@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>JSON Loader</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.5.0/highlight.min.js"></script>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.5.0/styles/github-dark.min.css">
+        <script>hljs.highlightAll();</script>
+        <style>
+            body {
+                display: flex;
+                font-family: Arial, sans-serif;
+                margin: 0;
+                padding: 20px;
+                background-color: #f4f4f4;
+            }
+            #file-panel {
+                position: fixed;
+                left: 0;
+                top: 0;
+                width: 250px;
+                height: 100vh;
+                overflow-y: auto;
+                border-right: 2px solid #ccc;
+                padding: 10px;
+                background-color: #f8f8f8;
+                box-shadow: 2px 0 5px rgba(0, 0, 0, 0.1);
+            }
+
+            #content {
+                margin-left: 270px; /* Adjust to avoid overlap with fixed sidebar */
+                padding: 20px;
+                flex-grow: 1;
+                overflow-y: auto;
+                background: rgb(228, 228, 228);
+                border-radius: 8px;
+                box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            }
+            .file-item {
+                cursor: pointer;
+                padding: 8px;
+                border-bottom: 1px solid #ddd;
+                background: white;
+                margin-bottom: 5px;
+                border-radius: 4px;
+            }
+            .file-item:hover {
+                background-color: #e0e0e0;
+            }
+            .file-item.selected {
+                background-color: #d0d0d0;
+                font-weight: bold;
+            }
+            h3, h2 {
+                margin-top: 0;
+            }
+            .change-block {
+                border-left: 5px solid #007bff;
+                padding: 10px;
+                background: #fff;
+                margin-bottom: 15px;
+                border-radius: 6px;
+                box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+                position: relative;
+            }
+            .review-buttons {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+            }
+            .review-buttons button {
+                margin-left: 5px;
+                padding: 5px 10px;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-weight: bold;
+            }
+            .tick-button {
+                color: black;
+                background-color: #adfdad;
+            }
+            .cross-button {
+                color: black;
+                background-color: #fdb2ad;
+            }
+            pre {
+                background: #272822;
+                color: #f8f8f2;
+                padding: 10px;
+                border-radius: 5px;
+                overflow-x: auto;
+                white-space: pre-wrap;
+            }
+            .diff-added {
+                color: #32cd32;
+            }
+            .diff-removed {
+                color: #ff6347;
+            }
+            .hljs {
+                background: #272822 !important; /* Dark gray background (similar to VS Code) */
+                color: #f8f8f2; /* Light text for better contrast */
+                padding: 10px;
+                border-radius: 5px;
+                overflow-x: auto;
+                white-space: pre-wrap;
+                font-size: 14px; /* Increased font size */
+                line-height: 1.5; /* Improves readability */
+            }
+        </style>
+    </head>
+    <body>
+        <div id="file-panel">
+            <h3>JSON Files</h3>
+            <div id="files"></div>
+        </div>
+        <div id="content">
+            <h2>Project: <span id="project-name"></span></h2>
+            <h3>Commit: <span id="commit-hash"></span></h3>
+            <p><strong>Message:</strong> <span id="commit-message"></span></p>
+            <div id="changes-container"></div>
+        </div>
+
+    <script>
+        function fetchFileList() {
+            fetch('/getFileList')
+                .then(response => response.json())
+                .then(files => {
+                    const filesContainer = document.getElementById('files');
+                    filesContainer.innerHTML = "";
+                    files.forEach(file => {
+                        let fileItem = document.createElement('div');
+                        fileItem.classList.add('file-item');
+                        fileItem.textContent = file;
+                        fileItem.onclick = function(event) {
+                            document.querySelectorAll('.file-item').forEach(el => el.classList.remove('selected'));
+                            fileItem.classList.add('selected');
+                            loadJson(file);
+                        };
+                        filesContainer.appendChild(fileItem);
+                    });
+                })
+                .catch(error => console.error('Error fetching file list:', error));
+        }
+
+        function loadJson(filename) {
+            fetch('/getAllChanges', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filename: filename })
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById('project-name').textContent = data.Project;
+                document.getElementById('commit-hash').textContent = data.Commit;
+                document.getElementById('commit-message').textContent = data.CommitMessage;
+
+                const changesContainer = document.getElementById('changes-container');
+                changesContainer.innerHTML = "";
+
+                data.Changes.forEach(change => {
+                    let changeBlock = document.createElement('div');
+                    changeBlock.classList.add('change-block');
+
+                    let fileHeader = document.createElement('h4');
+                    fileHeader.textContent = "File: " + change.File;
+                    changeBlock.appendChild(fileHeader);
+
+                    let typeTag = document.createElement('p');
+                    typeTag.innerHTML = `<strong>Change Type:</strong> ${change.Type}`;
+                    changeBlock.appendChild(typeTag);
+
+                    let sourceCode = document.createElement('pre');
+                    sourceCode.innerHTML = `<code class="language-java">${escapeHtml(change.Source)}</code>`;
+                    changeBlock.appendChild(sourceCode);
+
+                    let diffCode = document.createElement('pre');
+                    diffCode.innerHTML = `<code class="language-diff">${formatDiff(change.Diff)}</code>`;
+                    changeBlock.appendChild(diffCode);
+
+                    // Bottom buttons    
+                    let buttonContainerBottom = document.createElement('div');
+                    buttonContainerBottom.style.marginTop = "10px";
+
+                    let tickButtonBottom = document.createElement('button');
+                    tickButtonBottom.textContent = "✅ Buggy";
+                    tickButtonBottom.style.marginRight = "10px";
+                    tickButtonBottom.classList.add('tick-button');
+                    tickButtonBottom.onclick = () => submitReview("Buggy", data.Project, change.File, data.Commit, change.Diff);
+
+                    let crossButtonBottom = document.createElement('button');
+                    crossButtonBottom.textContent = "❌ Not Buggy";
+                    crossButtonBottom.classList.add('cross-button');
+                    crossButtonBottom.onclick = () => submitReview("NotBuggy", data.Project, change.File, data.Commit, change.Diff);
+
+                    buttonContainerBottom.appendChild(tickButtonBottom);
+                    buttonContainerBottom.appendChild(crossButtonBottom);
+                    changeBlock.appendChild(buttonContainerBottom);
+                    
+                    // Top buttons
+                    let buttonContainer = document.createElement('div');
+                    buttonContainer.classList.add('review-buttons');
+
+                    let tickButton = document.createElement('button');
+                    tickButton.textContent = "✅ Buggy";
+                    tickButton.classList.add('tick-button');
+                    tickButton.onclick = () => submitReview("Buggy", data.Project, change.File, data.Commit, change.Diff);
+
+                    let crossButton = document.createElement('button');
+                    crossButton.textContent = "❌  Not Buggy";
+                    crossButton.classList.add('cross-button');
+                    crossButton.onclick = () => submitReview("NotBuggy", data.Project, change.File, data.Commit, change.Diff);
+
+                    buttonContainer.appendChild(tickButton);
+                    buttonContainer.appendChild(crossButton);
+                    changeBlock.appendChild(buttonContainer);
+
+                    changesContainer.appendChild(changeBlock);
+                    hljs.highlightAll();
+                });
+            })
+            .catch(error => console.error('Error loading JSON:', error));
+        }
+
+        function escapeHtml(text) {
+            return text.replace(/[&<>"']/g, function(m) {
+                return {
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#039;'
+                }[m];
+            });
+        }
+
+        function formatDiff(diff) {
+            return escapeHtml(diff)
+                .replace(/^(\+.*)/gm, '<span class="diff-added">$1</span>')
+                .replace(/^(\-.*)/gm, '<span class="diff-removed">$1</span>');
+        }
+
+        function submitReview(decision, project, fileName, commitHash, diff) {
+            fetch('/submit_review', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    decision: decision, 
+                    project: project, 
+                    file_name: fileName, 
+                    commit_hash: commitHash,
+                    diff: diff
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert(`Review submitted: ${decision.toUpperCase()} for ${fileName} \nResult: ${data.message}`);
+                console.log("Review Response:", data);
+            })
+            .catch(error => console.error('Error submitting review:', error));
+        }
+
+        window.onload = fetchFileList;
+    </script>
+</body>
+</html>
