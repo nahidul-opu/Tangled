@@ -71,7 +71,7 @@ def load_json():
 
             decision = ""
             if gold_set is not None and gold_set.loc[(gold_set['Project'] == project_name) & (gold_set['File'] == item["File"]) & (gold_set["CommitHash"] == commit_hash)].shape[0] > 0:
-                decision = gold_set.loc[(gold_set['Project'] == "spring-boot") & (gold_set['File'] == "9233.json")]["Decision"][0]
+                decision = gold_set.loc[(gold_set['Project'] == project_name) & (gold_set['File'] == item["File"]) & (gold_set["CommitHash"] == commit_hash)]["Decision"][0]
 
             res["Changes"].append({"File": item["File"],
                                    "Type": commit_data["type"],
@@ -79,6 +79,7 @@ def load_json():
                                    "Diff": change_data["diff"],
                                    "CurrentDecision": decision})
 
+        print(res)
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
