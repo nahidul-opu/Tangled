@@ -52,8 +52,6 @@ def getMethodList():
         on_review_methods = true_buggy_methods
         if "NotBuggy" in method_type:
             on_review_methods = true_not_buggy_methods
-        
-        print(method_type)
 
         files = on_review_methods["Project"]+"/"+on_review_methods["File"]
         return jsonify(files.to_list())
@@ -82,6 +80,7 @@ def load_method_history():
 
 
         res = {"Project": project_name,
+               "SourceFile": json_data["sourceFilePath"],
                "MethodName": json_data["functionName"],
                "Changes" : []
                }
@@ -128,6 +127,7 @@ def getCommitHistory():
 
             commit_message = change_data["commitMessage"]
             res["Changes"].append({"File": item["File"],
+                                   "SourceFile": json_data["sourceFilePath"],
                                    "Type": commit_data["type"],
                                    "Source": change_data["actualSource"],
                                    "Diff": change_data["diff"]
@@ -183,15 +183,15 @@ def getAllChangesForTangled():
 
             decision = ""
             if gold_set is not None and gold_set.loc[(gold_set['Project'] == project_name) & (gold_set['File'] == item["File"]) & (gold_set["CommitHash"] == commit_hash)].shape[0] > 0:
-                decision = gold_set.loc[(gold_set['Project'] == project_name) & (gold_set['File'] == item["File"]) & (gold_set["CommitHash"] == commit_hash)]["Decision"][0]
+                decision = gold_set.loc[(gold_set['Project'] == project_name) & (gold_set['File'] == item["File"]) & (gold_set["CommitHash"] == commit_hash)]["Decision"].to_list()[0]
 
             res["Changes"].append({"File": item["File"],
+                                   "SourceFile": json_data["sourceFilePath"],
                                    "Type": commit_data["type"],
                                    "Source": change_data["actualSource"],
                                    "Diff": change_data["diff"],
                                    "CurrentDecision": decision})
 
-        print(res)
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
