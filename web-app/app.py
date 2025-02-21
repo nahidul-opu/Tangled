@@ -38,7 +38,7 @@ def tangledReviewer():
 
 def remove_completed(files):
     if True:
-        completed = ["spring-boot", "guava"]
+        completed = ["spring-boot", "guava", "pmd"]
         return [item for item in files if not any(sub in item for sub in completed)]
     else:
         return files
@@ -213,6 +213,7 @@ def submit_review():
     file_name = data.get("file_name")
     commit_hash = data.get("commit_hash")
     diff = data.get("diff")
+    message = data.get("message")
     
     if not all([decision, project, file_name, commit_hash]):
         return jsonify({"error": "Missing required fields"}), 400
@@ -222,7 +223,8 @@ def submit_review():
         "File": file_name,
         "CommitHash": commit_hash,
         "Diff": diff,
-        "Decision": decision
+        "Decision": decision,
+        "CommitMessage": message
     }
 
     new_df = pd.DataFrame([review_data])
