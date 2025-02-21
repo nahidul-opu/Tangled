@@ -35,11 +35,20 @@ def trueNotBuggyReviewer():
 def tangledReviewer():
     return render_template('TangledBuggyReviewer.html')
 
+
+def remove_completed(files):
+    if True:
+        completed = ["spring-boot", "guava"]
+        return [item for item in files if not any(sub in item for sub in completed)]
+    else:
+        return files
+
 @app.route('/getTangledMethodList', methods=['GET'])
 def getTangledMethodList():
     try:
         files = tangled_buggy_methods["Project"]+"/"+tangled_buggy_methods["File"]
-        return jsonify(files.to_list())
+        files = remove_completed(files.to_list())
+        return jsonify(files)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     
