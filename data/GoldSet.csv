@@ -1057,3 +1057,999 @@ guava,22907.json,9bf42862f877a0ed8234bd484aa0089a3773ccd4,"@@ -1,11 +1,12 @@
    }
 \ No newline at end of file
 ",Buggy
+pmd,8491.json,384cd4f3d9a15a09b664c728ad42e03321428d7a,"@@ -1,17 +1,17 @@
+     public Object visit(ASTMethodDeclarator node, Object data) {
+         Scope scope = node.getScope();
+         Map params = scope.getVariableDeclarations(true);
+         for (Iterator i = params.keySet().iterator(); i.hasNext();) {
+             VariableNameDeclaration decl = (VariableNameDeclaration)i.next();
+             List usages = (List)params.get(decl);
+             for (Iterator j = usages.iterator();j.hasNext();) {
+                 NameOccurrence occ = (NameOccurrence)j.next();
+-                if (occ.isOnLeftHandSide()) {
++                if (occ.isOnLeftHandSide() && (occ.getNameForWhichThisIsAQualifier() == null)) {
+                     RuleContext ctx = (RuleContext)data;
+                     String msg = MessageFormat.format(getMessage(), new Object[] {decl.getImage()});
+                     ctx.getReport().addRuleViolation(createRuleViolation(ctx, decl.getLine(), msg));
+                 }
+             }
+         }
+         return super.visit(node, data);
+     }
+\ No newline at end of file
+",Buggy
+pmd,8745.json,384cd4f3d9a15a09b664c728ad42e03321428d7a,"@@ -1,20 +1,20 @@
+     public Object visit(ASTMethodDeclaration node, Object data) {
+         if (node.isAbstract()) {
+             return data;
+         }
+ 
+         List returnNodes = new ArrayList();
+-        node.findChildrenOfType(ASTReturnStatement.class, returnNodes);
++        node.findChildrenOfType(ASTReturnStatement.class, returnNodes, false);
+         if (returnNodes.size() > 1) {
+             RuleContext ctx = (RuleContext)data;
+             for (Iterator i = returnNodes.iterator(); i.hasNext();) {
+                 SimpleNode problem = (SimpleNode)i.next();
+                 // skip the last one, it's OK
+                 if (!i.hasNext()) {
+                     continue;
+                 }
+                 ctx.getReport().addRuleViolation(createRuleViolation(ctx, problem.getBeginLine()));
+             }
+         }
+         return data;
+     }
+\ No newline at end of file
+",Buggy
+pmd,1151.json,384cd4f3d9a15a09b664c728ad42e03321428d7a,"@@ -1,15 +1,18 @@
+-    private void findChildrenOfType(Node node, Class targetType, List results) {
++    private void findChildrenOfType(Node node, Class targetType, List results, boolean descendIntoNestedClasses) {
+         if (node.getClass().equals(targetType)) {
+             results.add(node);
+         }
++        if (node.getClass().equals(ASTClassBody.class) && !descendIntoNestedClasses) {
++            return;
++        }
+         for (int i=0; i<node.jjtGetNumChildren(); i++) {
+-            Node child = (Node)node.jjtGetChild(i);
++            Node child = node.jjtGetChild(i);
+             if (child.jjtGetNumChildren()>0) {
+-                findChildrenOfType(child, targetType, results);
++                findChildrenOfType(child, targetType, results, descendIntoNestedClasses);
+             } else {
+                 if (child.getClass().equals(targetType)) {
+                     results.add(child);
+                 }
+             }
+         }
+     }
+\ No newline at end of file
+",Buggy
+pmd,7973.json,a405d23dfb9e574e2b2ef23f1f45d548a738ed3b,"@@ -1,10 +1,4 @@
+     public boolean isOnRightHandSide() {
+         SimpleNode node = (SimpleNode) location.jjtGetParent().jjtGetParent().jjtGetParent();
+-        if (node instanceof ASTExpression) {
+-            SimpleNode parent = (SimpleNode) node.jjtGetParent();
+-            if (node.jjtGetNumChildren() == 3) {
+-                return true;
+-            }
+-        }
+-        return false;
++        return node instanceof ASTExpression && node.jjtGetNumChildren() == 3;
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,8886.json,a405d23dfb9e574e2b2ef23f1f45d548a738ed3b,"@@ -1,18 +1,18 @@
+     public Object visit(ASTUnmodifiedClassDeclaration node, Object data) {
+         Map vars = node.getScope().getVariableDeclarations();
+         for (Iterator i = vars.keySet().iterator(); i.hasNext();) {
+             VariableNameDeclaration decl = (VariableNameDeclaration) i.next();
+-            if (!decl.getAccessNodeParent().isPrivate() || decl.getAccessNodeParent().isFinal()) {
++            if (decl.getAccessNodeParent().isStatic() || !decl.getAccessNodeParent().isPrivate() || decl.getAccessNodeParent().isFinal()) {
+                 continue;
+             }
++
+             int result = initializedInConstructor((List)vars.get(decl));
+             if (result == MUTABLE) {
+             	continue;
+             }
+-            if ((result == IMMUTABLE) ||
+-                ((result == CHECKDECL) && initializedInDeclaration(decl.getAccessNodeParent()))) {
++            if (result == IMMUTABLE || ((result == CHECKDECL) && initializedInDeclaration(decl.getAccessNodeParent()))) {
+                 ((RuleContext) data).getReport().addRuleViolation(createRuleViolation((RuleContext) data, decl.getLine(), MessageFormat.format(getMessage(), new Object[]{decl.getImage()})));
+             }
+         }
+         return super.visit(node, data);
+     }
+\ No newline at end of file
+",Buggy
+pmd,8888.json,a405d23dfb9e574e2b2ef23f1f45d548a738ed3b,"@@ -1,31 +1,31 @@
+     private int initializedInConstructor(List usages) {
+         int rc = MUTABLE, initCount = 0;
+         boolean setInConstructor = false;
+ 		boolean foundUsage = false;
+ 
+         for (Iterator j = usages.iterator(); j.hasNext();) {
+         	foundUsage = true;
+-        	NameOccurrence occurance = (NameOccurrence)j.next();
+-            if (occurance.isOnLeftHandSide()) {
+-            	SimpleNode node = occurance.getLocation();
++        	NameOccurrence occ = (NameOccurrence)j.next();
++            if (occ.isOnLeftHandSide()) {
++            	SimpleNode node = occ.getLocation();
+             	if (node.getFirstParentOfType(ASTConstructorDeclaration.class) != null) {
+             		setInConstructor = true;
+             		initCount++;
+  				}
+  				else {
+  					if (node.getFirstParentOfType(ASTMethodDeclaration.class) != null) {
+  						initCount++;
+  					}
+  				}
+  			}
+         }
+         if (!foundUsage || (initCount == 0)) {
+         	rc = CHECKDECL;
+         }
+         else {
+         	if ((initCount == 1) && setInConstructor) {
+         		rc = IMMUTABLE;
+         	}
+         }
+         return rc;
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,8249.json,222563dc32c51c8f77a1b06ba69077463a525479,"@@ -1,4 +1,4 @@
+ 		public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+ 			parent.addType(Type.getType(desc));
+-			return annotationVisitor;
++			return parent.annotationVisitor;
+ 		}
+\ No newline at end of file
+",Buggy
+pmd,8247.json,222563dc32c51c8f77a1b06ba69077463a525479,"@@ -1,5 +1,5 @@
+ 	private void extractSignature(String sig) {
+ 		if (sig != null) {
+-			new SignatureReader(sig).acceptType(sigVisitor);
++			new SignatureReader(sig).accept(sigVisitor);
+ 		}
+ 	}
+\ No newline at end of file
+",Buggy
+pmd,6069.json,51ab4ae563f9875328e56161bff3eb97331b10cd,"@@ -1,8 +1,8 @@
+     public void jjtClose() {
+-        if ((children == null) || (children.length == 0)) {
++        if (beginLine == -1 && (children == null || children.length == 0)) {
+             beginLine = parser.token.beginLine;
+             beginColumn = parser.token.beginColumn;
+         }
+         endLine = parser.token.endLine;
+         endColumn = parser.token.endColumn;
+     }
+\ No newline at end of file
+",Buggy
+pmd,6068.json,51ab4ae563f9875328e56161bff3eb97331b10cd,"@@ -1,6 +1,6 @@
+     public void jjtOpen() {
+-        if (parser.token.next != null) {
++        if (beginLine == -1 && parser.token.next != null) {
+             beginLine = parser.token.next.beginLine;
+             beginColumn = parser.token.next.beginColumn;
+         }
+     }
+\ No newline at end of file
+",Buggy
+pmd,1134.json,51ab4ae563f9875328e56161bff3eb97331b10cd,"@@ -1,11 +1,3 @@
+     public int getBeginLine() {
+-        if (beginLine != -1) {
+-            return beginLine;
+-        } else {
+-            if ((children != null) && (children.length > 0)) {
+-                return ((SimpleNode) children[0]).getBeginLine();
+-            } else {
+-                throw new RuntimeException(""Unable to determine begining line of Node."");
+-            }
+-        }
++        return beginLine;
+     }
+\ No newline at end of file
+",Buggy
+pmd,2689.json,e249deb0879da58e78f31eafbafc3992661b5142,"@@ -1,7 +1,7 @@
+     public int getLineCount(Mark mark, Match match) {
+         TokenEntry endTok = get(mark.getIndexIntoTokenArray() + match.getTokenCount());
+         if (endTok.equals(TokenEntry.EOF)) {
+             endTok = get(mark.getIndexIntoTokenArray() + match.getTokenCount() - 1);
+         }
+-        return endTok.getBeginLine() - mark.getBeginLine();
++        return endTok.getBeginLine() - mark.getBeginLine() - 1;
+     }
+\ No newline at end of file
+",Buggy
+pmd,2580.json,e249deb0879da58e78f31eafbafc3992661b5142,"@@ -1,32 +1,32 @@
+     public void findMatches(int min) {
+        /*
+          Assign sort codes to all the pooled code. This should speed
+          up sorting them.
+        */
+         int count = 1;
+         for (Iterator iter = pool.keySet().iterator(); iter.hasNext();) {
+            TokenEntry token = (TokenEntry)iter.next();
+            token.setSortCode(count++);
+         }
+ 
+         MarkComparator mc = new MarkComparator(cpdListener, code);
+         Collections.sort(marks, mc);
+ 
+         MatchCollector coll = new MatchCollector(marks, code, mc);
+         matches = coll.collect(min);
+         Collections.sort(matches);
+ 
+         for (Iterator i = matches(); i.hasNext();) {
+             Match match = (Match)i.next();
+             for (Iterator occurrences = match.iterator(); occurrences.hasNext();) {
+                 Mark mark = (Mark)occurrences.next();
+-                SourceCode sourceCode = (SourceCode)source.get(mark.getTokenSrcID());
+                 match.setLineCount(tokens.getLineCount(mark, match));
+                 if (!occurrences.hasNext()) {
+                     int start = mark.getBeginLine();
+-                    int end = mark.getBeginLine()-1 + tokens.getLineCount(mark, match);
++                    int end = start + match.getLineCount() - 1;
++                    SourceCode sourceCode = (SourceCode)source.get(mark.getTokenSrcID());
+                     match.setSourceCodeSlice(sourceCode.getSlice(start, end));
+                 }
+             }
+         }
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,961.json,1ee8cc4e8daf001172f2a3aa1a8c2a89706e988f,"@@ -1,32 +1,32 @@
+     public static MetricKey<ASTAnyTypeDeclaration> of(final Metric<ASTAnyTypeDeclaration> metric, final String name) {
+         return new MetricKey<ASTAnyTypeDeclaration>() {
+             @Override
+             public String name() {
+                 return name;
+             }
+ 
+ 
+             @Override
+             public Metric<ASTAnyTypeDeclaration> getCalculator() {
+                 return metric;
+             }
+ 
+ 
+             @Override
+             public boolean supports(ASTAnyTypeDeclaration node) {
+                 return metric.supports(node);
+             }
+ 
+ 
+             @Override
+             public boolean equals(Object obj) {
+                 return obj == this;
+             }
+ 
+ 
+             @Override
+             public int hashCode() {
+-                return metric.hashCode() * 31 + name.hashCode();
++                return (metric != null ? metric.hashCode() * 31 : 0) + (name != null ? name.hashCode() : 0);
+             }
+         };
+     }
+\ No newline at end of file
+",Buggy
+pmd,5595.json,64ca9b6f01f9b946a456f6de05eada2374906d6a,"@@ -1,3 +1,6 @@
+     public EcmascriptNode getFinallyBlock() {
+-	return (EcmascriptNode) jjtGetChild(jjtGetNumChildren() - 1);
++        if (!isFinally()) {
++            return null;
++        }
++        return (EcmascriptNode) jjtGetChild(jjtGetNumChildren() - 1);
+     }
+\ No newline at end of file
+",Buggy
+pmd,376.json,a3d5e7e1921e2c1c10f6a1e60fdfc19983732097,"@@ -1,3 +1,3 @@
+     public void setClasspathRef(Reference r) {
+-        createClasspath().setRefid(r);
++        createLongClasspath().setRefid(r);
+     }
+\ No newline at end of file
+",Buggy
+pmd,7138.json,fc511ec111d90e8f861c187a7e012652c80fcc4d,"@@ -1,7 +1,11 @@
+-    private String getPackageName(String importName) {
++    public String getPackageName() {
++        String importName = getImportedName();
++        if (isImportOnDemand) {
++            return importName;
++        }
+         if (importName.indexOf('.') == -1) {
+             return """";
+         }
+         int lastDot = importName.lastIndexOf('.');
+         return importName.substring(0, lastDot);
+     }
+\ No newline at end of file
+",Buggy
+pmd,8736.json,fc511ec111d90e8f861c187a7e012652c80fcc4d,"@@ -1,19 +1,19 @@
+     public Object visit(ASTImportDeclaration node, Object data) {
+-        ImportWrapper wrapper = new ImportWrapper(node.getImportedNameNode().getImage(), node.getImportedNameNode().getImage(), node.getImportedNameNode());
++        ImportWrapper wrapper = new ImportWrapper(node.getImportedName(), node.getImportedName(), node.getImportedNameNode());
+ 
+         // blahhhh... this really wants to be ASTImportDeclaration to be polymorphic...
+         if (node.isImportOnDemand()) {
+             if (importOnDemandImports.contains(wrapper)) {
+                 addViolation(data, node.getImportedNameNode(), node.getImportedNameNode().getImage());
+             } else {
+                 importOnDemandImports.add(wrapper);
+             }
+         } else {
+             if (singleTypeImports.contains(wrapper)) {
+                 addViolation(data, node.getImportedNameNode(), node.getImportedNameNode().getImage());
+             } else {
+                 singleTypeImports.add(wrapper);
+             }
+         }
+         return data;
+     }
+\ No newline at end of file
+",Buggy
+pmd,8913.json,fc511ec111d90e8f861c187a7e012652c80fcc4d,"@@ -1,6 +1,6 @@
+     public Object visit(ASTImportDeclaration node, Object o) {
+-        if (node.getImportedNameNode().getImage().indexOf(""junit"") != -1) {
++        if (node.getImportedName().indexOf(""junit"") != -1) {
+             junitImported = true;
+         }
+         return super.visit(node, o);
+     }
+\ No newline at end of file
+",Buggy
+pmd,4678.json,fb25329e0d9ec5d632667df393f7c1b25a698e68,"@@ -1,42 +1,42 @@
+     public Object visit(ASTUserClass node, Object data) {
+ 
+         if (Helper.isTestMethodOrClass(node)) {
+             return data;
+         }
+ 
+-        // baz = String.escapeSignleQuotes(...);
+-        final List<ASTAssignmentExpression> assignmentCalls = node.findDescendantsOfType(ASTAssignmentExpression.class);
+-        for (ASTAssignmentExpression a : assignmentCalls) {
+-            findSanitizedVariables(a);
+-            findSelectContainingVariables(a);
+-        }
+-
+         final List<ASTFieldDeclaration> fieldExpr = node.findDescendantsOfType(ASTFieldDeclaration.class);
+         for (ASTFieldDeclaration a : fieldExpr) {
+             findSanitizedVariables(a);
+             findSelectContainingVariables(a);
+         }
+ 
+         // String foo = String.escapeSignleQuotes(...);
+         final List<ASTVariableDeclaration> variableDecl = node.findDescendantsOfType(ASTVariableDeclaration.class);
+         for (ASTVariableDeclaration a : variableDecl) {
+             findSanitizedVariables(a);
+             findSelectContainingVariables(a);
+         }
+ 
++        // baz = String.escapeSignleQuotes(...);
++        final List<ASTAssignmentExpression> assignmentCalls = node.findDescendantsOfType(ASTAssignmentExpression.class);
++        for (ASTAssignmentExpression a : assignmentCalls) {
++            findSanitizedVariables(a);
++            findSelectContainingVariables(a);
++        }
++
+         // Database.query(...) check
+         final List<ASTMethodCallExpression> potentialDbQueryCalls = node
+                 .findDescendantsOfType(ASTMethodCallExpression.class);
+ 
+         for (ASTMethodCallExpression m : potentialDbQueryCalls) {
+             if (!Helper.isTestMethodOrClass(m) && Helper.isMethodName(m, DATABASE, QUERY)) {
+                 reportStrings(m, data);
+                 reportVariables(m, data);
+             }
+         }
+-        
++
+         safeVariables.clear();
+         selectContainingVariables.clear();
+ 
+         return data;
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,7859.json,15ff7ca9447619240ec96fdb32f7974e1ecf5730,"@@ -1,34 +1,43 @@
+-    private MethodNameDeclaration createBuiltInMethodDeclaration(final String methodName, final int parameterCount) {
++    private MethodNameDeclaration createBuiltInMethodDeclaration(final String methodName, String... parameterTypes) {
+         ASTMethodDeclaration methodDeclaration = new ASTMethodDeclaration(JavaParserTreeConstants.JJTMETHODDECLARATION);
+         methodDeclaration.setPublic(true);
+         methodDeclaration.setScope(this);
+ 
+         ASTMethodDeclarator methodDeclarator = new ASTMethodDeclarator(JavaParserTreeConstants.JJTMETHODDECLARATOR);
+         methodDeclarator.setImage(methodName);
+         methodDeclarator.setScope(this);
+ 
+         ASTFormalParameters formalParameters = new ASTFormalParameters(JavaParserTreeConstants.JJTFORMALPARAMETERS);
+         formalParameters.setScope(this);
+ 
+         methodDeclaration.jjtAddChild(methodDeclarator, 0);
+         methodDeclarator.jjtSetParent(methodDeclaration);
+         methodDeclarator.jjtAddChild(formalParameters, 0);
+         formalParameters.jjtSetParent(methodDeclarator);
+ 
++        int parameterCount = parameterTypes.length;
+         for (int i = 0; i < parameterCount; i++) {
+             ASTFormalParameter formalParameter = new ASTFormalParameter(JavaParserTreeConstants.JJTFORMALPARAMETER);
+             formalParameters.jjtAddChild(formalParameter, i);
+             formalParameter.jjtSetParent(formalParameters);
+ 
+             ASTType type = new ASTType(JavaParserTreeConstants.JJTTYPE);
+             formalParameter.jjtAddChild(type, 0);
+             type.jjtSetParent(formalParameter);
++            ASTReferenceType referenceType = new ASTReferenceType(JavaParserTreeConstants.JJTREFERENCETYPE);
++            type.jjtAddChild(referenceType, 0);
++            referenceType.jjtSetParent(type);
++            ASTClassOrInterfaceType classOrInterfaceType = new ASTClassOrInterfaceType(JavaParserTreeConstants.JJTCLASSORINTERFACETYPE);
++            classOrInterfaceType.setImage(parameterTypes[i]);
++            referenceType.jjtAddChild(classOrInterfaceType, 0);
++            classOrInterfaceType.jjtSetParent(referenceType);
++
+             ASTVariableDeclaratorId variableDeclaratorId = new ASTVariableDeclaratorId(JavaParserTreeConstants.JJTVARIABLEDECLARATORID);
+             variableDeclaratorId.setImage(""arg"" + i);
+             formalParameter.jjtAddChild(variableDeclaratorId, 1);
+             variableDeclaratorId.jjtSetParent(formalParameter);
+         }
+ 
+         MethodNameDeclaration mnd = new MethodNameDeclaration(methodDeclarator);
+         return mnd;
+     }
+\ No newline at end of file
+",Buggy
+pmd,10015.json,8694a26cafe730add04695ec1917cd51bd4bbc4e,"@@ -1,4 +1,3 @@
+     public TokenManager createTokenManager(Reader source) {
+-	return new PLSQLTokenManager(source);
+-
++        return new PLSQLTokenManager(IOUtil.skipBOM(source));
+     }
+\ No newline at end of file
+",Buggy
+pmd,3080.json,6619e19d3558abf87dbf0b3f0047e355d593043b,"@@ -1,12 +1,12 @@
+     public void publish(LogRecord logRecord) {
+-        System.out.println(logRecord.getMessage());
++        System.out.println(FORMATTER.format(logRecord));
+         if (logRecord.getThrown() != null) {
+             // Use the same channel, to make sure that the stacktrace comes
+             // after the message on the console (using printStackTrace
+             // directly messes things up)
+             StringWriter stringWriter = new StringWriter();
+             PrintWriter printWriter = new PrintWriter(stringWriter, true);
+             logRecord.getThrown().printStackTrace(printWriter);
+             System.out.println(stringWriter.toString());
+         }
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,3084.json,6619e19d3558abf87dbf0b3f0047e355d593043b,"@@ -1,25 +1,25 @@
+     public void publish(LogRecord logRecord) {
+         //Map the log levels from java.util.logging to Ant
+         int antLevel;
+         Level level = logRecord.getLevel();
+         if (level == Level.FINEST)
+             antLevel = Project.MSG_DEBUG;   //Shown when -debug is supplied to Ant
+         else if (level == Level.FINE || level == Level.FINER || level == Level.CONFIG)
+             antLevel = Project.MSG_VERBOSE; //Shown when -verbose is supplied to Ant
+         else if (level == Level.INFO)
+             antLevel = Project.MSG_INFO;    //Always shown
+         else if (level == Level.WARNING)
+             antLevel = Project.MSG_WARN;    //Always shown
+         else if (level == Level.SEVERE)
+             antLevel = Project.MSG_ERR;     //Always shown
+         else
+             throw new IllegalStateException(""Unknown logging level"");   //shouldn't get ALL or NONE
+         
+-        antTask.log(logRecord.getMessage(), antLevel);
++        antTask.log(FORMATTER.format(logRecord), antLevel);
+         if (logRecord.getThrown() != null) {
+             StringWriter stringWriter = new StringWriter();
+             PrintWriter printWriter = new PrintWriter(stringWriter, true);
+             logRecord.getThrown().printStackTrace(printWriter);
+             antTask.log(stringWriter.toString(), antLevel);
+         }
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,2899.json,3386186533e02f7dec95e3390e85620da21bef36,"@@ -1,12 +1,14 @@
+     private void scanDirectory(File dir, List list, boolean recurse) {
+      FilenameFilter filter = new JavaFileOrDirectoryFilter();
+      String[] possibles = dir.list(filter);
+      for (int i=0; i<possibles.length; i++) {
+         File tmp = new File(dir + System.getProperty(""file.separator"") + possibles[i]);
+-        if (recurse && tmp.isDirectory()) {
+-           scanDirectory(tmp, list, true);
++        if (tmp.isDirectory()) {
++            if (recurse) {
++                scanDirectory(tmp, list, true);
++            }
+         } else {
+            list.add(new File(dir + System.getProperty(""file.separator"") + possibles[i]));
+         }
+      }
+     }
+\ No newline at end of file
+",Buggy
+pmd,2491.json,3386186533e02f7dec95e3390e85620da21bef36,"@@ -1,23 +1,24 @@
+     private void go() {
+         try {
+             CPD cpd = new CPD();
+             cpd.setListener(this);
+             cpd.setMinimumTileSize(Integer.parseInt(minimumLengthField.getText()));
+             addingTokensBar.setStringPainted(true);
+             if (rootDirectoryField.getText().endsWith("".java"")) {
+                 cpd.add(new File(rootDirectoryField.getText()));
+             } else {
+                 if (recurseCheckbox.isSelected()) {
+                     cpd.addRecursively(rootDirectoryField.getText());
+                 } else {
+                     cpd.addAllInDirectory(rootDirectoryField.getText());
+                 }
+             }
+             cpd.go();
+             CPDRenderer renderer = new TextRenderer();
+             resultsTextArea.setText("""");
+             resultsTextArea.append(renderer.render(cpd));
+         } catch (IOException ioe) {
+             ioe.printStackTrace();
++            JOptionPane.showMessageDialog(null, ""Halted due to "" + ioe.getClass().getName() + ""; "" + ioe.getMessage());
+         }
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,7444.json,dc453cf103787e06a70385cb4eab1917f6286446,"@@ -1,3 +1,3 @@
+-    public boolean isArrayDeference() {
+-        return isArrayDeference;
++    public boolean isArrayDereference() {
++        return isArrayDereference;
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,7443.json,dc453cf103787e06a70385cb4eab1917f6286446,"@@ -1,3 +1,3 @@
+     public void setIsArrayDereference() {
+-        isArrayDeference = true;
++        isArrayDereference = true;
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,9037.json,dc453cf103787e06a70385cb4eab1917f6286446,"@@ -1,43 +1,43 @@
+     public Object visit(ASTStatementExpression node, Object data) {
+         if (node.jjtGetNumChildren() != 3
+                 || !(node.jjtGetChild(0) instanceof ASTPrimaryExpression)
+                 || !(node.jjtGetChild(1) instanceof ASTAssignmentOperator)
+                 || (((ASTAssignmentOperator) (node.jjtGetChild(1))).isCompound())
+                 || !(node.jjtGetChild(2) instanceof ASTExpression)
+                 || node.jjtGetChild(0).jjtGetChild(0).jjtGetNumChildren() == 0
+                 || node.jjtGetChild(2).jjtGetChild(0).jjtGetChild(0).jjtGetNumChildren() == 0
+         ) {
+             return super.visit(node, data);
+         }
+ 
+         SimpleNode lhs = (SimpleNode) node.jjtGetChild(0).jjtGetChild(0).jjtGetChild(0);
+         if (!(lhs instanceof ASTName)) {
+             return super.visit(node, data);
+         }
+ 
+         SimpleNode rhs = (SimpleNode) node.jjtGetChild(2).jjtGetChild(0).jjtGetChild(0).jjtGetChild(0);
+         if (!(rhs instanceof ASTName)) {
+             return super.visit(node, data);
+         }
+ 
+         if (!lhs.getImage().equals(rhs.getImage())) {
+             return super.visit(node, data);
+         }
+ 
+         if (lhs.jjtGetParent().jjtGetParent().jjtGetNumChildren() > 1) {
+             Node n = lhs.jjtGetParent().jjtGetParent().jjtGetChild(1);
+-            if (n instanceof ASTPrimarySuffix && ((ASTPrimarySuffix) n).isArrayDeference()) {
++            if (n instanceof ASTPrimarySuffix && ((ASTPrimarySuffix) n).isArrayDereference()) {
+                 return super.visit(node, data);
+             }
+         }
+ 
+         if (rhs.jjtGetParent().jjtGetParent().jjtGetNumChildren() > 1) {
+             Node n = rhs.jjtGetParent().jjtGetParent().jjtGetChild(1);
+-            if (n instanceof ASTPrimarySuffix && ((ASTPrimarySuffix) n).isArguments() || ((ASTPrimarySuffix) n).isArrayDeference()) {
++            if (n instanceof ASTPrimarySuffix && ((ASTPrimarySuffix) n).isArguments() || ((ASTPrimarySuffix) n).isArrayDereference()) {
+                 return super.visit(node, data);
+             }
+         }
+ 
+         addViolation(data, node);
+         return super.visit(node, data);
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,8010.json,87bbe9e5b34ddf7a66a3d5b462991cbb47746d80,"@@ -1,11 +1,19 @@
+     public JavaTypeDefinition getGenericType(final String parameterName) {
+-        final TypeVariable<?>[] typeParameters = clazz.getTypeParameters();
+-        for (int i = 0; i < typeParameters.length; i++) {
+-            if (typeParameters[i].getName().equals(parameterName)) {
+-                return getGenericType(i);
++        for (JavaTypeDefinition currTypeDef = this; currTypeDef != null; currTypeDef = currTypeDef.enclosingClass) {
++            final TypeVariable<?>[] typeParameters = currTypeDef.clazz.getTypeParameters();
++            for (int i = 0; i < typeParameters.length; i++) {
++                if (typeParameters[i].getName().equals(parameterName)) {
++                    return currTypeDef.getGenericType(i);
++                }
+             }
+         }
+ 
+-        throw new IllegalArgumentException(""No generic parameter by name "" + parameterName
+-                                                   + "" on class "" + clazz.getSimpleName());
++        // throw because we could not find parameterName
++        StringBuilder builder = new StringBuilder(""No generic parameter by name "").append(parameterName);
++        for (JavaTypeDefinition currTypeDef = this; currTypeDef != null; currTypeDef = currTypeDef.enclosingClass) {
++            builder.append(""\n on class "");
++            builder.append(clazz.getSimpleName());
++        }
++
++        throw new IllegalArgumentException(builder.toString());
+     }
+\ No newline at end of file
+",Buggy
+pmd,8270.json,87bbe9e5b34ddf7a66a3d5b462991cbb47746d80,"@@ -1,3 +1,3 @@
+         public void visitInnerClassType(String name) {
+-            parent.parseClassName(name);
++            // parent.parseClassName(name);
+         }
+\ No newline at end of file
+",Buggy
+pmd,7974.json,0b90fd01542a5a765cbb72e0b0c90185168d2331,"@@ -1,31 +1,32 @@
+     public boolean isOnLeftHandSide() {
+         // I detest this method with every atom of my being
+         Node primaryExpression;
+         if (location.jjtGetParent() instanceof ASTPrimaryExpression) {
+             primaryExpression = location.jjtGetParent().jjtGetParent();
+         } else if (location.jjtGetParent().jjtGetParent() instanceof ASTPrimaryExpression) {
+             primaryExpression = location.jjtGetParent().jjtGetParent().jjtGetParent();
+         } else {
+             throw new RuntimeException(
+-                    ""Found a NameOccurrence that didn't have an ASTPrimary Expression as parent or grandparent.  Parent = ""
+-                            + location.jjtGetParent() + "" and grandparent = "" + location.jjtGetParent().jjtGetParent());
++                    ""Found a NameOccurrence ("" + location + "") that didn't have an ASTPrimary Expression as parent or grandparent.  Parent = ""
++                            + location.jjtGetParent() + "" and grandparent = "" + location.jjtGetParent().jjtGetParent()
++                            + "" (location line "" + location.getBeginLine() + "" col "" + location.getBeginColumn() + "")"");
+         }
+ 
+         if (isStandAlonePostfix(primaryExpression)) {
+             return true;
+         }
+ 
+         if (primaryExpression.jjtGetNumChildren() <= 1) {
+             return false;
+         }
+ 
+         if (!(primaryExpression.jjtGetChild(1) instanceof ASTAssignmentOperator)) {
+             return false;
+         }
+ 
+         if (isPartOfQualifiedName() /* or is an array type */) {
+             return false;
+         }
+ 
+         return !isCompoundAssignment(primaryExpression);
+     }
+\ No newline at end of file
+",Buggy
+pmd,7846.json,9a940e0cc57577c730a54adf2582612581cb05af,"@@ -1,3 +1,3 @@
+     public String toString() {
+-        return ""Variable "" + node.getImage() + "":"" + node.getBeginLine();
++        return ""Variable symbol "" + node.getImage() + "" line "" + node.getBeginLine();
+     }
+\ No newline at end of file
+",Buggy
+pmd,2946.json,4383ac357979bf353947351cac11d9586398ffbd,"@@ -1,4 +1,3 @@
+         public String toString() {
+-            SimpleNode n = (SimpleNode) node.jjtGetChild(1);
+-            return n.getImage();
++            return node.getMethodName();
+         }
+\ No newline at end of file
+",Buggy
+pmd,9191.json,4383ac357979bf353947351cac11d9586398ffbd,"@@ -1,15 +1,20 @@
+     public Object visit(ASTNullLiteral node, Object data) {
+-        if (lookUp(node) instanceof ASTStatementExpression) {
+-            Node n = lookUp(node);
++        if (get5thParent(node) instanceof ASTStatementExpression) {
++            ASTStatementExpression n = (ASTStatementExpression)get5thParent(node);
++
++            if (isAssignmentToFinalField(n)) {
++                return data;
++            }
++
+             if (n.jjtGetNumChildren() > 2 && n.jjtGetChild(1) instanceof ASTAssignmentOperator) {
+                 RuleContext ctx = (RuleContext) data;
+                 ctx.getReport().addRuleViolation(createRuleViolation(ctx, node));
+             }
+-        } else if (lookUp2(node) instanceof ASTConditionalExpression) {
+-            checkTernary((ASTConditionalExpression)lookUp2(node), data, node);
+-        } else if (lookUp(node) instanceof ASTConditionalExpression) {
+-            checkTernary((ASTConditionalExpression)lookUp(node), data, node);
++        } else if (get4thParent(node) instanceof ASTConditionalExpression) {
++            checkTernary((ASTConditionalExpression)get4thParent(node), data, node);
++        } else if (get5thParent(node) instanceof ASTConditionalExpression) {
++            checkTernary((ASTConditionalExpression)get5thParent(node), data, node);
+         }
+ 
+         return data;
+     }
+\ No newline at end of file
+",Buggy
+pmd,7976.json,78583ee897aa40fd474c85d59cccee016dfadfe0,"@@ -1,3 +1,3 @@
+-    private boolean postFixWithExceptions(SimpleNode primaryExpression) {
++    private boolean isStandAlonePostfix(SimpleNode primaryExpression) {
+         return primaryExpression instanceof ASTPostfixExpression && primaryExpression.jjtGetParent() instanceof ASTStatementExpression && thirdChildHasDottedName(primaryExpression);
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,7974.json,78583ee897aa40fd474c85d59cccee016dfadfe0,"@@ -1,32 +1,32 @@
+     public boolean isOnLeftHandSide() {
+         SimpleNode primaryExpression;
+         if (location.jjtGetParent() instanceof ASTPrimaryExpression) {
+             primaryExpression = (SimpleNode) location.jjtGetParent().jjtGetParent();
+         } else if (location.jjtGetParent().jjtGetParent() instanceof ASTPrimaryExpression) {
+             primaryExpression = (SimpleNode) location.jjtGetParent().jjtGetParent().jjtGetParent();
+         } else {
+             throw new RuntimeException(""Found a NameOccurrence that didn't have an ASTPrimary Expression as parent or grandparent.  Parent = "" + location.jjtGetParent() + "" and grandparent = "" + location.jjtGetParent().jjtGetParent());
+         }
+ 
+-        if (postFixWithExceptions(primaryExpression))  {
++        if (isStandAlonePostfix(primaryExpression))  {
+             return true;
+         }
+ 
+         if (primaryExpression.jjtGetNumChildren() <= 1) {
+             return false;
+         }
+ 
+         if (!(primaryExpression.jjtGetChild(1) instanceof ASTAssignmentOperator)) {
+             return false;
+         }
+ 
+         if (isPartOfQualifiedName() /* or is an array type */) {
+             return false;
+         }
+ 
+         if (isCompoundAssignment(primaryExpression)) {
+             return false;
+         }
+ 
+         return true;
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,8888.json,78583ee897aa40fd474c85d59cccee016dfadfe0,"@@ -1,30 +1,30 @@
+     private int initializedInConstructor(List usages, Set allConstructors) {
+         int rc = MUTABLE, methodInitCount = 0;
+         boolean foundUsage = false;
+         Set consSet = new HashSet();
+-        
++
+         for (Iterator j = usages.iterator(); j.hasNext();) {
+             foundUsage = true;
+             NameOccurrence occ = (NameOccurrence)j.next();
+-            if (occ.isOnLeftHandSide()) {
++            if (occ.isOnLeftHandSide() || occ.getLocation().jjtGetParent().jjtGetParent().jjtGetParent() instanceof ASTPreDecrementExpression || occ.getLocation().jjtGetParent().jjtGetParent().jjtGetParent() instanceof ASTPreIncrementExpression) {
+                 SimpleNode node = occ.getLocation();
+                 SimpleNode constructor = (SimpleNode)node.getFirstParentOfType(ASTConstructorDeclaration.class);
+                 if (constructor != null) {
+                     consSet.add(constructor);
+                 } else {
+                     if (node.getFirstParentOfType(ASTMethodDeclaration.class) != null) {
+                         methodInitCount++;
+                     }
+                 }
+             }
+         }
+         if (!foundUsage || ((methodInitCount == 0) && consSet.isEmpty())) {
+             rc = CHECKDECL;
+         } else {
+             allConstructors.removeAll(consSet);
+             if (allConstructors.isEmpty() && (methodInitCount == 0)) {
+                 rc = IMMUTABLE;
+             }
+         }
+         return rc;
+     }
+\ No newline at end of file
+",Buggy
+pmd,8892.json,78583ee897aa40fd474c85d59cccee016dfadfe0,"@@ -1,6 +1,5 @@
+     private Set findAllConstructors(ASTUnmodifiedClassDeclaration node) {
+-        List results = node.findChildrenOfType(ASTConstructorDeclaration.class);
+-        HashSet set = new HashSet();
+-        set.addAll(results);
++        Set set = new HashSet();
++        set.addAll(node.findChildrenOfType(ASTConstructorDeclaration.class));
+         return set;
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,6536.json,1942e94cec6b6a30532716d14da5c7cd0cd8f075,"@@ -1,15 +1,15 @@
+     private boolean isUnbalanced(String image, String pattern) {
+         int occurance = 0;
+-        int index = image.lastIndexOf(""="");
++        int index = image.indexOf(""="");
+         index = image.indexOf(pattern, index + 1);
+         while (index >= 0) {
+             occurance++;
+             index = image.indexOf(pattern, index + 1);
+         }
+ 
+         if ((occurance % 2) != 0) {
+             return true;
+         }
+ 
+         return false;
+     }
+\ No newline at end of file
+",Buggy
+pmd,358.json,6156ba5de5f004b96bceb0cc8e44191c6876c7c9,"@@ -1,23 +1,23 @@
+     private void validate() throws BuildException {
+         if (formatters.isEmpty() && !printToConsole) {
+             throw new BuildException(""No formatter specified; and printToConsole was false"");
+         }
+ 
+         for (Iterator i = formatters.iterator(); i.hasNext();) {
+             Formatter f = (Formatter) i.next();
+-            if (f.isToFileNull()) {
++            if (f.isNoOutputSupplied()) {
+                 throw new BuildException(""Formatter toFile attribute is required"");
+             }
+         }
+ 
+         if (ruleSetFiles == null) {
+             if (nestedRules.isEmpty()) {
+                 throw new BuildException(""No rulesets specified"");
+             }
+             ruleSetFiles = getNestedRuleSetFiles();
+         }
+ 
+         if (!targetJDK.equals(""1.3"") && !targetJDK.equals(""1.4"") && !targetJDK.equals(""1.5"")) {
+             throw new BuildException(""The targetjdk attribute, if used, must be set to either '1.3', '1.4', or '1.5'"");
+         }
+     }
+\ No newline at end of file
+",Buggy
+pmd,412.json,604a45d941cf2042c5c548490ef4401ad54080c9,"@@ -1,12 +1,10 @@
+     private void logRulesUsed(RuleSets rules) {
+         log(""Using these rulesets: "" + ruleSetFiles, Project.MSG_VERBOSE);
+ 
+         RuleSet[] ruleSets = rules.getAllRuleSets();
+-        for (int j = 0; j < ruleSets.length; j++) {
+-            RuleSet ruleSet = ruleSets[j];
+-
++        for (RuleSet ruleSet : ruleSets) {
+             for (Rule rule: ruleSet.getRules()) {
+                 log(""Using rule "" + rule.getName(), Project.MSG_VERBOSE);
+             }
+         }
+     }
+\ No newline at end of file
+",NotBuggy
+pmd,358.json,604a45d941cf2042c5c548490ef4401ad54080c9,"@@ -1,19 +1,31 @@
+     private void validate() throws BuildException {
+         // TODO - check for empty Formatters List here?
+         for (Formatter f: formatters) {
+             if (f.isNoOutputSupplied()) {
+                 throw new BuildException(""toFile or toConsole needs to be specified in Formatter"");
+             }
+         }
+ 
+         if (ruleSetFiles == null) {
+             if (nestedRules.isEmpty()) {
+                 throw new BuildException(""No rulesets specified"");
+             }
+             ruleSetFiles = getNestedRuleSetFiles();
+         }
+ 
++        // convert relative paths and substitute env variables/properties
++        final StringBuffer sb = new StringBuffer();
++        for(String s: ruleSetFiles.split("","")) {
++            Path p = new Path(getProject());
++            p.setPath(getProject().replaceProperties(s));
++            if (sb.length() > 0) {
++                sb.append(',');
++            }
++            sb.append(p);
++        }
++        ruleSetFiles = sb.toString();
++
+         if (!targetJDK.equals(""1.3"") && !targetJDK.equals(""1.4"") && !targetJDK.equals(""1.5"") && !targetJDK.equals(""1.6"") && !targetJDK.equals(""1.7"") && !targetJDK.equals(""jsp"")) {
+             throw new BuildException(""The targetjdk attribute, if used, must be set to either '1.3', '1.4', '1.5', '1.6', '1.7' or 'jsp'"");
+         }
+     }
+\ No newline at end of file
+",Buggy
+pmd,6753.json,1ef5079b29401bdb0df6e773f0160fa54f779018,"@@ -1,8 +1,10 @@
+     public Object visit(ASTPrimaryExpression node, Object data) {
+-        if (isForeignAttributeOrMethod(node) && (isAttributeAccess(node)
+-            || isMethodCall(node) && isForeignGetterSetterCall(node))) {
+-
+-            ((MutableInt) data).increment();
++        if (isForeignAttributeOrMethod(node)) {
++            if (isAttributeAccess(node)) {
++                ((MutableInt) data).increment();
++            } else {
++                ((MutableInt) data).add(countForeignGetterSetterCalls(node));
++            }
+         }
+         return super.visit(node, data);
+     }
+\ No newline at end of file
+",Buggy
+pmd,6754.json,1ef5079b29401bdb0df6e773f0160fa54f779018,"@@ -1,6 +1,4 @@
+     private boolean isForeignGetterSetterCall(ASTPrimaryExpression node) {
+-
+         String methodOrAttributeName = getMethodOrAttributeName(node);
+-
+-        return methodOrAttributeName != null && StringUtils.startsWithAny(methodOrAttributeName, ""get"", ""is"", ""set"");
++        return isForeignGetterSetterCall(methodOrAttributeName);
+     }
+\ No newline at end of file
+",Buggy
+hbase,27505.json,d589b7238257c78dc8616e47ab5bb3e2309a5237,"@@ -1,3 +1,3 @@
+-    public Throwable getCause() {
++    public synchronized Throwable getCause() {
+       return cause;
+     }
+\ No newline at end of file
+",Buggy
+hbase,7228.json,84a50393ee56d09abb68f54b44b64f5279bd33c9,"@@ -1,8 +1,8 @@
+-  public long refill(long limit, long available) {
++  public long refill(long limit) {
+     final long now = EnvironmentEdgeManager.currentTime();
+     if (now < nextRefillTime) {
+       return 0;
+     }
+     nextRefillTime = now + super.getTimeUnitInMillis();
+     return limit;
+   }
+\ No newline at end of file
+",NotBuggy
+hbase,7525.json,84a50393ee56d09abb68f54b44b64f5279bd33c9,"@@ -1,16 +1,16 @@
+   public synchronized boolean canExecute(final long amount) {
+-    long refillAmount = refill(limit, avail);
++    long refillAmount = refill(limit);
+     if (refillAmount == 0 && avail < amount) {
+       return false;
+     }
+     // check for positive overflow
+     if (avail <= Long.MAX_VALUE - refillAmount) {
+       avail = Math.max(0, Math.min(avail + refillAmount, limit));
+     } else {
+       avail = Math.max(0, limit);
+     }
+     if (avail >= amount) {
+       return true;
+     }
+     return false;
+   }
+\ No newline at end of file
+",Buggy
+hbase,7389.json,84a50393ee56d09abb68f54b44b64f5279bd33c9,"@@ -1,15 +1,15 @@
+-  public long refill(long limit, long available) {
++  public long refill(long limit) {
+     final long now = EnvironmentEdgeManager.currentTime();
+     if (nextRefillTime == -1) {
+       // Till now no resource has been consumed.
+       nextRefillTime = EnvironmentEdgeManager.currentTime();
+       return limit;
+     }
+ 
+     long delta = (limit * (now - nextRefillTime)) / super.getTimeUnitInMillis();
+     if (delta > 0) {
+       this.nextRefillTime = now;
+-      return Math.min(limit, available + delta);
++      return Math.min(limit, delta);
+     }
+     return 0;
+   }
+\ No newline at end of file
+",Buggy
