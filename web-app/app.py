@@ -38,7 +38,7 @@ def tangledReviewer():
 
 def remove_completed(files):
     if True:
-        completed = ["spring-boot", "guava", "pmd", "hbase"]
+        completed = ["spring-boot", "guava", "pmd", "hbase", "ant"]
         return [item for item in files if not any(sub in item for sub in completed)]
     else:
         return files

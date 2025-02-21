@@ -4333,3 +4333,721 @@ lucene-solr,14425.json,4070bdd8d8b2095b406c404720e5f2c347596350,"@@ -1,23 +1,23 
 \ No newline at end of file
 ",Buggy,"SOLR-8657: Fix SolrRequestInfo error logs if QuerySenderListener is being used
 "
+ant,3769.json,2ca342fb2a9191f8e22abfc8fee9aaab94ea8496,"@@ -1,6 +1,6 @@
+     public void setServerLanguageCodeConfig(LanguageCode serverLanguageCode) {
+-        if (serverLanguageCode != null && !serverLanguageCode.equals("""")) {
++        if (serverLanguageCode != null && !"""".equals(serverLanguageCode.getValue())) {
+             this.serverLanguageCodeConfig = serverLanguageCode;
+             configurationHasBeenSet();
+         }
+     }
+\ No newline at end of file
+",Buggy,"Fixed some obvious errors. (Formatter class is not thread safe, equals from string to another object).
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/core/trunk@739572 13f79535-47bb-0310-9956-ffa450edef68
+"
+ant,3780.json,2ca342fb2a9191f8e22abfc8fee9aaab94ea8496,"@@ -1,6 +1,6 @@
+     public void setTimestampGranularity(Granularity timestampGranularity) {
+-        if (null == timestampGranularity || """".equals(timestampGranularity)) {
++        if (null == timestampGranularity || """".equals(timestampGranularity.getValue())) {
+             return;
+         }
+         this.timestampGranularity = timestampGranularity;
+     }
+\ No newline at end of file
+",Buggy,"Fixed some obvious errors. (Formatter class is not thread safe, equals from string to another object).
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/core/trunk@739572 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,43949.json,b0db06bad568b7eedf528379a2fe5ac935992d56,"@@ -1,43 +1,45 @@
+       public Scorer scorer(LeafReaderContext context) throws IOException {
+         SortedNumericDocValues values = getValues(context.reader(), field);
+         if (values == null) {
+           return null;
+         }
+-        final NumericDocValues singleton = DocValues.unwrapSingleton(values);
++        final NumericDocValues singleton = null; // TODO: LUCENE-7649, re-consider optimization that broke SOLR-10013
++        // final NumericDocValues singleton = DocValues.unwrapSingleton(values);
+         final TwoPhaseIterator iterator;
+         if (singleton != null) {
++          assert false : ""imposible code -- or: someone re-enabled singleton optinization w/o reading the whole method"";
+           iterator = new TwoPhaseIterator(singleton) {
+             @Override
+             public boolean matches() throws IOException {
+               final long value = singleton.longValue();
+               return value >= lowerValue && value <= upperValue;
+             }
+ 
+             @Override
+             public float matchCost() {
+               return 2; // 2 comparisons
+             }
+           };
+         } else {
+           iterator = new TwoPhaseIterator(values) {
+             @Override
+             public boolean matches() throws IOException {
+               for (int i = 0, count = values.docValueCount(); i < count; ++i) {
+                 final long value = values.nextValue();
+                 if (value < lowerValue) {
+                   continue;
+                 }
+                 // Values are sorted, so the first value that is >= lowerValue is our best candidate
+                 return value <= upperValue;
+               }
+               return false; // all values were < lowerValue
+             }
+ 
+             @Override
+             public float matchCost() {
+               return 2; // 2 comparisons
+             }
+           };
+         }
+         return new ConstantScoreScorer(this, score(), iterator);
+       }
+\ No newline at end of file
+",Buggy,"SOLR-10013: Fix DV range query bug introduced by LUCENE-7643 by disabling and optimization (LUCENE-7649 to track re-enabling or removing completely)
+"
+lucene-solr,20864.json,568f6a398a8be76ec0261125f625c5d28942ea4a,"@@ -1,3 +1,3 @@
+-  public static ConfigSolr fromSolrHome(String solrHome) {
+-    return fromFile(new File(solrHome, SOLR_XML_FILE));
++  public static ConfigSolr fromSolrHome(SolrResourceLoader loader, String solrHome) {
++    return fromFile(loader, new File(solrHome, SOLR_XML_FILE));
+   }
+\ No newline at end of file
+",Buggy,"SOLR-5009: Don't create multiple SolrResourceLoaders for same Solr home, wasting resources and slowing down startup. This fixes the problem where the loader was not correctly closed, making tests fail on Windows.
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1500156 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,20441.json,568f6a398a8be76ec0261125f625c5d28942ea4a,"@@ -1,5 +1,6 @@
+   public static CoreContainer createAndLoad(String solrHome, File configFile) {
+-    CoreContainer cc = new CoreContainer(new SolrResourceLoader(solrHome), ConfigSolr.fromFile(configFile));
++    SolrResourceLoader loader = new SolrResourceLoader(solrHome);
++    CoreContainer cc = new CoreContainer(loader, ConfigSolr.fromFile(loader, configFile));
+     cc.load();
+     return cc;
+   }
+\ No newline at end of file
+",Buggy,"SOLR-5009: Don't create multiple SolrResourceLoaders for same Solr home, wasting resources and slowing down startup. This fixes the problem where the loader was not correctly closed, making tests fail on Windows.
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1500156 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,48003.json,5fa6cd3fec996cca528327c6a13815d96e34cf9c,"@@ -1,48 +1,48 @@
+   public static void compress(byte[] bytes, int off, int len, DataOutput out, HashTable ht) throws IOException {
+ 
+     final int base = off;
+     final int end = off + len;
+ 
+     int anchor = off++;
+ 
+     if (len > LAST_LITERALS + MIN_MATCH) {
+ 
+       final int limit = end - LAST_LITERALS;
+       final int matchLimit = limit - MIN_MATCH;
+       ht.reset(len);
+       final int hashLog = ht.hashLog;
+       final PackedInts.Mutable hashTable = ht.hashTable;
+ 
+       main:
+-      while (off < limit) {
++      while (off <= limit) {
+         // find a match
+         int ref;
+         while (true) {
+           if (off >= matchLimit) {
+             break main;
+           }
+           final int v = readInt(bytes, off);
+           final int h = hash(v, hashLog);
+           ref = base + (int) hashTable.get(h);
+           assert PackedInts.bitsRequired(off - base) <= hashTable.getBitsPerValue();
+           hashTable.set(h, off - base);
+           if (off - ref < MAX_DISTANCE && readInt(bytes, ref) == v) {
+             break;
+           }
+           ++off;
+         }
+ 
+         // compute match length
+         final int matchLen = MIN_MATCH + commonBytes(bytes, ref + MIN_MATCH, off + MIN_MATCH, limit);
+ 
+         encodeSequence(bytes, anchor, ref, off, matchLen, out);
+         off += matchLen;
+         anchor = off;
+       }
+     }
+ 
+     // last literals
+     final int literalLen = end - anchor;
+     assert literalLen >= LAST_LITERALS || literalLen == len;
+     encodeLastLiterals(bytes, anchor, end - anchor, out);
+   }
+\ No newline at end of file
+",Buggy,"Fix compression bug on highly compressible inputs with LZ4.compressHC.
+
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1520060 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,48001.json,5fa6cd3fec996cca528327c6a13815d96e34cf9c,"@@ -1,10 +1,10 @@
+     private void addHash(byte[] bytes, int off) {
+       final int v = readInt(bytes, off);
+       final int h = hashHC(v);
+       int delta = off - hashTable[h];
+       if (delta >= MAX_DISTANCE) {
+         delta = MAX_DISTANCE - 1;
+       }
+       chainTable[off & MASK] = (short) delta;
+-      hashTable[h] = off - base;
++      hashTable[h] = off;
+     }
+\ No newline at end of file
+",Buggy,"Fix compression bug on highly compressible inputs with LZ4.compressHC.
+
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1520060 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,41767.json,f5fdea8ddaa3002dc89e624e608582a6345f7e1d,"@@ -1,3 +1 @@
+-          public int docID() {
+-            return doc;
+-          }
+\ No newline at end of file
++    public int docID() { return doc; }
+\ No newline at end of file
+",NotBuggy,"LUCENE-3102: first cut - some refactoring, bug fixes, add test, move to core (trunk)
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1103872 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,41766.json,f5fdea8ddaa3002dc89e624e608582a6345f7e1d,"@@ -1,3 +1 @@
+-          public float score() {
+-            return score;
+-          }
+\ No newline at end of file
++    public float score() { return score; }
+\ No newline at end of file
+",NotBuggy,"LUCENE-3102: first cut - some refactoring, bug fixes, add test, move to core (trunk)
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1103872 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,41782.json,f5fdea8ddaa3002dc89e624e608582a6345f7e1d,"@@ -1,52 +1,60 @@
+   public void collect(int doc) throws IOException {
+ 
+     if (curDocs == null) {
+       // Cache was too large
+-      if (curScores != null) {
+-        score = scorer.score();
++      if (cacheScores) {
++        cachedScorer.score = scorer.score();
+       }
+-      this.doc = doc;
++      cachedScorer.doc = doc;
+       other.collect(doc);
+       return;
+     }
+ 
++    // Allocate a bigger array or abort caching
+     if (upto == curDocs.length) {
+       base += upto;
+-      final int nextLength;
+-      // Max out at 512K arrays:
+-      if (curDocs.length < 524288) {
+-        nextLength = 8*curDocs.length;
+-      } else {
+-        nextLength = curDocs.length;
++      
++      // Compute next array length - don't allocate too big arrays
++      int nextLength = 8*curDocs.length;
++      if (nextLength > MAX_ARRAY_SIZE) {
++        nextLength = MAX_ARRAY_SIZE;
+       }
+ 
+       if (base + nextLength > maxDocsToCache) {
+-        // Too many docs to collect -- clear cache
+-        curDocs = null;
+-        if (curScores != null) {
+-          score = scorer.score();
++        // try to allocate a smaller array
++        nextLength = maxDocsToCache - base;
++        if (nextLength <= 0) {
++          // Too many docs to collect -- clear cache
++          curDocs = null;
++          curScores = null;
++          cachedSegs.clear();
++          cachedDocs.clear();
++          cachedScores.clear();
++          if (cacheScores) {
++            cachedScorer.score = scorer.score();
++          }
++          cachedScorer.doc = doc;
++          other.collect(doc);
++          return;
+         }
+-        this.doc = doc;
+-        other.collect(doc);
+-        cachedDocs.clear();
+-        cachedScores.clear();
+-        return;
+       }
++      
+       curDocs = new int[nextLength];
+       cachedDocs.add(curDocs);
+-      if (curScores != null) {
++      if (cacheScores) {
+         curScores = new float[nextLength];
+         cachedScores.add(curScores);
+       }
+       upto = 0;
+     }
++    
+     curDocs[upto] = doc;
+     // TODO: maybe specialize private subclass so we don't
+     // null check per collect...
+-    if (curScores != null) {
+-      score = curScores[upto] = scorer.score();
++    if (cacheScores) {
++      cachedScorer.score = curScores[upto] = scorer.score();
+     }
+     upto++;
+-    this.doc = doc;
++    cachedScorer.doc = doc;
+     other.collect(doc);
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-3102: first cut - some refactoring, bug fixes, add test, move to core (trunk)
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1103872 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,41774.json,f5fdea8ddaa3002dc89e624e608582a6345f7e1d,"@@ -1,40 +1,42 @@
+   public void replay(Collector other) throws IOException {
+     if (!isCached()) {
+       throw new IllegalStateException(""cannot replay: cache was cleared because too much RAM was required"");
+     }
++    
++    if (!other.acceptsDocsOutOfOrder() && this.other.acceptsDocsOutOfOrder()) {
++      throw new IllegalArgumentException(
++          ""cannot replay: given collector does not support ""
++              + ""out-of-order collection, while the wrapped collector does. ""
++              + ""Therefore cached documents may be out-of-order."");
++    }
++
+     //System.out.println(""CC: replay totHits="" + (upto + base));
+     if (lastReaderContext != null) {
+       cachedSegs.add(new SegStart(lastReaderContext, base+upto));
+       lastReaderContext = null;
+     }
+-    final int uptoSav = upto;
+-    final int baseSav = base;
+-    try {
+-      upto = 0;
+-      base = 0;
+-      int chunkUpto = 0;
+-      other.setScorer(cachedScorer);
+-      curDocs = EMPTY_INT_ARRAY;
+-      for(SegStart seg : cachedSegs) {
+-        other.setNextReader(seg.readerContext);
+-        while(base+upto < seg.end) {
+-          if (upto == curDocs.length) {
+-            base += curDocs.length;
+-            curDocs = cachedDocs.get(chunkUpto);
+-            if (curScores != null) {
+-              curScores = cachedScores.get(chunkUpto);
+-            }
+-            chunkUpto++;
+-            upto = 0;
++    
++    int curupto = 0;
++    int curbase = 0;
++    int chunkUpto = 0;
++    other.setScorer(cachedScorer);
++    curDocs = EMPTY_INT_ARRAY;
++    for(SegStart seg : cachedSegs) {
++      other.setNextReader(seg.readerContext);
++      while(curbase+curupto < seg.end) {
++        if (curupto == curDocs.length) {
++          curbase += curDocs.length;
++          curDocs = cachedDocs.get(chunkUpto);
++          if (cacheScores) {
++            curScores = cachedScores.get(chunkUpto);
+           }
+-          if (curScores != null) {
+-            score = curScores[upto];
+-          }
+-          other.collect(curDocs[upto++]);
++          chunkUpto++;
++          curupto = 0;
+         }
++        if (cacheScores) {
++          cachedScorer.score = curScores[curupto];
++        }
++        other.collect(curDocs[curupto++]);
+       }
+-    } finally {
+-      upto = uptoSav;
+-      base = baseSav;
+     }
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-3102: first cut - some refactoring, bug fixes, add test, move to core (trunk)
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1103872 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,47123.json,52d1ab79192a331e1f3fc5f5a202d6a4c5a633b2,"@@ -1,23 +1,27 @@
+-  ByteBuffer[] map(FileChannel fc, long offset, long length) throws IOException {
++  final ByteBuffer[] map(String resourceDescription, FileChannel fc, long offset, long length) throws IOException {
+     if ((length >>> chunkSizePower) >= Integer.MAX_VALUE)
+-      throw new IllegalArgumentException(""RandomAccessFile too big for chunk size: "" + fc.toString());
++      throw new IllegalArgumentException(""RandomAccessFile too big for chunk size: "" + resourceDescription);
+     
+     final long chunkSize = 1L << chunkSizePower;
+     
+     // we always allocate one more buffer, the last one may be a 0 byte one
+     final int nrBuffers = (int) (length >>> chunkSizePower) + 1;
+     
+     ByteBuffer buffers[] = new ByteBuffer[nrBuffers];
+     
+     long bufferStart = 0L;
+     for (int bufNr = 0; bufNr < nrBuffers; bufNr++) { 
+       int bufSize = (int) ( (length > (bufferStart + chunkSize))
+           ? chunkSize
+               : (length - bufferStart)
+           );
+-      buffers[bufNr] = fc.map(MapMode.READ_ONLY, offset + bufferStart, bufSize);
++      try {
++        buffers[bufNr] = fc.map(MapMode.READ_ONLY, offset + bufferStart, bufSize);
++      } catch (IOException ioe) {
++        throw convertMapFailedIOException(ioe, resourceDescription, bufSize);
++      }
+       bufferStart += bufSize;
+     }
+     
+     return buffers;
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-5673: MMapDirectory: Work around a ""bug"" in the JDK that throws a confusing OutOfMemoryError wrapped inside IOException if the FileChannel  mapping failed because of lack of virtual address space. The IOException is rethrown with more useful information about the problem, omitting the incorrect OutOfMemoryError
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1595213 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,3974.json,277dd050869d458a370fb7adb837a035e091b89f,"@@ -1,31 +1,32 @@
+-    private MapWriter serializeToV2Format(SolrParams params, String[] list) {
++    private MapWriter serializeToV2Format(SolrParams paramsV1, String[] list) {
+       return ew -> ew.put(meta.commandName, (MapWriter) ew1 -> {
+-        Iterator<String> iter = params.getParameterNamesIterator();
++        Iterator<String> iter = paramsV1.getParameterNamesIterator();
+         Map<String, Map<String, String>> subProperties = null;
+         while (iter.hasNext()) {
+           String key = iter.next();
+           if (CoreAdminParams.ACTION.equals(key)) continue;
+           Object substitute = meta.getReverseParamSubstitute(key);
+           int idx = template.variables.indexOf(substitute);
+           if (idx > -1) {
+-            String val = params.get(String.valueOf(substitute));
++            String val = paramsV1.get(key);
+             if (val == null) throw new RuntimeException(""null value is not valid for "" + key);
+             list[idx] = val;
+             continue;
+           }
+           if (substitute instanceof Pair) {//this is a nested object
++            @SuppressWarnings(""unchecked"")
+             Pair<String, String> p = (Pair<String, String>) substitute;
+             if (subProperties == null) subProperties = new HashMap<>();
+-            subProperties.computeIfAbsent(p.first(), s -> new HashMap<>()).put(p.second(), params.get(key));
++            subProperties.computeIfAbsent(p.first(), s -> new HashMap<>()).put(p.second(), paramsV1.get(key));
+           } else {
+-            Object val = params.get(key);
++            Object val = paramsV1.get(key);
+             ew1.put(substitute.toString(), val);
+           }
+         }
+         if (subProperties != null) {
+           for (Map.Entry<String, Map<String, String>> e : subProperties.entrySet()) {
+             ew1.put(e.getKey(), e.getValue());
+           }
+         }
+       });
+     }
+\ No newline at end of file
+",Buggy,"SOLR-12061: Fix substitution bug in API V1 to V2 migration
+"
+lucene-solr,3973.json,277dd050869d458a370fb7adb837a035e091b89f,"@@ -1,12 +1,12 @@
+-    public V2Request.Builder convert(SolrParams params) {
++    public V2Request.Builder convert(SolrParams paramsV1) {
+       String[] list = new String[template.variables.size()];
+-      MapWriter data = serializeToV2Format(params, list);
++      MapWriter data = serializeToV2Format(paramsV1, list);
+       Map o = data.toMap(new LinkedHashMap<>());
+       return new V2Request.Builder(template.apply(s -> {
+         int idx = template.variables.indexOf(s);
+         return list[idx];
+       }))
+           .withMethod(meta.getHttpMethod())
+           .withPayload(o);
+ 
+     }
+\ No newline at end of file
+",NotBuggy,"SOLR-12061: Fix substitution bug in API V1 to V2 migration
+"
+lucene-solr,3975.json,277dd050869d458a370fb7adb837a035e091b89f,"@@ -1,11 +1,11 @@
+-  public static V2Request.Builder convert(CollectionAdminRequest request) {
++  public static V2Request.Builder convert(CollectionAdminRequest<?> request) {
+     ActionInfo info = mapping.get(request.action);
+     if (info == null) throw new RuntimeException(""Unsupported action :"" + request.action);
+ 
+     if (info.meta.getHttpMethod() == SolrRequest.METHOD.POST) {
+       if (info.path == null) info.setPath();
+       return info.convert(request.getParams());
+     }
+ 
+     return null;
+   }
+\ No newline at end of file
+",Buggy,"SOLR-12061: Fix substitution bug in API V1 to V2 migration
+"
+lucene-solr,30452.json,ef8126e5eab7aec9c8775c2e08bd6c2bb1ef690f,"@@ -1,13 +1,10 @@
+   public void setRangeValues(InetAddress min, InetAddress max) {
+-    if (StringHelper.compare(BYTES, min.getAddress(), 0, max.getAddress(), 0) > 0) {
+-      throw new IllegalArgumentException(""min value cannot be greater than max value for range field (name="" + name + "")"");
+-    }
+     final byte[] bytes;
+     if (fieldsData == null) {
+       bytes = new byte[BYTES*2];
+       fieldsData = new BytesRef(bytes);
+     } else {
+       bytes = ((BytesRef)fieldsData).bytes;
+     }
+     encode(min, max, bytes);
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-7738: Fix min/max verification bug in InetAddressRange to correctly compare IPv4 and IPv6. Update tests.
+"
+lucene-solr,30453.json,ef8126e5eab7aec9c8775c2e08bd6c2bb1ef690f,"@@ -1,4 +1,11 @@
+   private static void encode(final InetAddress min, final InetAddress max, final byte[] bytes) {
+-    System.arraycopy(InetAddressPoint.encode(min), 0, bytes, 0, BYTES);
+-    System.arraycopy(InetAddressPoint.encode(max), 0, bytes, BYTES, BYTES);
++    // encode min and max value (consistent w/ InetAddressPoint encoding)
++    final byte[] minEncoded = InetAddressPoint.encode(min);
++    final byte[] maxEncoded = InetAddressPoint.encode(max);
++    // ensure min is lt max
++    if (StringHelper.compare(BYTES, minEncoded, 0, maxEncoded, 0) > 0) {
++      throw new IllegalArgumentException(""min value cannot be greater than max value for InetAddressRange field"");
++    }
++    System.arraycopy(minEncoded, 0, bytes, 0, BYTES);
++    System.arraycopy(maxEncoded, 0, bytes, BYTES, BYTES);
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-7738: Fix min/max verification bug in InetAddressRange to correctly compare IPv4 and IPv6. Update tests.
+"
+lucene-solr,26824.json,d58041803c7be0eaf35b6381762c846df7e58116,"@@ -1,14 +1,17 @@
+   public void inform(ResourceLoader loader) {
+     String stopTagFiles = args.get(""tags"");
+     enablePositionIncrements = getBoolean(""enablePositionIncrements"", false);
++    stopTags = null;
+     try {
+       CharArraySet cas = getWordSet(loader, stopTagFiles, false);
+-      stopTags = new HashSet<String>();
+-      for (Object element : cas) {
+-        char chars[] = (char[]) element;
+-        stopTags.add(new String(chars));
++      if (cas != null) {
++        stopTags = new HashSet<String>();
++        for (Object element : cas) {
++          char chars[] = (char[]) element;
++          stopTags.add(new String(chars));
++        }
+       }
+     } catch (IOException e) {
+       throw new InitializationException(""IOException thrown while loading tags"", e);
+     }
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-2510: fix more factory arg bugs found by TestFactories
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/branches/lucene2510@1365426 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,26825.json,d58041803c7be0eaf35b6381762c846df7e58116,"@@ -1,3 +1,4 @@
+   public TokenStream create(TokenStream stream) {
+-    return new JapanesePartOfSpeechStopFilter(enablePositionIncrements, stream, stopTags);
++    // if stoptags is null, it means the file is empty
++    return stopTags == null ? stream : new JapanesePartOfSpeechStopFilter(enablePositionIncrements, stream, stopTags);
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-2510: fix more factory arg bugs found by TestFactories
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/branches/lucene2510@1365426 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,46955.json,3b35de6599b12e08e5edd7549cd64c947cdb5a15,"@@ -1,12 +1,15 @@
+                     public Number next() {
+                       if (++curDoc >= maxDoc) {
+                         throw new NoSuchElementException(""no more documents to return values for"");
+                       }
+                       Long updatedValue = updates.get(curDoc);
+                       if (updatedValue == null) {
+-                        updatedValue = Long.valueOf(currentValues.get(curDoc));
++                        // only read the current value if the document had a value before
++                        if (currentValues != null && docsWithField.get(curDoc)) {
++                          updatedValue = currentValues.get(curDoc);
++                        }
+                       } else if (updatedValue == NumericUpdate.MISSING) {
+                         updatedValue = null;
+                       }
+                       return updatedValue;
+                     }
+\ No newline at end of file
+",Buggy,"LUCENE-5189: fix updates-order and docsWithField bugs
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1528837 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,48196.json,ae4723e0b504da902656aedac8ea27cd98e4cf6b,"@@ -1,28 +1,27 @@
+   public static IntsRef getSingleton(Automaton a) {
+     if (a.isDeterministic() == false) {
+       throw new IllegalArgumentException(""input automaton must be deterministic"");
+     }
+     IntsRefBuilder builder = new IntsRefBuilder();
+     HashSet<Integer> visited = new HashSet<>();
+     int s = 0;
+-    boolean done;
+     Transition t = new Transition();
+     while (true) {
+       visited.add(s);
+       if (a.isAccept(s) == false) {
+         if (a.getNumTransitions(s) == 1) {
+           a.getTransition(s, 0, t);
+           if (t.min == t.max && !visited.contains(t.dest)) {
+             builder.append(t.min);
+             s = t.dest;
+             continue;
+           }
+         }
+       } else if (a.getNumTransitions(s) == 0) {
+         return builder.get();
+       }
+ 
+       // Automaton accepts more than one string:
+       return null;
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-6365: fix buggy Operations.topoSort; add test
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1689079 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,48202.json,ae4723e0b504da902656aedac8ea27cd98e4cf6b,"@@ -1,26 +1,25 @@
+   public static int[] topoSortStates(Automaton a) {
++    if (a.getNumStates() == 0) {
++      return new int[0];
++    }
+     int numStates = a.getNumStates();
+     int[] states = new int[numStates];
+     final BitSet visited = new BitSet(numStates);
+-    final LinkedList<Integer> worklist = new LinkedList<>();
+-    worklist.add(0);
+-    visited.set(0);
+-    int upto = 0;
+-    states[upto] = 0;
+-    upto++;
+-    Transition t = new Transition();
+-    while (worklist.size() > 0) {
+-      int s = worklist.removeFirst();
+-      int count = a.initTransition(s, t);
+-      for (int i=0;i<count;i++) {
+-        a.getNextTransition(t);
+-        if (!visited.get(t.dest)) {
+-          visited.set(t.dest);
+-          worklist.add(t.dest);
+-          states[upto++] = t.dest;
+-        }
+-      }
++    int upto = topoSortStatesRecurse(a, visited, states, 0, 0);
++
++    if (upto < states.length) {
++      // There were dead states
++      int[] newStates = new int[upto];
++      System.arraycopy(states, 0, newStates, 0, upto);
++      states = newStates;
++    }
++
++    // Reverse the order:
++    for(int i=0;i<states.length/2;i++) {
++      int s = states[i];
++      states[i] = states[states.length-1-i];
++      states[states.length-1-i] = s;
+     }
+ 
+     return states;
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-6365: fix buggy Operations.topoSort; add test
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1689079 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,49563.json,e48f99c36cb1a5a2cca505266f886fa52fd2be5f,"@@ -1,8 +1,8 @@
+   public static ReaderIterator getReaderIterator(DataInput in, int mem) throws IOException {
+-    final int version = CodecUtil.checkHeader(in, CODEC_NAME, VERSION_START, VERSION_START);
++    final int version = CodecUtil.checkHeader(in, CODEC_NAME, VERSION_START, VERSION_CURRENT);
+     final int bitsPerValue = in.readVInt();
+     assert bitsPerValue > 0 && bitsPerValue <= 64: ""bitsPerValue="" + bitsPerValue;
+     final int valueCount = in.readVInt();
+     final Format format = Format.byId(in.readVInt());
+     return getReaderIteratorNoHeader(in, format, version, valueCount, bitsPerValue, mem);
+   }
+\ No newline at end of file
+",Buggy,"Fix error-prone header check.
+
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1359861 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,13424.json,cc344dc6bd9e71ed7848618630b51f4633e1dd50,"@@ -1,37 +1,38 @@
+   public SlotAcc createSlotAcc(FacetContext fcontext, int numDocs, int numSlots) throws IOException {
+     ValueSource vs = getArg();
+ 
+     SchemaField sf = null;
+ 
+     if (vs instanceof FieldNameValueSource) {
+       String field = ((FieldNameValueSource)vs).getFieldName();
+       sf = fcontext.qcontext.searcher().getSchema().getField(field);
+ 
+       if (sf.multiValued() || sf.getType().multiValuedFieldCache()) {
+         vs = null;
+         throw new SolrException(SolrException.ErrorCode.BAD_REQUEST, ""min/max aggregations can't be used on multi-valued field "" + field);
+       } else {
+         vs = sf.getType().getValueSource(sf, null);
+       }
+     }
+ 
+     if (vs instanceof StrFieldSource) {
+       return new SingleValuedOrdAcc(fcontext, sf, numSlots);
+     }
+ 
+     // Since functions don't currently have types, we rely on the type of the field
+     if (sf != null && sf.getType().getNumberType() != null) {
+       switch (sf.getType().getNumberType()) {
+         case FLOAT:
+         case DOUBLE:
+           return new DFuncAcc(vs, fcontext, numSlots);
+         case INTEGER:
+         case LONG:
+-        case DATE:
+           return new LFuncAcc(vs, fcontext, numSlots);
++        case DATE:
++          return new DateFuncAcc(vs, fcontext, numSlots);
+       }
+     }
+ 
+     // numeric functions
+     return new DFuncAcc(vs, fcontext, numSlots);
+   }
+\ No newline at end of file
+",NotBuggy,"SOLR-11316: date support for min/max, fix missing bug for int/long fields
+"
+lucene-solr,13439.json,cc344dc6bd9e71ed7848618630b51f4633e1dd50,"@@ -1,8 +1,3 @@
+     public Object getValue(int slot) {
+-      long val = result[slot];
+-      if (val == 0 && exists.get(slot)) {
+-        return null;
+-      } else {
+-        return val;
+-      }
++      return result[slot] == MISSING ? null : new Date(result[slot]);
+     }
+\ No newline at end of file
+",Buggy,"SOLR-11316: date support for min/max, fix missing bug for int/long fields
+"
