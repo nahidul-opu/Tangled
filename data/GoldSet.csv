@@ -679,3 +679,381 @@ guava,10881.json,c95fc106ff08d0652b5d661cab9a73f38697eccc,"@@ -1,3 +1,12 @@
    }
 \ No newline at end of file
 ",Buggy
+guava,11748.json,4362a4529306ea43e177fae2d0457e794dd77cd6,"@@ -1,7 +1,7 @@
+-    static Object forLookup(Type t) {
++    static TypeVariableKey forLookup(Type t) {
+       if (t instanceof TypeVariable) {
+         return new TypeVariableKey((TypeVariable<?>) t);
+       } else {
+         return null;
+       }
+     }
+\ No newline at end of file
+",NotBuggy
+guava,11957.json,4362a4529306ea43e177fae2d0457e794dd77cd6,"@@ -1,24 +1,24 @@
+     private int collectTypes(K type, Map<? super K, Integer> map) {
+-      Integer existing = map.get(this);
++      Integer existing = map.get(type);
+       if (existing != null) {
+         // short circuit: if set contains type it already contains its supertypes
+         return existing;
+       }
+       int aboveMe = getRawType(type).isInterface()
+           ? 1 // interfaces should be listed before Object
+           : 0;
+       for (K interfaceType : getInterfaces(type)) {
+         aboveMe = Math.max(aboveMe, collectTypes(interfaceType, map));
+       }
+       K superclass = getSuperclass(type);
+       if (superclass != null) {
+         aboveMe = Math.max(aboveMe, collectTypes(superclass, map));
+       }
+       /*
+        * TODO(benyu): should we include Object for interface?
+        * Also, CharSequence[] and Object[] for String[]?
+        *
+        */
+       map.put(type, aboveMe + 1);
+       return aboveMe + 1;
+     }
+\ No newline at end of file
+",NotBuggy
+guava,19253.json,4c949e3399a80396525774a0ffc66b8af3155242,"@@ -1,18 +1,18 @@
+   private static boolean validateSyntax(List<String> parts) {
+     final int lastIndex = parts.size() - 1;
+ 
+     // Validate the last part specially, as it has different syntax rules.
+ 
+-    if (!validatePart(parts.get(lastIndex), FINAL_PART)) {
++    if (!validatePart(parts.get(lastIndex), true)) {
+       return false;
+     }
+ 
+     for (int i = 0; i < lastIndex; i++) {
+       String part = parts.get(i);
+-      if (!validatePart(part, NORMAL_PART)) {
++      if (!validatePart(part, false)) {
+         return false;
+       }
+     }
+ 
+     return true;
+   }
+\ No newline at end of file
+",NotBuggy
+guava,19284.json,4c949e3399a80396525774a0ffc66b8af3155242,"@@ -1,12 +1,12 @@
+   private static String convertDottedQuadToHex(String ipString) {
+     int lastColon = ipString.lastIndexOf(':');
+     String initialPart = ipString.substring(0, lastColon + 1);
+     String dottedQuad = ipString.substring(lastColon + 1);
+     byte[] quad = textToNumericFormatV4(dottedQuad);
+     if (quad == null) {
+       return null;
+     }
+-    String penultimate = Integer.toHexString((quad[0] << 8) | (quad[1] & 0xff));
+-    String ultimate = Integer.toHexString((quad[2] << 8) | (quad[3] & 0xff));
++    String penultimate = Integer.toHexString(((quad[0] & 0xff) << 8) | (quad[1] & 0xff));
++    String ultimate = Integer.toHexString(((quad[2] & 0xff) << 8) | (quad[3] & 0xff));
+     return initialPart + penultimate + "":"" + ultimate;
+   }
+\ No newline at end of file
+",Buggy
+guava,10943.json,3fbaf56f390db1a7c442ceaeab2c3a8bc1c8fd79,"@@ -1,29 +1,43 @@
+     @Override protected String computeNext() {
+       while (offset != -1) {
+         int start = offset;
+         int end;
+ 
+         int separatorPosition = separatorStart(offset);
+         if (separatorPosition == -1) {
+           end = toSplit.length();
+           offset = -1;
+         } else {
+           end = separatorPosition;
+           offset = separatorEnd(separatorPosition);
+         }
+ 
+         while (start < end && trimmer.matches(toSplit.charAt(start))) {
+           start++;
+         }
+         while (end > start && trimmer.matches(toSplit.charAt(end - 1))) {
+           end--;
+         }
+ 
+         if (omitEmptyStrings && start == end) {
+           continue;
+         }
+ 
++        if (limit == 1) {
++          // The limit has been reached, return the rest of the string as the
++          // final item.  This is tested after empty string removal so that
++          // empty strings do not count towards the limit.
++          end = toSplit.length();
++          offset = -1;
++          // Since we may have changed the end, we need to trim it again.
++          while (end > start && trimmer.matches(toSplit.charAt(end - 1))) {
++            end--;
++          }
++        } else {
++          limit--;
++        }
++
+         return toSplit.subSequence(start, end).toString();
+       }
+       return endOfData();
+     }
+\ No newline at end of file
+",Buggy
+guava,15629.json,2ef955163b3d43e7849c1929ef4e5d714b93da96,"@@ -1,27 +1,34 @@
+   MoveDesc<E> removeAt(int index) {
+     checkPositionIndex(index, size);
+     modCount++;
+     size--;
+     if (size == index) {
+       queue[size] = null;
+       return null;
+     }
+     E actualLastElement = elementData(size);
+-    int lastElementAt = heapForIndex(size).getCorrectLastElement(actualLastElement);
++    int lastElementAt = heapForIndex(size).swapWithConceptuallyLastElement(actualLastElement);
++    if (lastElementAt == index) {
++      // 'actualLastElement' is now at 'lastElementAt', and the element that was at 'lastElementAt'
++      // is now at the end of queue. If that's the element we wanted to remove in the first place,
++      // don't try to (incorrectly) trickle it. Instead, just delete it and we're done.
++      queue[size] = null;
++      return null;
++    }
+     E toTrickle = elementData(size);
+     queue[size] = null;
+     MoveDesc<E> changes = fillHole(index, toTrickle);
+     if (lastElementAt < index) {
+       // Last element is moved to before index, swapped with trickled element.
+       if (changes == null) {
+         // The trickled element is still after index.
+         return new MoveDesc<E>(actualLastElement, toTrickle);
+       } else {
+         // The trickled element is back before index, but the replaced element
+         // has now been moved after index.
+         return new MoveDesc<E>(actualLastElement, changes.replaced);
+       }
+     }
+     // Trickled element was after index to begin with, no adjustment needed.
+     return changes;
+   }
+\ No newline at end of file
+",Buggy
+guava,15643.json,2ef955163b3d43e7849c1929ef4e5d714b93da96,"@@ -1,16 +1,16 @@
+-    int getCorrectLastElement(E actualLastElement) {
++    int swapWithConceptuallyLastElement(E actualLastElement) {
+       int parentIndex = getParentIndex(size);
+       if (parentIndex != 0) {
+         int grandparentIndex = getParentIndex(parentIndex);
+         int uncleIndex = getRightChildIndex(grandparentIndex);
+         if (uncleIndex != parentIndex && getLeftChildIndex(uncleIndex) >= size) {
+           E uncleElement = elementData(uncleIndex);
+           if (ordering.compare(uncleElement, actualLastElement) < 0) {
+             queue[uncleIndex] = actualLastElement;
+             queue[size] = uncleElement;
+             return uncleIndex;
+           }
+         }
+       }
+       return size;
+     }
+\ No newline at end of file
+",NotBuggy
+guava,15653.json,2ef955163b3d43e7849c1929ef4e5d714b93da96,"@@ -1,21 +1,23 @@
+     public void remove() {
+       checkRemove(canRemove);
+       checkModCount();
+       canRemove = false;
+       expectedModCount++;
+       if (cursor < size()) {
+         MoveDesc<E> moved = removeAt(cursor);
+         if (moved != null) {
+           if (forgetMeNot == null) {
+             forgetMeNot = new ArrayDeque<E>();
+             skipMe = new ArrayList<E>(3);
+           }
+-          forgetMeNot.add(moved.toTrickle);
++          if (!containsExact(skipMe, moved.toTrickle)) {
++            forgetMeNot.add(moved.toTrickle);
++          }
+           skipMe.add(moved.replaced);
+         }
+         cursor--;
+       } else { // we must have set lastFromForgetMeNot in next()
+         checkState(removeExact(lastFromForgetMeNot));
+         lastFromForgetMeNot = null;
+       }
+     }
+\ No newline at end of file
+",Buggy
+guava,11915.json,953e11352bbcb297987c81d1158f0c46f16cc054,"@@ -1,19 +1,20 @@
+   final TypeToken<T> rejectTypeVariables() {
+     new TypeVisitor() {
+       @Override void visitTypeVariable(TypeVariable<?> type) {
+         throw new IllegalArgumentException(
+             runtimeType + ""contains a type variable and is not safe for the operation"");
+       }
+       @Override void visitWildcardType(WildcardType type) {
+         visit(type.getLowerBounds());
+         visit(type.getUpperBounds());
+       }
+       @Override void visitParameterizedType(ParameterizedType type) {
+         visit(type.getActualTypeArguments());
++        visit(type.getOwnerType());
+       }
+       @Override void visitGenericArrayType(GenericArrayType type) {
+         visit(type.getGenericComponentType());
+       }
+     }.visit(runtimeType);
+     return this;
+   }
+\ No newline at end of file
+",Buggy
+guava,11913.json,953e11352bbcb297987c81d1158f0c46f16cc054,"@@ -1,3 +1,4 @@
+       @Override void visitParameterizedType(ParameterizedType type) {
+         visit(type.getActualTypeArguments());
++        visit(type.getOwnerType());
+       }
+\ No newline at end of file
+",Buggy
+guava,17172.json,0330f712f56cc53633874e95bdc1203cf881eb85,"@@ -1,10 +1,10 @@
+     public V get(@Nullable Object key) {
+       if (key instanceof Range) {
+         Range<?> range = (Range<?>) key;
+         RangeMapEntry<K, V> rangeMapEntry = entriesByLowerBound.get(range.lowerBound);
+-        if (rangeMapEntry.getKey().equals(range)) {
++        if (rangeMapEntry != null && rangeMapEntry.getKey().equals(range)) {
+           return rangeMapEntry.getValue();
+         }
+       }
+       return null;
+     }
+\ No newline at end of file
+",Buggy
+guava,21153.json,1a5b0b9caaa5b6aaef77c9e7ace4f8cac4025738,"@@ -1,11 +1,8 @@
+     private void startTask() {
+-      lock.lock();
+-      try {
+-        if (isShutdown()) {
++      synchronized (lock) {
++        if (shutdown) {
+           throw new RejectedExecutionException(""Executor already shutdown"");
+         }
+         runningTasks++;
+-      } finally {
+-        lock.unlock();
+       }
+     }
+\ No newline at end of file
+",Buggy
+guava,21154.json,1a5b0b9caaa5b6aaef77c9e7ace4f8cac4025738,"@@ -1,11 +1,8 @@
+     private void endTask() {
+-      lock.lock();
+-      try {
+-        runningTasks--;
+-        if (isTerminated()) {
+-          termination.signalAll();
++      synchronized (lock) {
++        int numRunning = --runningTasks;
++        if (numRunning == 0) {
++          lock.notifyAll();
+         }
+-      } finally {
+-        lock.unlock();
+       }
+     }
+\ No newline at end of file
+",Buggy
+guava,11437.json,b4cf74aa3a56751f25ae09eb79b68e0656d40618,"@@ -1,25 +1,21 @@
+   public String collapseFrom(CharSequence sequence, char replacement) {
+-    int first = indexIn(sequence);
+-    if (first == -1) {
+-      return sequence.toString();
+-    }
+-
+-    // TODO(kevinb): see if this implementation can be made faster
+-    StringBuilder builder = new StringBuilder(sequence.length())
+-        .append(sequence.subSequence(0, first))
+-        .append(replacement);
+-    boolean in = true;
+-    for (int i = first + 1; i < sequence.length(); i++) {
++    // This implementation avoids unnecessary allocation.
++    int len = sequence.length();
++    for (int i = 0; i < len; i++) {
+       char c = sequence.charAt(i);
+       if (matches(c)) {
+-        if (!in) {
+-          builder.append(replacement);
+-          in = true;
++        if (c == replacement
++            && (i == len - 1 || !matches(sequence.charAt(i + 1)))) {
++          // a no-op replacement
++          i++;
++        } else {
++          StringBuilder builder = new StringBuilder(len)
++              .append(sequence.subSequence(0, i))
++              .append(replacement);
++          return finishCollapseFrom(sequence, i + 1, len, replacement, builder, true);
+         }
+-      } else {
+-        builder.append(c);
+-        in = false;
+       }
+     }
+-    return builder.toString();
++    // no replacement needed
++    return sequence.toString();
+   }
+\ No newline at end of file
+",NotBuggy
+guava,11403.json,b4cf74aa3a56751f25ae09eb79b68e0656d40618,"@@ -1,21 +1,17 @@
+-  public String trimAndCollapseFrom(CharSequence sequence, char replacement) {
+-    int first = negate().indexIn(sequence);
+-    if (first == -1) {
+-      return """"; // everything matches. nothing's left.
+-    }
+-    StringBuilder builder = new StringBuilder(sequence.length());
+-    boolean inMatchingGroup = false;
+-    for (int i = first; i < sequence.length(); i++) {
++  private String finishCollapseFrom(
++      CharSequence sequence, int start, int end, char replacement,
++      StringBuilder builder, boolean inMatchingGroup) {
++    for (int i = start; i < end; i++) {
+       char c = sequence.charAt(i);
+       if (matches(c)) {
+-        inMatchingGroup = true;
+-      } else {
+-        if (inMatchingGroup) {
++        if (!inMatchingGroup) {
+           builder.append(replacement);
+-          inMatchingGroup = false;
++          inMatchingGroup = true;
+         }
++      } else {
+         builder.append(c);
++        inMatchingGroup = false;
+       }
+     }
+     return builder.toString();
+   }
+\ No newline at end of file
+",NotBuggy
+guava,22907.json,9bf42862f877a0ed8234bd484aa0089a3773ccd4,"@@ -1,11 +1,12 @@
+   private void addDoneString(StringBuilder builder) {
+     try {
+-      builder.append(""SUCCESS, result=["").append(getDone(this)).append(""]"");
++      V value = getDone(this);
++      builder.append(""SUCCESS, result=["").append(value).append(""]"");
+     } catch (ExecutionException e) {
+       builder.append(""FAILURE, cause=["").append(e.getCause()).append(""]"");
+     } catch (CancellationException e) {
+       builder.append(""CANCELLED"");
+     } catch (RuntimeException e) {
+       builder.append(""UNKNOWN, cause=["").append(e.getClass()).append("" thrown from get()]"");
+     }
+   }
+\ No newline at end of file
+",Buggy
