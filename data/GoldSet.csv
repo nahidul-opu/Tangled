@@ -5051,3 +5051,3300 @@ lucene-solr,13439.json,cc344dc6bd9e71ed7848618630b51f4633e1dd50,"@@ -1,8 +1,3 @@
 \ No newline at end of file
 ",Buggy,"SOLR-11316: date support for min/max, fix missing bug for int/long fields
 "
+lucene-solr,17606.json,481a1f859d0e9c844113c7693424c6aca1fa5245,"@@ -1,54 +1,54 @@
+   public void checkSystemCollection() {
+     if (cloudManager != null) {
+       try {
+         if (cloudManager.isClosed() || Thread.interrupted()) {
+           factory.setPersistent(false);
+           return;
+         }
+         ClusterState clusterState = cloudManager.getClusterStateProvider().getClusterState();
+         DocCollection systemColl = clusterState.getCollectionOrNull(CollectionAdminParams.SYSTEM_COLL);
+         if (systemColl == null) {
+           if (logMissingCollection) {
+-            log.warn(""Missing "" + CollectionAdminParams.SYSTEM_COLL + "", keeping metrics history in memory"");
++            log.info(""No "" + CollectionAdminParams.SYSTEM_COLL + "" collection, keeping metrics history in memory."");
+             logMissingCollection = false;
+           }
+           factory.setPersistent(false);
+           return;
+         } else {
+           boolean ready = false;
+           for (Replica r : systemColl.getReplicas()) {
+             if (r.isActive(clusterState.getLiveNodes())) {
+               ready = true;
+               break;
+             }
+           }
+           if (!ready) {
+-            log.debug(CollectionAdminParams.SYSTEM_COLL + "" not ready yet, keeping metrics history in memory"");
++            log.debug(CollectionAdminParams.SYSTEM_COLL + ""collection not ready yet, keeping metrics history in memory"");
+             factory.setPersistent(false);
+             return;
+           }
+         }
+       } catch (Exception e) {
+         if (logMissingCollection) {
+           log.warn(""Error getting cluster state, keeping metrics history in memory"", e);
+         }
+         logMissingCollection = false;
+         factory.setPersistent(false);
+         return;
+       }
+       logMissingCollection = true;
+       factory.setPersistent(true);
+     } else {
+       try {
+         solrClient.query(CollectionAdminParams.SYSTEM_COLL, new SolrQuery(CommonParams.Q, ""*:*"", CommonParams.ROWS, ""0""));
+         factory.setPersistent(true);
+         logMissingCollection = true;
+       } catch (Exception e) {
+         if (logMissingCollection) {
+-          log.warn(""Error querying .system collection, keeping metrics history in memory"", e);
++          log.info(""No "" + CollectionAdminParams.SYSTEM_COLL + "" collection, keeping metrics history in memory."");
+         }
+         logMissingCollection = false;
+         factory.setPersistent(false);
+       }
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"SOLR-11779: Reduce logging, fix index size conversion bug.
+"
+lucene-solr,17615.json,481a1f859d0e9c844113c7693424c6aca1fa5245,"@@ -1,149 +1,145 @@
+   private void collectGlobalMetrics() {
+     if (!amIOverseerLeader()) {
+       return;
+     }
+     Set<String> nodes = new HashSet<>(cloudManager.getClusterStateProvider().getLiveNodes());
+     NodeStateProvider nodeStateProvider = cloudManager.getNodeStateProvider();
+     Set<String> collTags = new HashSet<>();
+     collTags.addAll(counters.get(Group.core.toString()));
+     collTags.addAll(gauges.get(Group.core.toString()));
+ 
+     Set<String> nodeTags = new HashSet<>();
+     String nodePrefix = ""metrics:"" + SolrMetricManager.getRegistryName(Group.node) + "":"";
+     counters.get(Group.node.toString()).forEach(name -> {
+       nodeTags.add(nodePrefix + name);
+     });
+     gauges.get(Group.node.toString()).forEach(name -> {
+       nodeTags.add(nodePrefix + name);
+     });
+     String jvmPrefix = ""metrics:"" + SolrMetricManager.getRegistryName(Group.jvm) + "":"";
+     counters.get(Group.jvm.toString()).forEach(name -> {
+       nodeTags.add(jvmPrefix + name);
+     });
+     gauges.get(Group.jvm.toString()).forEach(name -> {
+       nodeTags.add(jvmPrefix + name);
+     });
+ 
+     // per-registry totals
+     // XXX at the moment the type of metrics that we collect allows
+     // adding all partial values. At some point it may be necessary to implement
+     // other aggregation functions.
+     // group : registry : name : value
+     Map<Group, Map<String, Map<String, Number>>> totals = new HashMap<>();
+ 
+     // collect and aggregate per-collection totals
+     for (String node : nodes) {
+       if (cloudManager.isClosed() || Thread.interrupted()) {
+         return;
+       }
+       // add core-level stats
+       Map<String, Map<String, List<ReplicaInfo>>> infos = nodeStateProvider.getReplicaInfo(node, collTags);
+       infos.forEach((coll, shards) -> {
+         shards.forEach((sh, replicas) -> {
+           String registry = SolrMetricManager.getRegistryName(Group.collection, coll);
+           Map<String, Number> perReg = totals
+               .computeIfAbsent(Group.collection, g -> new HashMap<>())
+               .computeIfAbsent(registry, r -> new HashMap<>());
+           replicas.forEach(ri -> {
+             collTags.forEach(tag -> {
+               double value = ((Number)ri.getVariable(tag, 0.0)).doubleValue();
+-              // TODO: fix this when Suggestion.Condition.DISK_IDX uses proper conversion
+-              if (tag.contains(Suggestion.coreidxsize)) {
+-                value = value * 1024.0 * 1024.0 * 1024.0;
+-              }
+               DoubleAdder adder = (DoubleAdder)perReg.computeIfAbsent(tag, t -> new DoubleAdder());
+               adder.add(value);
+             });
+           });
+         });
+       });
+       // add node-level stats
+       Map<String, Object> nodeValues = nodeStateProvider.getNodeValues(node, nodeTags);
+       for (Group g : Arrays.asList(Group.node, Group.jvm)) {
+         String registry = SolrMetricManager.getRegistryName(g);
+         Map<String, Number> perReg = totals
+             .computeIfAbsent(g, gr -> new HashMap<>())
+             .computeIfAbsent(registry, r -> new HashMap<>());
+         Set<String> names = new HashSet<>();
+         names.addAll(counters.get(g.toString()));
+         names.addAll(gauges.get(g.toString()));
+         names.forEach(name -> {
+           String tag = ""metrics:"" + registry + "":"" + name;
+           double value = ((Number)nodeValues.getOrDefault(tag, 0.0)).doubleValue();
+           DoubleAdder adder = (DoubleAdder)perReg.computeIfAbsent(name, t -> new DoubleAdder());
+           adder.add(value);
+         });
+       }
+     }
+ 
+     // add numNodes
+     String nodeReg = SolrMetricManager.getRegistryName(Group.node);
+     Map<String, Number> perNodeReg = totals
+         .computeIfAbsent(Group.node, gr -> new HashMap<>())
+         .computeIfAbsent(nodeReg, r -> new HashMap<>());
+     perNodeReg.put(NUM_NODES_KEY, nodes.size());
+ 
+     // add some global collection-level stats
+     try {
+       ClusterState state = cloudManager.getClusterStateProvider().getClusterState();
+       state.forEachCollection(coll -> {
+         String registry = SolrMetricManager.getRegistryName(Group.collection, coll.getName());
+         Map<String, Number> perReg = totals
+             .computeIfAbsent(Group.collection, g -> new HashMap<>())
+             .computeIfAbsent(registry, r -> new HashMap<>());
+         Collection<Slice> slices = coll.getActiveSlices();
+         perReg.put(NUM_SHARDS_KEY, slices.size());
+         DoubleAdder numActiveReplicas = new DoubleAdder();
+         slices.forEach(s -> {
+           s.forEach(r -> {
+             if (r.isActive(state.getLiveNodes())) {
+               numActiveReplicas.add(1.0);
+             }
+           });
+         });
+         perReg.put(NUM_REPLICAS_KEY, numActiveReplicas);
+       });
+     } catch (IOException e) {
+       log.warn(""Exception getting cluster state"", e);
+     }
+ 
+     // now update the db-s
+     totals.forEach((group, perGroup) -> {
+       perGroup.forEach((reg, perReg) -> {
+         RrdDb db = getOrCreateDb(reg, group);
+         if (db == null) {
+           return;
+         }
+         try {
+           // set the timestamp
+           Sample s = db.createSample(TimeUnit.SECONDS.convert(timeSource.getEpochTimeNs(), TimeUnit.NANOSECONDS));
+           AtomicBoolean dirty = new AtomicBoolean(false);
+           List<Group> groups = new ArrayList<>();
+           groups.add(group);
+           if (group == Group.collection) {
+             groups.add(Group.core);
+           }
+           for (Group g : groups) {
+             counters.get(g.toString()).forEach(c -> {
+               Number val = perReg.get(c);
+               if (val != null) {
+                 dirty.set(true);
+                 s.setValue(c, val.doubleValue());
+               }
+             });
+             gauges.get(g.toString()).forEach(c -> {
+               Number val = perReg.get(c);
+               if (val != null) {
+                 dirty.set(true);
+                 s.setValue(c, val.doubleValue());
+               }
+             });
+           }
+           if (dirty.get()) {
+             s.update();
+           }
+         } catch (Exception e) {
+         }
+       });
+     });
+   }
+\ No newline at end of file
+",Buggy,"SOLR-11779: Reduce logging, fix index size conversion bug.
+"
+lucene-solr,50428.json,ceb4f768bf5b71a91872f9ecdc5ebed4d0262903,"@@ -1,22 +1,23 @@
+   private GeoPoint[] findAdjoiningPoints(final Plane plane, final GeoPoint pointOnPlane, final Plane envelopePlane) {
+     // Compute a normalized perpendicular vector
+     final Vector perpendicular = new Vector(plane, pointOnPlane);
+     double distanceFactor = 0.0;
+     for (int i = 0; i < MAX_ITERATIONS; i++) {
+       distanceFactor += DELTA_DISTANCE;
+       // Compute two new points along this vector from the original
+       final GeoPoint pointA = planetModel.createSurfacePoint(pointOnPlane.x + perpendicular.x * distanceFactor,
+         pointOnPlane.y + perpendicular.y * distanceFactor,
+         pointOnPlane.z + perpendicular.z * distanceFactor);
+       final GeoPoint pointB = planetModel.createSurfacePoint(pointOnPlane.x - perpendicular.x * distanceFactor,
+         pointOnPlane.y - perpendicular.y * distanceFactor,
+         pointOnPlane.z - perpendicular.z * distanceFactor);
+       if (Math.abs(envelopePlane.evaluate(pointA)) > OFF_PLANE_AMOUNT && Math.abs(envelopePlane.evaluate(pointB)) > OFF_PLANE_AMOUNT) {
+         //System.out.println(""Distance: ""+computeSquaredDistance(rval[0], pointOnPlane)+"" and ""+computeSquaredDistance(rval[1], pointOnPlane));
+         return new GeoPoint[]{pointA, pointB};
+       }
+       // Loop back around and use a bigger delta
+     }
+     // Had to abort, so return null.
++    //System.out.println(""     Adjoining points not found.  Are planes parallel?  edge = ""+plane+""; envelope = ""+envelopePlane+""; perpendicular = ""+perpendicular);
+     return null;
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-8337: Fix problems with how travel planes too close to edge of world are disallowed, and increase the size of the disallowed window by an order of magnitude.
+"
+lucene-solr,50391.json,ceb4f768bf5b71a91872f9ecdc5ebed4d0262903,"@@ -1,46 +1,47 @@
+     public boolean apply(final GeoPoint testPoint, final boolean testPointInSet,
+       final double x, final double y, final double z) {
+       // First, try with two individual legs.  If that doesn't work, try the DualCrossingIterator.
+       try {
+         // First, we'll determine if the intersection point is in set or not
+         //System.out.println("" Finding whether ""+intersectionPoint+"" is in-set, based on travel from ""+testPoint+"" along ""+firstLegPlane+"" (value=""+firstLegValue+"")"");
+         final CountingEdgeIterator testPointEdgeIterator = createLinearCrossingEdgeIterator(testPoint,
+           firstLegPlane, firstLegAbovePlane, firstLegBelowPlane,
+           intersectionPoint.x, intersectionPoint.y, intersectionPoint.z);
+         // Traverse our way from the test point to the check point.  Use the z tree because that's fixed.
+         firstLegTree.traverse(testPointEdgeIterator, firstLegValue);
+         final boolean intersectionPointOnEdge = testPointEdgeIterator.isOnEdge();
+         // If the intersection point is on the edge, we cannot use this combination of legs, since it's not logically possible to compute in-set or out-of-set
+         // with such a starting point.
+         if (intersectionPointOnEdge) {
+           throw new IllegalArgumentException(""Intersection point landed on an edge -- illegal path"");
+         }
+         final boolean intersectionPointInSet = intersectionPointOnEdge || (((testPointEdgeIterator.getCrossingCount() & 1) == 0)?testPointInSet:!testPointInSet);
+         
+         //System.out.println(""  Intersection point in-set? ""+intersectionPointInSet+"" On edge? ""+intersectionPointOnEdge);
+ 
+         // Now do the final leg
+         //System.out.println("" Finding whether [""+x+"",""+y+"",""+z+""] is in-set, based on travel from ""+intersectionPoint+"" along ""+secondLegPlane+"" (value=""+secondLegValue+"")"");
+         final CountingEdgeIterator travelEdgeIterator = createLinearCrossingEdgeIterator(intersectionPoint,
+           secondLegPlane, secondLegAbovePlane, secondLegBelowPlane,
+           x, y, z);
+         // Traverse our way from the test point to the check point.
+         secondLegTree.traverse(travelEdgeIterator, secondLegValue);
+         final boolean rval = travelEdgeIterator.isOnEdge() || (((travelEdgeIterator.getCrossingCount() & 1) == 0)?intersectionPointInSet:!intersectionPointInSet);
+         
+         //System.out.println("" Check point in set? ""+rval);
+         return rval;
+       } catch (IllegalArgumentException e) {
+         // Intersection point apparently was on edge, so try another strategy
++        //System.out.println("" Trying dual crossing edge iterator"");
+         final CountingEdgeIterator edgeIterator = new DualCrossingEdgeIterator(testPoint,
+           firstLegPlane, firstLegAbovePlane, firstLegBelowPlane,
+           secondLegPlane, secondLegAbovePlane, secondLegBelowPlane,
+           x, y, z, intersectionPoint);
+         firstLegTree.traverse(edgeIterator, firstLegValue);
+         if (edgeIterator.isOnEdge()) {
+           return true;
+         }
+         secondLegTree.traverse(edgeIterator, secondLegValue);
+         return edgeIterator.isOnEdge() || (((edgeIterator.getCrossingCount() & 1) == 0)?testPointInSet:!testPointInSet);
+       }
+     }
+\ No newline at end of file
+",NotBuggy,"LUCENE-8337: Fix problems with how travel planes too close to edge of world are disallowed, and increase the size of the disallowed window by an order of magnitude.
+"
+lucene-solr,50389.json,ceb4f768bf5b71a91872f9ecdc5ebed4d0262903,"@@ -1,17 +1,19 @@
+   private CountingEdgeIterator createLinearCrossingEdgeIterator(final GeoPoint testPoint,
+     final Plane plane, final Plane abovePlane, final Plane belowPlane,
+     final double thePointX, final double thePointY, final double thePointZ) {
+     // If thePoint and testPoint are parallel, we won't be able to determine sidedness of the bounding planes.  So detect that case, and build the iterator differently if we find it.
+     // This didn't work; not sure why not:
+     //if (testPoint.isParallel(thePointX, thePointY, thePointZ)) {
+     //  return new FullLinearCrossingEdgeIterator(plane, abovePlane, belowPlane, thePointX, thePointY, thePointZ);
+     //}
+     //return new SectorLinearCrossingEdgeIterator(plane, abovePlane, belowPlane, thePointX, thePointY, thePointZ);
+     //
+     try {
++      //System.out.println("" creating sector linear crossing edge iterator"");
+       return new SectorLinearCrossingEdgeIterator(testPoint, plane, abovePlane, belowPlane, thePointX, thePointY, thePointZ);
+     } catch (IllegalArgumentException e) {
+       // Assume we failed because we could not construct bounding planes, so do it another way.
++      //System.out.println("" create full linear crossing edge iterator"");
+       return new FullLinearCrossingEdgeIterator(testPoint, plane, abovePlane, belowPlane, thePointX, thePointY, thePointZ);
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-8337: Fix problems with how travel planes too close to edge of world are disallowed, and increase the size of the disallowed window by an order of magnitude.
+"
+lucene-solr,50383.json,ceb4f768bf5b71a91872f9ecdc5ebed4d0262903,"@@ -1,242 +1,242 @@
+   private boolean isInSet(final double x, final double y, final double z,
+     final GeoPoint testPoint,
+     final boolean testPointInSet,
+     final Plane testPointFixedXPlane, final Plane testPointFixedXAbovePlane, final Plane testPointFixedXBelowPlane,
+     final Plane testPointFixedYPlane, final Plane testPointFixedYAbovePlane, final Plane testPointFixedYBelowPlane,
+     final Plane testPointFixedZPlane, final Plane testPointFixedZAbovePlane, final Plane testPointFixedZBelowPlane) {
+ 
+     //System.out.println(""\nIsInSet called for [""+x+"",""+y+"",""+z+""], testPoint=""+testPoint+""; is in set? ""+testPointInSet);
+     // If we're right on top of the point, we know the answer.
+     if (testPoint.isNumericallyIdentical(x, y, z)) {
+       return testPointInSet;
+     }
+     
+     // If we're right on top of any of the test planes, we navigate solely on that plane.
+     if (testPointFixedYAbovePlane != null && testPointFixedYBelowPlane != null && testPointFixedYPlane.evaluateIsZero(x, y, z)) {
+       // Use the XZ plane exclusively.
+       //System.out.println("" Using XZ plane alone"");
+       final CountingEdgeIterator crossingEdgeIterator = createLinearCrossingEdgeIterator(testPoint, testPointFixedYPlane, testPointFixedYAbovePlane, testPointFixedYBelowPlane, x, y, z);
+       // Traverse our way from the test point to the check point.  Use the y tree because that's fixed.
+       yTree.traverse(crossingEdgeIterator, testPoint.y);
+       return crossingEdgeIterator.isOnEdge() || (((crossingEdgeIterator.getCrossingCount() & 1) == 0)?testPointInSet:!testPointInSet);
+     } else if (testPointFixedXAbovePlane != null && testPointFixedXBelowPlane != null && testPointFixedXPlane.evaluateIsZero(x, y, z)) {
+       // Use the YZ plane exclusively.
+       //System.out.println("" Using YZ plane alone"");
+       final CountingEdgeIterator crossingEdgeIterator = createLinearCrossingEdgeIterator(testPoint, testPointFixedXPlane, testPointFixedXAbovePlane, testPointFixedXBelowPlane, x, y, z);
+       // Traverse our way from the test point to the check point.  Use the x tree because that's fixed.
+       xTree.traverse(crossingEdgeIterator, testPoint.x);
+       return crossingEdgeIterator.isOnEdge() || (((crossingEdgeIterator.getCrossingCount() & 1) == 0)?testPointInSet:!testPointInSet);
+     } else if (testPointFixedZAbovePlane != null && testPointFixedZBelowPlane != null && testPointFixedZPlane.evaluateIsZero(x, y, z)) {
+       //System.out.println("" Using XY plane alone"");
+       final CountingEdgeIterator crossingEdgeIterator = createLinearCrossingEdgeIterator(testPoint, testPointFixedZPlane, testPointFixedZAbovePlane, testPointFixedZBelowPlane, x, y, z);
+       // Traverse our way from the test point to the check point.  Use the z tree because that's fixed.
+       zTree.traverse(crossingEdgeIterator, testPoint.z);
+       return crossingEdgeIterator.isOnEdge() || (((crossingEdgeIterator.getCrossingCount() & 1) == 0)?testPointInSet:!testPointInSet);
+     } else {
+       //System.out.println("" Using two planes"");
+       // This is the expensive part!!
+       // Changing the code below has an enormous impact on the queries per second we see with the benchmark.
+       
+       // We need to use two planes to get there.  We don't know which two planes will do it but we can figure it out.
+       final Plane travelPlaneFixedX = new Plane(1.0, 0.0, 0.0, -x);
+       final Plane travelPlaneFixedY = new Plane(0.0, 1.0, 0.0, -y);
+       final Plane travelPlaneFixedZ = new Plane(0.0, 0.0, 1.0, -z);
+ 
+       Plane fixedYAbovePlane = new Plane(travelPlaneFixedY, true);
+-      if (fixedYAbovePlane.D - planetModel.getMaximumYValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumYValue() - fixedYAbovePlane.D > NEAR_EDGE_CUTOFF) {
++      if (-fixedYAbovePlane.D - planetModel.getMaximumYValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumYValue() + fixedYAbovePlane.D > NEAR_EDGE_CUTOFF) {
+           fixedYAbovePlane = null;
+       }
+       
+       Plane fixedYBelowPlane = new Plane(travelPlaneFixedY, false);
+-      if (fixedYBelowPlane.D - planetModel.getMaximumYValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumYValue() - fixedYBelowPlane.D > NEAR_EDGE_CUTOFF) {
++      if (-fixedYBelowPlane.D - planetModel.getMaximumYValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumYValue() + fixedYBelowPlane.D > NEAR_EDGE_CUTOFF) {
+           fixedYBelowPlane = null;
+       }
+       
+       Plane fixedXAbovePlane = new Plane(travelPlaneFixedX, true);
+-      if (fixedXAbovePlane.D - planetModel.getMaximumXValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumXValue() - fixedXAbovePlane.D > NEAR_EDGE_CUTOFF) {
++      if (-fixedXAbovePlane.D - planetModel.getMaximumXValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumXValue() + fixedXAbovePlane.D > NEAR_EDGE_CUTOFF) {
+           fixedXAbovePlane = null;
+       }
+       
+       Plane fixedXBelowPlane = new Plane(travelPlaneFixedX, false);
+-      if (fixedXBelowPlane.D - planetModel.getMaximumXValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumXValue() - fixedXBelowPlane.D > NEAR_EDGE_CUTOFF) {
++      if (-fixedXBelowPlane.D - planetModel.getMaximumXValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumXValue() + fixedXBelowPlane.D > NEAR_EDGE_CUTOFF) {
+           fixedXBelowPlane = null;
+       }
+       
+       Plane fixedZAbovePlane = new Plane(travelPlaneFixedZ, true);
+-      if (fixedZAbovePlane.D - planetModel.getMaximumZValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumZValue() - fixedZAbovePlane.D > NEAR_EDGE_CUTOFF) {
++      if (-fixedZAbovePlane.D - planetModel.getMaximumZValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumZValue() + fixedZAbovePlane.D > NEAR_EDGE_CUTOFF) {
+           fixedZAbovePlane = null;
+       }
+       
+       Plane fixedZBelowPlane = new Plane(travelPlaneFixedZ, false);
+-      if (fixedZBelowPlane.D - planetModel.getMaximumZValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumZValue() - fixedZBelowPlane.D > NEAR_EDGE_CUTOFF) {
++      if (-fixedZBelowPlane.D - planetModel.getMaximumZValue() > NEAR_EDGE_CUTOFF || planetModel.getMinimumZValue() + fixedZBelowPlane.D > NEAR_EDGE_CUTOFF) {
+           fixedZBelowPlane = null;
+       }
+ 
+       // Find the intersection points for each one of these and the complementary test point planes.
+ 
+       final List<TraversalStrategy> traversalStrategies = new ArrayList<>(12);
+       
+       if (testPointFixedYAbovePlane != null && testPointFixedYBelowPlane != null && fixedXAbovePlane != null && fixedXBelowPlane != null) {
+         //check if planes intersects  inside world
+         final double checkAbove = 4.0 * (fixedXAbovePlane.D * fixedXAbovePlane.D * planetModel.inverseAbSquared + testPointFixedYAbovePlane.D * testPointFixedYAbovePlane.D * planetModel.inverseAbSquared - 1.0);
+         final double checkBelow = 4.0 * (fixedXBelowPlane.D * fixedXBelowPlane.D * planetModel.inverseAbSquared + testPointFixedYBelowPlane.D * testPointFixedYBelowPlane.D * planetModel.inverseAbSquared - 1.0);
+         if (checkAbove < Vector.MINIMUM_RESOLUTION_SQUARED && checkBelow < Vector.MINIMUM_RESOLUTION_SQUARED) {
+           //System.out.println(""  Looking for intersections between travel and test point planes..."");
+           final GeoPoint[] XIntersectionsY = travelPlaneFixedX.findIntersections(planetModel, testPointFixedYPlane);
+           for (final GeoPoint p : XIntersectionsY) {
+             // Travel would be in YZ plane (fixed x) then in XZ (fixed y)
+             // We compute distance we need to travel as a placeholder for the number of intersections we might encounter.
+             //final double newDistance = p.arcDistance(testPoint) + p.arcDistance(thePoint);
+             final double tpDelta1 = testPoint.x - p.x;
+             final double tpDelta2 = testPoint.z - p.z;
+             final double cpDelta1 = y - p.y;
+             final double cpDelta2 = z - p.z;
+             final double newDistance = tpDelta1 * tpDelta1 + tpDelta2 * tpDelta2 + cpDelta1 * cpDelta1 + cpDelta2 * cpDelta2;
+             //final double newDistance = (testPoint.x - p.x) * (testPoint.x - p.x) + (testPoint.z - p.z) * (testPoint.z - p.z)  + (thePoint.y - p.y) * (thePoint.y - p.y) + (thePoint.z - p.z) * (thePoint.z - p.z);
+             //final double newDistance = Math.abs(testPoint.x - p.x) + Math.abs(thePoint.y - p.y);
+             traversalStrategies.add(new TraversalStrategy(newDistance, testPoint.y, x,
+               testPointFixedYPlane, testPointFixedYAbovePlane, testPointFixedYBelowPlane,
+               travelPlaneFixedX, fixedXAbovePlane, fixedXBelowPlane,
+               yTree, xTree, p));
+           }
+         }
+       }
+       if (testPointFixedZAbovePlane != null && testPointFixedZBelowPlane != null && fixedXAbovePlane != null && fixedXBelowPlane != null) {
+         //check if planes intersects  inside world
+         final double checkAbove = 4.0 * (fixedXAbovePlane.D * fixedXAbovePlane.D * planetModel.inverseAbSquared + testPointFixedZAbovePlane.D * testPointFixedZAbovePlane.D * planetModel.inverseCSquared - 1.0);
+         final double checkBelow = 4.0 * (fixedXBelowPlane.D * fixedXBelowPlane.D * planetModel.inverseAbSquared + testPointFixedZBelowPlane.D * testPointFixedZBelowPlane.D * planetModel.inverseCSquared - 1.0);
+         if (checkAbove < Vector.MINIMUM_RESOLUTION_SQUARED && checkBelow < Vector.MINIMUM_RESOLUTION_SQUARED) {
+           //System.out.println(""  Looking for intersections between travel and test point planes..."");
+           final GeoPoint[] XIntersectionsZ = travelPlaneFixedX.findIntersections(planetModel, testPointFixedZPlane);
+           for (final GeoPoint p : XIntersectionsZ) {
+             // Travel would be in YZ plane (fixed x) then in XY (fixed z)
+             //final double newDistance = p.arcDistance(testPoint) + p.arcDistance(thePoint);
+             final double tpDelta1 = testPoint.x - p.x;
+             final double tpDelta2 = testPoint.y - p.y;
+             final double cpDelta1 = y - p.y;
+             final double cpDelta2 = z - p.z;
+             final double newDistance = tpDelta1 * tpDelta1 + tpDelta2 * tpDelta2 + cpDelta1 * cpDelta1 + cpDelta2 * cpDelta2;
+             //final double newDistance = (testPoint.x - p.x) * (testPoint.x - p.x) + (testPoint.y - p.y) * (testPoint.y - p.y)  + (thePoint.y - p.y) * (thePoint.y - p.y) + (thePoint.z - p.z) * (thePoint.z - p.z);
+             //final double newDistance = Math.abs(testPoint.x - p.x) + Math.abs(thePoint.z - p.z);
+             traversalStrategies.add(new TraversalStrategy(newDistance, testPoint.z, x,
+               testPointFixedZPlane, testPointFixedZAbovePlane, testPointFixedZBelowPlane,
+               travelPlaneFixedX, fixedXAbovePlane, fixedXBelowPlane,
+               zTree, xTree, p));
+           }
+         }
+       }
+       if (testPointFixedXAbovePlane != null && testPointFixedXBelowPlane != null && fixedYAbovePlane != null && fixedYBelowPlane != null) {
+         //check if planes intersects inside world
+         final double checkAbove = 4.0 * (testPointFixedXAbovePlane.D * testPointFixedXAbovePlane.D * planetModel.inverseAbSquared + fixedYAbovePlane.D * fixedYAbovePlane.D * planetModel.inverseAbSquared - 1.0);
+         final double checkBelow = 4.0 * (testPointFixedXBelowPlane.D * testPointFixedXBelowPlane.D * planetModel.inverseAbSquared + fixedYBelowPlane.D * fixedYBelowPlane.D * planetModel.inverseAbSquared - 1.0);
+         if (checkAbove < Vector.MINIMUM_RESOLUTION_SQUARED && checkBelow < Vector.MINIMUM_RESOLUTION_SQUARED) {
+           //System.out.println(""  Looking for intersections between travel and test point planes..."");
+           final GeoPoint[] YIntersectionsX = travelPlaneFixedY.findIntersections(planetModel, testPointFixedXPlane);
+           for (final GeoPoint p : YIntersectionsX) {
+             // Travel would be in XZ plane (fixed y) then in YZ (fixed x)
+             //final double newDistance = p.arcDistance(testPoint) + p.arcDistance(thePoint);
+             final double tpDelta1 = testPoint.y - p.y;
+             final double tpDelta2 = testPoint.z - p.z;
+             final double cpDelta1 = x - p.x;
+             final double cpDelta2 = z - p.z;
+             final double newDistance = tpDelta1 * tpDelta1 + tpDelta2 * tpDelta2 + cpDelta1 * cpDelta1 + cpDelta2 * cpDelta2;
+             //final double newDistance = (testPoint.y - p.y) * (testPoint.y - p.y) + (testPoint.z - p.z) * (testPoint.z - p.z)  + (thePoint.x - p.x) * (thePoint.x - p.x) + (thePoint.z - p.z) * (thePoint.z - p.z);
+             //final double newDistance = Math.abs(testPoint.y - p.y) + Math.abs(thePoint.x - p.x);
+             traversalStrategies.add(new TraversalStrategy(newDistance, testPoint.x, y,
+               testPointFixedXPlane, testPointFixedXAbovePlane, testPointFixedXBelowPlane,
+               travelPlaneFixedY, fixedYAbovePlane, fixedYBelowPlane,
+               xTree, yTree, p));
+           }
+         }
+       }
+       if (testPointFixedZAbovePlane != null && testPointFixedZBelowPlane != null && fixedYAbovePlane != null && fixedYBelowPlane != null) {
+         //check if planes intersects inside world
+         final double checkAbove = 4.0 * (testPointFixedZAbovePlane.D * testPointFixedZAbovePlane.D * planetModel.inverseCSquared + fixedYAbovePlane.D * fixedYAbovePlane.D * planetModel.inverseAbSquared - 1.0);
+         final double checkBelow = 4.0 * (testPointFixedZBelowPlane.D * testPointFixedZBelowPlane.D * planetModel.inverseCSquared + fixedYBelowPlane.D * fixedYBelowPlane.D * planetModel.inverseAbSquared - 1.0);
+         if (checkAbove < Vector.MINIMUM_RESOLUTION_SQUARED && checkBelow < Vector.MINIMUM_RESOLUTION_SQUARED) {
+           //System.out.println(""  Looking for intersections between travel and test point planes..."");
+           final GeoPoint[] YIntersectionsZ = travelPlaneFixedY.findIntersections(planetModel, testPointFixedZPlane);
+           for (final GeoPoint p : YIntersectionsZ) {
+             // Travel would be in XZ plane (fixed y) then in XY (fixed z)
+             //final double newDistance = p.arcDistance(testPoint) + p.arcDistance(thePoint);
+             final double tpDelta1 = testPoint.x - p.x;
+             final double tpDelta2 = testPoint.y - p.y;
+             final double cpDelta1 = x - p.x;
+             final double cpDelta2 = z - p.z;
+             final double newDistance = tpDelta1 * tpDelta1 + tpDelta2 * tpDelta2 + cpDelta1 * cpDelta1 + cpDelta2 * cpDelta2;
+             //final double newDistance = (testPoint.x - p.x) * (testPoint.x - p.x) + (testPoint.y - p.y) * (testPoint.y - p.y)  + (thePoint.x - p.x) * (thePoint.x - p.x) + (thePoint.z - p.z) * (thePoint.z - p.z);
+             //final double newDistance = Math.abs(testPoint.y - p.y) + Math.abs(thePoint.z - p.z);
+             traversalStrategies.add(new TraversalStrategy(newDistance, testPoint.z, y,
+               testPointFixedZPlane, testPointFixedZAbovePlane, testPointFixedZBelowPlane,
+               travelPlaneFixedY, fixedYAbovePlane, fixedYBelowPlane,
+               zTree, yTree, p));
+           }
+         }
+       }
+       if (testPointFixedXAbovePlane != null && testPointFixedXBelowPlane != null && fixedZAbovePlane != null && fixedZBelowPlane != null) {
+         //check if planes intersects inside world
+         final double checkAbove = 4.0 * (testPointFixedXAbovePlane.D * testPointFixedXAbovePlane.D * planetModel.inverseAbSquared + fixedZAbovePlane.D * fixedZAbovePlane.D * planetModel.inverseCSquared - 1.0);
+         final double checkBelow = 4.0 * (testPointFixedXBelowPlane.D * testPointFixedXBelowPlane.D * planetModel.inverseAbSquared + fixedZBelowPlane.D * fixedZBelowPlane.D * planetModel.inverseCSquared - 1.0);
+         if (checkAbove < Vector.MINIMUM_RESOLUTION_SQUARED && checkBelow < Vector.MINIMUM_RESOLUTION_SQUARED) {
+           //System.out.println(""  Looking for intersections between travel and test point planes..."");
+           final GeoPoint[] ZIntersectionsX = travelPlaneFixedZ.findIntersections(planetModel, testPointFixedXPlane);
+           for (final GeoPoint p : ZIntersectionsX) {
+             // Travel would be in XY plane (fixed z) then in YZ (fixed x)
+             //final double newDistance = p.arcDistance(testPoint) + p.arcDistance(thePoint);
+             final double tpDelta1 = testPoint.y - p.y;
+             final double tpDelta2 = testPoint.z - p.z;
+             final double cpDelta1 = y - p.y;
+             final double cpDelta2 = x - p.x;
+             final double newDistance = tpDelta1 * tpDelta1 + tpDelta2 * tpDelta2 + cpDelta1 * cpDelta1 + cpDelta2 * cpDelta2;
+             //final double newDistance = (testPoint.y - p.y) * (testPoint.y - p.y) + (testPoint.z - p.z) * (testPoint.z - p.z)  + (thePoint.y - p.y) * (thePoint.y - p.y) + (thePoint.x - p.x) * (thePoint.x - p.x);
+             //final double newDistance = Math.abs(testPoint.z - p.z) + Math.abs(thePoint.x - p.x);
+             traversalStrategies.add(new TraversalStrategy(newDistance, testPoint.x, z,
+               testPointFixedXPlane, testPointFixedXAbovePlane, testPointFixedXBelowPlane,
+               travelPlaneFixedZ, fixedZAbovePlane, fixedZBelowPlane,
+               xTree, zTree, p));
+           }
+         }
+       }
+       if (testPointFixedYAbovePlane != null && testPointFixedYBelowPlane != null && fixedZAbovePlane != null && fixedZBelowPlane != null) {
+         //check if planes intersects inside world
+         final double checkAbove = 4.0 * (testPointFixedYAbovePlane.D * testPointFixedYAbovePlane.D * planetModel.inverseAbSquared + fixedZAbovePlane.D * fixedZAbovePlane.D * planetModel.inverseCSquared - 1.0);
+         final double checkBelow = 4.0 * (testPointFixedYBelowPlane.D * testPointFixedYBelowPlane.D * planetModel.inverseAbSquared + fixedZBelowPlane.D * fixedZBelowPlane.D * planetModel.inverseCSquared - 1.0);
+         if (checkAbove < Vector.MINIMUM_RESOLUTION_SQUARED && checkBelow < Vector.MINIMUM_RESOLUTION_SQUARED) {
+           //System.out.println(""  Looking for intersections between travel and test point planes..."");
+           final GeoPoint[] ZIntersectionsY = travelPlaneFixedZ.findIntersections(planetModel, testPointFixedYPlane);
+           for (final GeoPoint p : ZIntersectionsY) {
+             // Travel would be in XY plane (fixed z) then in XZ (fixed y)
+             //final double newDistance = p.arcDistance(testPoint) + p.arcDistance(thePoint);
+             final double tpDelta1 = testPoint.x - p.x;
+             final double tpDelta2 = testPoint.z - p.z;
+             final double cpDelta1 = y - p.y;
+             final double cpDelta2 = x - p.x;
+             final double newDistance = tpDelta1 * tpDelta1 + tpDelta2 * tpDelta2 + cpDelta1 * cpDelta1 + cpDelta2 * cpDelta2;
+             //final double newDistance = (testPoint.x - p.x) * (testPoint.x - p.x) + (testPoint.z - p.z) * (testPoint.z - p.z)  + (thePoint.y - p.y) * (thePoint.y - p.y) + (thePoint.x - p.x) * (thePoint.x - p.x);
+             //final double newDistance = Math.abs(testPoint.z - p.z) + Math.abs(thePoint.y - p.y);
+             traversalStrategies.add(new TraversalStrategy(newDistance, testPoint.y, z,
+               testPointFixedYPlane, testPointFixedYAbovePlane, testPointFixedYBelowPlane,
+               travelPlaneFixedZ, fixedZAbovePlane, fixedZBelowPlane,
+               yTree, zTree, p));
+           }
+         }
+       }
+ 
+       Collections.sort(traversalStrategies);
+       
+       if (traversalStrategies.size() == 0) {
+         throw new IllegalArgumentException(""No dual-plane travel strategies were found"");
+       }
+ 
+       // Loop through travel strategies, in order, until we find one that works.
+       for (final TraversalStrategy ts : traversalStrategies) {
+         try {
+           return ts.apply(testPoint, testPointInSet, x, y, z);
+         } catch (IllegalArgumentException e) {
+           // Continue
+         }
+       }
+       
+       throw new IllegalArgumentException(""Exhausted all traversal strategies"");
+     }
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-8337: Fix problems with how travel planes too close to edge of world are disallowed, and increase the size of the disallowed window by an order of magnitude.
+"
+lucene-solr,28702.json,ec788948a64955acc0415281f353d4d7b2f797cc,"@@ -1,132 +1,134 @@
+   public SeekStatus scanToTermNonLeaf(BytesRef target, boolean exactOnly) throws IOException {
+ 
+     // if (DEBUG) System.out.println(""    scanToTermNonLeaf: block fp="" + fp + "" prefix="" + prefix + "" nextEnt="" + nextEnt + "" (of "" + entCount + "") target="" + OrdsSegmentTermsEnum.brToString(target) + "" term="" + OrdsSegmentTermsEnum.brToString(ste.term));
+ 
+     assert nextEnt != -1;
+ 
+     if (nextEnt == entCount) {
+       if (exactOnly) {
+         fillTerm();
+         ste.termExists = subCode == 0;
+       }
+       return SeekStatus.END;
+     }
+ 
+     assert prefixMatches(target);
+ 
+     // Loop over each entry (term or sub-block) in this block:
+     //nextTerm: while(nextEnt < entCount) {
+     nextTerm: while (true) {
+       nextEnt++;
+ 
+       final int code = suffixesReader.readVInt();
+       suffix = code >>> 1;
+       // if (DEBUG) {
+       //   BytesRef suffixBytesRef = new BytesRef();
+       //   suffixBytesRef.bytes = suffixBytes;
+       //   suffixBytesRef.offset = suffixesReader.getPosition();
+       //   suffixBytesRef.length = suffix;
+       //   System.out.println(""      cycle: "" + ((code&1)==1 ? ""sub-block"" : ""term"") + "" "" + (nextEnt-1) + "" (of "" + entCount + "") suffix="" + brToString(suffixBytesRef));
+       // }
+ 
+       ste.termExists = (code & 1) == 0;
+       final int termLen = prefix + suffix;
+       startBytePos = suffixesReader.getPosition();
+       suffixesReader.skipBytes(suffix);
++      // Must save ord before we skip over a sub-block in case we push, below:
++      long prevTermOrd = termOrd;
+       if (ste.termExists) {
+         state.termBlockOrd++;
+         termOrd++;
+         subCode = 0;
+       } else {
+         subCode = suffixesReader.readVLong();
+         termOrd += suffixesReader.readVLong();
+         lastSubFP = fp - subCode;
+       }
+ 
+       final int targetLimit = target.offset + (target.length < termLen ? target.length : termLen);
+       int targetPos = target.offset + prefix;
+ 
+       // Loop over bytes in the suffix, comparing to
+       // the target
+       int bytePos = startBytePos;
+       while(true) {
+         final int cmp;
+         final boolean stop;
+         if (targetPos < targetLimit) {
+           cmp = (suffixBytes[bytePos++]&0xFF) - (target.bytes[targetPos++]&0xFF);
+           stop = false;
+         } else {
+           assert targetPos == targetLimit;
+           cmp = termLen - target.length;
+           stop = true;
+         }
+ 
+         if (cmp < 0) {
+           // Current entry is still before the target;
+           // keep scanning
+ 
+           if (nextEnt == entCount) {
+             if (exactOnly) {
+               fillTerm();
+               //termExists = true;
+             }
+             // We are done scanning this block
+             break nextTerm;
+           } else {
+             continue nextTerm;
+           }
+         } else if (cmp > 0) {
+ 
+           // Done!  Current entry is after target --
+           // return NOT_FOUND:
+           fillTerm();
+ 
+           if (!exactOnly && !ste.termExists) {
+             // We are on a sub-block, and caller wants
+             // us to position to the next term after
+             // the target, so we must recurse into the
+             // sub-frame(s):
+-            ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, termLen, ste.currentFrame.termOrd);
++            ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, termLen, prevTermOrd);
+             ste.currentFrame.loadBlock();
+             while (ste.currentFrame.next()) {
+-              ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, ste.term.length, ste.currentFrame.termOrd);
++              ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, ste.term.length, prevTermOrd);
+               ste.currentFrame.loadBlock();
+             }
+           }
+                 
+           //if (DEBUG) System.out.println(""        not found"");
+           return SeekStatus.NOT_FOUND;
+         } else if (stop) {
+           // Exact match!
+ 
+           // This cannot be a sub-block because we
+           // would have followed the index to this
+           // sub-block from the start:
+ 
+           assert ste.termExists;
+           fillTerm();
+           //if (DEBUG) System.out.println(""        found!"");
+           return SeekStatus.FOUND;
+         }
+       }
+     }
+ 
+     // It is possible (and OK) that terms index pointed us
+     // at this block, but, we scanned the entire block and
+     // did not find the term to position to.  This happens
+     // when the target is after the last term in the block
+     // (but, before the next term in the index).  EG
+     // target could be foozzz, and terms index pointed us
+     // to the foo* block, but the last term in this block
+     // was fooz (and, eg, first term in the next block will
+     // bee fop).
+     //if (DEBUG) System.out.println(""      block end"");
+     if (exactOnly) {
+       fillTerm();
+     }
+ 
+     // TODO: not consistent that in the
+     // not-exact case we don't next() into the next
+     // frame here
+     return SeekStatus.END;
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-5819: fix ord bug; add test case; remove dead code
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1612217 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,42320.json,ec788948a64955acc0415281f353d4d7b2f797cc,"@@ -1,123 +1,110 @@
+   public SeekStatus scanToTermLeaf(BytesRef target, boolean exactOnly) throws IOException {
+ 
+     // if (DEBUG) System.out.println(""    scanToTermLeaf: block fp="" + fp + "" prefix="" + prefix + "" nextEnt="" + nextEnt + "" (of "" + entCount + "") target="" + brToString(target) + "" term="" + brToString(term));
+ 
+     assert nextEnt != -1;
+ 
+     ste.termExists = true;
+     subCode = 0;
+ 
+     if (nextEnt == entCount) {
+       if (exactOnly) {
+         fillTerm();
+       }
+       return SeekStatus.END;
+     }
+ 
+     assert prefixMatches(target);
+ 
+     // Loop over each entry (term or sub-block) in this block:
+     //nextTerm: while(nextEnt < entCount) {
+     nextTerm: while (true) {
+       nextEnt++;
+ 
+       suffix = suffixesReader.readVInt();
+ 
+       // if (DEBUG) {
+       //   BytesRef suffixBytesRef = new BytesRef();
+       //   suffixBytesRef.bytes = suffixBytes;
+       //   suffixBytesRef.offset = suffixesReader.getPosition();
+       //   suffixBytesRef.length = suffix;
+       //   System.out.println(""      cycle: term "" + (nextEnt-1) + "" (of "" + entCount + "") suffix="" + brToString(suffixBytesRef));
+       // }
+ 
+       final int termLen = prefix + suffix;
+       startBytePos = suffixesReader.getPosition();
+       suffixesReader.skipBytes(suffix);
+ 
+       final int targetLimit = target.offset + (target.length < termLen ? target.length : termLen);
+       int targetPos = target.offset + prefix;
+ 
+       // Loop over bytes in the suffix, comparing to
+       // the target
+       int bytePos = startBytePos;
+       while(true) {
+         final int cmp;
+         final boolean stop;
+         if (targetPos < targetLimit) {
+           cmp = (suffixBytes[bytePos++]&0xFF) - (target.bytes[targetPos++]&0xFF);
+           stop = false;
+         } else {
+           assert targetPos == targetLimit;
+           cmp = termLen - target.length;
+           stop = true;
+         }
+ 
+         if (cmp < 0) {
+           // Current entry is still before the target;
+           // keep scanning
+ 
+           if (nextEnt == entCount) {
+             if (exactOnly) {
+               fillTerm();
+             }
+             // We are done scanning this block
+             break nextTerm;
+           } else {
+             continue nextTerm;
+           }
+         } else if (cmp > 0) {
+ 
+           // Done!  Current entry is after target --
+           // return NOT_FOUND:
+           fillTerm();
+ 
+-          if (!exactOnly && !ste.termExists) {
+-            // We are on a sub-block, and caller wants
+-            // us to position to the next term after
+-            // the target, so we must recurse into the
+-            // sub-frame(s):
+-            ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, termLen);
+-            ste.currentFrame.loadBlock();
+-            while (ste.currentFrame.next()) {
+-              ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, ste.term.length);
+-              ste.currentFrame.loadBlock();
+-            }
+-          }
+-                
+           //if (DEBUG) System.out.println(""        not found"");
+           return SeekStatus.NOT_FOUND;
+         } else if (stop) {
+           // Exact match!
+ 
+           // This cannot be a sub-block because we
+           // would have followed the index to this
+           // sub-block from the start:
+ 
+           assert ste.termExists;
+           fillTerm();
+           //if (DEBUG) System.out.println(""        found!"");
+           return SeekStatus.FOUND;
+         }
+       }
+     }
+ 
+     // It is possible (and OK) that terms index pointed us
+     // at this block, but, we scanned the entire block and
+     // did not find the term to position to.  This happens
+     // when the target is after the last term in the block
+     // (but, before the next term in the index).  EG
+     // target could be foozzz, and terms index pointed us
+     // to the foo* block, but the last term in this block
+     // was fooz (and, eg, first term in the next block will
+     // bee fop).
+     //if (DEBUG) System.out.println(""      block end"");
+     if (exactOnly) {
+       fillTerm();
+     }
+ 
+     // TODO: not consistent that in the
+     // not-exact case we don't next() into the next
+     // frame here
+     return SeekStatus.END;
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-5819: fix ord bug; add test case; remove dead code
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1612217 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,28701.json,ec788948a64955acc0415281f353d4d7b2f797cc,"@@ -1,124 +1,111 @@
+   public SeekStatus scanToTermLeaf(BytesRef target, boolean exactOnly) throws IOException {
+ 
+     // if (DEBUG) System.out.println(""    scanToTermLeaf: block fp="" + fp + "" prefix="" + prefix + "" nextEnt="" + nextEnt + "" (of "" + entCount + "") target="" + OrdsSegmentTermsEnum.brToString(target) + "" term="" + OrdsSegmentTermsEnum.brToString(ste.term));
+ 
+     assert nextEnt != -1;
+ 
+     ste.termExists = true;
+     subCode = 0;
+ 
+     if (nextEnt == entCount) {
+       if (exactOnly) {
+         fillTerm();
+       }
+       return SeekStatus.END;
+     }
+ 
+     assert prefixMatches(target);
+ 
+     // Loop over each entry (term or sub-block) in this block:
+     //nextTerm: while(nextEnt < entCount) {
+     nextTerm: while (true) {
+       nextEnt++;
+       termOrd++;
+ 
+       suffix = suffixesReader.readVInt();
+ 
+       // if (DEBUG) {
+       //    BytesRef suffixBytesRef = new BytesRef();
+       //    suffixBytesRef.bytes = suffixBytes;
+       //    suffixBytesRef.offset = suffixesReader.getPosition();
+       //    suffixBytesRef.length = suffix;
+       //    System.out.println(""      cycle: term "" + (nextEnt-1) + "" (of "" + entCount + "") suffix="" + OrdsSegmentTermsEnum.brToString(suffixBytesRef));
+       // }
+ 
+       final int termLen = prefix + suffix;
+       startBytePos = suffixesReader.getPosition();
+       suffixesReader.skipBytes(suffix);
+ 
+       final int targetLimit = target.offset + (target.length < termLen ? target.length : termLen);
+       int targetPos = target.offset + prefix;
+ 
+       // Loop over bytes in the suffix, comparing to
+       // the target
+       int bytePos = startBytePos;
+       while(true) {
+         final int cmp;
+         final boolean stop;
+         if (targetPos < targetLimit) {
+           cmp = (suffixBytes[bytePos++]&0xFF) - (target.bytes[targetPos++]&0xFF);
+           stop = false;
+         } else {
+           assert targetPos == targetLimit;
+           cmp = termLen - target.length;
+           stop = true;
+         }
+ 
+         if (cmp < 0) {
+           // Current entry is still before the target;
+           // keep scanning
+ 
+           if (nextEnt == entCount) {
+             if (exactOnly) {
+               fillTerm();
+             }
+             // We are done scanning this block
+             break nextTerm;
+           } else {
+             continue nextTerm;
+           }
+         } else if (cmp > 0) {
+ 
+           // Done!  Current entry is after target --
+           // return NOT_FOUND:
+           fillTerm();
+ 
+-          if (!exactOnly && !ste.termExists) {
+-            // We are on a sub-block, and caller wants
+-            // us to position to the next term after
+-            // the target, so we must recurse into the
+-            // sub-frame(s):
+-            ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, termLen, ste.currentFrame.termOrd);
+-            ste.currentFrame.loadBlock();
+-            while (ste.currentFrame.next()) {
+-              ste.currentFrame = ste.pushFrame(null, ste.currentFrame.lastSubFP, ste.term.length, ste.currentFrame.termOrd);
+-              ste.currentFrame.loadBlock();
+-            }
+-          }
+-                
+           //if (DEBUG) System.out.println(""        not found"");
+           return SeekStatus.NOT_FOUND;
+         } else if (stop) {
+           // Exact match!
+ 
+           // This cannot be a sub-block because we
+           // would have followed the index to this
+           // sub-block from the start:
+ 
+           assert ste.termExists;
+           fillTerm();
+           //if (DEBUG) System.out.println(""        found!"");
+           return SeekStatus.FOUND;
+         }
+       }
+     }
+ 
+     // It is possible (and OK) that terms index pointed us
+     // at this block, but, we scanned the entire block and
+     // did not find the term to position to.  This happens
+     // when the target is after the last term in the block
+     // (but, before the next term in the index).  EG
+     // target could be foozzz, and terms index pointed us
+     // to the foo* block, but the last term in this block
+     // was fooz (and, eg, first term in the next block will
+     // bee fop).
+     //if (DEBUG) System.out.println(""      block end"");
+     if (exactOnly) {
+       fillTerm();
+     }
+ 
+     // TODO: not consistent that in the
+     // not-exact case we don't next() into the next
+     // frame here
+     return SeekStatus.END;
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-5819: fix ord bug; add test case; remove dead code
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1612217 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,20313.json,766b017b1a356f57a5eb6e73bd70e67f34534013,"@@ -1,11 +1,6 @@
+-  private IndexSchema initSchema(SolrConfig config, IndexSchema schema) {
++  private void initSchema(SolrConfig config, IndexSchema schema) {
+     if (schema == null) {
+       schema = IndexSchemaFactory.buildIndexSchema(IndexSchema.DEFAULT_SCHEMA_FILE, config);
+     }
+-    final SimilarityFactory similarityFactory = schema.getSimilarityFactory();
+-    if (similarityFactory instanceof SolrCoreAware) {
+-      // Similarity needs SolrCore before inform() is called on all registered SolrCoreAware listeners below
+-      ((SolrCoreAware) similarityFactory).inform(this);
+-    }
+-    return schema;
++    setLatestSchema(schema);
+   }
+\ No newline at end of file
+",Buggy,"SOLR-8280: Fixed bug in SimilarityFactory initialization that prevented SolrCoreAware factories from functioning properly with managed schema features
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1715215 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,12746.json,766b017b1a356f57a5eb6e73bd70e67f34534013,"@@ -1,4 +1,6 @@
+   public Similarity getSimilarity() {
+-    assert core != null : ""inform must be called first"";
++    if (null == core) {
++      throw new IllegalStateException(""SchemaSimilarityFactory can not be used until SolrCoreAware.inform has been called"");
++    }
+     return similarity;
+   }
+\ No newline at end of file
+",NotBuggy,"SOLR-8280: Fixed bug in SimilarityFactory initialization that prevented SolrCoreAware factories from functioning properly with managed schema features
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1715215 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,43373.json,9952af099ae65f051056fc8ff55c8e8f4cfb3b93,"@@ -1,18 +1,16 @@
+   private static final boolean isIntersectingPolygon(final Node start, final double x0, final double y0,
+                                                      final double x1, final double y1) {
+     Node node = start;
+     Node nextNode;
+     do {
+       nextNode = node.next;
+-      if(node.getX() != x0 && node.getY() != y0 && nextNode.getX() != x0
+-          && nextNode.getY() != y0 && node.getX() != x1 && node.getY() != y1
+-          && nextNode.getX() != x1 && nextNode.getY() != y1) {
++      if(isVertexEquals(node, x0, y0) == false && isVertexEquals(node, x1, y1) == false) {
+         if (linesIntersect(node.getX(), node.getY(), nextNode.getX(), nextNode.getY(), x0, y0, x1, y1)) {
+           return true;
+         }
+       }
+       node = nextNode;
+     } while (node != start);
+ 
+     return false;
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-8559: Fix bug where polygon edges were skipped when checking for intersections
+"
+lucene-solr,43381.json,9952af099ae65f051056fc8ff55c8e8f4cfb3b93,"@@ -1,3 +1,3 @@
+   private static final boolean isVertexEquals(final Node a, final Node b) {
+-    return a.getX() == b.getX() && a.getY() == b.getY();
++    return isVertexEquals(a, b.getX(), b.getY());
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-8559: Fix bug where polygon edges were skipped when checking for intersections
+"
+lucene-solr,43382.json,9952af099ae65f051056fc8ff55c8e8f4cfb3b93,"@@ -1,3 +1,3 @@
+-  private static final boolean isVertexEquals(final Node a, final Node b) {
+-    return a.getX() == b.getX() && a.getY() == b.getY();
++  private static final boolean isVertexEquals(final Node a, final double x, final  double y) {
++    return a.getX() == x && a.getY() == y;
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-8559: Fix bug where polygon edges were skipped when checking for intersections
+"
+lucene-solr,38533.json,b33d7176aa3624df2de1708b17919f20d034872f,"@@ -1,15 +1,16 @@
+-  private static void intersectInterval(double heatMin, double heatMax, double heatCellLen, int heatLen,
++  private static void intersectInterval(double heatMin, double heatMax, double heatCellLen, int numCells,
+                                         double cellMin, double cellMax,
+                                         int[] out) {
++    assert heatMin < heatMax && cellMin < cellMax;
+     //precondition: we know there's an intersection
+     if (heatMin >= cellMin) {
+       out[0] = 0;
+     } else {
+       out[0] = (int) Math.round((cellMin - heatMin) / heatCellLen);
+     }
+     if (heatMax <= cellMax) {
+-      out[1] = heatLen - 1;
++      out[1] = numCells - 1;
+     } else {
+       out[1] = (int) Math.round((cellMax - heatMin) / heatCellLen) - 1;
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-7291: Fix spatial HeatmapFacetCounter bug with dateline and large non-point shapes
+"
+lucene-solr,38532.json,b33d7176aa3624df2de1708b17919f20d034872f,"@@ -1,152 +1,153 @@
+   public static Heatmap calcFacets(PrefixTreeStrategy strategy, IndexReaderContext context, Bits topAcceptDocs,
+                                    Shape inputShape, final int facetLevel, int maxCells) throws IOException {
+     if (maxCells > (MAX_ROWS_OR_COLUMNS * MAX_ROWS_OR_COLUMNS)) {
+       throw new IllegalArgumentException(""maxCells ("" + maxCells + "") should be <= "" + MAX_ROWS_OR_COLUMNS);
+     }
+     if (inputShape == null) {
+       inputShape = strategy.getSpatialContext().getWorldBounds();
+     }
+     final Rectangle inputRect = inputShape.getBoundingBox();
+     //First get the rect of the cell at the bottom-left at depth facetLevel
+     final SpatialPrefixTree grid = strategy.getGrid();
+     final SpatialContext ctx = grid.getSpatialContext();
+     final Point cornerPt = ctx.makePoint(inputRect.getMinX(), inputRect.getMinY());
+     final CellIterator cellIterator = grid.getTreeCellIterator(cornerPt, facetLevel);
+     Cell cornerCell = null;
+     while (cellIterator.hasNext()) {
+       cornerCell = cellIterator.next();
+     }
+     assert cornerCell != null && cornerCell.getLevel() == facetLevel : ""Cell not at target level: "" + cornerCell;
+     final Rectangle cornerRect = (Rectangle) cornerCell.getShape();
+     assert cornerRect.hasArea();
+     //Now calculate the number of columns and rows necessary to cover the inputRect
+     double heatMinX = cornerRect.getMinX();//note: we might change this below...
+     final double cellWidth = cornerRect.getWidth();
+     final Rectangle worldRect = ctx.getWorldBounds();
+     final int columns = calcRowsOrCols(cellWidth, heatMinX, inputRect.getWidth(), inputRect.getMinX(), worldRect.getWidth());
+     final double heatMinY = cornerRect.getMinY();
+     final double cellHeight = cornerRect.getHeight();
+     final int rows = calcRowsOrCols(cellHeight, heatMinY, inputRect.getHeight(), inputRect.getMinY(), worldRect.getHeight());
+     assert rows > 0 && columns > 0;
+     if (columns > MAX_ROWS_OR_COLUMNS || rows > MAX_ROWS_OR_COLUMNS || columns * rows > maxCells) {
+       throw new IllegalArgumentException(
+           ""Too many cells ("" + columns + "" x "" + rows + "") for level "" + facetLevel + "" shape "" + inputRect);
+     }
+ 
+     //Create resulting heatmap bounding rectangle & Heatmap object.
+     final double halfCellWidth = cellWidth / 2.0;
+     // if X world-wraps, use world bounds' range
+     if (columns * cellWidth + halfCellWidth > worldRect.getWidth()) {
+       heatMinX = worldRect.getMinX();
+     }
+     double heatMaxX = heatMinX + columns * cellWidth;
+     if (Math.abs(heatMaxX - worldRect.getMaxX()) < halfCellWidth) {//numeric conditioning issue
+       heatMaxX = worldRect.getMaxX();
+     } else if (heatMaxX > worldRect.getMaxX()) {//wraps dateline (won't happen if !geo)
+       heatMaxX = heatMaxX - worldRect.getMaxX() +  worldRect.getMinX();
+     }
+     final double halfCellHeight = cellHeight / 2.0;
+     double heatMaxY = heatMinY + rows * cellHeight;
+     if (Math.abs(heatMaxY - worldRect.getMaxY()) < halfCellHeight) {//numeric conditioning issue
+       heatMaxY = worldRect.getMaxY();
+     }
+ 
+     final Heatmap heatmap = new Heatmap(columns, rows, ctx.makeRectangle(heatMinX, heatMaxX, heatMinY, heatMaxY));
+ 
+     //All ancestor cell counts (of facetLevel) will be captured during facet visiting and applied later. If the data is
+     // just points then there won't be any ancestors.
+     //Facet count of ancestors covering all of the heatmap:
+     int[] allCellsAncestorCount = new int[1]; // single-element array so it can be accumulated in the inner class
+     //All other ancestors:
+     Map<Rectangle,Integer> ancestors = new HashMap<>();
+ 
+     //Now lets count some facets!
+     PrefixTreeFacetCounter.compute(strategy, context, topAcceptDocs, inputShape, facetLevel,
+         new PrefixTreeFacetCounter.FacetVisitor() {
+       @Override
+       public void visit(Cell cell, int count) {
+         final double heatMinX = heatmap.region.getMinX();
+         final Rectangle rect = (Rectangle) cell.getShape();
+         if (cell.getLevel() == facetLevel) {//heatmap level; count it directly
+           //convert to col & row
+           int column;
+           if (rect.getMinX() >= heatMinX) {
+             column = (int) Math.round((rect.getMinX() - heatMinX) / cellWidth);
+           } else { // due to dateline wrap
+             column = (int) Math.round((rect.getMinX() + 360 - heatMinX) / cellWidth);
+           }
+           int row = (int) Math.round((rect.getMinY() - heatMinY) / cellHeight);
+           //note: unfortunately, it's possible for us to visit adjacent cells to the heatmap (if the SpatialPrefixTree
+           // allows adjacent cells to overlap on the seam), so we need to skip them
+           if (column < 0 || column >= heatmap.columns || row < 0 || row >= heatmap.rows) {
+             return;
+           }
+           // increment
+           heatmap.counts[column * heatmap.rows + row] += count;
+ 
+         } else if (rect.relate(heatmap.region) == SpatialRelation.CONTAINS) {//containing ancestor
+           allCellsAncestorCount[0] += count;
+ 
+         } else { // ancestor
+           // note: not particularly efficient (possible put twice, and Integer wrapper); oh well
+           Integer existingCount = ancestors.put(rect, count);
+           if (existingCount != null) {
+             ancestors.put(rect, count + existingCount);
+           }
+         }
+       }
+     });
+ 
+     //Update the heatmap counts with ancestor counts
+ 
+     // Apply allCellsAncestorCount
+     if (allCellsAncestorCount[0] > 0) {
+       for (int i = 0; i < heatmap.counts.length; i++) {
+         heatmap.counts[i] += allCellsAncestorCount[0];
+       }
+     }
+ 
+     // Apply ancestors
+     //  note: This approach isn't optimized for a ton of ancestor cells. We'll potentially increment the same cells
+     //    multiple times in separate passes if any ancestors overlap. IF this poses a problem, we could optimize it
+     //    with additional complication by keeping track of intervals in a sorted tree structure (possible TreeMap/Set)
+     //    and iterate them cleverly such that we just make one pass at this stage.
+ 
+     int[] pair = new int[2];//output of intersectInterval
+     for (Map.Entry<Rectangle, Integer> entry : ancestors.entrySet()) {
+-      Rectangle rect = entry.getKey();
++      Rectangle rect = entry.getKey(); // from a cell (thus doesn't cross DL)
+       final int count = entry.getValue();
++
+       //note: we approach this in a way that eliminates int overflow/underflow (think huge cell, tiny heatmap)
+       intersectInterval(heatMinY, heatMaxY, cellHeight, rows, rect.getMinY(), rect.getMaxY(), pair);
+       final int startRow = pair[0];
+       final int endRow = pair[1];
+ 
+       if (!heatmap.region.getCrossesDateLine()) {
+         intersectInterval(heatMinX, heatMaxX, cellWidth, columns, rect.getMinX(), rect.getMaxX(), pair);
+         final int startCol = pair[0];
+         final int endCol = pair[1];
+         incrementRange(heatmap, startCol, endCol, startRow, endRow, count);
+ 
+       } else {
++        // note: the cell rect might intersect 2 disjoint parts of the heatmap, so we do the left & right separately
++        final int leftColumns = (int) Math.round((180 - heatMinX) / cellWidth);
++        final int rightColumns = heatmap.columns - leftColumns;
+         //left half of dateline:
+-        if (rect.getMaxX() >= heatMinX) {
+-          final int leftColumns = (int) Math.round((180 - heatMinX) / cellWidth) + 1;
++        if (rect.getMaxX() > heatMinX) {
+           intersectInterval(heatMinX, 180, cellWidth, leftColumns, rect.getMinX(), rect.getMaxX(), pair);
+           final int startCol = pair[0];
+           final int endCol = pair[1];
+           incrementRange(heatmap, startCol, endCol, startRow, endRow, count);
+         }
+         //right half of dateline
+-        if (rect.getMinY() <= heatMaxX) {
+-          final int rightColumns = (int) Math.round(heatMaxX / cellWidth) + 1;
+-          intersectInterval(0, heatMaxX, cellWidth, rightColumns, rect.getMinX(), rect.getMaxX(), pair);
+-          final int startCol = pair[0];
+-          final int endCol = pair[1];
++        if (rect.getMinX() < heatMaxX) {
++          intersectInterval(-180, heatMaxX, cellWidth, rightColumns, rect.getMinX(), rect.getMaxX(), pair);
++          final int startCol = pair[0] + leftColumns;
++          final int endCol = pair[1] + leftColumns;
+           incrementRange(heatmap, startCol, endCol, startRow, endRow, count);
+         }
+       }
+-
+     }
+ 
+     return heatmap;
+   }
+\ No newline at end of file
+",Buggy,"LUCENE-7291: Fix spatial HeatmapFacetCounter bug with dateline and large non-point shapes
+"
+lucene-solr,36488.json,75b0b5312c6f7722b88088fbc590259e9cd31567,"@@ -1,42 +1,34 @@
+   private void count(ValueSource valueSource, List<MatchingDocs> matchingDocs) throws IOException {
+ 
+     DoubleRange[] ranges = (DoubleRange[]) this.ranges;
+ 
+     LongRange[] longRanges = new LongRange[ranges.length];
+     for(int i=0;i<ranges.length;i++) {
+       DoubleRange range = ranges[i];
+       longRanges[i] =  new LongRange(range.label,
+                                      NumericUtils.doubleToSortableLong(range.minIncl), true,
+                                      NumericUtils.doubleToSortableLong(range.maxIncl), true);
+     }
+ 
+     LongRangeCounter counter = new LongRangeCounter(longRanges);
+ 
+-    // Compute min & max over all ranges:
+-    double minIncl = Double.POSITIVE_INFINITY;
+-    double maxIncl = Double.NEGATIVE_INFINITY;
+-    for(DoubleRange range : ranges) {
+-      minIncl = Math.min(minIncl, range.minIncl);
+-      maxIncl = Math.max(maxIncl, range.maxIncl);
+-    }
+-
+     int missingCount = 0;
+     for (MatchingDocs hits : matchingDocs) {
+       FunctionValues fv = valueSource.getValues(Collections.emptyMap(), hits.context);
+       final int length = hits.bits.length();
+       int doc = 0;
+       totCount += hits.totalHits;
+       while (doc < length && (doc = hits.bits.nextSetBit(doc)) != -1) {
+         // Skip missing docs:
+         if (fv.exists(doc)) {
+           counter.add(NumericUtils.doubleToSortableLong(fv.doubleVal(doc)));
+         } else {
+           missingCount++;
+         }
+         doc++;
+       }
+     }
+ 
+     missingCount += counter.fillCounts(counts);
+     totCount -= missingCount;
+   }
+\ No newline at end of file
+",NotBuggy,"fix test bug; remove dead code
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1555715 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,36489.json,75b0b5312c6f7722b88088fbc590259e9cd31567,"@@ -1,39 +1,31 @@
+   private void count(ValueSource valueSource, List<MatchingDocs> matchingDocs) throws IOException {
+ 
+     LongRange[] ranges = (LongRange[]) this.ranges;
+ 
+-    // Compute min & max over all ranges:
+-    long minIncl = Long.MAX_VALUE;
+-    long maxIncl = Long.MIN_VALUE;
+-    for(LongRange range : ranges) {
+-      minIncl = Math.min(minIncl, range.minIncl);
+-      maxIncl = Math.max(maxIncl, range.maxIncl);
+-    }
+-
+     LongRangeCounter counter = new LongRangeCounter(ranges);
+ 
+     int missingCount = 0;
+     for (MatchingDocs hits : matchingDocs) {
+       FunctionValues fv = valueSource.getValues(Collections.emptyMap(), hits.context);
+       final int length = hits.bits.length();
+       int doc = 0;
+       totCount += hits.totalHits;
+       while (doc < length && (doc = hits.bits.nextSetBit(doc)) != -1) {
+         // Skip missing docs:
+         if (fv.exists(doc)) {
+           counter.add(fv.longVal(doc));
+         } else {
+           missingCount++;
+         }
+ 
+         doc++;
+       }
+     }
+     
+     int x = counter.fillCounts(counts);
+ 
+     missingCount += x;
+ 
+     //System.out.println(""totCount "" + totCount + "" missingCount "" + counter.missingCount);
+     totCount -= missingCount;
+   }
+\ No newline at end of file
+",NotBuggy,"fix test bug; remove dead code
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1555715 13f79535-47bb-0310-9956-ffa450edef68
+"
+lucene-solr,46441.json,e283271aaf6da3033156f36b421d3241b5499d4e,"@@ -1,45 +1,51 @@
+   private DocMap[] buildDocMaps(List<CodecReader> readers, Sort indexSort) throws IOException {
+ 
+     int numReaders = readers.size();
+ 
+     if (indexSort == null) {
+       // no index sort ... we only must map around deletions, and rebase to the merged segment's docID space
+ 
+       int totalDocs = 0;
+       DocMap[] docMaps = new DocMap[numReaders];
+ 
+       // Remap docIDs around deletions:
+       for (int i = 0; i < numReaders; i++) {
+         LeafReader reader = readers.get(i);
+         Bits liveDocs = reader.getLiveDocs();
+ 
+         final PackedLongValues delDocMap;
+         if (liveDocs != null) {
+           delDocMap = removeDeletes(reader.maxDoc(), liveDocs);
+         } else {
+           delDocMap = null;
+         }
+ 
+         final int docBase = totalDocs;
+         docMaps[i] = new DocMap() {
+           @Override
+           public int get(int docID) {
+             if (liveDocs == null) {
+               return docBase + docID;
+             } else if (liveDocs.get(docID)) {
+               return docBase + (int) delDocMap.get(docID);
+             } else {
+               return -1;
+             }
+           }
+         };
+         totalDocs += reader.numDocs();
+       }
+ 
+       return docMaps;
+ 
+     } else {
+       // do a merge sort of the incoming leaves:
+-      return MultiSorter.sort(indexSort, readers);
++      long t0 = System.nanoTime();
++      DocMap[] result = MultiSorter.sort(indexSort, readers);
++      long t1 = System.nanoTime();
++      if (infoStream.isEnabled(""SM"")) {
++        infoStream.message(""SM"", String.format(Locale.ROOT, ""%.2f msec to build merge sorted DocMaps"", (t1-t0)/1000000.0));
++      }
++      return result;
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-6766: more IW.infoStream logging around sorting; fix test bug
+"
+lucene-solr,46444.json,e283271aaf6da3033156f36b421d3241b5499d4e,"@@ -1,61 +1,65 @@
+   private List<CodecReader> maybeSortReaders(List<CodecReader> originalReaders, SegmentInfo segmentInfo) throws IOException {
+ 
+     // Default to identity:
+     for(int i=0;i<originalReaders.size();i++) {
+       leafDocMaps[i] = new DocMap() {
+           @Override
+           public int get(int docID) {
+             return docID;
+           }
+         };
+     }
+ 
+     Sort indexSort = segmentInfo.getIndexSort();
+     if (indexSort == null) {
+       return originalReaders;
+     }
+ 
+     // If an incoming reader is not sorted, because it was flushed by IW, we sort it here:
+     final Sorter sorter = new Sorter(indexSort);
+     List<CodecReader> readers = new ArrayList<>(originalReaders.size());
+ 
+     for (CodecReader leaf : originalReaders) {
+       Sort segmentSort = leaf.getIndexSort();
+ 
+       if (segmentSort == null) {
+         // TODO: fix IW to also sort when flushing?  It's somewhat tricky because of stored fields and term vectors, which write ""live""
+         // to their index files on each indexed document:
+ 
+         // This segment was written by flush, so documents are not yet sorted, so we sort them now:
++        long t0 = System.nanoTime();
+         Sorter.DocMap sortDocMap = sorter.sort(leaf);
++        long t1 = System.nanoTime();
++        double msec = (t1-t0)/1000000.0;
++        
+         if (sortDocMap != null) {
+           if (infoStream.isEnabled(""SM"")) {
+-            infoStream.message(""SM"", ""segment "" + leaf + "" is not sorted; wrapping for sort "" + indexSort + "" now"");
++            infoStream.message(""SM"", String.format(Locale.ROOT, ""segment %s is not sorted; wrapping for sort %s now (%.2f msec to sort)"", leaf, indexSort, msec));
+           }
+           leaf = SlowCodecReaderWrapper.wrap(SortingLeafReader.wrap(new MergeReaderWrapper(leaf), sortDocMap));
+           leafDocMaps[readers.size()] = new DocMap() {
+               @Override
+               public int get(int docID) {
+                 return sortDocMap.oldToNew(docID);
+               }
+             };
+         } else {
+           if (infoStream.isEnabled(""SM"")) {
+-            infoStream.message(""SM"", ""segment "" + leaf + "" is not sorted, but is already accidentally in sort "" + indexSort + "" order"");
++            infoStream.message(""SM"", String.format(Locale.ROOT, ""segment %s is not sorted, but is already accidentally in sort %s order (%.2f msec to sort)"", leaf, indexSort, msec));
+           }
+         }
+ 
+       } else {
+         if (segmentSort.equals(indexSort) == false) {
+           throw new IllegalArgumentException(""index sort mismatch: merged segment has sort="" + indexSort + "" but to-be-merged segment has sort="" + segmentSort);
+         }
+         if (infoStream.isEnabled(""SM"")) {
+           infoStream.message(""SM"", ""segment "" + leaf + "" already sorted"");
+         }
+       }
+ 
+       readers.add(leaf);
+     }
+ 
+     return readers;
+   }
+\ No newline at end of file
+",NotBuggy,"LUCENE-6766: more IW.infoStream logging around sorting; fix test bug
+"
+lucene-solr,44598.json,a2a9f2a6f9cba3b27b248102d88431b8b234530e,"@@ -1,32 +1,34 @@
+     public SeekStatus seekCeil(BytesRef text) {
+ 
+       // TODO: we could instead keep the BytesRefHash
+       // intact so this is a hash lookup
+ 
+       // binary search:
+       int lo = 0;
+       int hi = numTerms - 1;
+       while (hi >= lo) {
+         int mid = (lo + hi) >>> 1;
+         int textStart = postingsArray.textStarts[sortedTermIDs[mid]];
+         terms.bytePool.setBytesRef(scratch, textStart);
+         int cmp = scratch.compareTo(text);
+         if (cmp < 0) {
+           lo = mid + 1;
+         } else if (cmp > 0) {
+           hi = mid - 1;
+         } else {
+           // found:
+           ord = mid;
+           return SeekStatus.FOUND;
+         }
+       }
+ 
+       // not found:
+       ord = lo + 1;
+-      if (ord == numTerms) {
++      if (ord >= numTerms) {
+         return SeekStatus.END;
+       } else {
++        int textStart = postingsArray.textStarts[sortedTermIDs[ord]];
++        terms.bytePool.setBytesRef(scratch, textStart);
+         return SeekStatus.NOT_FOUND;
+       }
+     }
+\ No newline at end of file
+",Buggy,"test seekCeil in pull postings API; fix trunk-only bug
+
+git-svn-id: https://svn.apache.org/repos/asf/lucene/dev/trunk@1611305 13f79535-47bb-0310-9956-ffa450edef68
+"
+jna,165.json,535518713bc51e6eacefeaeaccc7033ade905a9a,"@@ -1,14 +1,15 @@
+         private static long getVisualID(GraphicsConfiguration config) {
+             // Use reflection to call
+             // X11GraphicsConfig.getVisual
+             try {
+                 Object o = config.getClass()
+                     .getMethod(""getVisual"", (Class[])null)
+                     .invoke(config, (Object[])null);
+                 return ((Number)o).longValue();
+             }
+             catch (Exception e) {
++                // FIXME properly handle this error
+                 e.printStackTrace();
+                 return -1;
+             }
+         }
+\ No newline at end of file
+",NotBuggy,"fix mappings to properly work on 32-bit windows (fixes memory faults)
+"
+jna,146.json,535518713bc51e6eacefeaeaccc7033ade905a9a,"@@ -1,17 +1,18 @@
+-				public boolean callback(final HWND hwnd, final Pointer arg1) {
+-					try {
+-						final boolean visible = !onlyVisibleWindows
+-								|| User32.INSTANCE.IsWindowVisible(hwnd);
+-						if (visible) {
+-							final String title = getWindowTitle(hwnd);
+-							final String filePath = getProcessFilePath(hwnd);
+-							final Rectangle locAndSize = getWindowLocationAndSize(hwnd);
+-							result.add(new DesktopWindow(hwnd, title, filePath,
+-									locAndSize));
+-						}
+-					} catch (final Exception e) {
+-						e.printStackTrace();
+-					}
+-
+-					return true;
+-				}
+\ No newline at end of file
++                public boolean callback(final HWND hwnd, final Pointer arg1) {
++                    try {
++                        final boolean visible = !onlyVisibleWindows
++                            || User32.INSTANCE.IsWindowVisible(hwnd);
++                        if (visible) {
++                            final String title = getWindowTitle(hwnd);
++                            final String filePath = getProcessFilePath(hwnd);
++                            final Rectangle locAndSize = getWindowLocationAndSize(hwnd);
++                            result.add(new DesktopWindow(hwnd, title, filePath,
++                                                         locAndSize));
++                        }
++                    } catch (final Exception e) {
++                        // FIXME properly handle whatever error is raised
++                        e.printStackTrace();
++                    }
++                    
++                    return true;
++                }
+\ No newline at end of file
+",Buggy,"fix mappings to properly work on 32-bit windows (fixes memory faults)
+"
+jna,3926.json,e5958a2a159cd87a8168c801f569f5bcc7511c25,"@@ -1,86 +1,84 @@
+     public Object invoke(Class returnType, Object[] inArgs, Map options) {
+         // Clone the argument array to obtain a scratch space for modified
+         // types/values
+         Object[] args = { };
+         if (inArgs != null) {
+             if (inArgs.length > MAX_NARGS) {
+                 throw new UnsupportedOperationException(""Maximum argument count is "" + MAX_NARGS);
+             }
+             args = new Object[inArgs.length];
+             System.arraycopy(inArgs, 0, args, 0, args.length);
+         }
+ 
+         TypeMapper mapper = 
+             (TypeMapper)options.get(Library.OPTION_TYPE_MAPPER);
+         Method invokingMethod = (Method)options.get(OPTION_INVOKING_METHOD);
+         for (int i=0; i < args.length; i++) {
+             args[i] = convertArgument(args, i, invokingMethod, mapper);
+         }
+         
+         Class nativeType = returnType;
+         FromNativeConverter resultConverter = null;
+         if (NativeMapped.class.isAssignableFrom(returnType)) {
+             NativeMappedConverter tc = new NativeMappedConverter(returnType);
+             resultConverter = tc;
+             nativeType = tc.nativeType();
+         }
+         else if (mapper != null) {
+             resultConverter = mapper.getFromNativeConverter(returnType);
+             if (resultConverter != null) {
+                 nativeType = resultConverter.nativeType();
+             }
+         }
+ 
+         Object result = invoke(args, nativeType);
+ 
+         // Convert the result to a custom value/type if appropriate
+         if (resultConverter != null) {
+             FromNativeContext context;
+             
+             if (invokingMethod != null) {
+                 context = new MethodResultContext(returnType, this, inArgs, invokingMethod);
+             } else {
+                 context = new FunctionResultContext(returnType, this, inArgs);
+             }
+             result = resultConverter.fromNative(result, context);
+         }
+ 
+         // Sync all memory which might have been modified by the native call
+         if (inArgs != null) {
+             for (int i=0; i < inArgs.length; i++) {
+                 Object arg = inArgs[i];
+                 if (arg == null)
+                     continue;
+                 if (arg instanceof Structure) {
+                     if (!(arg instanceof Structure.ByValue)) {
+                         ((Structure)arg).read();
+                     }
+                 }
+                 else if (args[i] instanceof StringArray) {
+-                    // Read back arrays of String, just in case they
+-                    // were modified
+                     ((StringArray)args[i]).read();
+                 }
+                 else if (args[i] instanceof PointerArray) {
+                     PointerArray array = (PointerArray)args[i];
+                     array.read();
+                     if (Structure.ByReference[].class.isAssignableFrom(arg.getClass())) {
+                         Class type = arg.getClass().getComponentType();
+                         Structure[] ss = (Structure[])arg;
+                         for (int si=0;si < ss.length;si++) {
+                             Pointer p = array.getPointer(Pointer.SIZE * si);
+                             ss[si] = Structure.updateStructureByReference(type, ss[si], p);
+                         }
+                     }
+                 }
+                 else if (Structure[].class.isAssignableFrom(arg.getClass())) {
+                     Structure[] ss = (Structure[])arg;
+                     for (int si=0;si < ss.length;si++) {
+                         ss[si].read();
+                     }
+                 }
+             }
+         }
+                         
+         return result;
+     }
+\ No newline at end of file
+",NotBuggy,"Fix bug in stdcall function mapping when using struct by value
+Defer size_t/off_t definition, for now
+
+git-svn-id: https://svn.java.net/svn/jna~svn/trunk@436 2f8a963e-d2e4-e7d0-97bf-ccb7fcea9d80
+"
+jna,3554.json,e5958a2a159cd87a8168c801f569f5bcc7511c25,"@@ -1,23 +1,30 @@
+-    private int getNativeSize(Class type, Object value) {
+-        if (Structure.class.isAssignableFrom(type)) {
+-            if (ByReference.class.isAssignableFrom(type)) {
+-                return Pointer.SIZE;
+-            }
+-            else {
+-                if (value == null)
+-                    value = newInstance(type);
+-                Structure s = (Structure)value;
+-                return s.size();
+-            }
+-        }
++    private static int getNativeSize(Class type, Object value) {
+         if (type.isArray()) {
+             int len = Array.getLength(value);
+             if (len > 0) {
+                 Object o = Array.get(value, 0);
+                 return len * getNativeSize(type.getComponentType(), o);
+             }
+             // Don't process zero-length arrays
+-            throw new IllegalArgumentException(""Arrays of length zero not allowed in structure: "" + this);
++            throw new IllegalArgumentException(""Arrays of length zero not allowed in structure: "" + type);
+         }
+-        return getNativeSize(type);
++        // May provide this in future; problematic on read, since we can't
++        // auto-create a java.nio.Buffer w/o knowing its size
++        if (Buffer.class.isAssignableFrom(type)) {
++            throw new IllegalArgumentException(""the type \"""" + type.getName() 
++                                               + ""\"" is not supported as a structure field"");
++        }
++        if (Structure.class.isAssignableFrom(type)
++            && !Structure.ByReference.class.isAssignableFrom(type)) {
++            if (value == null)
++                value = newInstance(type);
++            return ((Structure)value).size();
++        }
++        try {
++            return Native.getNativeSize(type);
++        }
++        catch(IllegalArgumentException e) {
++            throw new IllegalArgumentException(""The type \"""" + type.getName() 
++                                               + ""\"" is not supported as a structure field"");
++        }
+     }
+\ No newline at end of file
+",Buggy,"Fix bug in stdcall function mapping when using struct by value
+Defer size_t/off_t definition, for now
+
+git-svn-id: https://svn.java.net/svn/jna~svn/trunk@436 2f8a963e-d2e4-e7d0-97bf-ccb7fcea9d80
+"
+jna,3652.json,4068c6da1a057942ee7eb167c0e5436b0f225761,"@@ -1,9 +1,10 @@
+     Object getField(StructField structField) {
+         try {
+             return structField.field.get(this);
+         }
+         catch (Exception e) {
+             throw new Error(""Exception reading field '""
+-                            + structField.name + ""' in "" + getClass(), e);
++                            + structField.name + ""' in "" + getClass() 
++                            + "": "" + e);
+         }
+     }
+\ No newline at end of file
+",NotBuggy,"Fix bug in nested struct array read/write
+
+git-svn-id: https://svn.java.net/svn/jna~svn/trunk@445 2f8a963e-d2e4-e7d0-97bf-ccb7fcea9d80
+"
+jna,4096.json,4068c6da1a057942ee7eb167c0e5436b0f225761,"@@ -1,137 +1,147 @@
+     void writeField(StructField structField) {
+         // Get the offset of the field
+         int offset = structField.offset;
+ 
+         // Get the value from the field
+         Object value = getField(structField);
+         
+         // Determine the type of the field
+         Class nativeType = structField.type;
+         ToNativeConverter converter = structField.writeConverter;
+         if (converter != null) {
+             value = converter.toNative(value, 
+                     new StructureWriteContext(this, structField.field));
+             // Assume any null values are pointers
+             nativeType = value != null ? value.getClass() : Pointer.class;
+         }
+ 
+         // Java strings get converted to C strings, where a Pointer is used
+         if (String.class == nativeType
+             || WString.class == nativeType) {
+ 
+             // Allocate a new string in memory
+             boolean wide = nativeType == WString.class;
+             if (value != null) {
+                 NativeString nativeString = new NativeString(value.toString(), wide);
+                 // Keep track of allocated C strings to avoid 
+                 // premature garbage collection of the memory.
+                 nativeStrings.put(structField.name, nativeString);
+                 value = nativeString.getPointer();
+             }
+             else {
+                 value = null;
+             }
+         }
+ 
+         // Set the value at the offset according to its type
+         if (nativeType == boolean.class || nativeType == Boolean.class) {
+             memory.setInt(offset, Boolean.TRUE.equals(value) ? -1 : 0);
+         }
+         else if (nativeType == byte.class || nativeType == Byte.class) {
+             memory.setByte(offset, ((Byte)value).byteValue());
+         }
+         else if (nativeType == short.class || nativeType == Short.class) {
+             memory.setShort(offset, ((Short)value).shortValue());
+         }
+         else if (nativeType == char.class || nativeType == Character.class) {
+             memory.setChar(offset, ((Character)value).charValue());
+         }
+         else if (nativeType == int.class || nativeType == Integer.class) {
+             memory.setInt(offset, ((Integer)value).intValue());
+         }
+         else if (nativeType == long.class || nativeType == Long.class) {
+             memory.setLong(offset, ((Long)value).longValue());
+         }
+         else if (nativeType == float.class || nativeType == Float.class) {
+             memory.setFloat(offset, ((Float)value).floatValue());
+         }
+         else if (nativeType == double.class || nativeType == Double.class) {
+             memory.setDouble(offset, ((Double)value).doubleValue());
+         }
+         else if (nativeType == Pointer.class) {
+             memory.setPointer(offset, (Pointer)value);
+         }
+         else if (nativeType == String.class) {
+             memory.setPointer(offset, (Pointer)value);
+         }
+         else if (nativeType == WString.class) {
+             memory.setPointer(offset, (Pointer)value);
+         }
+         else if (nativeType.isArray()) {
+             Class cls = nativeType.getComponentType();
+             if (cls == byte.class) {
+                 byte[] buf = (byte[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+             else if (cls == short.class) {
+                 short[] buf = (short[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+             else if (cls == char.class) {
+                 char[] buf = (char[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+             else if (cls == int.class) {
+                 int[] buf = (int[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+             else if (cls == long.class) {
+                 long[] buf = (long[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+             else if (cls == float.class) {
+                 float[] buf = (float[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+             else if (cls == double.class) {
+                 double[] buf = (double[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+             else if (Pointer.class.isAssignableFrom(cls)) {
+                 Pointer[] buf = (Pointer[])value;
+                 memory.write(offset, buf, 0, buf.length);
+             }
+-            else if (Structure.class.isAssignableFrom(cls)
+-                     && ByReference.class.isAssignableFrom(cls)) {
++            else if (Structure.class.isAssignableFrom(cls)) {
+                 Structure[] sbuf = (Structure[])value;
+-                Pointer[] buf = new Pointer[sbuf.length];
+-                for (int i=0;i < sbuf.length;i++) {
+-                    buf[i] = sbuf[i] == null ? null : sbuf[i].getPointer();
++                if (ByReference.class.isAssignableFrom(cls)) {
++                    Pointer[] buf = new Pointer[sbuf.length];
++                    for (int i=0;i < sbuf.length;i++) {
++                        buf[i] = sbuf[i] == null ? null : sbuf[i].getPointer();
++                    }
++                    memory.write(offset, buf, 0, buf.length);
+                 }
+-                memory.write(offset, buf, 0, buf.length);
++                else {
++                    for (int i=0;i < sbuf.length;i++) {
++                        if (sbuf[i] == null) {
++                            sbuf[i] = newInstance(cls);
++                            sbuf[i].useMemory(memory, offset + i * sbuf[i].size());
++                        }
++                        sbuf[i].write();
++                    }
++                }
+             }
+             else {
+                 throw new IllegalArgumentException(""Inline array of ""
+                                                    + cls + "" not supported"");
+             }
+         }
+         else if (Structure.class.isAssignableFrom(nativeType)) {
+             Structure s = (Structure)value;
+             if (ByReference.class.isAssignableFrom(nativeType)) {
+                 memory.setPointer(offset, s == null ? null : s.getPointer());
+             }
+             else {
+                 s.useMemory(memory, offset);
+                 s.write();
+             }
+         }
+         else if (Callback.class.isAssignableFrom(nativeType)) {
+             memory.setPointer(offset, CallbackReference.getFunctionPointer((Callback)value));
+         }
+         else {
+         	String msg = ""Structure field \"""" + structField.name
+         	    + ""\"" was declared as "" + nativeType 
+         	    + "", which is not supported within a Structure"";
+             throw new IllegalArgumentException(msg);
+         }
+     }
+\ No newline at end of file
+",Buggy,"Fix bug in nested struct array read/write
+
+git-svn-id: https://svn.java.net/svn/jna~svn/trunk@445 2f8a963e-d2e4-e7d0-97bf-ccb7fcea9d80
+"
+jna,4092.json,4068c6da1a057942ee7eb167c0e5436b0f225761,"@@ -1,136 +1,146 @@
+     Object readField(StructField structField) {
+         
+         // Get the offset of the field
+         int offset = structField.offset;
+ 
+         // Determine the type of the field
+         Class nativeType = structField.type;
+         FromNativeConverter readConverter = structField.readConverter;
+         if (readConverter != null) {
+             nativeType = readConverter.nativeType();
+         }
+ 
+         // Get the value at the offset according to its type
+         Object result = null;
+         if (Structure.class.isAssignableFrom(nativeType)) {
+             Structure s = (Structure)getField(structField);
+             if (ByReference.class.isAssignableFrom(nativeType)) {
+                 s = updateStructureByReference(nativeType, s, memory.getPointer(offset));
+             }
+             else {
+                 s.useMemory(memory, offset);
+                 s.read();
+             }
+             result = s;
+         }
+         else if (nativeType == boolean.class || nativeType == Boolean.class) {
+             result = Boolean.valueOf(memory.getInt(offset) != 0);
+         }
+         else if (nativeType == byte.class || nativeType == Byte.class) {
+             result = new Byte(memory.getByte(offset));
+         }
+         else if (nativeType == short.class || nativeType == Short.class) {
+             result = new Short(memory.getShort(offset));
+         }
+         else if (nativeType == char.class || nativeType == Character.class) {
+             result = new Character(memory.getChar(offset));
+         }
+         else if (nativeType == int.class || nativeType == Integer.class) {
+             result = new Integer(memory.getInt(offset));
+         }
+         else if (nativeType == long.class || nativeType == Long.class) {
+             result = new Long(memory.getLong(offset));
+         }
+         else if (nativeType == float.class || nativeType == Float.class) {
+             result=new Float(memory.getFloat(offset));
+         }
+         else if (nativeType == double.class || nativeType == Double.class) {
+             result = new Double(memory.getDouble(offset));
+         }
+         else if (nativeType == Pointer.class) {
+             result = memory.getPointer(offset);
+         }
+         else if (nativeType == String.class) {
+             Pointer p = memory.getPointer(offset);
+             result = p != null ? p.getString(0) : null;
+         }
+         else if (nativeType == WString.class) {
+             Pointer p = memory.getPointer(offset);
+             result = p != null ? new WString(p.getString(0, true)) : null;
+         }
+         else if (Callback.class.isAssignableFrom(nativeType)) {
+             // Overwrite the Java memory if the native pointer is a different
+             // function pointer.
+             Pointer fp = memory.getPointer(offset);
+             if (fp == null) {
+                 result = null;
+             }
+             else {
+                 Callback cb = (Callback)getField(structField);
+                 Pointer oldfp = CallbackReference.getFunctionPointer(cb);
+                 if (!fp.equals(oldfp)) {
+                     cb = CallbackReference.getCallback(nativeType, fp);
+                 }
+                 result = cb;
+             }
+         }
+         else if (nativeType.isArray()) {
+             Class cls = nativeType.getComponentType();
+             int length = 0;
+             Object o = getField(structField);
+             if (o == null) {
+                 throw new IllegalStateException(""Array field in Structure not initialized"");
+             }
+             length = Array.getLength(o);
+             result = o;
+ 
+             if (cls == byte.class) {
+                 memory.read(offset, (byte[])result, 0, length);
+             }
+             else if (cls == short.class) {
+                 memory.read(offset, (short[])result, 0, length);
+             }
+             else if (cls == char.class) {
+                 memory.read(offset, (char[])result, 0, length);
+             }
+             else if (cls == int.class) {
+                 memory.read(offset, (int[])result, 0, length);
+             }
+             else if (cls == long.class) {
+                 memory.read(offset, (long[])result, 0, length);
+             }
+             else if (cls == float.class) {
+                 memory.read(offset, (float[])result, 0, length);
+             }
+             else if (cls == double.class) {
+                 memory.read(offset, (double[])result, 0, length);
+             }
+             else if (Pointer.class.isAssignableFrom(cls)) {
+                 memory.read(offset, (Pointer[])result, 0, length);
+             }
+-            else if (Structure.class.isAssignableFrom(cls)
+-                     && ByReference.class.isAssignableFrom(cls)) {
++            else if (Structure.class.isAssignableFrom(cls)) {
+                 Structure[] sarray = (Structure[])result;
+-                Pointer[] parray = memory.getPointerArray(offset, sarray.length);
+-                for (int i=0;i < sarray.length;i++) {
+-                    sarray[i] = updateStructureByReference(cls, sarray[i], parray[i]);
++                if (ByReference.class.isAssignableFrom(cls)) {
++                    Pointer[] parray = memory.getPointerArray(offset, sarray.length);
++                    for (int i=0;i < sarray.length;i++) {
++                        sarray[i] = updateStructureByReference(cls, sarray[i], parray[i]);
++                    }
++                }
++                else {
++                    for (int i=0;i < sarray.length;i++) {
++                        if (sarray[i] == null) {
++                            sarray[i] = newInstance(cls);
++                            sarray[i].useMemory(memory, offset + i * sarray[i].size());
++                        }
++                        sarray[i].read();
++                    }
+                 }
+             }
+             else {
+                 throw new IllegalArgumentException(""Array of ""
+                                                    + cls + "" not supported"");
+             }
+         }
+         else {
+             throw new IllegalArgumentException(""Unsupported field type \""""
+                                                + nativeType + ""\"""");
+         }
+ 
+         if (readConverter != null) {
+             result = readConverter.fromNative(result, structField.context);
+         }
+ 
+         // Update the value on the field
+         setField(structField, result);
+         return result;
+     }
+\ No newline at end of file
+",Buggy,"Fix bug in nested struct array read/write
+
+git-svn-id: https://svn.java.net/svn/jna~svn/trunk@445 2f8a963e-d2e4-e7d0-97bf-ccb7fcea9d80
+"
+jna,2043.json,fe79ff84115369d6cc0e1d6fa240d2c431094af7,"@@ -1,3 +1,3 @@
+     public static boolean FAILED(int hr) {
+-        return (hr != S_OK);
++        return hr < 0;
+     }
+\ No newline at end of file
+",Buggy,"Fix SUCCEEDED and FAILED instead of trying to fix the bug where it's visible. See MSDN for FAILED and SUCCEEDED definitions
+
+Changes
+"
+jna,2041.json,fe79ff84115369d6cc0e1d6fa240d2c431094af7,"@@ -1,6 +1,3 @@
+     public static boolean SUCCEEDED(int hr) {
+-        if (hr == S_OK)
+-            return true;
+-        else
+-            return false;
++        return hr >= 0;
+     }
+\ No newline at end of file
+",Buggy,"Fix SUCCEEDED and FAILED instead of trying to fix the bug where it's visible. See MSDN for FAILED and SUCCEEDED definitions
+
+Changes
+"
+jna,4111.json,64466deb5eb01a0d9c3e27ceb2a89d4e6d546908,"@@ -1,21 +1,21 @@
+     private void validateField(String name, Class type) {
+         if (typeMapper != null) {
+             ToNativeConverter toNative = typeMapper.getToNativeConverter(type);
+             if (toNative != null) {
+                 validateField(name, toNative.nativeType());
+                 return;
+             }
+         }
+         if (type.isArray()) {
+             validateField(name, type.getComponentType());
+         }
+         else {
+             try {
+                 getNativeSize(type);
+             }
+             catch(IllegalArgumentException e) {
+-                String msg = ""Invalid Structure field in "" + getClass() + "", field name '"" + name + ""' ("" + type + "")"";
++                String msg = ""Invalid Structure field in "" + getClass() + "", field name '"" + name + ""' ("" + type + ""): "" + e.getMessage();
+                 throw new IllegalArgumentException(msg, e);
+             }
+         }
+     }
+\ No newline at end of file
+",NotBuggy,"Ensure exception message includes all faulty field information (fixes broken test)
+"
+jna,4113.json,64466deb5eb01a0d9c3e27ceb2a89d4e6d546908,"@@ -1,147 +1,147 @@
+     private LayoutInfo deriveLayout(boolean force, boolean avoidFFIType) {
+         int calculatedSize = 0;
+         List fields = getFields(force);
+         if (fields == null) {
+             return null;
+         }
+ 
+         LayoutInfo info = new LayoutInfo();
+         info.alignType = this.alignType;
+         info.typeMapper = this.typeMapper;
+ 
+         boolean firstField = true;
+         for (Iterator i=fields.iterator();i.hasNext();firstField=false) {
+             Field field = (Field)i.next();
+             int modifiers = field.getModifiers();
+ 
+             Class type = field.getType();
+             if (type.isArray()) {
+                 info.variable = true;
+             }
+             StructField structField = new StructField();
+             structField.isVolatile = Modifier.isVolatile(modifiers);
+             structField.isReadOnly = Modifier.isFinal(modifiers);
+             if (structField.isReadOnly) {
+                 if (!Platform.RO_FIELDS) {
+                     throw new IllegalArgumentException(""This VM does not support read-only fields (field '""
+                                                        + field.getName() + ""' within "" + getClass() + "")"");
+                 }
+                 // In J2SE VMs, this allows overriding the value of final
+                 // fields
+                 field.setAccessible(true);
+             }
+             structField.field = field;
+             structField.name = field.getName();
+             structField.type = type;
+ 
+             // Check for illegal field types
+             if (Callback.class.isAssignableFrom(type) && !type.isInterface()) {
+                 throw new IllegalArgumentException(""Structure Callback field '""
+                                                    + field.getName()
+                                                    + ""' must be an interface"");
+             }
+             if (type.isArray()
+                 && Structure.class.equals(type.getComponentType())) {
+                 String msg = ""Nested Structure arrays must use a ""
+                     + ""derived Structure type so that the size of ""
+                     + ""the elements can be determined"";
+                 throw new IllegalArgumentException(msg);
+             }
+ 
+             int fieldAlignment = 1;
+             if (!Modifier.isPublic(field.getModifiers())) {
+                 continue;
+             }
+ 
+             Object value = getFieldValue(structField.field);
+             if (value == null && type.isArray()) {
+                 if (force) {
+                     throw new IllegalStateException(""Array fields must be initialized"");
+                 }
+                 // can't calculate size yet, defer until later
+                 return null;
+             }
+             Class nativeType = type;
+             if (NativeMapped.class.isAssignableFrom(type)) {
+                 NativeMappedConverter tc = NativeMappedConverter.getInstance(type);
+                 nativeType = tc.nativeType();
+                 structField.writeConverter = tc;
+                 structField.readConverter = tc;
+                 structField.context = new StructureReadContext(this, field);
+             }
+             else if (typeMapper != null) {
+                 ToNativeConverter writeConverter = typeMapper.getToNativeConverter(type);
+                 FromNativeConverter readConverter = typeMapper.getFromNativeConverter(type);
+                 if (writeConverter != null && readConverter != null) {
+                     value = writeConverter.toNative(value,
+                                                     new StructureWriteContext(this, structField.field));
+                     nativeType = value != null ? value.getClass() : Pointer.class;
+                     structField.writeConverter = writeConverter;
+                     structField.readConverter = readConverter;
+                     structField.context = new StructureReadContext(this, field);
+                 }
+                 else if (writeConverter != null || readConverter != null) {
+                     String msg = ""Structures require bidirectional type conversion for "" + type;
+                     throw new IllegalArgumentException(msg);
+                 }
+             }
+ 
+             if (value == null) {
+                 value = initializeField(structField.field, type);
+             }
+ 
+             try {
+                 structField.size = getNativeSize(nativeType, value);
+                 fieldAlignment = getNativeAlignment(nativeType, value, firstField);
+             }
+             catch(IllegalArgumentException e) {
+                 // Might simply not yet have a type mapper set yet
+                 if (!force && typeMapper == null) {
+                     return null;
+                 }
+-                String msg = ""Invalid Structure field in "" + getClass() + "", field name '"" + structField.name + ""' ("" + structField.type + "")"";
++                String msg = ""Invalid Structure field in "" + getClass() + "", field name '"" + structField.name + ""' ("" + structField.type + ""): "" + e.getMessage();
+                 throw new IllegalArgumentException(msg, e);
+             }
+ 
+             // Align fields as appropriate
+             if (fieldAlignment == 0) {
+                 throw new Error(""Field alignment is zero for field '"" + structField.name + ""' within "" + getClass());
+             }
+             info.alignment = Math.max(info.alignment, fieldAlignment);
+             if ((calculatedSize % fieldAlignment) != 0) {
+                 calculatedSize += fieldAlignment - (calculatedSize % fieldAlignment);
+             }
+             if (this instanceof Union) {
+                 structField.offset = 0;
+                 calculatedSize = Math.max(calculatedSize, structField.size);
+             }
+             else {
+                 structField.offset = calculatedSize;
+                 calculatedSize += structField.size;
+             }
+ 
+             // Save the field in our list
+             info.fields.put(structField.name, structField);
+ 
+             if (info.typeInfoField == null
+                 || info.typeInfoField.size < structField.size
+                 || (info.typeInfoField.size == structField.size
+                     && Structure.class.isAssignableFrom(structField.type))) {
+                 info.typeInfoField = structField;
+             }
+         }
+ 
+         if (calculatedSize > 0) {
+             int size = addPadding(calculatedSize, info.alignment);
+             // Update native FFI type information, if needed
+             if (this instanceof ByValue && !avoidFFIType) {
+                 getTypeInfo();
+             }
+             info.size = size;
+             return info;
+         }
+ 
+         throw new IllegalArgumentException(""Structure "" + getClass()
+                                            + "" has unknown or zero size (ensure ""
+                                            + ""all fields are public)"");
+     }
+\ No newline at end of file
+",NotBuggy,"Ensure exception message includes all faulty field information (fixes broken test)
+"
+spring-framework,25502.json,98218687070fc47eb6f91e81d3d714bf96068cc5,"@@ -1,9 +1,7 @@
+ 	public static void sortBySpecificityAndQuality(List<MediaType> mediaTypes) {
+ 		Assert.notNull(mediaTypes, ""'mediaTypes' must not be null"");
+ 		if (mediaTypes.size() > 1) {
+-			Comparator<?>[] comparators = new Comparator[2];
+-			comparators[0] = MediaType.SPECIFICITY_COMPARATOR;
+-			comparators[1] = MediaType.QUALITY_VALUE_COMPARATOR;
+-			Collections.sort(mediaTypes, new CompoundComparator<MediaType>(comparators));
++			Collections.sort(mediaTypes, new CompoundComparator<MediaType>(
++					MediaType.SPECIFICITY_COMPARATOR, MediaType.QUALITY_VALUE_COMPARATOR));
+ 		}
+ 	}
+\ No newline at end of file
+",NotBuggy,"Refactor and polish various Comparator impls
+
+ - Refactor CompoundComparator constructor to use varargs
+ - Refactor MediaType to consume new varargs constructor
+ - Add notNull assertions where appropriate
+ - Add generic typing where appropriate
+ - Suppress generics warnings elsewhere
+ - Fix whitespace errors
+"
+spring-framework,15028.json,98218687070fc47eb6f91e81d3d714bf96068cc5,"@@ -1,10 +1,10 @@
+ 	public boolean equals(Object obj) {
+ 		if (this == obj) {
+ 			return true;
+ 		}
+ 		if (!(obj instanceof NullSafeComparator)) {
+ 			return false;
+ 		}
+-		NullSafeComparator other = (NullSafeComparator) obj;
++		NullSafeComparator<T> other = (NullSafeComparator<T>) obj;
+ 		return (this.nonNullComparator.equals(other.nonNullComparator) && this.nullsLow == other.nullsLow);
+ 	}
+\ No newline at end of file
+",NotBuggy,"Refactor and polish various Comparator impls
+
+ - Refactor CompoundComparator constructor to use varargs
+ - Refactor MediaType to consume new varargs constructor
+ - Add notNull assertions where appropriate
+ - Add generic typing where appropriate
+ - Suppress generics warnings elsewhere
+ - Fix whitespace errors
+"
+spring-framework,15035.json,98218687070fc47eb6f91e81d3d714bf96068cc5,"@@ -1,10 +1,10 @@
+ 	public boolean equals(Object obj) {
+ 		if (this == obj) {
+ 			return true;
+ 		}
+ 		if (!(obj instanceof InvertibleComparator)) {
+ 			return false;
+ 		}
+-		InvertibleComparator other = (InvertibleComparator) obj;
++		InvertibleComparator<T> other = (InvertibleComparator<T>) obj;
+ 		return (this.comparator.equals(other.comparator) && this.ascending == other.ascending);
+ 	}
+\ No newline at end of file
+",NotBuggy,"Refactor and polish various Comparator impls
+
+ - Refactor CompoundComparator constructor to use varargs
+ - Refactor MediaType to consume new varargs constructor
+ - Add notNull assertions where appropriate
+ - Add generic typing where appropriate
+ - Suppress generics warnings elsewhere
+ - Fix whitespace errors
+"
+spring-framework,15051.json,98218687070fc47eb6f91e81d3d714bf96068cc5,"@@ -1,10 +1,10 @@
+ 	public boolean equals(Object obj) {
+ 		if (this == obj) {
+ 			return true;
+ 		}
+ 		if (!(obj instanceof CompoundComparator)) {
+ 			return false;
+ 		}
+-		CompoundComparator other = (CompoundComparator) obj;
++		CompoundComparator<T> other = (CompoundComparator<T>) obj;
+ 		return this.comparators.equals(other.comparators);
+ 	}
+\ No newline at end of file
+",NotBuggy,"Refactor and polish various Comparator impls
+
+ - Refactor CompoundComparator constructor to use varargs
+ - Refactor MediaType to consume new varargs constructor
+ - Add notNull assertions where appropriate
+ - Add generic typing where appropriate
+ - Suppress generics warnings elsewhere
+ - Fix whitespace errors
+"
+spring-framework,15045.json,98218687070fc47eb6f91e81d3d714bf96068cc5,"@@ -1,5 +1,5 @@
+ 	public void invertOrder() {
+-		for (InvertibleComparator comparator : this.comparators) {
++		for (InvertibleComparator<T> comparator : this.comparators) {
+ 			comparator.invertOrder();
+ 		}
+ 	}
+\ No newline at end of file
+",NotBuggy,"Refactor and polish various Comparator impls
+
+ - Refactor CompoundComparator constructor to use varargs
+ - Refactor MediaType to consume new varargs constructor
+ - Add notNull assertions where appropriate
+ - Add generic typing where appropriate
+ - Suppress generics warnings elsewhere
+ - Fix whitespace errors
+"
+spring-framework,16701.json,67a06f5edcc8697af0941e238ef29bdb2a73245d,"@@ -1,8 +1,8 @@
+ 	public ClientResponse build() {
++
+ 		ClientHttpResponse httpResponse =
+ 				new BuiltClientHttpResponse(this.statusCode, this.headers, this.cookies, this.body);
+ 
+-		// When building ClientResponse manually, the ClientRequest.logPrefix() has to be passed,
+-		// e.g. via ClientResponse.Builder, but this (builder) is not used currently.
+-		return new DefaultClientResponse(httpResponse, this.strategies, """", """", () -> this.request);
++		return new DefaultClientResponse(
++				httpResponse, this.strategies, """", """", () -> this.request);
+ 	}
+\ No newline at end of file
+",NotBuggy,"Add mutate() to ClientResponse and deprecate from()
+
+from() has the flaw of ignoring the body and it can't be fixed because
+applications are guaranteed to be setting it already and if set twice
+the builder drains the first body.
+
+mutate() is a better fit in any case for what needs to be done in a
+filter chain. It can be done more efficiently and is consistent with
+similar options on the server side.
+
+See gh-24680
+"
+spring-framework,16453.json,67a06f5edcc8697af0941e238ef29bdb2a73245d,"@@ -1,8 +1,7 @@
+ 	public static ExchangeFilterFunction limitResponseSize(long maxByteCount) {
+ 		return (request, next) ->
+-				next.exchange(request).map(response -> {
+-					Flux<DataBuffer> body = response.body(BodyExtractors.toDataBuffers());
+-					body = DataBufferUtils.takeUntilByteCount(body, maxByteCount);
+-					return ClientResponse.from(response).body(body).build();
+-				});
++				next.exchange(request).map(response ->
++						response.mutate()
++								.body(body -> DataBufferUtils.takeUntilByteCount(body, maxByteCount))
++								.build());
+ 	}
+\ No newline at end of file
+",Buggy,"Add mutate() to ClientResponse and deprecate from()
+
+from() has the flaw of ignoring the body and it can't be fixed because
+applications are guaranteed to be setting it already and if set twice
+the builder drains the first body.
+
+mutate() is a better fit in any case for what needs to be done in a
+filter chain. It can be done more efficiently and is consistent with
+similar options on the server side.
+
+See gh-24680
+"
+spring-framework,16698.json,67a06f5edcc8697af0941e238ef29bdb2a73245d,"@@ -1,11 +1,10 @@
+ 	public ClientResponse.Builder body(String body) {
+ 		Assert.notNull(body, ""Body must not be null"");
+ 		releaseBody();
+-		DataBufferFactory dataBufferFactory = new DefaultDataBufferFactory();
+ 		this.body = Flux.just(body).
+ 				map(s -> {
+ 					byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+-					return dataBufferFactory.wrap(bytes);
++					return new DefaultDataBufferFactory().wrap(bytes);
+ 				});
+ 		return this;
+ 	}
+\ No newline at end of file
+",NotBuggy,"Add mutate() to ClientResponse and deprecate from()
+
+from() has the flaw of ignoring the body and it can't be fixed because
+applications are guaranteed to be setting it already and if set twice
+the builder drains the first body.
+
+mutate() is a better fit in any case for what needs to be done in a
+filter chain. It can be done more efficiently and is consistent with
+similar options on the server side.
+
+See gh-24680
+"
+spring-framework,16585.json,67a06f5edcc8697af0941e238ef29bdb2a73245d,"@@ -1,3 +1,3 @@
+ 	static Builder from(ClientResponse other) {
+-		return new DefaultClientResponseBuilder(other);
++		return new DefaultClientResponseBuilder(other, false);
+ 	}
+\ No newline at end of file
+",Buggy,"Add mutate() to ClientResponse and deprecate from()
+
+from() has the flaw of ignoring the body and it can't be fixed because
+applications are guaranteed to be setting it already and if set twice
+the builder drains the first body.
+
+mutate() is a better fit in any case for what needs to be done in a
+filter chain. It can be done more efficiently and is consistent with
+similar options on the server side.
+
+See gh-24680
+"
+sonarqube,9310.json,e582be977c992d38fff928388bb1f1ae928fd146,"@@ -1,14 +1,13 @@
+   private java.util.Optional<CeTask> submit(CeTaskSubmit submission, EnumSet<SubmitOption> submitOptions) {
+-    checkState(!submitPaused.get(), ""Compute Engine does not currently accept new tasks"");
+     try (DbSession dbSession = dbClient.openSession(false)) {
+       if (submitOptions.contains(UNIQUE_QUEUE_PER_COMPONENT)
+         && submission.getComponentUuid() != null
+         && dbClient.ceQueueDao().countByStatusAndComponentUuid(dbSession, PENDING, submission.getComponentUuid()) > 0) {
+         return java.util.Optional.empty();
+       }
+       CeQueueDto dto = addToQueueInDb(dbSession, submission);
+       CeTask task = loadTask(dbSession, dto);
+       dbSession.commit();
+       return java.util.Optional.of(task);
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+mainly by removing unused code
+"
+sonarqube,9312.json,e582be977c992d38fff928388bb1f1ae928fd146,"@@ -1,16 +1,15 @@
+   public List<CeTask> massSubmit(Collection<CeTaskSubmit> submissions, SubmitOption... options) {
+-    checkState(!submitPaused.get(), ""Compute Engine does not currently accept new tasks"");
+     if (submissions.isEmpty()) {
+       return Collections.emptyList();
+     }
+ 
+     try (DbSession dbSession = dbClient.openSession(true)) {
+       List<CeQueueDto> ceQueueDtos = submissions.stream()
+         .filter(filterBySubmitOptions(options, submissions, dbSession))
+         .map(submission -> addToQueueInDb(dbSession, submission))
+         .collect(Collectors.toList());
+       List<CeTask> tasks = loadTasks(dbSession, ceQueueDtos);
+       dbSession.commit();
+       return tasks;
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+mainly by removing unused code
+"
+sonarqube,8268.json,3bfcfa0de67e7f00d7cd0dc74649fef7e5772298,"@@ -1,3 +1,3 @@
+   public void stop() {
+-
++    // do nothing
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,1454.json,3bfcfa0de67e7f00d7cd0dc74649fef7e5772298,"@@ -1,3 +1,3 @@
+-  public String metadata() {
+-    return metadata;
++  public String internalKey() {
++    return internalKey;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,1485.json,3bfcfa0de67e7f00d7cd0dc74649fef7e5772298,"@@ -1,4 +1,4 @@
+-  public NewRule setMetadata(@Nullable String metadata) {
+-    this.metadata = metadata;
++  public NewRule setInternalKey(@Nullable String s) {
++    this.internalKey = s;
+     return this;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,2297.json,074f5c655822a466819c899ed9c90aef4ba1d2b4,"@@ -1,14 +1,15 @@
+   boolean isDescendant(DbSession dbSession, QualityProfileDto childProfile, @Nullable QualityProfileDto parentProfile) {
+     QualityProfileDto currentParent = parentProfile;
+     while (currentParent != null) {
+       if (childProfile.getName().equals(currentParent.getName())) {
+         return true;
+       }
+-      if (currentParent.getParentKee() != null) {
+-        currentParent = db.qualityProfileDao().getByKey(dbSession, currentParent.getParentKee());
++      String parentKey = currentParent.getParentKee();
++      if (parentKey != null) {
++        currentParent = db.qualityProfileDao().getByKey(dbSession, parentKey);
+       } else {
+         currentParent = null;
+       }
+     }
+     return false;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,6627.json,074f5c655822a466819c899ed9c90aef4ba1d2b4,"@@ -1,30 +1,34 @@
+   private ActiveRuleDto doUpdate(ActiveRuleChange change, RuleActivatorContext context, DbSession dbSession) {
+     ActiveRuleDto activeRule;
+     ActiveRuleDao dao = db.activeRuleDao();
+     activeRule = context.activeRule();
+-    activeRule.setSeverity(change.getSeverity());
+-    if (change.getInheritance() != null) {
+-      activeRule.setInheritance(change.getInheritance().name());
++    String severity = change.getSeverity();
++    if (severity != null) {
++      activeRule.setSeverity(severity);
++    }
++    ActiveRule.Inheritance inheritance = change.getInheritance();
++    if (inheritance != null) {
++      activeRule.setInheritance(inheritance.name());
+     }
+     dao.update(dbSession, activeRule);
+ 
+     for (Map.Entry<String, String> param : change.getParameters().entrySet()) {
+       ActiveRuleParamDto activeRuleParamDto = context.activeRuleParamsAsMap().get(param.getKey());
+       if (activeRuleParamDto == null) {
+         // did not exist
+         if (param.getValue() != null) {
+           activeRuleParamDto = ActiveRuleParamDto.createFor(context.ruleParamsByKeys().get(param.getKey()));
+           activeRuleParamDto.setValue(param.getValue());
+           dao.addParam(dbSession, activeRule, activeRuleParamDto);
+         }
+       } else {
+         if (param.getValue() != null) {
+           activeRuleParamDto.setValue(param.getValue());
+           dao.updateParam(dbSession, activeRule, activeRuleParamDto);
+         } else {
+           dao.deleteParam(dbSession, activeRule, activeRuleParamDto);
+         }
+       }
+     }
+     return activeRule;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,2295.json,074f5c655822a466819c899ed9c90aef4ba1d2b4,"@@ -1,27 +1,27 @@
+   void setParent(DbSession dbSession, String profileKey, @Nullable String parentKey) {
+     QualityProfileDto profile = db.qualityProfileDao().getNonNullByKey(dbSession, profileKey);
+     if (parentKey == null) {
+       // unset if parent is defined, else nothing to do
+       removeParent(dbSession, profile);
+ 
+-    } else if (profile.getParentKee() == null || !profile.getParentKee().equals(parentKey)) {
++    } else if (profile.getParentKee() == null || !parentKey.equals(profile.getParentKee())) {
+       QualityProfileDto parentProfile = db.qualityProfileDao().getNonNullByKey(dbSession, parentKey);
+       if (isDescendant(dbSession, profile, parentProfile)) {
+         throw new BadRequestException(String.format(""Descendant profile '%s' can not be selected as parent of '%s'"", parentKey, profileKey));
+       }
+       removeParent(dbSession, profile);
+ 
+       // set new parent
+       profile.setParentKee(parentKey);
+       db.qualityProfileDao().update(dbSession, profile);
+       for (ActiveRuleDto parentActiveRule : db.activeRuleDao().findByProfileKey(dbSession, parentKey)) {
+         try {
+           RuleActivation activation = new RuleActivation(parentActiveRule.getKey().ruleKey());
+           activate(dbSession, activation, profileKey);
+         } catch (BadRequestException e) {
+           // for example because rule status is REMOVED
+           // TODO return errors
+         }
+       }
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,6621.json,074f5c655822a466819c899ed9c90aef4ba1d2b4,"@@ -1,57 +1,58 @@
+   private List<ActiveRuleChange> doActivate(DbSession dbSession, RuleActivation activation, RuleActivatorContext context) {
+     context.verifyForActivation();
+     List<ActiveRuleChange> changes = Lists.newArrayList();
+     ActiveRuleChange change;
+     boolean stopPropagation = false;
+ 
+-    if (context.activeRule() == null) {
++    ActiveRuleDto activeRule = context.activeRule();
++    if (activeRule == null) {
+       if (activation.isReset()) {
+         // ignore reset when rule is not activated
+         return changes;
+       }
+       // new activation
+       change = ActiveRuleChange.createFor(ActiveRuleChange.Type.ACTIVATED, context.activeRuleKey());
+       applySeverityAndParamToChange(activation, context, change);
+       if (activation.isCascade() || context.isSameAsParent(change)) {
+         change.setInheritance(ActiveRule.Inheritance.INHERITED);
+       }
+     } else {
+       // already activated
+-      if (activation.isCascade() && context.activeRule().doesOverride()) {
++      if (activation.isCascade() && activeRule.doesOverride()) {
+         // propagating to descendants, but child profile already overrides rule -> stop propagation
+         return changes;
+       }
+       change = ActiveRuleChange.createFor(ActiveRuleChange.Type.UPDATED, context.activeRuleKey());
+-      if (activation.isCascade() && context.activeRule().getInheritance() == null) {
++      if (activation.isCascade() && activeRule.getInheritance() == null) {
+         // activate on child, then on parent -> mark child as overriding parent
+         change.setInheritance(ActiveRule.Inheritance.OVERRIDES);
+         change.setSeverity(context.currentSeverity());
+         change.setParameters(context.activeRuleParamsAsStringMap());
+         stopPropagation = true;
+       } else {
+         applySeverityAndParamToChange(activation, context, change);
+         if (!activation.isCascade() && context.parentActiveRule() != null) {
+           // override rule which is already declared on parents
+           change.setInheritance(context.isSameAsParent(change) ? ActiveRule.Inheritance.INHERITED : ActiveRule.Inheritance.OVERRIDES);
+         }
+       }
+       if (context.isSame(change)) {
+         change = null;
+       }
+     }
+ 
+     if (change != null) {
+       changes.add(change);
+       persist(change, context, dbSession);
+     }
+ 
+     if (!stopPropagation) {
+       changes.addAll(cascadeActivation(dbSession, activation, context.profile().getKey()));
+     }
+ 
+     if (!changes.isEmpty()) {
+       updateProfileDate(dbSession, context);
+       previewCache.reportGlobalModification(dbSession);
+     }
+     return changes;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,11064.json,e582be977c992d38fff928388bb1f1ae928fd146,"@@ -1,8 +1,8 @@
+   private static String groupSearchToSql(@Nullable String query) {
+     if (query == null) {
+       return null;
+     }
+ 
+     String upperCasedNameQuery = StringUtils.upperCase(query, Locale.ENGLISH);
+-    return DaoDatabaseUtils.buildLikeValue(upperCasedNameQuery, WildcardPosition.BEFORE_AND_AFTER);
++    return DaoUtils.buildLikeValue(upperCasedNameQuery, WildcardPosition.BEFORE_AND_AFTER);
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+mainly by removing unused code
+"
+sonarqube,12391.json,e582be977c992d38fff928388bb1f1ae928fd146,"@@ -1,13 +1,13 @@
+   private Optional<CeQueueDto> tryToPeek(DbSession session, EligibleTaskDto eligible, String workerUuid) {
+     long now = system2.now();
+     int touchedRows = mapper(session).updateIf(eligible.getUuid(),
+       new UpdateIf.NewProperties(IN_PROGRESS, workerUuid, eligible.getExecutionCount() + 1, now, now),
+       new UpdateIf.OldProperties(PENDING, eligible.getExecutionCount()));
+     if (touchedRows != 1) {
+       return Optional.empty();
+     }
+ 
+     CeQueueDto result = mapper(session).selectByUuid(eligible.getUuid());
+     session.commit();
+-    return Optional.of(result);
++    return Optional.ofNullable(result);
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+mainly by removing unused code
+"
+sonarqube,14783.json,1c73879c6bd7bb325e7e95acfadbb8431adc39f3,"@@ -1,18 +1,18 @@
+-  private static Optional<Double> getDoubleValue(Optional<Measure> measureOptional) {
+-    if (!measureOptional.isPresent()) {
+-      return Optional.absent();
+-    }
+-    Measure measure = measureOptional.get();
+-    switch (measure.getValueType()) {
+-      case DOUBLE:
+-        return Optional.of(measure.getDoubleValue());
+-      case LONG:
+-        return Optional.of((double) measure.getLongValue());
+-      case INT:
+-        return Optional.of((double) measure.getIntValue());
+-      case NO_VALUE:
++    private Optional<Double> getDoubleValue(Optional<Measure> measureOptional) {
++      if (!measureOptional.isPresent()) {
+         return Optional.absent();
+-      default:
+-        throw new IllegalArgumentException(String.format(""Measure of type '%s' are not supported"", measure.getValueType().name()));
+-    }
+-  }
+\ No newline at end of file
++      }
++      Measure measure = measureOptional.get();
++      switch (measure.getValueType()) {
++        case DOUBLE:
++          return Optional.of(measure.getDoubleValue());
++        case LONG:
++          return Optional.of((double) measure.getLongValue());
++        case INT:
++          return Optional.of((double) measure.getIntValue());
++        case NO_VALUE:
++          return Optional.absent();
++        default:
++          throw new IllegalArgumentException(String.format(""Measure of type '%s' are not supported"", measure.getValueType().name()));
++      }
++    }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,14622.json,1c73879c6bd7bb325e7e95acfadbb8431adc39f3,"@@ -1,8 +1,8 @@
+-  private static String convertType(Constants.ComponentLinkType reportType) {
+-    String type = typesConverter.get(reportType);
+-    if (type != null) {
+-      return type;
+-    } else {
+-      throw new IllegalArgumentException(String.format(""Unsupported type %s"", reportType.name()));
+-    }
+-  }
+\ No newline at end of file
++    private String convertType(Constants.ComponentLinkType reportType) {
++      String type = typesConverter.get(reportType);
++      if (type != null) {
++        return type;
++      } else {
++        throw new IllegalArgumentException(String.format(""Unsupported type %s"", reportType.name()));
++      }
++    }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,14062.json,1c73879c6bd7bb325e7e95acfadbb8431adc39f3,"@@ -1,6 +1,6 @@
+-  private static String computeRevision(@Nullable Changeset latestChange) {
+-    if (latestChange == null) {
+-      return null;
+-    }
+-    return latestChange.getRevision();
+-  }
+\ No newline at end of file
++    private String computeRevision(@Nullable Changeset latestChange) {
++      if (latestChange == null) {
++        return null;
++      }
++      return latestChange.getRevision();
++    }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,13389.json,1c73879c6bd7bb325e7e95acfadbb8431adc39f3,"@@ -1,16 +1,16 @@
+-  private static DbCommons.TextRange.Builder convertTextRange(BatchReport.TextRange sourceRange) {
+-    DbCommons.TextRange.Builder targetRange = DbCommons.TextRange.newBuilder();
+-    if (sourceRange.hasStartLine()) {
+-      targetRange.setStartLine(sourceRange.getStartLine());
+-    }
+-    if (sourceRange.hasStartOffset()) {
+-      targetRange.setStartOffset(sourceRange.getStartOffset());
+-    }
+-    if (sourceRange.hasEndLine()) {
+-      targetRange.setEndLine(sourceRange.getEndLine());
+-    }
+-    if (sourceRange.hasEndOffset()) {
+-      targetRange.setEndOffset(sourceRange.getEndOffset());
+-    }
+-    return targetRange;
+-  }
+\ No newline at end of file
++    private DbCommons.TextRange.Builder convertTextRange(BatchReport.TextRange sourceRange) {
++      DbCommons.TextRange.Builder targetRange = DbCommons.TextRange.newBuilder();
++      if (sourceRange.hasStartLine()) {
++        targetRange.setStartLine(sourceRange.getStartLine());
++      }
++      if (sourceRange.hasStartOffset()) {
++        targetRange.setStartOffset(sourceRange.getStartOffset());
++      }
++      if (sourceRange.hasEndLine()) {
++        targetRange.setEndLine(sourceRange.getEndLine());
++      }
++      if (sourceRange.hasEndOffset()) {
++        targetRange.setEndOffset(sourceRange.getEndOffset());
++      }
++      return targetRange;
++    }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,1136.json,371ab065edbef2e92b502878eec9a73d310af54b,"@@ -1,3 +1,3 @@
+     public Reader getReader() {
+-      return new StringReader(source_code);
++      return new StringReader(sourceCode);
+     }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,1134.json,371ab065edbef2e92b502878eec9a73d310af54b,"@@ -1,3 +1,3 @@
+     public Reader getReader() {
+-      return new StringReader(source_code);
++      return new StringReader(sourceCode);
+     }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,18140.json,4a108310e196bcff760bc81de326346b1ee4ac4c,"@@ -1,7 +1,7 @@
+   public String toString() {
+     return Objects.toStringHelper(DebtRemediationFunction.class)
+       .add(""type"", type)
+-      .add(""coefficient"", factor)
++      .add(""coefficient"", coefficient)
+       .add(""offset"", offset)
+       .toString();
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,18137.json,4a108310e196bcff760bc81de326346b1ee4ac4c,"@@ -1,21 +1,21 @@
+   private void validate() {
+     switch (type) {
+       case LINEAR:
+-        if (this.factor == null || this.offset != null) {
++        if (this.coefficient == null || this.offset != null) {
+           throw new IllegalArgumentException(String.format(""Only coefficient must be set on %s"", this));
+         }
+         break;
+       case LINEAR_OFFSET:
+-        if (this.factor == null || this.offset == null) {
++        if (this.coefficient == null || this.offset == null) {
+           throw new IllegalArgumentException(String.format(""Both coefficient and offset are required on %s"", this));
+         }
+         break;
+       case CONSTANT_ISSUE:
+-        if (this.factor != null || this.offset == null) {
++        if (this.coefficient != null || this.offset == null) {
+           throw new IllegalArgumentException(String.format(""Only offset must be set on %s"", this));
+         }
+         break;
+       default:
+         throw new IllegalArgumentException(String.format(""Unknown type on %s"", this));
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,18133.json,4a108310e196bcff760bc81de326346b1ee4ac4c,"@@ -1,3 +1,3 @@
+   public String coefficient() {
+-    return factor;
++    return coefficient;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,18138.json,4a108310e196bcff760bc81de326346b1ee4ac4c,"@@ -1,16 +1,14 @@
+   public boolean equals(Object o) {
++    if (!(o instanceof DefaultDebtRemediationFunction)) {
++      return false;
++    }
+     if (this == o) {
+       return true;
+     }
+-    if (o == null || getClass() != o.getClass()) {
+-      return false;
+-    }
+-    DefaultDebtRemediationFunction that = (DefaultDebtRemediationFunction) o;
+-    if (factor != null ? !factor.equals(that.factor) : that.factor != null) {
+-      return false;
+-    }
+-    if (offset != null ? !offset.equals(that.offset) : that.offset != null) {
+-      return false;
+-    }
+-    return type == that.type;
++    DefaultDebtRemediationFunction other = (DefaultDebtRemediationFunction) o;
++    return new EqualsBuilder()
++      .append(coefficient, other.coefficient())
++      .append(offset, other.offset())
++      .append(type, other.type())
++      .isEquals();
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,18139.json,4a108310e196bcff760bc81de326346b1ee4ac4c,"@@ -1,6 +1,6 @@
+   public int hashCode() {
+     int result = type.hashCode();
+-    result = 31 * result + (factor != null ? factor.hashCode() : 0);
++    result = 31 * result + (coefficient != null ? coefficient.hashCode() : 0);
+     result = 31 * result + (offset != null ? offset.hashCode() : 0);
+     return result;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,10480.json,d20f21e4cd409de904ef4a0ae5926b61706b402e,"@@ -1,4 +1,4 @@
+-  public QualityProfileDto setParent(String parent) {
++  public QualityProfileDto setParent(@Nullable String parent) {
+     this.parent = parent;
+     return this;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,10472.json,d20f21e4cd409de904ef4a0ae5926b61706b402e,"@@ -1,4 +1,4 @@
+-  public QualityProfileDto setParent(String parent) {
++  public QualityProfileDto setParent(@Nullable String parent) {
+     this.parent = parent;
+     return this;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,9636.json,d20f21e4cd409de904ef4a0ae5926b61706b402e,"@@ -1,4 +1,4 @@
+-  public QualityProfileDto setParent(String parent) {
++  public QualityProfileDto setParent(@Nullable String parent) {
+     this.parent = parent;
+     return this;
+   }
+\ No newline at end of file
+",NotBuggy,"Fix quality flaws
+"
+sonarqube,19951.json,d102a8a9916bac0ab600cd5e90ba5359766f8d6d,"@@ -1,12 +1,12 @@
+   private void autodetection() {
+-    for (ScmProvider provider : providerPerKey.values()) {
+-      if (provider.supports(projectReactor.getRoot().getBaseDir())) {
++    for (ScmProvider installedProvider : providerPerKey.values()) {
++      if (installedProvider.supports(projectReactor.getRoot().getBaseDir())) {
+         if (this.provider == null) {
+-          this.provider = provider;
++          this.provider = installedProvider;
+         } else {
+-          throw new IllegalStateException(""SCM provider autodetection failed. Both "" + this.provider.key() + "" and "" + provider.key()
++          throw new IllegalStateException(""SCM provider autodetection failed. Both "" + this.provider.key() + "" and "" + installedProvider.key()
+             + "" claim to support this project. Please use "" + CoreProperties.SCM_PROVIDER_KEY + "" to define SCM of your project."");
+         }
+       }
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,19956.json,d102a8a9916bac0ab600cd5e90ba5359766f8d6d,"@@ -1,3 +1,3 @@
+   public void stop() {
+-
++    // Nothing to do
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,4891.json,289be70bf6056b5f3c66a797ecab019891e731d6,"@@ -1,28 +1,30 @@
+   public void handle(Request request, Response response) throws Exception {
+     int pageSize = request.mandatoryParamAsInt(Param.PAGE_SIZE);
+     int page = request.mandatoryParamAsInt(Param.PAGE);
+     String queryString = request.param(Param.TEXT_QUERY);
+     String selected = request.mandatoryParam(Param.SELECTED);
+ 
+     try (DbSession dbSession = dbClient.openSession(false)) {
+       GroupId group = support.findGroup(dbSession, request);
+       userSession.checkPermission(OrganizationPermission.ADMINISTER, group.getOrganizationUuid());
+ 
+       UserMembershipQuery query = UserMembershipQuery.builder()
+         .groupId(group.getId())
+         .organizationUuid(group.getOrganizationUuid())
+         .memberSearch(queryString)
+         .membership(getMembership(selected))
+         .pageIndex(page)
+         .pageSize(pageSize)
+         .build();
+       int total = dbClient.groupMembershipDao().countMembers(dbSession, query);
+       Paging paging = forPageIndex(page).withPageSize(pageSize).andTotal(total);
+       List<UserMembershipDto> users = dbClient.groupMembershipDao().selectMembers(dbSession, query, paging.offset(), paging.pageSize());
+ 
+-      JsonWriter json = response.newJsonWriter().beginObject();
+-      writeMembers(json, users);
+-      writePaging(json, paging);
+-      json.endObject().close();
++      try (JsonWriter json = response.newJsonWriter()) {
++        json.beginObject();
++        writeMembers(json, users);
++        writePaging(json, paging);
++        json.endObject();
++      }
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+"
+sonarqube,2559.json,289be70bf6056b5f3c66a797ecab019891e731d6,"@@ -1,7 +1,9 @@
+   static void writeResponse(BulkChangeResult result, Response response) {
+-    JsonWriter json = response.newJsonWriter().beginObject();
+-    json.prop(""succeeded"", result.countSucceeded());
+-    json.prop(""failed"", result.countFailed());
+-    WebServiceEngine.writeErrors(json, result.getErrors());
+-    json.endObject().close();
++    try (JsonWriter json = response.newJsonWriter()) {
++      json.beginObject();
++      json.prop(""succeeded"", result.countSucceeded());
++      json.prop(""failed"", result.countFailed());
++      WebServiceEngine.writeErrors(json, result.getErrors());
++      json.endObject();
++    }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+"
+sonarqube,18845.json,38e53c0572db4e267a704666cb0d1343992df5e1,"@@ -1,3 +1,3 @@
+-  public void resolveOrder() throws CyclicDependenciesException {
++  public void resolveOrder() {
+     resolveOrder(toString());
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,18846.json,38e53c0572db4e267a704666cb0d1343992df5e1,"@@ -1,19 +1,19 @@
+-  private int resolveOrder(String path) throws CyclicDependenciesException {
++  private int resolveOrder(String path) {
+     seen = true;
+     try {
+       int highOrder = -1;
+       for (Node dep : dependencies) {
+         if (dep.seen) {
+           throw new CyclicDependenciesException(path + "" -> "" + dep.toString());
+         }
+         highOrder = Math.max(highOrder, dep.resolveOrder(path + "" -> "" + dep.toString()));
+ 
+       }
+ 
+       order = highOrder + 1;
+       return order;
+ 
+     } finally {
+       seen = false;
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,8517.json,38e53c0572db4e267a704666cb0d1343992df5e1,"@@ -1,35 +1,33 @@
+   public static Collection<String> listResources(ClassLoader classLoader, String rootPath, Predicate<String> predicate) {
+     try {
+       Collection<String> paths = Lists.newArrayList();
+       rootPath = StringUtils.removeStart(rootPath, ""/"");
+ 
+       URL root = classLoader.getResource(rootPath);
+       if (root != null) {
+-        if (!""jar"".equals(root.getProtocol())) {
+-          throw new IllegalStateException(""Unsupported protocol: "" + root.getProtocol());
+-        }
++        checkJarFile(root);
+ 
+         // Path of the root directory
+         // Examples :
+         // org/sonar/sqale/index.txt  -> rootDirectory is org/sonar/sqale
+         // org/sonar/sqale/  -> rootDirectory is org/sonar/sqale
+         // org/sonar/sqale  -> rootDirectory is org/sonar/sqale
+         String rootDirectory = rootPath;
+         if (StringUtils.substringAfterLast(rootPath, ""/"").indexOf('.') >= 0) {
+           rootDirectory = StringUtils.substringBeforeLast(rootPath, ""/"");
+         }
+         String jarPath = root.getPath().substring(5, root.getPath().indexOf(""!"")); //strip out only the JAR file
+         JarFile jar = new JarFile(URLDecoder.decode(jarPath, CharEncoding.UTF_8));
+         Enumeration<JarEntry> entries = jar.entries();
+         while (entries.hasMoreElements()) {
+           String name = entries.nextElement().getName();
+           if (name.startsWith(rootDirectory) && predicate.apply(name)) {
+             paths.add(name);
+           }
+         }
+       }
+       return paths;
+     } catch (Exception e) {
+       throw Throwables.propagate(e);
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix some quality flaws
+"
+sonarqube,7268.json,fd78d281d57d7b1ffa49d27cd03de39b6a961592,"@@ -1,14 +1,14 @@
+   private UserDto synchronize(String userLogin, UserDetails details, HttpServletRequest request) {
+     String name = details.getName();
+     UserIdentity.Builder userIdentityBuilder = UserIdentity.builder()
+       .setLogin(userLogin)
+-      .setName(isNullOrEmpty(name) ? userLogin : name)
++      .setName(isEmpty(name) ? userLogin : name)
+       .setEmail(trimToNull(details.getEmail()))
+       .setProviderLogin(userLogin);
+     if (externalGroupsProvider != null) {
+       ExternalGroupsProvider.Context context = new ExternalGroupsProvider.Context(userLogin, request);
+       Collection<String> groups = externalGroupsProvider.doGetGroups(context);
+       userIdentityBuilder.setGroups(new HashSet<>(groups));
+     }
+     return userIdentityAuthenticator.authenticate(userIdentityBuilder.build(), new ExternalIdentityProvider());
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+- missing tests for Protobuf
+- remove incorrect imports of org.elasticsearch.common.Strings
+"
+sonarqube,7206.json,fd78d281d57d7b1ffa49d27cd03de39b6a961592,"@@ -1,12 +1,12 @@
+   private static Optional<String> getTokenFromCookie(HttpServletRequest request) {
+     Optional<Cookie> jwtCookie = findCookie(JWT_COOKIE, request);
+     if (!jwtCookie.isPresent()) {
+       return Optional.empty();
+     }
+     Cookie cookie = jwtCookie.get();
+     String token = cookie.getValue();
+-    if (isNullOrEmpty(token)) {
++    if (isEmpty(token)) {
+       return Optional.empty();
+     }
+     return Optional.of(token);
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+- missing tests for Protobuf
+- remove incorrect imports of org.elasticsearch.common.Strings
+"
+sonarqube,3674.json,fd78d281d57d7b1ffa49d27cd03de39b6a961592,"@@ -1,7 +1,7 @@
+   private List<Setting> loadDefaultSettings(Set<String> keys) {
+     return propertyDefinitions.getAll().stream()
+       .filter(definition -> keys.contains(definition.key()))
+-      .filter(defaultProperty -> !isNullOrEmpty(defaultProperty.defaultValue()))
++      .filter(defaultProperty -> !isEmpty(defaultProperty.defaultValue()))
+       .map(Setting::createForDefinition)
+       .collect(Collectors.toList());
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+- missing tests for Protobuf
+- remove incorrect imports of org.elasticsearch.common.Strings
+"
+sonarqube,4743.json,fd78d281d57d7b1ffa49d27cd03de39b6a961592,"@@ -1,8 +1,8 @@
+   private UserDto authenticate(HttpServletRequest request) {
+     String login = request.getParameter(""login"");
+     String password = request.getParameter(""password"");
+-    if (isNullOrEmpty(login) || isNullOrEmpty(password)) {
++    if (isEmpty(login) || isEmpty(password)) {
+       throw new UnauthorizedException();
+     }
+     return credentialsAuthenticator.authenticate(login, password, request);
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+
+- missing tests for Protobuf
+- remove incorrect imports of org.elasticsearch.common.Strings
+"
+sonarqube,20010.json,5e0b742ac8299c7ddcd2bf3dfe682482c4d8eda4,"@@ -1,9 +1,9 @@
+   private static void cleanTempFolders(Path path) throws IOException {
+-    if (Files.exists(path)) {
++    if (path.toFile().exists()) {
+       try (DirectoryStream<Path> stream = Files.newDirectoryStream(path, new CleanFilter())) {
+         for (Path p : stream) {
+           deleteQuietly(p.toFile());
+         }
+       }
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+"
+sonarqube,20011.json,5e0b742ac8299c7ddcd2bf3dfe682482c4d8eda4,"@@ -1,24 +1,24 @@
+     public boolean accept(Path path) throws IOException {
+-      if (!Files.isDirectory(path)) {
++      if (!path.toFile().exists()) {
+         return false;
+       }
+ 
+       if (!path.getFileName().toString().startsWith(TMP_NAME_PREFIX)) {
+         return false;
+       }
+ 
+       long threshold = System.currentTimeMillis() - CLEAN_MAX_AGE;
+ 
+       // we could also check the timestamp in the name, instead
+       BasicFileAttributes attrs;
+ 
+       try {
+         attrs = Files.readAttributes(path, BasicFileAttributes.class);
+       } catch (IOException ioe) {
+         LOG.error(String.format(""Couldn't read file attributes for %s : "", path), ioe);
+         return false;
+       }
+ 
+       long creationTime = attrs.creationTime().toMillis();
+       return creationTime < threshold;
+     }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+"
+sonarqube,8900.json,5e0b742ac8299c7ddcd2bf3dfe682482c4d8eda4,"@@ -1,7 +1,7 @@
+-  public static void main(String[] args) throws Exception {
++  public static void main(String[] args) {
+     ProcessEntryPoint entryPoint = ProcessEntryPoint.createForArguments(args);
+     Props props = entryPoint.getProps();
+     new WebServerProcessLogging().configure(props);
+     WebServer server = new WebServer(props);
+     entryPoint.launch(server);
+   }
+\ No newline at end of file
+",NotBuggy,"Fix Quality flaws
+"
+sonarqube,4469.json,0584dc8d5d5d82a2035763c34afba0e12cf6e8d0,"@@ -1,15 +1,15 @@
+   public void handle(Request wsRequest, Response wsResponse) throws Exception {
+     try (DbSession dbSession = dbClient.openSession(false)) {
+       WsTemplateRef templateRef = WsTemplateRef.fromRequest(wsRequest);
+       PermissionTemplateDto template = support.findTemplate(dbSession, templateRef);
+       checkGlobalAdmin(userSession, template.getOrganizationUuid());
+ 
+       PermissionQuery query = buildPermissionQuery(wsRequest);
+-      int total = dbClient.permissionTemplateDao().countGroupNamesByQueryAndTemplate(dbSession, query, template.getId());
++      int total = dbClient.permissionTemplateDao().countGroupNamesByQueryAndTemplate(dbSession, query, template.getOrganizationUuid(), template.getId());
+       Paging paging = Paging.forPageIndex(wsRequest.mandatoryParamAsInt(PAGE)).withPageSize(wsRequest.mandatoryParamAsInt(PAGE_SIZE)).andTotal(total);
+       List<GroupDto> groups = findGroups(dbSession, query, template);
+       List<PermissionTemplateGroupDto> groupPermissions = findGroupPermissions(dbSession, groups, template);
+       WsPermissions.WsGroupsResponse groupsResponse = buildResponse(groups, groupPermissions, paging);
+       writeProtobuf(groupsResponse, wsRequest, wsResponse);
+     }
+   }
+\ No newline at end of file
+",Buggy,"SONAR-8682 fix error when filtering on name
+
+and a given group name exists in multiple organizations
+"
+sonarqube,12672.json,0584dc8d5d5d82a2035763c34afba0e12cf6e8d0,"@@ -1,3 +1,3 @@
+-  public List<String> selectGroupNamesByQueryAndTemplate(DbSession session, PermissionQuery query, long templateId) {
+-    return mapper(session).selectGroupNamesByQueryAndTemplate(query, templateId, new RowBounds(query.getPageOffset(), query.getPageSize()));
++  public List<String> selectGroupNamesByQueryAndTemplate(DbSession session, PermissionQuery query, String organizationUuid, long templateId) {
++    return mapper(session).selectGroupNamesByQueryAndTemplate(organizationUuid, templateId, query, new RowBounds(query.getPageOffset(), query.getPageSize()));
+   }
+\ No newline at end of file
+",Buggy,"SONAR-8682 fix error when filtering on name
+
+and a given group name exists in multiple organizations
+"
+sonarqube,4472.json,0584dc8d5d5d82a2035763c34afba0e12cf6e8d0,"@@ -1,8 +1,8 @@
+   private List<GroupDto> findGroups(DbSession dbSession, PermissionQuery dbQuery, PermissionTemplateDto template) {
+-    List<String> orderedNames = dbClient.permissionTemplateDao().selectGroupNamesByQueryAndTemplate(dbSession, dbQuery, template.getId());
++    List<String> orderedNames = dbClient.permissionTemplateDao().selectGroupNamesByQueryAndTemplate(dbSession, dbQuery, template.getOrganizationUuid(), template.getId());
+     List<GroupDto> groups = dbClient.groupDao().selectByNames(dbSession, template.getOrganizationUuid(), orderedNames);
+     if (orderedNames.contains(DefaultGroups.ANYONE)) {
+       groups.add(0, new GroupDto().setId(0L).setName(DefaultGroups.ANYONE));
+     }
+     return Ordering.explicit(orderedNames).onResultOf(GroupDto::getName).immutableSortedCopy(groups);
+   }
+\ No newline at end of file
+",Buggy,"SONAR-8682 fix error when filtering on name
+
+and a given group name exists in multiple organizations
+"
+sonarqube,12673.json,0584dc8d5d5d82a2035763c34afba0e12cf6e8d0,"@@ -1,3 +1,3 @@
+-  public int countGroupNamesByQueryAndTemplate(DbSession session, PermissionQuery query, long templateId) {
+-    return mapper(session).countGroupNamesByQueryAndTemplate(query, templateId);
++  public int countGroupNamesByQueryAndTemplate(DbSession session, PermissionQuery query, String organizationUuid, long templateId) {
++    return mapper(session).countGroupNamesByQueryAndTemplate(organizationUuid, query, templateId);
+   }
+\ No newline at end of file
+",Buggy,"SONAR-8682 fix error when filtering on name
+
+and a given group name exists in multiple organizations
+"
+voldemort,9608.json,4a463214895e56db53db78064bde3ebd10b6e949,"@@ -1,8 +1,8 @@
+-    public void recordOpTimeUs(SocketDestination dest, long opTimeUs) {
++    public void recordOpTimeNs(SocketDestination dest, long opTimeNs) {
+         if (dest != null) {
+-            getOrCreateNodeStats(dest).recordOpTimeUs(null, opTimeUs);
+-            recordOpTimeUs(null, opTimeUs);
++            getOrCreateNodeStats(dest).recordOpTimeNs(null, opTimeNs);
++            recordOpTimeNs(null, opTimeNs);
+         } else {
+-            this.opTimeRequestCounter.addRequest(opTimeUs * Time.NS_PER_US);
++            this.opTimeRequestCounter.addRequest(opTimeNs);
+         }
+     }
+\ No newline at end of file
+",Buggy,"Fix time convertion (Nano to micro) bug
+
+Make the method accept nanoseconds to avoid unnecessary
+convertion.
+"
