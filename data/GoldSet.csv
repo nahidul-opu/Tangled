@@ -8348,3 +8348,2516 @@ voldemort,9608.json,4a463214895e56db53db78064bde3ebd10b6e949,"@@ -1,8 +1,8 @@
 Make the method accept nanoseconds to avoid unnecessary
 convertion.
 "
+voldemort,10099.json,84a1b526a2ed4e9c02a778cd6304b3dad62995d5,"@@ -1,58 +1,59 @@
+     public void put(ByteArray key, Versioned<byte[]> value) throws PersistenceFailureException {
+         StoreUtils.assertValidKey(key);
+         boolean doCommit = false;
+         Connection conn = null;
+         PreparedStatement insert = null;
+         PreparedStatement select = null;
+         ResultSet results = null;
+         String insertSql = ""insert into "" + name + "" (key_, version_, value_) values (?, ?, ?)"";
+         String selectSql = ""select key_, version_ from "" + name + "" where key_ = ?"";
+         try {
+             conn = datasource.getConnection();
+             conn.setAutoCommit(false);
+ 
+             // check for superior versions
+             select = conn.prepareStatement(selectSql);
+             select.setBytes(1, key.get());
+             results = select.executeQuery();
+             while(results.next()) {
+                 byte[] thisKey = results.getBytes(""key_"");
+                 VectorClock version = new VectorClock(results.getBytes(""version_""));
+                 Occured occured = value.getVersion().compare(version);
+                 if(occured == Occured.BEFORE)
+                     throw new ObsoleteVersionException(""Attempt to put version ""
+                                                        + value.getVersion()
+                                                        + "" which is superceeded by "" + version
+                                                        + ""."");
+                 else if(occured == Occured.AFTER)
+                     delete(conn, thisKey, version.toBytes());
+             }
+ 
+             // Okay, cool, now put the value
+             insert = conn.prepareStatement(insertSql);
+             insert.setBytes(1, key.get());
+             VectorClock clock = (VectorClock) value.getVersion();
+             insert.setBytes(2, clock.toBytes());
+             insert.setBytes(3, value.getValue());
+             insert.executeUpdate();
++            doCommit = true;
+         } catch(SQLException e) {
+             if(e.getErrorCode() == MYSQL_ERR_DUP_KEY || e.getErrorCode() == MYSQL_ERR_DUP_ENTRY) {
+                 throw new ObsoleteVersionException(""Key or value already used."");
+             } else {
+                 throw new PersistenceFailureException(""Fix me!"", e);
+             }
+         } finally {
+             if(conn != null) {
+                 try {
+                     if(doCommit)
+                         conn.commit();
+                     else
+                         conn.rollback();
+                 } catch(SQLException e) {}
+             }
+             tryClose(results);
+             tryClose(insert);
+             tryClose(select);
+             tryClose(conn);
+         }
+     }
+\ No newline at end of file
+",Buggy,"Fix transactional bug in mysql--transaction must be committed.
+"
+voldemort,10087.json,84a1b526a2ed4e9c02a778cd6304b3dad62995d5,"@@ -1,5 +1,5 @@
+     public void create() {
+-        execute(""create table ""
+-                + getName()
+-                + "" (key_ varbinary(200) not null, version_ varbinary(200) not null, value_ blob, primary key(key_, version_))"");
++        execute(""create table "" + getName()
++                + "" (key_ varbinary(200) not null, version_ varbinary(200) not null, ""
++                + "" value_ blob, primary key(key_, version_)) engine = InnoDB"");
+     }
+\ No newline at end of file
+",NotBuggy,"Fix transactional bug in mysql--transaction must be committed.
+"
+voldemort,8659.json,da027c470c327f2e0759acae2b3b46dfa0b114b2,"@@ -1,15 +1,15 @@
+         void streamingPut(ByteArray key, Versioned<byte[]> value) {
+-            if(overwrite == false) {
+-                dstStreamingClient.streamingPut(key, value);
+-            } else {
++            if(overwrite) {
+                 VectorClock denseClock = VectorClockUtils.makeClockWithCurrentTime(dstServerIds);
+                 Versioned<byte[]> updatedValue = new Versioned<byte[]>(value.getValue(), denseClock);
+                 dstStreamingClient.streamingPut(key, updatedValue);
++            } else {
++                dstStreamingClient.streamingPut(key, value);
+             }
+ 
+             entriesForkLifted++;
+             if(entriesForkLifted % progressOps == 0) {
+                 logger.info(workName + "" fork lifted "" + entriesForkLifted
+                             + "" entries successfully"");
+             }
+         }
+\ No newline at end of file
+",NotBuggy,"Incorporate code review comments
+
+Fix error message
+Change the order of if/else
+"
+voldemort,8669.json,da027c470c327f2e0759acae2b3b46dfa0b114b2,"@@ -1,82 +1,82 @@
+     public static void main(String[] args) throws Exception {
+         OptionParser parser = null;
+         OptionSet options = null;
+         try {
+             parser = getParser();
+             options = parser.parse(args);
+         } catch(Exception oe) {
+             logger.error(""Exception processing command line options"", oe);
+             parser.printHelpOn(System.out);
+             return;
+         }
+ 
+         /* validate options */
+         if(options.has(""help"")) {
+             parser.printHelpOn(System.out);
+             return;
+         }
+ 
+         if(!options.has(""src-url"") || !options.has(""dst-url"")) {
+             logger.error(""Both 'src-url' and 'dst-url' options are mandatory"");
+             parser.printHelpOn(System.out);
+             return;
+         }
+ 
+         String srcBootstrapUrl = (String) options.valueOf(""src-url"");
+         String dstBootstrapUrl = (String) options.valueOf(""dst-url"");
+         int maxPutsPerSecond = DEFAULT_MAX_PUTS_PER_SEC;
+         if(options.has(""max-puts-per-second""))
+             maxPutsPerSecond = (Integer) options.valueOf(""max-puts-per-second"");
+         List<String> storesList = null;
+         if(options.has(""stores"")) {
+             storesList = new ArrayList<String>((List<String>) options.valuesOf(""stores""));
+         }
+         List<Integer> partitions = null;
+         if(options.has(""partitions"")) {
+             partitions = (List<Integer>) options.valuesOf(""partitions"");
+         }
+ 
+         int partitionParallelism = DEFAULT_PARTITION_PARALLELISM;
+         if(options.has(""parallelism"")) {
+             partitionParallelism = (Integer) options.valueOf(""parallelism"");
+         }
+         int progressOps = DEFAULT_PROGRESS_PERIOD_OPS;
+         if(options.has(""progress-period-ops"")) {
+             progressOps = (Integer) options.valueOf(""progress-period-ops"");
+         }
+ 
+         ForkLiftTaskMode mode;
+         mode = ForkLiftTaskMode.primary_resolution;
+         if(options.has(""mode"")) {
+             mode = Utils.getEnumFromString(ForkLiftTaskMode.class, (String) options.valueOf(""mode""));
+             if(mode == null)
+                 mode = ForkLiftTaskMode.primary_resolution;
+ 
+         }
+ 
+         Boolean overwrite = false;
+-        if(options.has(""overwrite"")) {
+-            if(options.hasArgument(""overwrite"")) {
+-                overwrite = (Boolean) options.valueOf(""overwrite"");
++        if(options.has(OVERWRITE_OPTION)) {
++            if(options.hasArgument(OVERWRITE_OPTION)) {
++                overwrite = (Boolean) options.valueOf(OVERWRITE_OPTION);
+             } else {
+                 overwrite = true;
+             }
+         }
+ 
+         if(overwrite) {
+             logger.warn(OVERWRITE_WARNING_MESSAGE);
+         }
+ 
+         ClusterForkLiftTool forkLiftTool = new ClusterForkLiftTool(srcBootstrapUrl,
+                                                                    dstBootstrapUrl,
+                                                                    overwrite,
+                                                                    maxPutsPerSecond,
+                                                                    partitionParallelism,
+                                                                    progressOps,
+                                                                    storesList,
+                                                                    partitions,
+                                                                    mode);
+         forkLiftTool.run();
+         // TODO cleanly shut down the hanging threadpool
+         System.exit(0);
+     }
+\ No newline at end of file
+",NotBuggy,"Incorporate code review comments
+
+Fix error message
+Change the order of if/else
+"
+voldemort,9827.json,8fe6ef89e6f219a246413f918167b573f69e070c,"@@ -1,18 +1,20 @@
+     public boolean delete(ByteArray key, Version version) throws VoldemortException {
+         boolean deleteSuccessful = false;
+         StoreUtils.assertValidKey(key);
+         String keyString = new String(key.get());
+         String initialValue = this.metadataMap.get(keyString);
+         if(initialValue != null) {
+             String removedValue = this.metadataMap.remove(keyString);
+             if(removedValue != null) {
+                 deleteSuccessful = (initialValue.equals(removedValue));
+             }
+         }
+         if(deleteSuccessful) {
+             this.flushData();
+             // Reset the vector clock and persist it.
++            // FIXME this also needs to be done per entry, as opposed to
++            // versioning the file.
+             writeVersion(new VectorClock());
+         }
+         return deleteSuccessful;
+     }
+\ No newline at end of file
+",NotBuggy,"Workaround SystemStore bug and fix quota store inserts
+"
+voldemort,9441.json,e7ecec1bd3dd879221a56714fc774a2001d843e8,"@@ -1,35 +1,36 @@
+     public void run() {
+         Node proxyNode = metadata.getCluster().getNodeById(destinationNode);
+         long startNs = System.nanoTime();
+         try {
+             // TODO there are no retries now if the node we want to write to is
+             // unavailable
+             redirectingStore.checkNodeAvailable(proxyNode);
+             Store<ByteArray, byte[], byte[]> socketStore = redirectingStore.getRedirectingSocketStore(redirectingStore.getName(),
+                                                                                                       destinationNode);
+ 
+             socketStore.put(key, value, transforms);
+             redirectingStore.recordSuccess(proxyNode, startNs);
++            redirectingStore.reportProxyPutSuccess();
+             if(logger.isTraceEnabled()) {
+                 logger.trace(""Proxy write for store "" + redirectingStore.getName() + "" key ""
+-                             + ByteUtils.toBinaryString(key.get()) + "" to destinationNode:""
++                             + ByteUtils.toHexString(key.get()) + "" to destinationNode:""
+                              + destinationNode);
+             }
+         } catch(UnreachableStoreException e) {
+             redirectingStore.recordException(proxyNode, startNs, e);
+             logFailedProxyPutIfNeeded(e);
+         } catch(ObsoleteVersionException ove) {
+             /*
+              * Proxy puts can get an OVE if somehow there are two stealers for
+              * the same proxy node and the other stealer's proxy put already got
+              * tothe proxy node.. This will not result from online put winning,
+              * since we don't issue proxy puts if the proxy node is still a
+              * replica
+              */
+             logFailedProxyPutIfNeeded(ove);
+         } catch(Exception e) {
+             // Just log the key.. Not sure having values in the log is a good
+             // idea.
+             logFailedProxyPutIfNeeded(e);
+         }
+     }
+\ No newline at end of file
+",NotBuggy,"1.Enabling proxy puts by dafault
+2. Bug fix in proxy put stats
+3. Changing order of state change updates for correctness
+4. Setting proxy put tests to do one batch rebalancing
+"
+voldemort,7092.json,e7ecec1bd3dd879221a56714fc774a2001d843e8,"@@ -1,122 +1,150 @@
+     public void rebalanceStateChange(Cluster cluster,
+                                      List<RebalancePartitionsInfo> rebalancePartitionsInfo,
+                                      boolean swapRO,
+                                      boolean changeClusterMetadata,
+                                      boolean changeRebalanceState,
+                                      boolean rollback) {
+         Cluster currentCluster = metadataStore.getCluster();
+ 
+         logger.info(""Server doing rebalance state change with options [ cluster metadata change - ""
+                     + changeClusterMetadata + "" ], [ changing rebalancing state - ""
+                     + changeRebalanceState + "" ], [ changing swapping RO - "" + swapRO
+                     + "" ], [ rollback - "" + rollback + "" ]"");
+ 
+         // Variables to track what has completed
+         List<RebalancePartitionsInfo> completedRebalancePartitionsInfo = Lists.newArrayList();
+         List<String> swappedStoreNames = Lists.newArrayList();
+         boolean completedClusterChange = false;
+         boolean completedRebalanceSourceClusterChange = false;
+         Cluster previousRebalancingSourceCluster = null;
+ 
+         try {
+-            // CHANGE CLUSTER METADATA
+-            if(changeClusterMetadata) {
+-                logger.info(""Switching metadata from "" + currentCluster + "" to "" + cluster);
+-                changeCluster(MetadataStore.CLUSTER_KEY, cluster);
+-                completedClusterChange = true;
+-            }
+ 
+-            // SWAP RO DATA FOR ALL STORES
+-            if(swapRO) {
+-                swapROStores(swappedStoreNames, false);
+-            }
+-
++            /*
++             * Do the rebalancing state changes. It is important that this
++             * happens before the actual cluster metadata is changed. Here's
++             * what could happen otherwise. When a batch completes with
++             * {current_cluster c2, rebalancing_source_cluster c1} and the next
++             * rebalancing state changes it to {current_cluster c3,
++             * rebalancing_source_cluster c2} is set for the next batch, then
++             * there could be a window during which the state is
++             * {current_cluster c3, rebalancing_source_cluster c1}. On the other
++             * hand, when we update the rebalancing source cluster first, there
++             * is a window where the state is {current_cluster c2,
++             * rebalancing_source_cluster c2}, which still fine, because of the
++             * following. Successful completion of a batch means the cluster is
++             * finalized, so its okay to stop proxying based on {current_cluster
++             * c2, rebalancing_source_cluster c1}. And since the cluster
++             * metadata has not yet been updated to c3, the writes will happen
++             * based on c2.
++             * 
++             * Even if some clients have already seen the {current_cluster c3,
++             * rebalancing_source_cluster c2} state from other servers, the
++             * operation will be rejected with InvalidMetadataException since
++             * this server itself is not aware of C3
++             */
+             // CHANGE REBALANCING STATE
+             if(changeRebalanceState) {
+                 try {
+                     previousRebalancingSourceCluster = metadataStore.getRebalancingSourceCluster();
+                     if(!rollback) {
+                         // Save up the current cluster for Redirecting store
++                        logger.info(""Setting rebalancing source cluster xml from ""
++                                    + previousRebalancingSourceCluster + ""to "" + currentCluster);
+                         changeCluster(MetadataStore.REBALANCING_SOURCE_CLUSTER_XML, currentCluster);
+                         completedRebalanceSourceClusterChange = true;
+ 
+                         for(RebalancePartitionsInfo info: rebalancePartitionsInfo) {
+                             metadataStore.addRebalancingState(info);
+                             completedRebalancePartitionsInfo.add(info);
+                         }
+                     } else {
+                         // Reset the rebalancing source cluster back to null
++                        logger.info(""Resetting rebalancing source cluster xml from ""
++                                    + previousRebalancingSourceCluster + ""to null"");
+                         changeCluster(MetadataStore.REBALANCING_SOURCE_CLUSTER_XML, null);
+                         completedRebalanceSourceClusterChange = true;
+ 
+                         for(RebalancePartitionsInfo info: rebalancePartitionsInfo) {
+                             metadataStore.deleteRebalancingState(info);
+                             completedRebalancePartitionsInfo.add(info);
+                         }
+                     }
+                 } catch(Exception e) {
+                     throw new VoldemortException(e);
+                 }
+             }
++
++            // CHANGE CLUSTER METADATA
++            if(changeClusterMetadata) {
++                logger.info(""Switching metadata from "" + currentCluster + "" to "" + cluster);
++                changeCluster(MetadataStore.CLUSTER_KEY, cluster);
++                completedClusterChange = true;
++            }
++
++            // SWAP RO DATA FOR ALL STORES
++            if(swapRO) {
++                swapROStores(swappedStoreNames, false);
++            }
+         } catch(VoldemortException e) {
+ 
+             logger.error(""Got exception while changing state, now rolling back changes"", e);
+ 
+             // ROLLBACK CLUSTER CHANGE
+             if(completedClusterChange) {
+                 try {
+                     logger.info(""Rolling back cluster.xml to "" + currentCluster);
+                     changeCluster(MetadataStore.CLUSTER_KEY, currentCluster);
+                 } catch(Exception exception) {
+                     logger.error(""Error while rolling back cluster metadata to "" + currentCluster,
+                                  exception);
+                 }
+             }
+ 
+             // SWAP RO DATA FOR ALL COMPLETED STORES
+             if(swappedStoreNames.size() > 0) {
+                 try {
+                     swapROStores(swappedStoreNames, true);
+                 } catch(Exception exception) {
+                     logger.error(""Error while swapping back to old state "", exception);
+                 }
+             }
+ 
+             // CHANGE BACK ALL REBALANCING STATES FOR COMPLETED ONES
+             if(completedRebalancePartitionsInfo.size() > 0) {
+                 if(!rollback) {
+                     for(RebalancePartitionsInfo info: completedRebalancePartitionsInfo) {
+                         try {
+                             metadataStore.deleteRebalancingState(info);
+                         } catch(Exception exception) {
+                             logger.error(""Error while deleting back rebalance info during error rollback ""
+                                                  + info,
+                                          exception);
+                         }
+                     }
+                 } else {
+                     for(RebalancePartitionsInfo info: completedRebalancePartitionsInfo) {
+                         try {
+                             metadataStore.addRebalancingState(info);
+                         } catch(Exception exception) {
+                             logger.error(""Error while adding back rebalance info during error rollback ""
+                                                  + info,
+                                          exception);
+                         }
+                     }
+                 }
+ 
+             }
+ 
+             // Revert changes to REBALANCING_SOURCE_CLUSTER_XML
+             if(completedRebalanceSourceClusterChange) {
+                 logger.info(""Reverting the REBALANCING_SOURCE_CLUSTER_XML back to ""
+                             + previousRebalancingSourceCluster);
+                 changeCluster(MetadataStore.REBALANCING_SOURCE_CLUSTER_XML,
+                               previousRebalancingSourceCluster);
+             }
+ 
+             throw e;
+         }
+ 
+     }
+\ No newline at end of file
+",Buggy,"1.Enabling proxy puts by dafault
+2. Bug fix in proxy put stats
+3. Changing order of state change updates for correctness
+4. Setting proxy put tests to do one batch rebalancing
+"
+voldemort,9466.json,e7ecec1bd3dd879221a56714fc774a2001d843e8,"@@ -1,4 +1,3 @@
+     protected void recordSuccess(Node node, long startNs) {
+-        proxyPutStats.reportProxyPutCompletion();
+         failureDetector.recordSuccess(node, (System.nanoTime() - startNs) / Time.NS_PER_MS);
+     }
+\ No newline at end of file
+",Buggy,"1.Enabling proxy puts by dafault
+2. Bug fix in proxy put stats
+3. Changing order of state change updates for correctness
+4. Setting proxy put tests to do one batch rebalancing
+"
+voldemort,8840.json,e0707033c5a5c63fd044a59e7ee4055453334a01,"@@ -1,13 +1,11 @@
+     public int getCheckedInResourcesCount(K key) {
+-        int rc = 0;
+-        if(!resourcePoolMap.containsKey(key)) {
+-            return rc;
++        if(resourcePoolMap.containsKey(key)) {
++            try {
++                Pool<V> resourcePool = getResourcePoolForExistingKey(key);
++                return resourcePool.queue.size();
++            } catch(IllegalArgumentException iae) {
++                logger.debug(""getCheckedInResourceCount called on invalid key: "", iae);
++            }
+         }
+-        try {
+-            Pool<V> resourcePool = getResourcePoolForExistingKey(key);
+-            rc = resourcePool.queue.size();
+-        } catch(IllegalArgumentException iae) {
+-            logger.debug(""getCheckedInResourceCount called on invalid key: "", iae);
+-        }
+-        return rc;
++        return 0;
+     }
+\ No newline at end of file
+",NotBuggy,"Clean up get stats methods in (Queued)KeyedResourcePool. Fix error in test case.
+"
+voldemort,8883.json,e0707033c5a5c63fd044a59e7ee4055453334a01,"@@ -1,14 +1,12 @@
+     public int getRegisteredResourceRequestCount(K key) {
+-        int rc = 0;
+-        if(!requestQueueMap.containsKey(key)) {
+-            return rc;
++        if(requestQueueMap.containsKey(key)) {
++            try {
++                Queue<AsyncResourceRequest<V>> requestQueue = getRequestQueueForExistingKey(key);
++                // FYI: .size() is not constant time in the next call. ;)
++                return requestQueue.size();
++            } catch(IllegalArgumentException iae) {
++                logger.debug(""getRegisteredResourceRequestCount called on invalid key: "", iae);
++            }
+         }
+-        try {
+-            Queue<AsyncResourceRequest<V>> requestQueue = getRequestQueueForExistingKey(key);
+-            // FYI: .size() is not constant time in the next call. ;)
+-            rc = requestQueue.size();
+-        } catch(IllegalArgumentException iae) {
+-            logger.debug(""getRegisteredResourceRequestCount called on invalid key: "", iae);
+-        }
+-        return rc;
++        return 0;
+     }
+\ No newline at end of file
+",NotBuggy,"Clean up get stats methods in (Queued)KeyedResourcePool. Fix error in test case.
+"
+voldemort,8838.json,e0707033c5a5c63fd044a59e7ee4055453334a01,"@@ -1,13 +1,11 @@
+     public int getTotalResourceCount(K key) {
+-        int rc = 0;
+-        if(!resourcePoolMap.containsKey(key)) {
+-            return rc;
++        if(resourcePoolMap.containsKey(key)) {
++            try {
++                Pool<V> resourcePool = getResourcePoolForExistingKey(key);
++                return resourcePool.size.get();
++            } catch(IllegalArgumentException iae) {
++                logger.debug(""getTotalResourceCount called on invalid key: "", iae);
++            }
+         }
+-        try {
+-            Pool<V> resourcePool = getResourcePoolForExistingKey(key);
+-            rc = resourcePool.size.get();
+-        } catch(IllegalArgumentException iae) {
+-            logger.debug(""getTotalResourceCount called on invalid key: "", iae);
+-        }
+-        return rc;
++        return 0;
+     }
+\ No newline at end of file
+",NotBuggy,"Clean up get stats methods in (Queued)KeyedResourcePool. Fix error in test case.
+"
+voldemort,8842.json,e0707033c5a5c63fd044a59e7ee4055453334a01,"@@ -1,13 +1,11 @@
+     public int getBlockingGetsCount(K key) {
+-        int rc = 0;
+-        if(!resourcePoolMap.containsKey(key)) {
+-            return rc;
++        if(resourcePoolMap.containsKey(key)) {
++            try {
++                Pool<V> resourcePool = getResourcePoolForExistingKey(key);
++                return resourcePool.blockingGets.get();
++            } catch(IllegalArgumentException iae) {
++                logger.debug(""getBlockingGetsCount called on invalid key: "", iae);
++            }
+         }
+-        try {
+-            Pool<V> resourcePool = getResourcePoolForExistingKey(key);
+-            rc = resourcePool.blockingGets.get();
+-        } catch(IllegalArgumentException iae) {
+-            logger.debug(""getBlockingGetsCount called on invalid key: "", iae);
+-        }
+-        return rc;
++        return 0;
+     }
+\ No newline at end of file
+",NotBuggy,"Clean up get stats methods in (Queued)KeyedResourcePool. Fix error in test case.
+"
+voldemort,532.json,81f0a160898ca88338ebf4834f7f1fd07f66c63b,"@@ -1,14 +1,18 @@
+     public RebalancePlan getPlan(Cluster finalCluster,
+                                  List<StoreDefinition> finalStoreDefs,
+                                  int batchSize) {
+         RebalanceUtils.validateClusterStores(finalCluster, finalStoreDefs);
+         RebalanceUtils.validateCurrentFinalCluster(currentCluster, finalCluster);
+ 
++        // TODO: (currentCluster vs interimCluster) Add more validation before
++        // constructing plan? Given that currentCluster was polled from prod
++        // cluster, should confirm that it is an ""interim cluster"" i.e., has
++        // same (superset?) of nodes as are in finalCluster.
+         String outputDir = null;
+         return new RebalancePlan(currentCluster,
+                                  currentStoreDefs,
+                                  finalCluster,
+                                  finalStoreDefs,
+                                  batchSize,
+                                  outputDir);
+     }
+\ No newline at end of file
+",NotBuggy,"Fix some bugs I introduced and added more TODOs
+
+Fixed overflow introduced in AdminClient.waitForCompletion by passing in
+Long.MAX_VALUE for duration.
+
+Verify cluster store definition in StoreRoutingPlan. This requires
+working around existing problems with how system stores are handled (the
+store definition is hard-coded for two zones). Left some TODOs about
+testing and fixing all of this.
+
+Added TODOs about currentCluster vs interimCluster. Need to tweak
+interface to RebalanceController and RebalancePlan to be consistent with
+recommended usage (i.e., deploying interimCluster before starting
+rebalance).
+
+Minor tweaks to tests based on above changes.
+"
+voldemort,887.json,81f0a160898ca88338ebf4834f7f1fd07f66c63b,"@@ -1,3 +1,3 @@
+         public String waitForCompletion(int nodeId, int requestId) {
+-            return waitForCompletion(nodeId, requestId, Long.MAX_VALUE, TimeUnit.SECONDS, null);
++            return waitForCompletion(nodeId, requestId, 0, TimeUnit.SECONDS, null);
+         }
+\ No newline at end of file
+",Buggy,"Fix some bugs I introduced and added more TODOs
+
+Fixed overflow introduced in AdminClient.waitForCompletion by passing in
+Long.MAX_VALUE for duration.
+
+Verify cluster store definition in StoreRoutingPlan. This requires
+working around existing problems with how system stores are handled (the
+store definition is hard-coded for two zones). Left some TODOs about
+testing and fixing all of this.
+
+Added TODOs about currentCluster vs interimCluster. Need to tweak
+interface to RebalanceController and RebalancePlan to be consistent with
+recommended usage (i.e., deploying interimCluster before starting
+rebalance).
+
+Minor tweaks to tests based on above changes.
+"
+voldemort,54.json,0b2ef083f53872f2686e10990e3586177c693bd6,"@@ -1,39 +1,42 @@
+     public void reduce(BytesWritable key,
+                        Iterator<BytesWritable> values,
+                        OutputCollector<Text, Text> output,
+                        Reporter reporter) throws IOException {
+         BytesWritable writable = values.next();
+         byte[] valueBytes = writable.get();
+ 
+         if(this.nodeId == -1)
+             this.nodeId = ByteUtils.readInt(valueBytes, 0);
+         if(this.chunkId == -1)
+             this.chunkId = ReadOnlyUtils.chunk(key.get(), this.numChunks);
+ 
+         // Write key and position
+         this.indexFileStream.write(key.get(), 0, key.getSize());
+-        this.checkSumDigestIndex.update(key.get(), 0, key.getSize());
+         this.indexFileStream.writeInt(this.position);
+-        this.checkSumDigestIndex.update(this.position);
++        if(this.checkSumDigestIndex != null) {
++            this.checkSumDigestIndex.update(key.get(), 0, key.getSize());
++            this.checkSumDigestIndex.update(this.position);
++        }
+ 
+         // Write length and value
+         int valueLength = writable.getSize() - 4;
+         this.valueFileStream.writeInt(valueLength);
+-        this.checkSumDigestValue.update(valueLength);
+         this.valueFileStream.write(valueBytes, 4, valueLength);
+-        this.checkSumDigestValue.update(valueBytes, 4, valueLength);
+-
++        if(this.checkSumDigestValue != null) {
++            this.checkSumDigestValue.update(valueLength);
++            this.checkSumDigestValue.update(valueBytes, 4, valueLength);
++        }
+         this.position += 4 + valueLength;
+         if(this.position < 0)
+             throw new VoldemortException(""Chunk overflow exception: chunk "" + chunkId
+                                          + "" has exceeded "" + Integer.MAX_VALUE + "" bytes."");
+ 
+         // if we have multiple values for this md5 that is a collision, throw an
+         // exception--either the data itself has duplicates, there are trillions
+         // of keys, or someone is attempting something malicious
+         if(values.hasNext())
+             throw new VoldemortException(""Duplicate keys detected for md5 sum ""
+                                          + ByteUtils.toHexString(ByteUtils.copy(key.get(),
+                                                                                 0,
+                                                                                 key.getSize())));
+     }
+\ No newline at end of file
+",Buggy,"Fixed minor bug which returns NPE when Checksum is None
+"
+voldemort,10530.json,0b2ef083f53872f2686e10990e3586177c693bd6,"@@ -1,10 +1,12 @@
+     public static String toString(CheckSumType type) {
+         if(type == CheckSumType.ADLER32) {
+             return ""adler32"";
+         } else if(type == CheckSumType.CRC32) {
+             return ""crc32"";
+         } else if(type == CheckSumType.MD5) {
+             return ""md5"";
++        } else if(type == CheckSumType.NONE) {
++            return ""none"";
+         }
+-        return null;
++        return ""none"";
+     }
+\ No newline at end of file
+",NotBuggy,"Fixed minor bug which returns NPE when Checksum is None
+"
+weka,27677.json,29dadd8d55df37a7a89f355922eb92adc307f713,"@@ -1,27 +1,26 @@
+   private double instanceTransformationProbability(Instance first, 
+ 						   Instance second) {
+     String debug = ""(KStar.instanceTransformationProbability) "";
+     double transProb = 1.0;
+     int numMissAttr = 0;
+     for (int i = 0; i < m_NumAttributes; i++) {
+       if (i == m_Train.classIndex()) {
+ 	continue; // ignore class attribute
+       }
+       if (first.isMissing(i)) { // test instance attribute value is missing
+ 	numMissAttr++;
+ 	continue;
+       }
+       transProb *= attrTransProb(first, second, i);
+       // normilize for missing values
+       if (numMissAttr != m_NumAttributes) {
+-	// I don't know where this comes from!!!
+ 	transProb = Math.pow(transProb, (double)m_NumAttributes / 
+ 			     (m_NumAttributes - numMissAttr));
+       }
+       else { // weird case!
+ 	transProb = 0.0;
+       }
+     }
+     // normilize for the train dataset
+      return transProb / m_NumInstances;
+   }
+\ No newline at end of file
+",NotBuggy,"Fixed bug that prevented correct initialization for -E option during incremental
+training.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@445 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,27694.json,29dadd8d55df37a7a89f355922eb92adc307f713,"@@ -1,3 +1,4 @@
+   private void update_m_Attributes() {
+     m_NumInstances = m_Train.numInstances();
++    m_InitFlag = ON;
+   }
+\ No newline at end of file
+",Buggy,"Fixed bug that prevented correct initialization for -E option during incremental
+training.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@445 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,31023.json,91f37b47e0458a307defac739c4967d86935770c,"@@ -1,13 +1,14 @@
+   public void setSource(InputStream input) throws IOException {
+     BufferedReader	reader;
+     String		line;
+     
+     m_structure    = null;
+     m_sourceFile   = null;
+     m_File         = null;
+ 
+     m_StreamBuffer = new StringBuffer();
+     reader         = new BufferedReader(new InputStreamReader(input));
+-    while ((line = reader.readLine()) != null)
++    while ((line = reader.readLine()) != null) {
+       m_StreamBuffer.append(line + ""\n"");
++    }
+   }
+\ No newline at end of file
+",NotBuggy,"Moved some code from setSource in ArffLoader to AbstractFileLoader so that other Loaders can handle gzip compression. Fixed bug in CSVLoader that was causing the source file to be loaded twice into the StringBuffer
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@4322 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,30923.json,91f37b47e0458a307defac739c4967d86935770c,"@@ -1,18 +1,22 @@
+   public void setSource(File file) throws IOException {
+     m_structure = null;
++    
+     setRetrieval(NONE);
+ 
+-    if (file == null) {
++    if (file == null)
+       throw new IOException(""Source file object is null!"");
+-    }
+ 
+     try {
+-      setSource(new FileInputStream(file));
++      if (file.getName().endsWith(getFileExtension() + FILE_EXTENSION_COMPRESSED)) {
++	setSource(new GZIPInputStream(new FileInputStream(file)));
++      } else {
++	setSource(new FileInputStream(file));
++      }
+     }
+     catch (FileNotFoundException ex) {
+       throw new IOException(""File not found"");
+     }
+-
++    
+     m_sourceFile = file;
+     m_File       = file.getAbsolutePath();
+-  }
+\ No newline at end of file
++    }
+\ No newline at end of file
+",Buggy,"Moved some code from setSource in ArffLoader to AbstractFileLoader so that other Loaders can handle gzip compression. Fixed bug in CSVLoader that was causing the source file to be loaded twice into the StringBuffer
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@4322 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,11692.json,38a69e67c3d1f3dcb2e0c53e54f54b37ff25a090,"@@ -1,53 +1,52 @@
+ 	public void drawGraph() {
+ 		// build the panel
+ 		try {
+ 		  remove(canvas3D);
+-		  System.out.println(""remove ok"");	
+ 		
+ 		} catch (Exception e) {
+ 		}
+ //		if (!m_canvasCreated) {
+ 		  canvas3D = new Canvas3D(SimpleUniverse.getPreferredConfiguration());
+ //		}
+ 
+ 		int scrHeight = (new Double(this.getSize().getHeight())).intValue();
+ 		int scrWidth = (new Double(this.getSize().getWidth())).intValue();
+ 		
+ 		canvas3D.setSize(scrWidth - 120, scrHeight - 50);
+ 		
+ //		if (!m_canvasCreated) {
+ 		add(canvas3D, java.awt.BorderLayout.CENTER);
+ 		m_canvasCreated = true;
+ //		}
+ 		
+ 		freeResources();				
+ 		
+ 		// build the visualisation
+                 m_scene = createSceneGraph();
+ 
+                 // compile the scene
+                 m_scene.compile();
+ 
+ 	        // build the universe
+ 		m_simpleU = new SimpleUniverse(canvas3D);
+ 
+ 
+ 		// add the behaviors to the ViewingPlatform
+ 		ViewingPlatform viewingPlatform = m_simpleU.getViewingPlatform();
+ 
+ 		viewingPlatform.setNominalViewingTransform();
+ 
+ 		// add orbit behavior to ViewingPlatform
+ 		orbit =
+ 			new OrbitBehavior(
+ 				canvas3D,
+ 				OrbitBehavior.REVERSE_ALL | OrbitBehavior.STOP_ZOOM);
+ 		BoundingSphere bounds =
+ 			new BoundingSphere(new Point3d(0.0, 0.0, 0.0), 100.0);
+ 		orbit.setSchedulingBounds(bounds);
+ 		viewingPlatform.setViewPlatformBehavior(orbit);
+ 		
+ 
+ 		m_simpleU.addBranchGraph(m_scene);
+ 
+ 	}
+\ No newline at end of file
+",NotBuggy,"Fixed a refresh bug that prevented the switching back to the rules selection tab from the 3D viewer tab. Now depends on the scatterPlot3D package for the Java3D libraries
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@12305 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,11730.json,38a69e67c3d1f3dcb2e0c53e54f54b37ff25a090,"@@ -1,23 +1,37 @@
+ 	private void panelChanged() {
+ 		int numTab = viewerTabbedPanel.getSelectedIndex();
+ 		visu1Rules = selectionPanel.getSelectedRules(1);
+ /*		visu2Rules = selectionPanel.getSelectedRules(2);
+ 		visu3Rules = selectionPanel.getSelectedRules(3); */
+ 
+ 		switch (numTab) {
++		case 0:
++			visu1PanelHolder.removeAll();
++			visu1PanelHolder.revalidate();
++			visu1PanelHolder.repaint();
++			break;
+ 			case 1 :
++				visu1PanelHolder.add(visu1Panel3D, BorderLayout.CENTER);
++				revalidate();
++				repaint();
+ 				String[] selectedCriteria =
+ 					selectionPanel.getSelectedCriteria();
+ 				visu1Panel3D.setData(visu1Rules, selectedCriteria);
+ //				visu1Panel.setSelectedRules(visu2Rules);
+ 				break;
+ 			case 2 :
+ 				visu2Panel.setData(visu2Rules, criteres);
+ 				visu2Panel.setSelectedRules(visu3Rules);
++				visu1PanelHolder.removeAll();
++				visu1PanelHolder.revalidate();
++				visu1PanelHolder.repaint();
+ 				break;
+ 			case 3 :
+ 				visu3Panel.setData(visu3Rules);
++				visu1PanelHolder.removeAll();
++				visu1PanelHolder.revalidate();
++				visu1PanelHolder.repaint();
+ 				break;
+ 		}
+ 
+ 	}
+\ No newline at end of file
+",Buggy,"Fixed a refresh bug that prevented the switching back to the rules selection tab from the 3D viewer tab. Now depends on the scatterPlot3D package for the Java3D libraries
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@12305 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,11722.json,38a69e67c3d1f3dcb2e0c53e54f54b37ff25a090,"@@ -1,114 +1,115 @@
+ 	private void initComponents() {
+ 	    setLayout(new java.awt.BorderLayout());
+ 		viewerTabbedPanel = new javax.swing.JTabbedPane();
+ 		selectionPanel = new selection.SelectionPanel();
+ 		visu1Panel3D = new Panel3D();
++		visu1PanelHolder.add(visu1Panel3D, BorderLayout.CENTER);
+ 		/*visu1Panel = new RulesSelectionPanel(visu1Panel3D);
+ 		visu1Panel.addActionListener(this); */
+ /*		visu2PanelLine = new PanelLine();
+ 		visu2Panel = new RulesSelectionPanel(visu2PanelLine);
+ 		visu2Panel.setSingleSelection();
+ 		visu2Panel.addActionListener(this);
+ 		visu2Panel.setColored();
+ 		visu3Panel = new visu3.PanelDDecker(); */
+ 		// viewerBar = new javax.swing.JMenuBar();
+ /*		fileMenu = new javax.swing.JMenu();
+ 		openItem = new javax.swing.JMenuItem();
+ 		printItem = new javax.swing.JMenuItem();
+ 		saveItem = new javax.swing.JMenuItem();
+ 		quitItem = new javax.swing.JMenuItem();
+ 		helpMenu = new javax.swing.JMenu();
+ 		aboutItem = new javax.swing.JMenuItem();
+ 		contentsItem = new javax.swing.JMenuItem(); */
+ 
+ 		selectionPanel.addMultipleListSelectionListener(this);
+ 
+ //		setTitle(""Association Rules Viewer"");
+ /*		addWindowListener(new java.awt.event.WindowAdapter() {
+ 			public void windowClosing(java.awt.event.WindowEvent evt) {
+ 				exitForm(evt);
+ 			}
+ 		}); */
+ 
+ 		viewerTabbedPanel.addChangeListener(new ChangeListener() {
+ 			public void stateChanged(ChangeEvent e) {
+ 				panelChanged();
+ 			}
+ 
+ 		});
+ 
+ 		viewerTabbedPanel.addTab(""Selection"", selectionPanel);
+-		viewerTabbedPanel.addTab(""3D Representation"", visu1Panel3D);
++		viewerTabbedPanel.addTab(""3D Representation"", visu1PanelHolder);
+ 		/*viewerTabbedPanel.addTab(""N Dimensional Line"", visu2Panel);
+ 		viewerTabbedPanel.addTab(""Double Decker Plot"", visu3Panel); */
+ 
+ 		viewerTabbedPanel.setEnabledAt(1, false);
+ 		// viewerTabbedPanel.setEnabledAt(2, false);
+ //		viewerTabbedPanel.setEnabledAt(3, false);
+ 
+ 		add(viewerTabbedPanel, java.awt.BorderLayout.CENTER);
+ 
+ /*		fileMenu.setText(""File"");
+ 		openItem.setText(""Open"");
+ 		openItem.addActionListener(new java.awt.event.ActionListener() {
+ 			public void actionPerformed(java.awt.event.ActionEvent evt) {
+ 				openPerformed(evt);
+ 			}
+ 		});
+ 
+ 		fileMenu.add(openItem);
+ 
+ 		printItem.setText(""Print"");
+ 		printItem.addActionListener(new java.awt.event.ActionListener() {
+ 			public void actionPerformed(java.awt.event.ActionEvent evt) {
+ 				printPerformed(evt);
+ 			}
+ 		});
+ 
+ 		fileMenu.add(printItem);
+ 
+ 		saveItem.setText(""Save as"");
+ 		saveItem.addActionListener(new java.awt.event.ActionListener() {
+ 			public void actionPerformed(java.awt.event.ActionEvent evt) {
+ 				savePerformed(evt);
+ 			}
+ 		});
+ 
+ 		fileMenu.add(saveItem);
+ 
+ 		quitItem.setText(""Quit"");
+ 		quitItem.addActionListener(new java.awt.event.ActionListener() {
+ 			public void actionPerformed(java.awt.event.ActionEvent evt) {
+ 				quitPerformed(evt);
+ 			}
+ 		});
+ 
+ 		fileMenu.add(quitItem);
+ 
+ 		viewerBar.add(fileMenu);
+ 
+ 		helpMenu.setText(""Help"");
+ 		aboutItem.setText(""About"");
+ 		aboutItem.addActionListener(new java.awt.event.ActionListener() {
+ 			public void actionPerformed(java.awt.event.ActionEvent evt) {
+ 				showAbout(evt);
+ 			}
+ 		});
+ 
+ 		helpMenu.add(aboutItem);
+ 
+ 		contentsItem.setText(""Contents"");
+ 		contentsItem.addActionListener(new java.awt.event.ActionListener() {
+ 			public void actionPerformed(java.awt.event.ActionEvent evt) {
+ 				showHelp(evt);
+ 			}
+ 		});
+ 
+ 		helpMenu.add(contentsItem);
+ 
+ 		viewerBar.add(helpMenu);
+ 
+ 		setJMenuBar(viewerBar);
+ 
+ 		pack(); */
+ 	}
+\ No newline at end of file
+",Buggy,"Fixed a refresh bug that prevented the switching back to the rules selection tab from the 3D viewer tab. Now depends on the scatterPlot3D package for the Java3D libraries
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@12305 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,28529.json,c34e6f5c40e4a29dfcedb4b3333188288fb79717,"@@ -1,11 +1,12 @@
+     public static void main(String[] args) {
+         try {
++	    System.err.println(""okidoki"");
+             BIFReader br = new BIFReader();
+             br.processFile(args[0]);
+ 	    System.out.println(br.toString());
+         
+         }
+         catch (Throwable t) {
+             t.printStackTrace();
+         }
+     } // main
+\ No newline at end of file
+",NotBuggy,"Bug fix spotted by Gladys Castillo Jordan
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2176 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,28685.json,c34e6f5c40e4a29dfcedb4b3333188288fb79717,"@@ -1,10 +1,10 @@
+     public Enumeration listOptions() {
+         Vector newVector = new Vector(4);
+ 
+-        newVector.addElement(new Option(""\tUse ADTree data structure\n"", ""D"", 0, ""-D""));
++        newVector.addElement(new Option(""\tDo not use ADTree data structure\n"", ""D"", 0, ""-D""));
+         newVector.addElement(new Option(""\tBIF file to compare with\n"", ""B"", 1, ""-B <BIF file>""));
+         newVector.addElement(new Option(""\tSearch algorithm\n"", ""Q"", 1, ""-Q weka.classifiers.bayes.net.search.SearchAlgorithm""));
+         newVector.addElement(new Option(""\tEstimator algorithm\n"", ""E"", 1, ""-E weka.classifiers.bayes.net.estimate.SimpleEstimator""));
+ 
+         return newVector.elements();
+     } // listOptions
+\ No newline at end of file
+",Buggy,"Bug fix spotted by Gladys Castillo Jordan
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2176 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,28381.json,c34e6f5c40e4a29dfcedb4b3333188288fb79717,"@@ -1,40 +1,41 @@
+ 	public double kFoldCV(BayesNet bayesNet, int nNrOfFolds) throws Exception {
+ 		m_BayesNet = bayesNet;
+ 		double fAccuracy = 0.0;
+ 		double fWeight = 0.0;
+ 		Instances instances = bayesNet.m_Instances;
+ 		// estimate CPTs based on complete data set
+ 		bayesNet.estimateCPTs();
+ 		int nFoldStart = 0;
+ 		int nFoldEnd = instances.numInstances() / nNrOfFolds;
+ 		int iFold = 1;
+ 		while (nFoldStart < instances.numInstances()) {
+ 			// remove influence of fold iFold from the probability distribution
+ 			for (int iInstance = nFoldStart; iInstance < nFoldEnd; iInstance++) {
+ 				Instance instance = instances.instance(iInstance);
+ 				instance.setWeight(-instance.weight());
+ 				bayesNet.updateClassifier(instance);
+ 			}
+ 			
+ 			// measure accuracy on fold iFold
+ 			for (int iInstance = nFoldStart; iInstance < nFoldEnd; iInstance++) {
+ 				Instance instance = instances.instance(iInstance);
+ 				instance.setWeight(-instance.weight());
+ 				fAccuracy += accuracyIncrease(instance);
++				instance.setWeight(-instance.weight());
+ 				fWeight += instance.weight();
+ 			}
+ 
+ 			// restore influence of fold iFold from the probability distribution
+ 			for (int iInstance = nFoldStart; iInstance < nFoldEnd; iInstance++) {
+ 				Instance instance = instances.instance(iInstance);
+ 				instance.setWeight(-instance.weight());
+ 				bayesNet.updateClassifier(instance);
+ 			}
+ 
+ 			// go to next fold
+ 			nFoldStart = nFoldEnd;
+ 			iFold++;
+ 			nFoldEnd = iFold * instances.numInstances() / nNrOfFolds;
+ 		}
+ 		return fAccuracy / fWeight;
+ 	} // kFoldCV
+\ No newline at end of file
+",Buggy,"Bug fix spotted by Gladys Castillo Jordan
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2176 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,25948.json,449c6a2d0acb111174652c53dff0960ed4f6e606,"@@ -1,61 +1,57 @@
+   private double findSplitNominalNominal(int index) throws Exception {
+ 
+     double bestVal = Double.MAX_VALUE, currVal;
+     double[][] counts = new double[theInstances.attribute(index).numValues() 
+ 				  + 1][theInstances.numClasses()];
+     double[] sumCounts = new double[theInstances.numClasses()];
+     double[][] bestDist = new double[3][theInstances.numClasses()];
+     int numMissing = 0;
+ 
+     // Compute counts for all the values
+-
+     for (int i = 0; i < theInstances.numInstances(); i++) {
+       Instance inst = theInstances.instance(i);
+       if (inst.isMissing(index)) {
+ 	numMissing++;
+ 	counts[theInstances.attribute(index).numValues()]
+ 	  [(int)inst.classValue()] += inst.weight();
+       } else {
+ 	counts[(int)inst.value(index)][(int)inst.classValue()] += inst
+ 	  .weight();
+       }
+     }
+ 
+     // Compute sum of counts
+-
+     for (int i = 0; i < theInstances.attribute(index).numValues() + 1; i++) {
+       for (int j = 0; j < theInstances.numClasses(); j++) {
+ 	sumCounts[j] += counts[i][j];
+       }
+     }
+     
+     // Make split counts for each possible split and evaluate
+-
+     System.arraycopy(counts[theInstances.attribute(index).numValues()], 0,
+ 		     m_Distribution[2], 0, theInstances.numClasses());
+     for (int i = 0; i < theInstances.attribute(index).numValues(); i++) {
+       for (int j = 0; j < theInstances.numClasses(); j++) {
+ 	m_Distribution[0][j] = counts[i][j];
+ 	m_Distribution[1][j] = sumCounts[j] - counts[i][j];
+       }
+       currVal = ContingencyTables.entropyConditionedOnRows(m_Distribution);
+       if (Utils.sm(currVal, bestVal)) {
+ 	bestVal = currVal;
+ 	m_SplitPoint = (double)i;
+ 	for (int j = 0; j < 3; j++) {
+ 	  System.arraycopy(m_Distribution[j], 0, bestDist[j], 0, 
+ 			   theInstances.numClasses());
+ 	}
+       }
+     }
+ 
+     // No missing values in training data.
+-
+     if (numMissing == 0) {
+       System.arraycopy(sumCounts, 0, bestDist[2], 0, 
+ 		       theInstances.numClasses());
+     }
+    
+     m_Distribution = bestDist;
+     return bestVal;
+   }
+\ No newline at end of file
+",NotBuggy,"Fixed division by zero bugs for numeric prediction.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@26 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,25951.json,449c6a2d0acb111174652c53dff0960ed4f6e606,"@@ -1,54 +1,50 @@
+   private double findSplitNumericNominal(int index) throws Exception {
+ 
+     double bestVal = Double.MAX_VALUE, currVal, currCutPoint;
+     int numMissing = 0;
+     double[] sum = new double[theInstances.numClasses()];
+     double[][] bestDist = new double[3][theInstances.numClasses()];
+ 
+     // Compute counts for all the values
+-
+     for (int i = 0; i < theInstances.numInstances(); i++) {
+       Instance inst = theInstances.instance(i);
+       if (!inst.isMissing(index)) {
+ 	m_Distribution[1][(int)inst.classValue()] += inst.weight();
+       } else {
+ 	m_Distribution[2][(int)inst.classValue()] += inst.weight();
+ 	numMissing++;
+       }
+     }
+     System.arraycopy(m_Distribution[1], 0, sum, 0, theInstances.numClasses());
+ 
+     // Sort instances
+-
+     theInstances.sort(index);
+     
+     // Make split counts for each possible split and evaluate
+-
+     for (int i = 0; i < theInstances.numInstances() - (numMissing + 1); i++) {
+       Instance inst = theInstances.instance(i);
+       Instance instPlusOne = theInstances.instance(i + 1);
+       m_Distribution[0][(int)inst.classValue()] += inst.weight();
+       m_Distribution[1][(int)inst.classValue()] -= inst.weight();
+       if (Utils.sm(inst.value(index), instPlusOne.value(index))) {
+ 	currCutPoint = (inst.value(index) + instPlusOne.value(index)) / 2.0;
+ 	currVal = ContingencyTables.entropyConditionedOnRows(m_Distribution);
+ 	if (Utils.sm(currVal, bestVal)) {
+ 	  m_SplitPoint = currCutPoint;
+ 	  bestVal = currVal;
+ 	  for (int j = 0; j < 3; j++) {
+ 	    System.arraycopy(m_Distribution[j], 0, bestDist[j], 0, 
+ 			     theInstances.numClasses());
+ 	  }
+ 	}
+       }
+     }
+ 
+     // No missing values in training data.
+-
+     if (numMissing == 0) {
+       System.arraycopy(sum, 0, bestDist[2], 0, theInstances.numClasses());
+     }
+  
+     m_Distribution = bestDist;
+     return bestVal;
+   }
+\ No newline at end of file
+",NotBuggy,"Fixed division by zero bugs for numeric prediction.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@26 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,25940.json,449c6a2d0acb111174652c53dff0960ed4f6e606,"@@ -1,63 +1,58 @@
+   public void buildClassifier(Instances instances) throws Exception {
+     
+     double bestVal = Double.MAX_VALUE, currVal;
+     double bestPoint = -Double.MAX_VALUE, sum;
+     int bestAtt = -1, numClasses;
+ 
+     if (instances.checkForStringAttributes()) {
+       throw new Exception(""Can't handle string attributes!"");
+     }
+ 
+     double[][] bestDist = new double[3][instances.numClasses()];
+ 
+     theInstances = new Instances(instances);
+     theInstances.deleteWithMissingClass();
+     if (theInstances.classAttribute().isNominal()) {
+       numClasses = theInstances.numClasses();
+     } else {
+       numClasses = 1;
+     }
+ 
+     // For each attribute
+-    
+     for (int i = 0; i < theInstances.numAttributes(); i++) {
+       if (i != theInstances.classIndex()) {
+ 	
+ 	// Reserve space for distribution.
+-	
+ 	m_Distribution = new double[3][numClasses];
+ 
+ 	// Compute value of criterion for best split on attribute
+-	
+ 	if (theInstances.attribute(i).isNominal()) {
+ 	  currVal = findSplitNominal(i);
+ 	} else {
+ 	  currVal = findSplitNumeric(i);
+ 	}
+ 	if (Utils.sm(currVal, bestVal)) {
+ 	  bestVal = currVal;
+ 	  bestAtt = i;
+ 	  bestPoint = m_SplitPoint;
+ 	  for (int j = 0; j < 3; j++) {
+ 	    System.arraycopy(m_Distribution[j], 0, bestDist[j], 0, 
+ 			     numClasses);
+ 	  }
+ 	}
+       }
+     }
+     
+     // Set attribute, split point and distribution.
+-    
+     m_AttIndex = bestAtt;
+     m_SplitPoint = bestPoint;
+     m_Distribution = bestDist;
+     if (theInstances.classAttribute().isNominal()) {
+       for (int i = 0; i < m_Distribution.length; i++) {
+ 	Utils.normalize(m_Distribution[i]);
+       }
+     }
+     
+     // Save memory
+-    
+     theInstances = new Instances(theInstances, 0);
+   }
+\ No newline at end of file
+",NotBuggy,"Fixed division by zero bugs for numeric prediction.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@26 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,25952.json,449c6a2d0acb111174652c53dff0960ed4f6e606,"@@ -1,64 +1,60 @@
+   private double findSplitNumericNumeric(int index) throws Exception {
+ 
+     double bestVal = Double.MAX_VALUE, currVal, currCutPoint;
+     int numMissing = 0;
+     double[] sumsSquares = new double[3], sumOfWeights = new double[3];
+     double[][] bestDist = new double[3][1];
+-    double meanNoMissing;
++    double totalSum = 0, totalSumOfWeights = 0;
+ 
+     // Compute counts for all the values
+-
+     for (int i = 0; i < theInstances.numInstances(); i++) {
+       Instance inst = theInstances.instance(i);
+       if (!inst.isMissing(index)) {
+ 	m_Distribution[1][0] += inst.classValue() * inst.weight();
+ 	sumsSquares[1] += inst.classValue() * inst.classValue() 
+ 	  * inst.weight();
+ 	sumOfWeights[1] += inst.weight();
+       } else {
+ 	m_Distribution[2][0] += inst.classValue() * inst.weight();
+ 	sumsSquares[2] += inst.classValue() * inst.classValue() 
+ 	  * inst.weight();
+ 	sumOfWeights[2] += inst.weight();
+ 	numMissing++;
+       }
++      totalSumOfWeights += inst.weight();
++      totalSum += inst.classValue() * inst.weight();
+     }
+-    meanNoMissing = m_Distribution[1][0] / sumOfWeights[1];
+ 
+     // Sort instances
+-
+     theInstances.sort(index);
+     
+     // Make split counts for each possible split and evaluate
+-
+     for (int i = 0; i < theInstances.numInstances() - (numMissing + 1); i++) {
+       Instance inst = theInstances.instance(i);
+       Instance instPlusOne = theInstances.instance(i + 1);
+       m_Distribution[0][0] += inst.classValue() * inst.weight();
+       sumsSquares[0] += inst.classValue() * inst.classValue() * inst.weight();
+       sumOfWeights[0] += inst.weight();
+       m_Distribution[1][0] -= inst.classValue() * inst.weight();
+       sumsSquares[1] -= inst.classValue() * inst.classValue() * inst.weight();
+       sumOfWeights[1] -= inst.weight();
+       if (Utils.sm(inst.value(index), instPlusOne.value(index))) {
+ 	currCutPoint = (inst.value(index) + instPlusOne.value(index)) / 2.0;
+ 	currVal = variance(m_Distribution, sumsSquares, sumOfWeights);
+ 	if (Utils.sm(currVal, bestVal)) {
+ 	  m_SplitPoint = currCutPoint;
+ 	  bestVal = currVal;
+ 	  for (int j = 0; j < 3; j++) {
+-	    bestDist[j][0] = m_Distribution[j][0] / sumOfWeights[j];
++	    if (!Utils.eq(sumOfWeights[j], 0)) {
++	      bestDist[j][0] = m_Distribution[j][0] / sumOfWeights[j];
++	    } else {
++	      bestDist[j][0] = totalSum / totalSumOfWeights;
++	    }
+ 	  }
+ 	}
+       }
+     }
+ 
+-    // No missing values in training data
+-    
+-    if (numMissing == 0) {
+-      bestDist[2][0] = meanNoMissing;
+-    }
+-
+     m_Distribution = bestDist;
+     return bestVal;
+   }
+\ No newline at end of file
+",Buggy,"Fixed division by zero bugs for numeric prediction.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@26 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,20096.json,f39f7d042b70f510b9721bbff0535ef0a3d348a8,"@@ -1,38 +1,40 @@
+   public void performRequest(String request) {
+     if (request.compareTo(""Show chart"") == 0) {
+       try {
+-	// popup visualize panel
+-	if (!m_framePoppedUp) {
+-	  m_framePoppedUp = true;
++        // popup visualize panel
++        if (!m_framePoppedUp) {
++          m_framePoppedUp = true;
+ 
+-	  final javax.swing.JFrame jf = 
+-	    new javax.swing.JFrame(""Model Performance Chart"");
+-	  jf.setSize(800,600);
+-	  jf.getContentPane().setLayout(new BorderLayout());
+-	  jf.getContentPane().add(m_visPanel, BorderLayout.CENTER);
+-	  jf.addWindowListener(new java.awt.event.WindowAdapter() {
+-	      public void windowClosing(java.awt.event.WindowEvent e) {
+-		jf.dispose();
+-		m_framePoppedUp = false;
+-	      }
+-	    });
+-	  jf.setVisible(true);
+-	  m_popupFrame = jf;
+-	} else {
+-	  m_popupFrame.toFront();
+-	}
++          final javax.swing.JFrame jf = new javax.swing.JFrame(
++              ""Model Performance Chart"");
++          jf.setSize(800, 600);
++          jf.getContentPane().setLayout(new BorderLayout());
++          jf.getContentPane().add(m_visPanel, BorderLayout.CENTER);
++          jf.addWindowListener(new java.awt.event.WindowAdapter() {
++            @Override
++            public void windowClosing(java.awt.event.WindowEvent e) {
++              jf.dispose();
++              m_framePoppedUp = false;
++            }
++          });
++          jf.setVisible(true);
++          m_popupFrame = jf;
++        } else {
++          m_popupFrame.toFront();
++        }
+       } catch (Exception ex) {
+-	ex.printStackTrace();
+-	m_framePoppedUp = false;
++        ex.printStackTrace();
++        m_framePoppedUp = false;
+       }
+     } else if (request.equals(""Clear all plots"")) {
+-        m_visPanel.removeAllPlots();
+-        m_visPanel.validate(); m_visPanel.repaint();
+-        m_visPanel = null;
+-        m_masterPlot = null;
+-        m_offscreenPlotData = null;
++      m_visPanel.removeAllPlots();
++      m_visPanel.validate();
++      m_visPanel.repaint();
++      m_visPanel = null;
++      m_masterPlot = null;
++      m_offscreenPlotData = null;
+     } else {
+       throw new IllegalArgumentException(request
+-					 + "" not supported (Model Performance Chart)"");
++          + "" not supported (Model Performance Chart)"");
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fixed a bug for error plots where once the master plot had been set it did not get changed for subsequent incoming VisualizableErrorEvents (unless manually clearing all plots via the GUI).
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@9452 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,20081.json,f39f7d042b70f510b9721bbff0535ef0a3d348a8,"@@ -1,174 +1,179 @@
+   public synchronized void acceptDataSet(VisualizableErrorEvent e) {
+     if (m_env == null) {
+       m_env = Environment.getSystemWide();
+     }
+ 
+     if (!GraphicsEnvironment.isHeadless()) {
+       if (m_visPanel == null) {
+         m_visPanel = new VisualizePanel();
+       }
+-      if (m_masterPlot == null) {
+-        m_masterPlot = e.getDataSet();
+-      }
++
++      m_masterPlot = e.getDataSet();
++
+       try {
+         m_visPanel.setMasterPlot(m_masterPlot);
+       } catch (Exception ex) {
+-        System.err.println(""Problem setting up visualization (ModelPerformanceChart)"");
++        System.err
++            .println(""Problem setting up visualization (ModelPerformanceChart)"");
+         ex.printStackTrace();
+       }
+       m_visPanel.validate();
+       m_visPanel.repaint();
+     } else {
+       m_headlessEvents = new ArrayList<EventObject>();
+       m_headlessEvents.add(e);
+     }
+-    
++
+     if (m_imageListeners.size() > 0 && !m_processingHeadlessEvents) {
+       // configure the renderer (if necessary)
+       setupOffscreenRenderer();
+-     
+-      m_offscreenPlotData = new ArrayList<Instances>();      
++
++      m_offscreenPlotData = new ArrayList<Instances>();
+       Instances predictedI = e.getDataSet().getPlotInstances();
+       if (predictedI.classAttribute().isNominal()) {
+-        
++
+         // split the classes out into individual series.
+         // add a new attribute to hold point sizes - correctly
+-        // classified instances get default point size (2); 
++        // classified instances get default point size (2);
+         // misclassified instances get point size (5).
+         // WekaOffscreenChartRenderer can take advantage of this
+         // information - other plugin renderers may or may not
+         // be able to use it
+         FastVector atts = new FastVector();
+         for (int i = 0; i < predictedI.numAttributes(); i++) {
+           atts.add(predictedI.attribute(i).copy());
+         }
+         atts.add(new Attribute(""@@size@@""));
+-        Instances newInsts = new Instances(predictedI.relationName(),
+-            atts, predictedI.numInstances());
++        Instances newInsts = new Instances(predictedI.relationName(), atts,
++            predictedI.numInstances());
+         newInsts.setClassIndex(predictedI.classIndex());
+-        
++
+         for (int i = 0; i < predictedI.numInstances(); i++) {
+           double[] vals = new double[newInsts.numAttributes()];
+           for (int j = 0; j < predictedI.numAttributes(); j++) {
+             vals[j] = predictedI.instance(i).value(j);
+           }
+           vals[vals.length - 1] = 2; // default shape size
+           Instance ni = new DenseInstance(1.0, vals);
+           newInsts.add(ni);
+         }
+-        
++
+         // predicted class attribute is always actualClassIndex - 1
+         Instances[] classes = new Instances[newInsts.numClasses()];
+         for (int i = 0; i < newInsts.numClasses(); i++) {
+           classes[i] = new Instances(newInsts, 0);
+           classes[i].setRelationName(newInsts.classAttribute().value(i));
+         }
+         Instances errors = new Instances(newInsts, 0);
+         int actualClass = newInsts.classIndex();
+         for (int i = 0; i < newInsts.numInstances(); i++) {
+           Instance current = newInsts.instance(i);
+-          classes[(int)current.classValue()].add((Instance)current.copy());
+-          
++          classes[(int) current.classValue()].add((Instance) current.copy());
++
+           if (current.value(actualClass) != current.value(actualClass - 1)) {
+-            Instance toAdd = (Instance)current.copy();
+-            
++            Instance toAdd = (Instance) current.copy();
++
+             // larger shape for an error
+             toAdd.setValue(toAdd.numAttributes() - 1, 5);
+-            
++
+             // swap predicted and actual class value so
+             // that the color plotted for the error series
+             // is that of the predicted class
+             double actualClassV = toAdd.value(actualClass);
+             double predictedClassV = toAdd.value(actualClass - 1);
+             toAdd.setValue(actualClass, predictedClassV);
+             toAdd.setValue(actualClass - 1, actualClassV);
+-              
+-            errors.add(toAdd);            
++
++            errors.add(toAdd);
+           }
+         }
+-        
++
+         errors.setRelationName(""Errors"");
+         m_offscreenPlotData.add(errors);
+-        
++
+         for (int i = 0; i < classes.length; i++) {
+           m_offscreenPlotData.add(classes[i]);
+         }
+-  
++
+       } else {
+         // numeric class - have to make a new set of instances
+         // with the point sizes added as an additional attribute
+         FastVector atts = new FastVector();
+         for (int i = 0; i < predictedI.numAttributes(); i++) {
+           atts.add(predictedI.attribute(i).copy());
+         }
+         atts.add(new Attribute(""@@size@@""));
+-        Instances newInsts = new Instances(predictedI.relationName(),
+-            atts, predictedI.numInstances());
++        Instances newInsts = new Instances(predictedI.relationName(), atts,
++            predictedI.numInstances());
+ 
+         int[] shapeSizes = e.getDataSet().getShapeSize();
+ 
+         for (int i = 0; i < predictedI.numInstances(); i++) {
+           double[] vals = new double[newInsts.numAttributes()];
+           for (int j = 0; j < predictedI.numAttributes(); j++) {
+             vals[j] = predictedI.instance(i).value(j);
+           }
+           vals[vals.length - 1] = shapeSizes[i];
+           Instance ni = new DenseInstance(1.0, vals);
+           newInsts.add(ni);
+         }
+         newInsts.setRelationName(predictedI.classAttribute().name());
+         m_offscreenPlotData.add(newInsts);
+       }
+-      
++
+       List<String> options = new ArrayList<String>();
+-      
++
+       String additional = ""-color="" + predictedI.classAttribute().name()
+-        + "",-hasErrors"";
++          + "",-hasErrors"";
+       if (m_additionalOptions != null && m_additionalOptions.length() > 0) {
+         additional += "","" + m_additionalOptions;
+         try {
+           additional = m_env.substitute(additional);
+-        } catch (Exception ex) { }
+-      }            
++        } catch (Exception ex) {
++        }
++      }
+       String[] optionsParts = additional.split("","");
+       for (String p : optionsParts) {
+         options.add(p.trim());
+       }
+-      
+-//      if (predictedI.classAttribute().isNumeric()) {
++
++      // if (predictedI.classAttribute().isNumeric()) {
+       options.add(""-shapeSize=@@size@@"");
+-//      }
+-      
++      // }
++
+       String xAxis = m_xAxis;
+       try {
+         xAxis = m_env.substitute(xAxis);
+-      } catch (Exception ex) { }
+-      
++      } catch (Exception ex) {
++      }
++
+       String yAxis = m_yAxis;
+       try {
+         yAxis = m_env.substitute(yAxis);
+-      } catch (Exception ex) { }
+-      
++      } catch (Exception ex) {
++      }
++
+       String width = m_width;
+       String height = m_height;
+       int defWidth = 500;
+       int defHeight = 400;
+       try {
+         width = m_env.substitute(width);
+         height = m_env.substitute(height);
+-        
++
+         defWidth = Integer.parseInt(width);
+         defHeight = Integer.parseInt(height);
+-      } catch (Exception ex) { }
+-      
++      } catch (Exception ex) {
++      }
++
+       try {
+-        BufferedImage osi = m_offscreenRenderer.renderXYScatterPlot(defWidth, defHeight, 
+-            m_offscreenPlotData, xAxis, yAxis, options);
++        BufferedImage osi = m_offscreenRenderer.renderXYScatterPlot(defWidth,
++            defHeight, m_offscreenPlotData, xAxis, yAxis, options);
+ 
+         ImageEvent ie = new ImageEvent(this, osi);
+         notifyImageListeners(ie);
+       } catch (Exception e1) {
+         e1.printStackTrace();
+-      }      
++      }
+     }
+   }
+\ No newline at end of file
+",Buggy,"Fixed a bug for error plots where once the master plot had been set it did not get changed for subsequent incoming VisualizableErrorEvents (unless manually clearing all plots via the GUI).
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@9452 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,18379.json,41f296c55b87a1ead276fffbafb67535b858a70f,"@@ -1,44 +1,52 @@
+   private void saveExperiment() {
+ 
+     int returnVal = m_FileChooser.showSaveDialog(this);
+     if (returnVal != JFileChooser.APPROVE_OPTION) {
+       return;
+     }
+     File expFile = m_FileChooser.getSelectedFile();
+-    if ( !(    (expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
+-          || (KOML.isPresent() && expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
+-          || (expFile.getName().toLowerCase().endsWith("".xml"")) ) )
+-    {
+-      expFile = new File(expFile.getParent(), expFile.getName()
+-                         + Experiment.FILE_EXTENSION);
++    
++    // add extension if necessary
++    if (m_FileChooser.getFileFilter() == m_ExpFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + Experiment.FILE_EXTENSION);
+     }
++    else if (m_FileChooser.getFileFilter() == m_KOMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + KOML.FILE_EXTENSION);
++    }
++    else if (m_FileChooser.getFileFilter() == m_XMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith("".xml""))
++        expFile = new File(expFile.getParent(), expFile.getName() + "".xml"");
++    }
++    
+     try {
+        // KOML?
+        if ( (KOML.isPresent()) && (expFile.getAbsolutePath().toLowerCase().endsWith(KOML.FILE_EXTENSION)) ) {
+           KOML.write(expFile.getAbsolutePath(), m_Exp);
+        }
+        else
+        // XML?
+        if (expFile.getAbsolutePath().toLowerCase().endsWith("".xml"")) {
+           XMLExperiment xml = new XMLExperiment(); 
+           xml.write(expFile, m_Exp);
+        }
+        // binary
+        else {
+           FileOutputStream fo = new FileOutputStream(expFile);
+           ObjectOutputStream oo = new ObjectOutputStream(
+                                   new BufferedOutputStream(fo));
+           oo.writeObject(m_Exp);
+           oo.close();
+        }
+       
+       System.err.println(""Saved experiment:\n"" + m_Exp);
+     } catch (Exception ex) {
+       ex.printStackTrace();
+       JOptionPane.showMessageDialog(this, ""Couldn't save experiment file:\n""
+ 				    + expFile
+ 				    + ""\nReason:\n"" + ex.getMessage(),
+ 				    ""Save Experiment"",
+ 				    JOptionPane.ERROR_MESSAGE);
+     }
+   }
+\ No newline at end of file
+",Buggy,"A few bug fixes from Peter regarding the latest GUI additions. Also eliminated some superfluous output from NaiveBayesSimple.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2259 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,8611.json,41f296c55b87a1ead276fffbafb67535b858a70f,"@@ -1,31 +1,29 @@
+   public double[] distributionForInstance(Instance instance) throws Exception {
+     
+     double [] probs = new double[instance.numClasses()];
+     int attIndex;
+     
+     for (int j = 0; j < instance.numClasses(); j++) {
+       probs[j] = 1;
+       Enumeration enumAtts = instance.enumerateAttributes();
+       attIndex = 0;
+       while (enumAtts.hasMoreElements()) {
+ 	Attribute attribute = (Attribute) enumAtts.nextElement();
+ 	if (!instance.isMissing(attribute)) {
+ 	  if (attribute.isNominal()) {
+ 	    probs[j] *= m_Counts[j][attIndex][(int)instance.value(attribute)];
+ 	  } else {
+ 	    probs[j] *= normalDens(instance.value(attribute),
+ 				   m_Means[j][attIndex],
+ 				   m_Devs[j][attIndex]);}
+ 	}
+ 	attIndex++;
+       }
+-      System.out.println(probs[j] + "" "");
+       probs[j] *= m_Priors[j];
+     }
+-    System.out.println();
+ 
+     // Normalize probabilities
+     Utils.normalize(probs);
+ 
+     return probs;
+   }
+\ No newline at end of file
+",NotBuggy,"A few bug fixes from Peter regarding the latest GUI additions. Also eliminated some superfluous output from NaiveBayesSimple.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2259 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,18418.json,41f296c55b87a1ead276fffbafb67535b858a70f,"@@ -1,47 +1,55 @@
+   private void openExperiment() {
+     
+     int returnVal = m_FileChooser.showOpenDialog(this);
+     if (returnVal != JFileChooser.APPROVE_OPTION) {
+       return;
+     }
+     File expFile = m_FileChooser.getSelectedFile();
+-    if ( !(    (expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
+-          || (KOML.isPresent() && expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
+-          || (expFile.getName().toLowerCase().endsWith("".xml"")) ) )
+-    {
+-       expFile = new File(expFile.getParent(), expFile.getName()
+-                          + Experiment.FILE_EXTENSION);
++    
++    // add extension if necessary
++    if (m_FileChooser.getFileFilter() == m_ExpFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + Experiment.FILE_EXTENSION);
+     }
++    else if (m_FileChooser.getFileFilter() == m_KOMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + KOML.FILE_EXTENSION);
++    }
++    else if (m_FileChooser.getFileFilter() == m_XMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith("".xml""))
++        expFile = new File(expFile.getParent(), expFile.getName() + "".xml"");
++    }
++    
+     try {
+       Experiment exp; 
+       
+       // KOML?
+       if ( (KOML.isPresent()) && (expFile.getAbsolutePath().toLowerCase().endsWith(KOML.FILE_EXTENSION)) ) {
+          exp = (Experiment) KOML.read(expFile.getAbsolutePath());
+       }
+       else
+       // XML?
+       if (expFile.getAbsolutePath().toLowerCase().endsWith("".xml"")) {
+          XMLExperiment xml = new XMLExperiment(); 
+          exp = (Experiment) xml.read(expFile);
+       }
+       // binary
+       else {
+          FileInputStream fi = new FileInputStream(expFile);
+          ObjectInputStream oi = new ObjectInputStream(
+                                 new BufferedInputStream(fi));
+          exp = (Experiment)oi.readObject();
+          oi.close();
+       }
+       setExperiment(exp);
+       System.err.println(""Opened experiment:\n"" + m_Exp);
+     } catch (Exception ex) {
+       ex.printStackTrace();
+       JOptionPane.showMessageDialog(this, ""Couldn't open experiment file:\n""
+ 				    + expFile
+ 				    + ""\nReason:\n"" + ex.getMessage(),
+ 				    ""Open Experiment"",
+ 				    JOptionPane.ERROR_MESSAGE);
+       // Pop up error dialog
+     }
+   }
+\ No newline at end of file
+",Buggy,"A few bug fixes from Peter regarding the latest GUI additions. Also eliminated some superfluous output from NaiveBayesSimple.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2259 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,18378.json,41f296c55b87a1ead276fffbafb67535b858a70f,"@@ -1,50 +1,58 @@
+   private void openExperiment() {
+     
+     int returnVal = m_FileChooser.showOpenDialog(this);
+     if (returnVal != JFileChooser.APPROVE_OPTION) {
+       return;
+     }
+     File expFile = m_FileChooser.getSelectedFile();
+-    if ( !(    (expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
+-            || (KOML.isPresent() && expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
+-            || (expFile.getName().toLowerCase().endsWith("".xml"")) ) )
+-    {
+-      expFile = new File(expFile.getParent(), expFile.getName()
+-                         + Experiment.FILE_EXTENSION);
++    
++    // add extension if necessary
++    if (m_FileChooser.getFileFilter() == m_ExpFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + Experiment.FILE_EXTENSION);
+     }
++    else if (m_FileChooser.getFileFilter() == m_KOMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + KOML.FILE_EXTENSION);
++    }
++    else if (m_FileChooser.getFileFilter() == m_XMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith("".xml""))
++        expFile = new File(expFile.getParent(), expFile.getName() + "".xml"");
++    }
++    
+     try {
+       Experiment exp; 
+       
+       // KOML?
+       if ( (KOML.isPresent()) && (expFile.getAbsolutePath().toLowerCase().endsWith(KOML.FILE_EXTENSION)) ) {
+          exp = (Experiment) KOML.read(expFile.getAbsolutePath());
+       }
+       else
+       // XML?
+       if (expFile.getAbsolutePath().toLowerCase().endsWith("".xml"")) {
+          XMLExperiment xml = new XMLExperiment(); 
+          exp = (Experiment) xml.read(expFile);
+       }
+       // binary
+       else {
+          FileInputStream fi = new FileInputStream(expFile);
+          ObjectInputStream oi = new ObjectInputStream(
+                                 new BufferedInputStream(fi));
+          exp = (Experiment)oi.readObject();
+          oi.close();
+       }
+       
+       if (!setExperiment(exp)) {
+ 	if (m_modePanel != null) m_modePanel.switchToAdvanced(exp);
+       }
+       System.err.println(""Opened experiment:\n"" + exp);
+     } catch (Exception ex) {
+       ex.printStackTrace();
+       JOptionPane.showMessageDialog(this, ""Couldn't open experiment file:\n""
+ 				    + expFile
+ 				    + ""\nReason:\n"" + ex.getMessage(),
+ 				    ""Open Experiment"",
+ 				    JOptionPane.ERROR_MESSAGE);
+       // Pop up error dialog
+     }
+   }
+\ No newline at end of file
+",Buggy,"A few bug fixes from Peter regarding the latest GUI additions. Also eliminated some superfluous output from NaiveBayesSimple.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2259 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,18419.json,41f296c55b87a1ead276fffbafb67535b858a70f,"@@ -1,43 +1,51 @@
+   private void saveExperiment() {
+ 
+     int returnVal = m_FileChooser.showSaveDialog(this);
+     if (returnVal != JFileChooser.APPROVE_OPTION) {
+       return;
+     }
+     File expFile = m_FileChooser.getSelectedFile();
+-    if ( !(    (expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
+-          || (KOML.isPresent() && expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
+-          || (expFile.getName().toLowerCase().endsWith("".xml"")) ) )
+-    {
+-       expFile = new File(expFile.getParent(), expFile.getName()
+-                          + Experiment.FILE_EXTENSION);
++    
++    // add extension if necessary
++    if (m_FileChooser.getFileFilter() == m_ExpFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(Experiment.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + Experiment.FILE_EXTENSION);
+     }
++    else if (m_FileChooser.getFileFilter() == m_KOMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith(KOML.FILE_EXTENSION))
++        expFile = new File(expFile.getParent(), expFile.getName() + KOML.FILE_EXTENSION);
++    }
++    else if (m_FileChooser.getFileFilter() == m_XMLFilter) {
++      if (!expFile.getName().toLowerCase().endsWith("".xml""))
++        expFile = new File(expFile.getParent(), expFile.getName() + "".xml"");
++    }
++    
+     try {
+       // KOML?
+       if ( (KOML.isPresent()) && (expFile.getAbsolutePath().toLowerCase().endsWith(KOML.FILE_EXTENSION)) ) {
+          KOML.write(expFile.getAbsolutePath(), m_Exp);
+       }
+       else
+       // XML?
+       if (expFile.getAbsolutePath().toLowerCase().endsWith("".xml"")) {
+          XMLExperiment xml = new XMLExperiment(); 
+          xml.write(expFile, m_Exp);
+       }
+       // binary
+       else {
+          FileOutputStream fo = new FileOutputStream(expFile);
+          ObjectOutputStream oo = new ObjectOutputStream(
+                                  new BufferedOutputStream(fo));
+          oo.writeObject(m_Exp);
+          oo.close();
+       }
+       System.err.println(""Saved experiment:\n"" + m_Exp);
+     } catch (Exception ex) {
+       ex.printStackTrace();
+       JOptionPane.showMessageDialog(this, ""Couldn't save experiment file:\n""
+ 				    + expFile
+ 				    + ""\nReason:\n"" + ex.getMessage(),
+ 				    ""Save Experiment"",
+ 				    JOptionPane.ERROR_MESSAGE);
+     }
+   }
+\ No newline at end of file
+",Buggy,"A few bug fixes from Peter regarding the latest GUI additions. Also eliminated some superfluous output from NaiveBayesSimple.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@2259 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,24330.json,0613647d320672d37f6da68efd32bd14bb88435b,"@@ -1,7 +1,15 @@
+   public void preProcess() throws Exception {
+     
+     if (m_ResultProducer == null) {
+       throw new Exception(""No ResultProducer set"");
+     }
++    // Tell the resultproducer to send results to us
++    m_ResultProducer.setResultListener(this);
++    findKeyIndex();
++    if (m_KeyIndex == -1) {
++      throw new Exception(""No key field called "" + m_KeyFieldName
++			  + "" produced by ""
++			  + m_ResultProducer.getClass().getName());
++    }
+     m_ResultProducer.preProcess();
+   }
+\ No newline at end of file
+",Buggy,"- Fixed bug where sometimes the sub-ResultProducer would not be correctly
+connected.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@171 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,24356.json,0613647d320672d37f6da68efd32bd14bb88435b,"@@ -1,5 +1,6 @@
+   public void setResultProducer(ResultProducer newResultProducer) {
+-    
++
+     m_ResultProducer = newResultProducer;
++    m_ResultProducer.setResultListener(this);
+     findKeyIndex();
+   }
+\ No newline at end of file
+",Buggy,"- Fixed bug where sometimes the sub-ResultProducer would not be correctly
+connected.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@171 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,24326.json,0613647d320672d37f6da68efd32bd14bb88435b,"@@ -1,71 +1,63 @@
+   protected void doAverageResult(Object [] template) throws Exception {
+ 
+     // Generate the key and ask whether the result is required
+     String [] newKey = new String [template.length - 1];
+     System.arraycopy(template, 0, newKey, 0, m_KeyIndex);
+     System.arraycopy(template, m_KeyIndex + 1,
+ 		     newKey, m_KeyIndex,
+ 		     template.length - m_KeyIndex - 1);
+-    /*
+-    System.err.println(""new key: "" + DatabaseUtils.arrayToString(newKey));
+-    */
+     if (m_ResultListener.isResultRequired(this, newKey)) {
+       Object [] resultTypes = m_ResultProducer.getResultTypes();
+       Stats [] stats = new Stats [resultTypes.length];
+       for (int i = 0; i < stats.length; i++) {
+ 	stats[i] = new Stats();
+       }
+       Object [] result = getResultTypes();
+       int numMatches = 0;
+       for (int i = 0; i < m_Keys.size(); i++) {
+ 	Object [] currentKey = (Object [])m_Keys.elementAt(i);
+ 	// Skip non-matching keys
+ 	if (!matchesTemplate(template, currentKey)) {
+ 	  continue;
+ 	}
+ 	// Add the results to the stats accumulator
+ 	Object [] currentResult = (Object [])m_Results.elementAt(i);
+ 	numMatches++;
+-	/*
+-	System.err.println(""Match: "" + DatabaseUtils.arrayToString(currentKey)
+-			   + "" -- ""
+-			   + DatabaseUtils.arrayToString(currentResult));
+-	*/
+ 	for (int j = 0; j < resultTypes.length; j++) {
+ 	  if (resultTypes[j] instanceof Double) {
+ 	    if (currentResult[j] == null) {
+ 	      throw new Exception(""Null numeric result field found:\n""
+ 				  + DatabaseUtils.arrayToString(currentKey)
+ 				  + "" -- ""
+ 				  + DatabaseUtils
+ 				  .arrayToString(currentResult));
+ 	    }
+ 	    double currentVal = ((Double)currentResult[j]).doubleValue();
+ 	    stats[j].add(currentVal);
+ 	  }
+ 	}
+       }
+       if (numMatches != m_ExpectedResultsPerAverage) {
+ 	throw new Exception(""Expected "" + m_ExpectedResultsPerAverage
+ 			    + "" results matching key \""""
+ 			    + DatabaseUtils.arrayToString(template)
+ 			    + ""\"" but got ""
+ 			    + numMatches);
+       }
+       result[0] = new Double(numMatches);
+       Object [] currentResult = (Object [])m_Results.elementAt(0);
+       int k = 1;
+       for (int j = 0; j < resultTypes.length; j++) {
+ 	if (resultTypes[j] instanceof Double) {
+ 	  stats[j].calculateDerived();
+ 	  result[k++] = new Double(stats[j].mean);
+ 	  if (getCalculateStdDevs()) {
+ 	    result[k++] = new Double(stats[j].stdDev);
+ 	  }
+ 	} else {
+ 	  result[k++] = currentResult[j];
+ 	}
+       }
+       m_ResultListener.acceptResult(this, newKey, result);      
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"- Fixed bug where sometimes the sub-ResultProducer would not be correctly
+connected.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@171 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,24324.json,0613647d320672d37f6da68efd32bd14bb88435b,"@@ -1,33 +1,31 @@
+   public void doRun(int run) throws Exception {
+-
++    
+     if (m_Instances == null) {
+       throw new Exception(""No Instances set"");
+     }
+-    // Tell the resultproducer to send results to us
+-    m_ResultProducer.setResultListener(this);
+     m_ResultProducer.setInstances(m_Instances);
+-    
++
+     // Clear the collected results
+     m_Keys.removeAllElements();
+     m_Results.removeAllElements();
+     
+     //    System.err.println(""Starting run "" + run);
+     // Collect all the results
+     // Should be smarter -- first doing a run collecting only the keys
+     // from isResultRequired(), then determining if the average is required,
+     // then getting the actual results.
+     m_ResultProducer.doRun(run);
+ 
+     // Average the results collected
+     //System.err.println(""Number of results collected: "" + m_Keys.size());
+ 
+     // Check that the keys only differ on the selected key field
+     checkForMultipleDifferences();
+ 
+     Object [] template = (Object [])((Object [])m_Keys.elementAt(0)).clone();
+     template[m_KeyIndex] = null;
+     // Check for duplicate keys
+     checkForDuplicateKeys(template);
+     // Calculate the average and submit it if necessary
+     doAverageResult(template);
+   }
+\ No newline at end of file
+",Buggy,"- Fixed bug where sometimes the sub-ResultProducer would not be correctly
+connected.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@171 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,24382.json,0613647d320672d37f6da68efd32bd14bb88435b,"@@ -1,7 +1,8 @@
+   public void preProcess() throws Exception {
+     
+     if (m_ResultProducer == null) {
+       throw new Exception(""No ResultProducer set"");
+     }
++    m_ResultProducer.setResultListener(this);
+     m_ResultProducer.preProcess();
+   }
+\ No newline at end of file
+",Buggy,"- Fixed bug where sometimes the sub-ResultProducer would not be correctly
+connected.
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@171 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,19514.json,90f4455c8174476ac55591cfcab3ea403fa3db02,"@@ -1,58 +1,66 @@
+   public boolean eventGeneratable(String eventName) {
+     if (eventName.compareTo(""trainingSet"") == 0) { 
+       if (m_trainingProvider == null) {
+ 	return false;
+       } else {
+ 	if (m_trainingProvider instanceof EventConstraints) {
+ 	  if (!((EventConstraints)m_trainingProvider).
+ 	      eventGeneratable(""trainingSet"")) {
+ 	    return false;
+ 	  }
+ 	}
+       }
+     }
+ 
+     if (eventName.compareTo(""dataSet"") == 0) { 
+       if (m_dataProvider == null) {
+-	m_connectedFormat = null;
+-	notifyDataFormatListeners();
++	if (m_instanceProvider == null) {
++	  m_connectedFormat = null;
++	  notifyDataFormatListeners();
++	}
+ 	return false;
+       } else {
+ 	if (m_dataProvider instanceof EventConstraints) {
+ 	  if (!((EventConstraints)m_dataProvider).
+ 	      eventGeneratable(""dataSet"")) {
+ 	    m_connectedFormat = null;
+ 	    notifyDataFormatListeners();
+ 	    return false;
+ 	  }
+ 	}
+       }
+     }
+ 
+     if (eventName.compareTo(""instance"") == 0) { 
+       if (m_instanceProvider == null) {
++	if (m_dataProvider == null) {
++	  m_connectedFormat = null;
++	  notifyDataFormatListeners();
++	}
+ 	return false;
+       } else {
+ 	if (m_instanceProvider instanceof EventConstraints) {
+ 	  if (!((EventConstraints)m_instanceProvider).
+ 	      eventGeneratable(""instance"")) {
++	    m_connectedFormat = null;
++	    notifyDataFormatListeners();
+ 	    return false;
+ 	  }
+ 	}
+       }
+     }
+ 
+     if (eventName.compareTo(""testSet"") == 0) {
+       if (m_testProvider == null) {
+ 	return false;
+       } else {
+ 	if (m_testProvider instanceof EventConstraints) {
+ 	  if (!((EventConstraints)m_testProvider).
+ 	      eventGeneratable(""testSet"")) {
+ 	    return false;
+ 	  }
+ 	}
+       }
+     }
+     return true;
+   }
+\ No newline at end of file
+",Buggy,"Fixed bug in format handling
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@1966 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,19490.json,90f4455c8174476ac55591cfcab3ea403fa3db02,"@@ -1,17 +1,18 @@
+   public void acceptInstance(InstanceEvent e) {
+     if (e.getStatus() == InstanceEvent.FORMAT_AVAILABLE) {
+       //      Instances dataSet = e.getInstance().dataset();
+       m_connectedFormat = e.getStructure();
+       
+       //      System.err.println(""Assigning class column..."");
+       assignClass(m_connectedFormat);
+       notifyInstanceListeners(e);
+ 
+       // tell any listening customizers (or other interested parties)
++      System.err.println(""Notifying customizer..."");
+       notifyDataFormatListeners();
+     } else {
+       //      Instances dataSet = e.getInstance().dataset();
+       //      assignClass(dataSet);
+       notifyInstanceListeners(e);
+     }
+   }
+\ No newline at end of file
+",NotBuggy,"Fixed bug in format handling
+
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@1966 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,25728.json,296933fb5c56e6b698f0f76c710c4ef61eaa9a3c,"@@ -1,35 +1,37 @@
+     protected void performBoostingCV() throws Exception{			
+ 	
+ 	//completed iteration keeps track of the number of iterations that have been
+ 	//performed in every fold (some might stop earlier than others). 
+ 	//Best iteration is selected only from these.
+ 	int completedIterations = m_maxIterations;
+ 	
+ 	Instances allData = new Instances(m_train);
+ 	
+ 	allData.stratify(m_numFoldsBoosting);	      
+ 
+ 	double[] error = new double[m_maxIterations + 1];	
+ 	
++        SimpleLinearRegression[][] backup = m_regressions;
++
+ 	for (int i = 0; i < m_numFoldsBoosting; i++) {
+ 	    //split into training/test data in fold
+ 	    Instances train = allData.trainCV(m_numFoldsBoosting,i);
+ 	    Instances test = allData.testCV(m_numFoldsBoosting,i);
+ 
+ 	    //initialize LogitBoost
+ 	    m_numRegressions = 0;
+-	    m_regressions = initRegressions();
++	    m_regressions = copyRegressions(backup);
+ 
+ 	    //run LogitBoost iterations
+ 	    int iterations = performBoosting(train,test,error,completedIterations);	    
+ 	    if (iterations < completedIterations) completedIterations = iterations;	    
+ 	}
+ 
+ 	//determine iteration with minimum error over the folds
+ 	int bestIteration = getBestIteration(error,completedIterations);
+ 
+ 	//rebuild model on all of the training data
+ 	m_numRegressions = 0;
+-        m_regressions = initRegressions();
++        m_regressions = backup;
+ 	performBoosting(bestIteration);
+     }    
+\ No newline at end of file
+",Buggy,"Bug fix for the case where cross-validation is performed locally at each node.
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@10104 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,25729.json,296933fb5c56e6b698f0f76c710c4ef61eaa9a3c,"@@ -1,22 +1,13 @@
+     protected SimpleLinearRegression[][] copyRegressions(SimpleLinearRegression[][] a)	
+         throws Exception {
+     
+         SimpleLinearRegression[][] result = initRegressions();
+         for (int i = 0; i < a.length; i++) {
+             for (int j = 0; j < a[i].length; j++) {
+                 if (j != m_numericDataHeader.classIndex()) {
+                     result[i][j].addModel(a[i][j]);
+                 }
+             }
+         }
+-
+-        /*        SimpleLinearRegression[][] result = null;
+-        try {
+-            SerializedObject so = new SerializedObject(a);
+-            result = (SimpleLinearRegression[][])so.getObject();
+-        } catch (Exception ex) {
+-            System.err.println(""Can't copy array of simple linear regression objects."");
+-            System.err.println(ex);
+-            }*/
+         return result;
+     }
+\ No newline at end of file
+",NotBuggy,"Bug fix for the case where cross-validation is performed locally at each node.
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@10104 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,20414.json,d5169a182f63b31a737d9b5d57ecdb49b8fbd56a,"@@ -1,15 +1,15 @@
+   protected void newStructure() throws Exception {
+     
+     m_Loader.reset();
+     
+     // Set environment variables
+     if (m_Loader instanceof EnvironmentHandler && m_env != null) {
+       try {
+         ((EnvironmentHandler)m_Loader).setEnvironment(m_env);
+       }catch (Exception ex) {
+       }
+     }
+     m_dataFormat = m_Loader.getStructure();
+-//    System.out.println(""[Loader] Notifying listeners of instance structure avail."");
+-//    notifyStructureAvailable(m_dataFormat);
++    System.out.println(""[Loader] Notifying listeners of instance structure avail."");
++    notifyStructureAvailable(m_dataFormat);
+   }  
+\ No newline at end of file
+",NotBuggy,"Fixed a bug where configuration changes (new files selected or database configuration changed) was not getting sent to downstream steps
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@7854 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,20407.json,d5169a182f63b31a737d9b5d57ecdb49b8fbd56a,"@@ -1,4 +1,11 @@
+   public void setDB(boolean flag){
+   
+       m_dbSet = flag;
++      if (m_dbSet) {
++        try {
++          newStructure();
++        } catch (Exception e) {
++          e.printStackTrace();
++        }
++      }
+   }
+\ No newline at end of file
+",Buggy,"Fixed a bug where configuration changes (new files selected or database configuration changed) was not getting sent to downstream steps
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@7854 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+weka,19057.json,d5169a182f63b31a737d9b5d57ecdb49b8fbd56a,"@@ -1,6 +1,41 @@
+   private void setUpOther() {
+     removeAll();
+     add(m_LoaderEditor, BorderLayout.CENTER);
++    
++    JPanel buttonsP = new JPanel();
++    buttonsP.setLayout(new FlowLayout());
++    JButton ok,cancel;
++    buttonsP.add(ok = new JButton(""OK""));
++    buttonsP.add(cancel=new JButton(""Cancel""));
++    ok.addActionListener(new ActionListener(){
++      public void actionPerformed(ActionEvent evt){
++        
++        // Tell the editor that we are closing under an OK condition
++        // so that it can pass on the message to any customizer that
++        // might be in use
++        m_LoaderEditor.closingOK();
++        
++        if (m_parentWindow != null) {
++          m_parentWindow.dispose();
++        }
++      }
++    });
++    cancel.addActionListener(new ActionListener(){
++      public void actionPerformed(ActionEvent evt){
++        
++        // Tell the editor that we are closing under a CANCEL condition
++        // so that it can pass on the message to any customizer that
++        // might be in use
++        m_LoaderEditor.closingCancel();
++        
++        if (m_parentWindow != null) {
++          m_parentWindow.dispose();
++        }
++      }
++    });
++    
++    add(buttonsP, BorderLayout.SOUTH);
++    
+     validate();
+     repaint();
+   }
+\ No newline at end of file
+",Buggy,"Fixed a bug where configuration changes (new files selected or database configuration changed) was not getting sent to downstream steps
+
+git-svn-id: https://svn.cms.waikato.ac.nz/svn/weka/trunk@7854 e0a1b77d-ad91-4216-81b1-defd5f83fa92
+"
+titan,4498.json,3b4dd304515746e895b4ea7cd1728c0bcfd5d460,"@@ -1,4 +1,4 @@
+         public Builder set(String path, Object value) {
+-            super.set(path, value);
++            writeConfiguration.set(path, value);
+             return this;
+         }
+\ No newline at end of file
+",Buggy,"Let TitanFactory.Builder accept arbitrary keys
+
+Elasticsearch reserves a Titan config namespace under which the user
+may provide arbitrary Elasticsearch config options.  These options
+can't be validated, since it's fundamentally a bit of a perversion of
+the config API: the keys are defined in and controlled by
+Elasticsearch, but we're cramming them into a Titan configuration.
+
+This commit tweaks TitanFactory.Builder to use a WriteConfiguration
+(which is based on dumb strings) instead of a ModifiableConfiguration
+(which is based on ConfigOption and includes validation).
+
+A more elegant way to approach this might be to introduce an
+abstraction to support Elasticsearch's reserved namespace: some kind
+of boolean field that says, in effect, ""don't try to validate any keys
+underneath me"".  That still wouldn't totally address the problem,
+though; (User)ModifiableConfiguration still wouldn't be a suitable
+basis for TitanFactory.Builder, since it requires that any
+user-provided config key string map to a ConfigOption.
+
+This commit also adds a test (that fails without the TitanFactory
+change).
+
+Fixes #1114
+"
+titan,353.json,3b4dd304515746e895b4ea7cd1728c0bcfd5d460,"@@ -1,16 +1,16 @@
+     public Map<ConfigElement.PathIdentifier,Object> getAll() {
+         Map<ConfigElement.PathIdentifier,Object> result = Maps.newHashMap();
+ 
+         for (String key : config.getKeys("""")) {
+             Preconditions.checkArgument(StringUtils.isNotBlank(key));
+             try {
+                 ConfigElement.PathIdentifier pid = ConfigElement.parse(getRootNamespace(),key);
+                 Preconditions.checkArgument(pid.element.isOption() && !pid.lastIsUmbrella);
+                 result.put(pid,get((ConfigOption)pid.element,pid.umbrellaElements));
+             } catch (IllegalArgumentException e) {
+-                log.info(""Ignored configuration entry for {} since it does not map to an option"",key,e);
++                log.debug(""Ignored configuration entry for {} since it does not map to an option"",key,e);
+                 continue;
+             }
+         }
+         return result;
+     }
+\ No newline at end of file
+",NotBuggy,"Let TitanFactory.Builder accept arbitrary keys
+
+Elasticsearch reserves a Titan config namespace under which the user
+may provide arbitrary Elasticsearch config options.  These options
+can't be validated, since it's fundamentally a bit of a perversion of
+the config API: the keys are defined in and controlled by
+Elasticsearch, but we're cramming them into a Titan configuration.
+
+This commit tweaks TitanFactory.Builder to use a WriteConfiguration
+(which is based on dumb strings) instead of a ModifiableConfiguration
+(which is based on ConfigOption and includes validation).
+
+A more elegant way to approach this might be to introduce an
+abstraction to support Elasticsearch's reserved namespace: some kind
+of boolean field that says, in effect, ""don't try to validate any keys
+underneath me"".  That still wouldn't totally address the problem,
+though; (User)ModifiableConfiguration still wouldn't be a suitable
+basis for TitanFactory.Builder, since it requires that any
+user-provided config key string map to a ConfigOption.
+
+This commit also adds a test (that fails without the TitanFactory
+change).
+
+Fixes #1114
+"
+titan,4499.json,3b4dd304515746e895b4ea7cd1728c0bcfd5d460,"@@ -1,3 +1,5 @@
+         public TitanGraph open() {
+-            return TitanFactory.open(super.getConfiguration());
++            ModifiableConfiguration mc = new ModifiableConfiguration(GraphDatabaseConfiguration.ROOT_NS,
++                    writeConfiguration.copy(), BasicConfiguration.Restriction.NONE);
++            return TitanFactory.open(mc);
+         }
+\ No newline at end of file
+",Buggy,"Let TitanFactory.Builder accept arbitrary keys
+
+Elasticsearch reserves a Titan config namespace under which the user
+may provide arbitrary Elasticsearch config options.  These options
+can't be validated, since it's fundamentally a bit of a perversion of
+the config API: the keys are defined in and controlled by
+Elasticsearch, but we're cramming them into a Titan configuration.
+
+This commit tweaks TitanFactory.Builder to use a WriteConfiguration
+(which is based on dumb strings) instead of a ModifiableConfiguration
+(which is based on ConfigOption and includes validation).
+
+A more elegant way to approach this might be to introduce an
+abstraction to support Elasticsearch's reserved namespace: some kind
+of boolean field that says, in effect, ""don't try to validate any keys
+underneath me"".  That still wouldn't totally address the problem,
+though; (User)ModifiableConfiguration still wouldn't be a suitable
+basis for TitanFactory.Builder, since it requires that any
+user-provided config key string map to a ConfigOption.
+
+This commit also adds a test (that fails without the TitanFactory
+change).
+
+Fixes #1114
+"

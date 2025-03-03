@@ -38,7 +38,7 @@ def tangledReviewer():
 
 def remove_completed(files):
     if True:
-        completed = ["spring-boot", "guava", "pmd", "hbase", "ant", "lucene-solr", "jna", "spring-framework", "sonarqube"]
+        completed = ["spring-boot", "guava", "pmd", "hbase", "ant", "lucene-solr", "jna", "spring-framework", "sonarqube", "voldemort", "cassandra", "jgit"]
         return [item for item in files if not any(sub in item for sub in completed)]
     else:
         return files
@@ -269,4 +269,4 @@ def clear_review():
     return jsonify({"message": "Review cleared successfully"})
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, host='0.0.0.0', port=5000)
