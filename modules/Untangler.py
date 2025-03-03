@@ -58,7 +58,7 @@ class Untangler:
                 if self.enable_cot:
                     few_shots = (
                         few_shots
-                        + f"\nCommit Messaage: {commit_message}\nGit Diff:\n{git_diff}\nAnswer: {explanation} The answer is {answer}.\n"
+                        + f"\nCommit Messaage: {commit_message}\nGit Diff:\n{git_diff}\nAnswer: {explanation} The answer is **{answer}**.\n"
                     )
                 else:
                     few_shots = (
@@ -85,7 +85,7 @@ class Untangler:
                     few_shots.append(
                         {
                             "role": "assistant",
-                            "content": f"{explanation} The answer is {answer}.",
+                            "content": f"{explanation} The answer is **{answer}**.",
                         }
                     )
                 else:
@@ -129,10 +129,9 @@ class Untangler:
         return self.__few_shot_data + question
 
     def prepare_prompt(self, commitMessage, diff):
-        print(self.model_name)
         if self.model_name == "gemini":
             self.prompt = self.__prepare_prompt_for_gemini(commitMessage, diff)
-        if self.model_name == "openai":
+        elif self.model_name == "openai":
             self.prompt = self.__prepare_prompt_for_openai(commitMessage, diff)
         else:
             raise NotImplementedError(
@@ -167,7 +166,6 @@ class Untangler:
                     config=genai.types.GenerateContentConfig(
                         system_instruction=self.__initial_prompt,
                         temperature=0.3,
-                        max_output_tokens=3,
                     ),
                     contents=self.prompt,
                 )
@@ -187,7 +185,7 @@ class Untangler:
             self.last_prompt = self.prompt
             self.prompt = ""
 
-            return prediction.strip()
+            return prediction
 
     def batch_detect(self, df):
         y_pred = []
