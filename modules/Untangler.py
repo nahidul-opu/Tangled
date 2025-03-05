@@ -2,11 +2,13 @@ from google import genai
 from openai import OpenAI
 import configparser
 import json
+import openai
 import pandas as pd
 import time
 from tqdm import tqdm
 import os
 import io
+import re
 
 random_seed = 50
 
@@ -107,7 +109,7 @@ class Untangler:
         )
         return messages
 
-    def prepare_batch_prompt_for_openai(self, model, messages):
+    def __prepare_batch_prompt_for_openai(self, model, messages):
         if os.path.exists(self.__batch_file_name):
             os.remove(self.__batch_file_name)
 
@@ -186,56 +188,100 @@ class Untangler:
             self.prompt = ""
 
             return prediction
+        
+    def __extract_cot_based_result(self, result):
+        def extract_last_sentence(text):
+            sentences = re.split(r'(?<=[.!?])\s+', text.strip())  # Split by punctuation followed by space
+            return  " ".join(sentences[:-1]), sentences[-1] if sentences else ""
+        
+        def extract_bold_words(text):
+            return re.findall(r'\*\*(.*?)\*\*', text)
+        
+        explanation, answer = extract_last_sentence(result)
+        answer = extract_bold_words(answer)
 
-    def batch_detect(self, df):
-        y_pred = []
-        y_true = []
-        for index, row in df.iterrows():
-            y_true.append(row["Decision"])
+        return explanation, answer
 
+    def batch_detect(self, df, iteratively = False):
+        df = df.copy()
         if self.model_name == "gemini":
+            explanations = []
+            answers = []
             for index, row in tqdm(df.iterrows()):
                 error = True
                 self.prepare_prompt(row["CommitMessage"], row["Diff"])
                 while error:
                     try:
-                        pred = self.predict()
+                        pred = self.detect()
                         error = False
                     except genai.errors.ClientError:
                         error = True
-                        time.sleep(60)
-                y_pred.append(pred)
-                y_true.append(row["Decision"])
-                time.sleep(3)
+                        time.sleep(120)
+                if self.enable_cot:
+                    e, a = self.__extract_cot_based_result(pred)
+                    explanations.append(e)
+                    answers.append(a)
+                else:
+                    explanations.append("")
+                    answers.append(pred)
+                time.sleep(5)
+
+            df["Detection"] = answers
+            df["Explanation"] = explanations
 
         elif self.model_name == "openai":
+            if iteratively:
+                explanations = []
+                answers = []
+                for index, row in tqdm(df.iterrows()):
+                    error = True
+                    self.prepare_prompt(row["CommitMessage"], row["Diff"])
+                    while error:
+                        try:
+                            pred = self.detect()
+                            error = False
+                        except Exception as e:
+                            error = True
+                            print(f"Error - {e}.\nRetrying in 1 minute")
+                            time.sleep(60)
+                    if self.enable_cot:
+                        e, a = self.__extract_cot_based_result(pred)
+                        explanations.append(e)
+                        answers.append(a)
+                    else:
+                        explanations.append("")
+                        answers.append(pred)
+                    time.sleep(3)
 
-            messages = []
-            for index, row in tqdm(df.iterrows()):
-                messages.append(
-                    self.__prepare_prompt_for_openai(row["CommitMessage"], row["Diff"])
+                df["Detection"] = answers
+                df["Explanation"] = explanations
+            else:
+                messages = []
+                for index, row in tqdm(df.iterrows()):
+                    messages.append(
+                        self.__prepare_prompt_for_openai(row["CommitMessage"], row["Diff"])
+                    )
+
+                self.__prepare_batch_prompt_for_openai(self.__openai_model_name, messages)
+
+                batch_input_file = self.__client.files.create(
+                    file=open(self.__batch_file_name, "rb"), purpose="batch"
                 )
 
-            self.prepare_batch_prompt_for_openai(self.__openai_model_name, messages)
+                batch_input_file_id = batch_input_file.id
+                self.__current_openai_batch = self.__client.batches.create(
+                    input_file_id=batch_input_file_id,
+                    endpoint="/v1/chat/completions",
+                    completion_window="24h",
+                )
 
-            batch_input_file = self.__client.files.create(
-                file=open(self.__batch_file_name, "rb"), purpose="batch"
-            )
-
-            batch_input_file_id = batch_input_file.id
-            self.__current_openai_batch = self.__client.batches.create(
-                input_file_id=batch_input_file_id,
-                endpoint="/v1/chat/completions",
-                completion_window="24h",
-            )
-
-            self.__current_openai_batch, y_pred = self.get_batch_result()
+                self.__current_openai_batch, df = self.get_batch_result(df=df)
         else:
             raise NotImplementedError()
 
-        return y_true, y_pred
+        return df 
 
-    def get_batch_result(self, batch_id=None):
+    def get_batch_result(self, batch_id=None, df = None):
         if batch_id == None:
             batch_id = self.__current_openai_batch.id
 
@@ -247,11 +293,28 @@ class Untangler:
                 time.sleep(5)
                 batch = self.__client.batches.retrieve(batch_id)
                 pbar.update(max(0, batch.request_counts.completed - pbar.n))
+                if batch.status in ["failed", "expired"]:
+                    raise Exception(batch.errors)
 
-        y_pred = []
+        explanations = []
+        answers = []
         if batch.status == "completed":
             file_response = self.__client.files.content(batch.output_file_id)
             jsonObj = pd.read_json(io.StringIO(file_response.text), lines=True)
             for r in jsonObj["response"].to_list():
-                y_pred.append(r["body"]["choices"][0]["message"]["content"])
-        return batch, y_pred
+                pred = r["body"]["choices"][0]["message"]["content"]
+                if self.enable_cot:
+                    e, a = self.__extract_cot_based_result(pred)
+                    explanations.append(e)
+                    answers.append(a)
+                else:
+                    explanations.append("")
+                    answers.append(pred)
+
+        if df is not None:
+            df = df.copy()
+            df["Detection"] = answers
+            df["Explanation"] = explanations
+        else:
+            df = pd.DataFrame([explanations,answers], columns=["Detection","Explanation"])
+        return batch, df
