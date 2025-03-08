@@ -1,0 +1,504 @@
+Project,File,CommitHash,Diff,Decision,CommitMessage,Detection,Explanation
+guava,15629.json,2ef955163b3d43e7849c1929ef4e5d714b93da96,"@@ -1,27 +1,34 @@
+   MoveDesc<E> removeAt(int index) {
+     checkPositionIndex(index, size);
+     modCount++;
+     size--;
+     if (size == index) {
+       queue[size] = null;
+       return null;
+     }
+     E actualLastElement = elementData(size);
+-    int lastElementAt = heapForIndex(size).getCorrectLastElement(actualLastElement);
++    int lastElementAt = heapForIndex(size).swapWithConceptuallyLastElement(actualLastElement);
++    if (lastElementAt == index) {
++      // 'actualLastElement' is now at 'lastElementAt', and the element that was at 'lastElementAt'
++      // is now at the end of queue. If that's the element we wanted to remove in the first place,
++      // don't try to (incorrectly) trickle it. Instead, just delete it and we're done.
++      queue[size] = null;
++      return null;
++    }
+     E toTrickle = elementData(size);
+     queue[size] = null;
+     MoveDesc<E> changes = fillHole(index, toTrickle);
+     if (lastElementAt < index) {
+       // Last element is moved to before index, swapped with trickled element.
+       if (changes == null) {
+         // The trickled element is still after index.
+         return new MoveDesc<E>(actualLastElement, toTrickle);
+       } else {
+         // The trickled element is back before index, but the replaced element
+         // has now been moved after index.
+         return new MoveDesc<E>(actualLastElement, changes.replaced);
+       }
+     }
+     // Trickled element was after index to begin with, no adjustment needed.
+     return changes;
+   }",Buggy,"Fix two bugs in MinMaxPriorityQueue (introduced in [] First is a bug in removeAt(int) that sometimes causes the wrong element to be removed. Second is a bug that sometimes causes certain elements to be iterated over more than once if elements were removed during iteration.
+
+Reported externally at https://github.com/google/guava/issues/2658
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=140382230",Buggy,
+guava,15643.json,2ef955163b3d43e7849c1929ef4e5d714b93da96,"@@ -1,16 +1,16 @@
+-    int getCorrectLastElement(E actualLastElement) {
++    int swapWithConceptuallyLastElement(E actualLastElement) {
+       int parentIndex = getParentIndex(size);
+       if (parentIndex != 0) {
+         int grandparentIndex = getParentIndex(parentIndex);
+         int uncleIndex = getRightChildIndex(grandparentIndex);
+         if (uncleIndex != parentIndex && getLeftChildIndex(uncleIndex) >= size) {
+           E uncleElement = elementData(uncleIndex);
+           if (ordering.compare(uncleElement, actualLastElement) < 0) {
+             queue[uncleIndex] = actualLastElement;
+             queue[size] = uncleElement;
+             return uncleIndex;
+           }
+         }
+       }
+       return size;
+     }",NotBuggy,"Fix two bugs in MinMaxPriorityQueue (introduced in [] First is a bug in removeAt(int) that sometimes causes the wrong element to be removed. Second is a bug that sometimes causes certain elements to be iterated over more than once if elements were removed during iteration.
+
+Reported externally at https://github.com/google/guava/issues/2658
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=140382230",Buggy,
+guava,15653.json,2ef955163b3d43e7849c1929ef4e5d714b93da96,"@@ -1,21 +1,23 @@
+     public void remove() {
+       checkRemove(canRemove);
+       checkModCount();
+       canRemove = false;
+       expectedModCount++;
+       if (cursor < size()) {
+         MoveDesc<E> moved = removeAt(cursor);
+         if (moved != null) {
+           if (forgetMeNot == null) {
+             forgetMeNot = new ArrayDeque<E>();
+             skipMe = new ArrayList<E>(3);
+           }
+-          forgetMeNot.add(moved.toTrickle);
++          if (!containsExact(skipMe, moved.toTrickle)) {
++            forgetMeNot.add(moved.toTrickle);
++          }
+           skipMe.add(moved.replaced);
+         }
+         cursor--;
+       } else { // we must have set lastFromForgetMeNot in next()
+         checkState(removeExact(lastFromForgetMeNot));
+         lastFromForgetMeNot = null;
+       }
+     }",Buggy,"Fix two bugs in MinMaxPriorityQueue (introduced in [] First is a bug in removeAt(int) that sometimes causes the wrong element to be removed. Second is a bug that sometimes causes certain elements to be iterated over more than once if elements were removed during iteration.
+
+Reported externally at https://github.com/google/guava/issues/2658
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=140382230",Buggy,
+guava,11915.json,953e11352bbcb297987c81d1158f0c46f16cc054,"@@ -1,19 +1,20 @@
+   final TypeToken<T> rejectTypeVariables() {
+     new TypeVisitor() {
+       @Override void visitTypeVariable(TypeVariable<?> type) {
+         throw new IllegalArgumentException(
+             runtimeType + ""contains a type variable and is not safe for the operation"");
+       }
+       @Override void visitWildcardType(WildcardType type) {
+         visit(type.getLowerBounds());
+         visit(type.getUpperBounds());
+       }
+       @Override void visitParameterizedType(ParameterizedType type) {
+         visit(type.getActualTypeArguments());
++        visit(type.getOwnerType());
+       }
+       @Override void visitGenericArrayType(GenericArrayType type) {
+         visit(type.getGenericComponentType());
+       }
+     }.visit(runtimeType);
+     return this;
+   }",Buggy,"Fixed a bug in rejectTypeVariable() where we failed to account for the owner type's type variables. For example:
+
+abstract class From<K> {
+class To<V> {
+TypeToken<To<V>> type() {
+return new TypeToken<To<V>>(getClass()) {};
+}
+}
+
+static <K> TypeToken<From<K>.To<?>> cheat() {
+return new From<K>().new To<String>() {}.type();
+}
+
+TypeToken<From<String>.To<?>> notReallyString = TheClass.<String>cheat();
+notReallyString.rejectTypeVariables(); // Should throw
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=45444012",Buggy,
+guava,11913.json,953e11352bbcb297987c81d1158f0c46f16cc054,"@@ -1,3 +1,4 @@
+       @Override void visitParameterizedType(ParameterizedType type) {
+         visit(type.getActualTypeArguments());
++        visit(type.getOwnerType());
+       }",Buggy,"Fixed a bug in rejectTypeVariable() where we failed to account for the owner type's type variables. For example:
+
+abstract class From<K> {
+class To<V> {
+TypeToken<To<V>> type() {
+return new TypeToken<To<V>>(getClass()) {};
+}
+}
+
+static <K> TypeToken<From<K>.To<?>> cheat() {
+return new From<K>().new To<String>() {}.type();
+}
+
+TypeToken<From<String>.To<?>> notReallyString = TheClass.<String>cheat();
+notReallyString.rejectTypeVariables(); // Should throw
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=45444012",Buggy,
+guava,17172.json,0330f712f56cc53633874e95bdc1203cf881eb85,"@@ -1,10 +1,10 @@
+     public V get(@Nullable Object key) {
+       if (key instanceof Range) {
+         Range<?> range = (Range<?>) key;
+         RangeMapEntry<K, V> rangeMapEntry = entriesByLowerBound.get(range.lowerBound);
+-        if (rangeMapEntry.getKey().equals(range)) {
++        if (rangeMapEntry != null && rangeMapEntry.getKey().equals(range)) {
+           return rangeMapEntry.getValue();
+         }
+       }
+       return null;
+     }",Buggy,"Fix bug in TreeRangeMap.asMapOfRanges().get(absentRange)
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=38651843",Buggy,
+guava,21153.json,1a5b0b9caaa5b6aaef77c9e7ace4f8cac4025738,"@@ -1,11 +1,8 @@
+     private void startTask() {
+-      lock.lock();
+-      try {
+-        if (isShutdown()) {
++      synchronized (lock) {
++        if (shutdown) {
+           throw new RejectedExecutionException(""Executor already shutdown"");
+         }
+         runningTasks++;
+-      } finally {
+-        lock.unlock();
+       }
+     }",Buggy,"Fix a signaling bug in newDirectExecutorService()  Also switch to implicit
+monitors to take advantage of biased locking.
+
+If thread A calls awaitTermination while there are no running tasks, then
+Thread B calls shutdown(). Thread A will never be woken up.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=87280837",Buggy,
+guava,21154.json,1a5b0b9caaa5b6aaef77c9e7ace4f8cac4025738,"@@ -1,11 +1,8 @@
+     private void endTask() {
+-      lock.lock();
+-      try {
+-        runningTasks--;
+-        if (isTerminated()) {
+-          termination.signalAll();
++      synchronized (lock) {
++        int numRunning = --runningTasks;
++        if (numRunning == 0) {
++          lock.notifyAll();
+         }
+-      } finally {
+-        lock.unlock();
+       }
+     }",Buggy,"Fix a signaling bug in newDirectExecutorService()  Also switch to implicit
+monitors to take advantage of biased locking.
+
+If thread A calls awaitTermination while there are no running tasks, then
+Thread B calls shutdown(). Thread A will never be woken up.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=87280837",Buggy,
+guava,11437.json,b4cf74aa3a56751f25ae09eb79b68e0656d40618,"@@ -1,25 +1,21 @@
+   public String collapseFrom(CharSequence sequence, char replacement) {
+-    int first = indexIn(sequence);
+-    if (first == -1) {
+-      return sequence.toString();
+-    }
+-
+-    // TODO(kevinb): see if this implementation can be made faster
+-    StringBuilder builder = new StringBuilder(sequence.length())
+-        .append(sequence.subSequence(0, first))
+-        .append(replacement);
+-    boolean in = true;
+-    for (int i = first + 1; i < sequence.length(); i++) {
++    // This implementation avoids unnecessary allocation.
++    int len = sequence.length();
++    for (int i = 0; i < len; i++) {
+       char c = sequence.charAt(i);
+       if (matches(c)) {
+-        if (!in) {
+-          builder.append(replacement);
+-          in = true;
++        if (c == replacement
++            && (i == len - 1 || !matches(sequence.charAt(i + 1)))) {
++          // a no-op replacement
++          i++;
++        } else {
++          StringBuilder builder = new StringBuilder(len)
++              .append(sequence.subSequence(0, i))
++              .append(replacement);
++          return finishCollapseFrom(sequence, i + 1, len, replacement, builder, true);
+         }
+-      } else {
+-        builder.append(c);
+-        in = false;
+       }
+     }
+-    return builder.toString();
++    // no replacement needed
++    return sequence.toString();
+   }",NotBuggy,"Optimize collapseFrom and trimAndCollapseFrom so that they
+only allocate if necessary.  Add a few tests.  Remove the GWT
+workarounds for GWT bug 4491 since it appears to be fixed.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=39757514",NotBuggy,
+guava,11403.json,b4cf74aa3a56751f25ae09eb79b68e0656d40618,"@@ -1,21 +1,17 @@
+-  public String trimAndCollapseFrom(CharSequence sequence, char replacement) {
+-    int first = negate().indexIn(sequence);
+-    if (first == -1) {
+-      return """"; // everything matches. nothing's left.
+-    }
+-    StringBuilder builder = new StringBuilder(sequence.length());
+-    boolean inMatchingGroup = false;
+-    for (int i = first; i < sequence.length(); i++) {
++  private String finishCollapseFrom(
++      CharSequence sequence, int start, int end, char replacement,
++      StringBuilder builder, boolean inMatchingGroup) {
++    for (int i = start; i < end; i++) {
+       char c = sequence.charAt(i);
+       if (matches(c)) {
+-        inMatchingGroup = true;
+-      } else {
+-        if (inMatchingGroup) {
++        if (!inMatchingGroup) {
+           builder.append(replacement);
+-          inMatchingGroup = false;
++          inMatchingGroup = true;
+         }
++      } else {
+         builder.append(c);
++        inMatchingGroup = false;
+       }
+     }
+     return builder.toString();
+   }",NotBuggy,"Optimize collapseFrom and trimAndCollapseFrom so that they
+only allocate if necessary.  Add a few tests.  Remove the GWT
+workarounds for GWT bug 4491 since it appears to be fixed.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=39757514",NotBuggy,
+guava,22907.json,9bf42862f877a0ed8234bd484aa0089a3773ccd4,"@@ -1,11 +1,12 @@
+   private void addDoneString(StringBuilder builder) {
+     try {
+-      builder.append(""SUCCESS, result=["").append(getDone(this)).append(""]"");
++      V value = getDone(this);
++      builder.append(""SUCCESS, result=["").append(value).append(""]"");
+     } catch (ExecutionException e) {
+       builder.append(""FAILURE, cause=["").append(e.getCause()).append(""]"");
+     } catch (CancellationException e) {
+       builder.append(""CANCELLED"");
+     } catch (RuntimeException e) {
+       builder.append(""UNKNOWN, cause=["").append(e.getClass()).append("" thrown from get()]"");
+     }
+   }",Buggy,"ImmediateFuture.toString() implementation to provide the returned value or exception.
+Provides for all ImmediateFutures implementation the same syntax that AbstractFuture uses.
+
+It's especially convenient during debugging of mocked asynchronous gRPC services.
+
+Fixes bug in AbstractFuture#toString in GWT that caused wrong representation:
+""Class$S413@205[status=SUCCESS, result=[FAILURE, cause=[Class$S6]]"" due to ongoing
+builder being already called when getDone() throws exception.
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=165925433",Buggy,
+pmd,8491.json,384cd4f3d9a15a09b664c728ad42e03321428d7a,"@@ -1,17 +1,17 @@
+     public Object visit(ASTMethodDeclarator node, Object data) {
+         Scope scope = node.getScope();
+         Map params = scope.getVariableDeclarations(true);
+         for (Iterator i = params.keySet().iterator(); i.hasNext();) {
+             VariableNameDeclaration decl = (VariableNameDeclaration)i.next();
+             List usages = (List)params.get(decl);
+             for (Iterator j = usages.iterator();j.hasNext();) {
+                 NameOccurrence occ = (NameOccurrence)j.next();
+-                if (occ.isOnLeftHandSide()) {
++                if (occ.isOnLeftHandSide() && (occ.getNameForWhichThisIsAQualifier() == null)) {
+                     RuleContext ctx = (RuleContext)data;
+                     String msg = MessageFormat.format(getMessage(), new Object[] {decl.getImage()});
+                     ctx.getReport().addRuleViolation(createRuleViolation(ctx, decl.getLine(), msg));
+                 }
+             }
+         }
+         return super.visit(node, data);
+     }",Buggy,"Several bug fixes
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@1376 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,
+pmd,8745.json,384cd4f3d9a15a09b664c728ad42e03321428d7a,"@@ -1,20 +1,20 @@
+     public Object visit(ASTMethodDeclaration node, Object data) {
+         if (node.isAbstract()) {
+             return data;
+         }
+ 
+         List returnNodes = new ArrayList();
+-        node.findChildrenOfType(ASTReturnStatement.class, returnNodes);
++        node.findChildrenOfType(ASTReturnStatement.class, returnNodes, false);
+         if (returnNodes.size() > 1) {
+             RuleContext ctx = (RuleContext)data;
+             for (Iterator i = returnNodes.iterator(); i.hasNext();) {
+                 SimpleNode problem = (SimpleNode)i.next();
+                 // skip the last one, it's OK
+                 if (!i.hasNext()) {
+                     continue;
+                 }
+                 ctx.getReport().addRuleViolation(createRuleViolation(ctx, problem.getBeginLine()));
+             }
+         }
+         return data;
+     }",Buggy,"Several bug fixes
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@1376 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,
+pmd,1151.json,384cd4f3d9a15a09b664c728ad42e03321428d7a,"@@ -1,15 +1,18 @@
+-    private void findChildrenOfType(Node node, Class targetType, List results) {
++    private void findChildrenOfType(Node node, Class targetType, List results, boolean descendIntoNestedClasses) {
+         if (node.getClass().equals(targetType)) {
+             results.add(node);
+         }
++        if (node.getClass().equals(ASTClassBody.class) && !descendIntoNestedClasses) {
++            return;
++        }
+         for (int i=0; i<node.jjtGetNumChildren(); i++) {
+-            Node child = (Node)node.jjtGetChild(i);
++            Node child = node.jjtGetChild(i);
+             if (child.jjtGetNumChildren()>0) {
+-                findChildrenOfType(child, targetType, results);
++                findChildrenOfType(child, targetType, results, descendIntoNestedClasses);
+             } else {
+                 if (child.getClass().equals(targetType)) {
+                     results.add(child);
+                 }
+             }
+         }
+     }",Buggy,"Several bug fixes
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@1376 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,
+pmd,7973.json,a405d23dfb9e574e2b2ef23f1f45d548a738ed3b,"@@ -1,10 +1,4 @@
+     public boolean isOnRightHandSide() {
+         SimpleNode node = (SimpleNode) location.jjtGetParent().jjtGetParent().jjtGetParent();
+-        if (node instanceof ASTExpression) {
+-            SimpleNode parent = (SimpleNode) node.jjtGetParent();
+-            if (node.jjtGetNumChildren() == 3) {
+-                return true;
+-            }
+-        }
+-        return false;
++        return node instanceof ASTExpression && node.jjtGetNumChildren() == 3;
+     }",NotBuggy,"Fixed bug 1050173 - ImmutableFieldRule no longer reports false positives for static fields.  Also fixed version number in PMD.java, argh.
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@2994 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,
+pmd,8886.json,a405d23dfb9e574e2b2ef23f1f45d548a738ed3b,"@@ -1,18 +1,18 @@
+     public Object visit(ASTUnmodifiedClassDeclaration node, Object data) {
+         Map vars = node.getScope().getVariableDeclarations();
+         for (Iterator i = vars.keySet().iterator(); i.hasNext();) {
+             VariableNameDeclaration decl = (VariableNameDeclaration) i.next();
+-            if (!decl.getAccessNodeParent().isPrivate() || decl.getAccessNodeParent().isFinal()) {
++            if (decl.getAccessNodeParent().isStatic() || !decl.getAccessNodeParent().isPrivate() || decl.getAccessNodeParent().isFinal()) {
+                 continue;
+             }
++
+             int result = initializedInConstructor((List)vars.get(decl));
+             if (result == MUTABLE) {
+             	continue;
+             }
+-            if ((result == IMMUTABLE) ||
+-                ((result == CHECKDECL) && initializedInDeclaration(decl.getAccessNodeParent()))) {
++            if (result == IMMUTABLE || ((result == CHECKDECL) && initializedInDeclaration(decl.getAccessNodeParent()))) {
+                 ((RuleContext) data).getReport().addRuleViolation(createRuleViolation((RuleContext) data, decl.getLine(), MessageFormat.format(getMessage(), new Object[]{decl.getImage()})));
+             }
+         }
+         return super.visit(node, data);
+     }",Buggy,"Fixed bug 1050173 - ImmutableFieldRule no longer reports false positives for static fields.  Also fixed version number in PMD.java, argh.
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@2994 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,
+pmd,8888.json,a405d23dfb9e574e2b2ef23f1f45d548a738ed3b,"@@ -1,31 +1,31 @@
+     private int initializedInConstructor(List usages) {
+         int rc = MUTABLE, initCount = 0;
+         boolean setInConstructor = false;
+ 		boolean foundUsage = false;
+ 
+         for (Iterator j = usages.iterator(); j.hasNext();) {
+         	foundUsage = true;
+-        	NameOccurrence occurance = (NameOccurrence)j.next();
+-            if (occurance.isOnLeftHandSide()) {
+-            	SimpleNode node = occurance.getLocation();
++        	NameOccurrence occ = (NameOccurrence)j.next();
++            if (occ.isOnLeftHandSide()) {
++            	SimpleNode node = occ.getLocation();
+             	if (node.getFirstParentOfType(ASTConstructorDeclaration.class) != null) {
+             		setInConstructor = true;
+             		initCount++;
+  				}
+  				else {
+  					if (node.getFirstParentOfType(ASTMethodDeclaration.class) != null) {
+  						initCount++;
+  					}
+  				}
+  			}
+         }
+         if (!foundUsage || (initCount == 0)) {
+         	rc = CHECKDECL;
+         }
+         else {
+         	if ((initCount == 1) && setInConstructor) {
+         		rc = IMMUTABLE;
+         	}
+         }
+         return rc;
+     }",NotBuggy,"Fixed bug 1050173 - ImmutableFieldRule no longer reports false positives for static fields.  Also fixed version number in PMD.java, argh.
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@2994 51baf565-9d33-0410-a72c-fc3788e3496d",NotBuggy,
+pmd,8249.json,222563dc32c51c8f77a1b06ba69077463a525479,"@@ -1,4 +1,4 @@
+ 		public AnnotationVisitor visitAnnotation(String desc, boolean visible) {
+ 			parent.addType(Type.getType(desc));
+-			return annotationVisitor;
++			return parent.annotationVisitor;
+ 		}",Buggy,"bug fix: acceptType only works for fields and locals
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@4822 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,
+pmd,8247.json,222563dc32c51c8f77a1b06ba69077463a525479,"@@ -1,5 +1,5 @@
+ 	private void extractSignature(String sig) {
+ 		if (sig != null) {
+-			new SignatureReader(sig).acceptType(sigVisitor);
++			new SignatureReader(sig).accept(sigVisitor);
+ 		}
+ 	}",Buggy,"bug fix: acceptType only works for fields and locals
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@4822 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,
+pmd,6069.json,51ab4ae563f9875328e56161bff3eb97331b10cd,"@@ -1,8 +1,8 @@
+     public void jjtClose() {
+-        if ((children == null) || (children.length == 0)) {
++        if (beginLine == -1 && (children == null || children.length == 0)) {
+             beginLine = parser.token.beginLine;
+             beginColumn = parser.token.beginColumn;
+         }
+         endLine = parser.token.endLine;
+         endColumn = parser.token.endColumn;
+     }",Buggy,"Fixed bug 583047 - columns were wrong on ASTName nodes
+
+
+git-svn-id: https://pmd.svn.sourceforge.net/svnroot/pmd/trunk@2011 51baf565-9d33-0410-a72c-fc3788e3496d",Buggy,

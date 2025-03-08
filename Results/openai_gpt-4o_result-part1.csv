@@ -1,0 +1,467 @@
+Project,File,CommitHash,Diff,Decision,CommitMessage,Detection,Explanation
+spring-boot,9232.json,ed15f742fd4eacc14b06908112ac4ca6ae4c0f90,"@@ -1,7 +1,7 @@
+ 	public static String template(TemplateEngine engine, String name, Map<String, ?> model)
+ 			throws IOException, CompilationFailedException, ClassNotFoundException {
+-		Writable writable = getTemplate(name).make(model);
++		Writable writable = getTemplate(engine, name).make(model);
+ 		StringWriter result = new StringWriter();
+ 		writable.writeTo(result);
+ 		return result.toString();
+ 	}",Buggy,"Fix bug in GroovyTemplate convenience
+
+It was ignoring the engine argument in the 3 arg version
+of template().",Buggy,
+spring-boot,9233.json,ed15f742fd4eacc14b06908112ac4ca6ae4c0f90,"@@ -1,17 +1,16 @@
+-	private static Template getTemplate(String name) throws CompilationFailedException,
++	private static Template getTemplate(TemplateEngine engine, String name) throws CompilationFailedException,
+ 			ClassNotFoundException, IOException {
+-		GStringTemplateEngine engine = new GStringTemplateEngine();
+ 
+ 		File file = new File(""templates"", name);
+ 		if (file.exists()) {
+ 			return engine.createTemplate(file);
+ 		}
+ 
+ 		ClassLoader classLoader = GroovyTemplate.class.getClassLoader();
+ 		URL resource = classLoader.getResource(""templates/"" + name);
+ 		if (resource != null) {
+ 			return engine.createTemplate(resource);
+ 		}
+ 
+ 		return engine.createTemplate(name);
+ 	}",Buggy,"Fix bug in GroovyTemplate convenience
+
+It was ignoring the engine argument in the 3 arg version
+of template().",Buggy,
+spring-boot,510.json,99ae6dac5321a741d93ff5187fafb94c295a6928,"@@ -1,3 +1,3 @@
+-		public CouchbaseEnvironment couchbaseEnvironment() throws Exception {
+-			return createEnvironment(this.properties);
++		public DefaultCouchbaseEnvironment couchbaseEnvironment() throws Exception {
++			return initializeEnvironmentBuilder(this.properties).build();
+ 		}",Buggy,"Customize Couchbase's socket connect timeout
+
+Our Windows build is failing currently because the couchbase server does
+not handle a socket connection within a second (the default). This commit
+adds a property to customize this option and set it to 10 sec in the
+sample.
+
+While investigating this issue, it turns out that while
+`CouchbaseConfiguration` is public, it is not really possible to extend
+it in user's configuration. This commit fixes this problem and add a test
+that demonstrates how it can be used.
+
+Closes gh-5657",NotBuggy,
+spring-boot,516.json,99ae6dac5321a741d93ff5187fafb94c295a6928,"@@ -1,22 +1,23 @@
+-		protected CouchbaseEnvironment createEnvironment(CouchbaseProperties properties) {
++		protected DefaultCouchbaseEnvironment.Builder initializeEnvironmentBuilder(CouchbaseProperties properties) {
+ 			CouchbaseProperties.Endpoints endpoints = properties.getEnv().getEndpoints();
+ 			CouchbaseProperties.Timeouts timeouts = properties.getEnv().getTimeouts();
+ 			DefaultCouchbaseEnvironment.Builder builder = DefaultCouchbaseEnvironment
+ 					.builder().connectTimeout(timeouts.getConnect())
+ 					.kvEndpoints(endpoints.getKeyValue())
+ 					.kvTimeout(timeouts.getKeyValue())
+ 					.queryEndpoints(endpoints.getQuery())
+ 					.queryTimeout(timeouts.getQuery()).viewEndpoints(endpoints.getView())
++					.socketConnectTimeout(timeouts.getSocketConnect())
+ 					.viewTimeout(timeouts.getView());
+ 			CouchbaseProperties.Ssl ssl = properties.getEnv().getSsl();
+ 			if (ssl.getEnabled()) {
+ 				builder.sslEnabled(true);
+ 				if (ssl.getKeyStore() != null) {
+ 					builder.sslKeystoreFile(ssl.getKeyStore());
+ 				}
+ 				if (ssl.getKeyStorePassword() != null) {
+ 					builder.sslKeystorePassword(ssl.getKeyStorePassword());
+ 				}
+ 			}
+-			return builder.build();
++			return builder;
+ 		}",Buggy,"Customize Couchbase's socket connect timeout
+
+Our Windows build is failing currently because the couchbase server does
+not handle a socket connection within a second (the default). This commit
+adds a property to customize this option and set it to 10 sec in the
+sample.
+
+While investigating this issue, it turns out that while
+`CouchbaseConfiguration` is public, it is not really possible to extend
+it in user's configuration. This commit fixes this problem and add a test
+that demonstrates how it can be used.
+
+Closes gh-5657",NotBuggy,
+spring-boot,6313.json,1a2186e6efed5c53d7c50548de7b30b9a6dcd7f7,"@@ -1,6 +1,6 @@
+ 		private boolean startsWithArgumentClassName(String message) {
+-			Predicate<Object> startsWith = (argument) -> argument != null
+-					&& message.startsWith(argument.getClass().getName());
++			Predicate<Object> startsWith = (argument) -> startsWithArgumentClassName(
++					message, argument);
+ 			return startsWith.test(this.argument)
+ 					|| Stream.of(this.additionalArguments).anyMatch(startsWith);
+ 		}",Buggy,"Attempt to fix lambda error detection on JDK 9
+
+Update `LambdaSafe` to also detect `ClassCastException` messages that
+start with ""module/name"".
+
+See gh-11584",NotBuggy,
+spring-boot,2051.json,4b4dc28a869e2f8b988f6ac6ea8a31c274477da5,"@@ -1,9 +1,10 @@
+ 	private void logError(ServerRequest request, ServerResponse response, Throwable throwable) {
+ 		if (logger.isDebugEnabled()) {
+ 			logger.debug(request.exchange().getLogPrefix() + formatError(throwable, request));
+ 		}
+-		if (response.statusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
++		if (HttpStatus.resolve(response.rawStatusCode()) != null
++				&& response.statusCode().equals(HttpStatus.INTERNAL_SERVER_ERROR)) {
+ 			logger.error(request.exchange().getLogPrefix() + ""500 Server Error for "" + formatRequest(request),
+ 					throwable);
+ 		}
+ 	}",Buggy,"Support non-standard error codes with AbstractErrorWebExceptionHandler
+
+Fixes gh-16691",Buggy,
+guava,10860.json,81f0a77431bf90bf02543b999577400c7c13aa13,"@@ -1,13 +1,15 @@
+       @Override public Iterator<T> iterator() {
+         return new AbstractIterator<T>() {
++          private final Iterator<Optional<T>> iterator = checkNotNull(optionals.iterator());
++
+           @Override protected T computeNext() {
+             while (iterator.hasNext()) {
+               Optional<T> optional = iterator.next();
+               if (optional.isPresent()) {
+                 return optional.get();
+               }
+             }
+             return endOfData();
+           }
+         };
+       };",Buggy,"Fix bug in Optional#presentInstances.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=26472796",Buggy,
+guava,10861.json,81f0a77431bf90bf02543b999577400c7c13aa13,"@@ -1,19 +1,20 @@
+-  public static <T> Iterable<T> presentInstances(Iterable<Optional<T>> optionals) {
++  public static <T> Iterable<T> presentInstances(final Iterable<Optional<T>> optionals) {
+     checkNotNull(optionals);
+-    final Iterator<Optional<T>> iterator = checkNotNull(optionals.iterator());
+     return new Iterable<T>() {
+       @Override public Iterator<T> iterator() {
+         return new AbstractIterator<T>() {
++          private final Iterator<Optional<T>> iterator = checkNotNull(optionals.iterator());
++
+           @Override protected T computeNext() {
+             while (iterator.hasNext()) {
+               Optional<T> optional = iterator.next();
+               if (optional.isPresent()) {
+                 return optional.get();
+               }
+             }
+             return endOfData();
+           }
+         };
+       };
+     };
+   }",Buggy,"Fix bug in Optional#presentInstances.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=26472796",Buggy,
+guava,14951.json,803f44ac9c6a3457388394e952132fe18449cb9f,"@@ -1,4 +1,6 @@
+     @Override public void clear() {
+-      linkedEntries.removeAll(createEntries(delegate()));
++      for (V value : delegate) {
++        linkedEntries.remove(createEntry(value));
++      }
+       delegate.clear();
+     }",Buggy,"Fix performance problem in LinkedHashMultimap.removeAll(key), as documented in http://code.google.com/p/guava-libraries/issues/detail?id=371&start=100
+
+R=kak
+DELTA=3  (2 added, 0 deleted, 1 changed)
+
+
+Revision created by MOE tool push_codebase.
+MOE_MIGRATION=177089
+
+
+git-svn-id: https://guava-libraries.googlecode.com/svn/trunk@93 8138a162-5c33-11de-8abc-d1c337b90d21",Buggy,
+guava,9470.json,2ee7f9da69308c56d5af71267e8b797cedaf31ba,"@@ -1,3 +1,5 @@
+   public boolean hasEdgeConnecting(N nodeU, N nodeV) {
+-    return !edgesConnecting(nodeU, nodeV).isEmpty();
++    checkNotNull(nodeU);
++    checkNotNull(nodeV);
++    return nodes().contains(nodeU) && successors(nodeU).contains(nodeV);
+   }",Buggy,"AbstractNetwork: fix bug in AbstractNetwork.hasEdgeConnecting() causing it to throw if either endpoint was not in the graph.
+
+RELNOTES=Fix bug in AbstractNetwork.hasEdgeConnecting() causing it to throw if either endpoint was not in the graph.  Originally reported as GitHub issue #3721.
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=282846559",Buggy,
+guava,9471.json,2ee7f9da69308c56d5af71267e8b797cedaf31ba,"@@ -1,7 +1,7 @@
+   public boolean hasEdgeConnecting(EndpointPair<N> endpoints) {
+     checkNotNull(endpoints);
+     if (!isOrderingCompatible(endpoints)) {
+       return false;
+     }
+-    return !edgesConnecting(endpoints.nodeU(), endpoints.nodeV()).isEmpty();
++    return hasEdgeConnecting(endpoints.nodeU(), endpoints.nodeV());
+   }",Buggy,"AbstractNetwork: fix bug in AbstractNetwork.hasEdgeConnecting() causing it to throw if either endpoint was not in the graph.
+
+RELNOTES=Fix bug in AbstractNetwork.hasEdgeConnecting() causing it to throw if either endpoint was not in the graph.  Originally reported as GitHub issue #3721.
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=282846559",Buggy,
+guava,18902.json,314727b81a4f45210ab53ebd46b695150ea36f8c,"@@ -1,14 +1,11 @@
+   public static long copy(Readable from, Appendable to) throws IOException {
+     CharBuffer buf = CharBuffer.allocate(BUF_SIZE);
+     long total = 0;
+-    while (true) {
+-      int r = from.read(buf);
+-      if (r == -1) {
+-        break;
+-      }
++    while (from.read(buf) != -1) {
+       buf.flip();
+-      to.append(buf, 0, r);
+-      total += r;
++      to.append(buf);
++      total += buf.remaining();
++      buf.clear();
+     }
+     return total;
+   }",Buggy,"Fix a bug with CharStreams.copy not clearing its buffer after reading.
+
+Guava issue 1061: http://code.google.com/p/guava-libraries/issues/detail?id=1061
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=31793143",Buggy,
+guava,12172.json,843f8d8fc37133e6870d5b2200838219a55eb83e,"@@ -1,3 +1,3 @@
+     @Override public int size() {
+-      return safeIntFactorial(inputList.size());
++      return IntMath.factorial(inputList.size());
+     }",Buggy,"Nuke 85 lines of code in Collections2 by adopting common.math. Which apparently fixed a size calculation bug that wasn't found due to a bad test that thought C(34,14) > MAX_VALUE.  (?)
+
+Also snuck a call to IntMath.pow() into cartesianProduct.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=28310475",Buggy,
+guava,12171.json,843f8d8fc37133e6870d5b2200838219a55eb83e,"@@ -1,32 +1,25 @@
+-    static <E> int calculateSize(List<E> sortedInputList,
+-        Comparator<? super E> comparator) {
+-      try {
+-        long permutations = 1;
+-        int n = 1;
+-        int r = 1;
+-        for (; n < sortedInputList.size(); n++, r++) {
+-          int comparison = comparator.compare(sortedInputList.get(n - 1),
+-              sortedInputList.get(n));
+-          // The list is sorted, this is an invariant.
+-          checkState(comparison <= 0);
+-          if (comparison < 0) {
+-            // We move to the next non-repeated element.
+-            permutations *= binomialCoefficient(n, r);
+-            r = 0;
+-
+-            // Return early if we have more than MAX_VALUE permutations.
+-            if (!isPositiveInt(permutations)) {
+-              return Integer.MAX_VALUE;
+-            }
++    private static <E> int calculateSize(
++        List<E> sortedInputList, Comparator<? super E> comparator) {
++      long permutations = 1;
++      int n = 1;
++      int r = 1;
++      while (n < sortedInputList.size()) {
++        int comparison = comparator.compare(
++            sortedInputList.get(n - 1), sortedInputList.get(n));
++        if (comparison < 0) {
++          // We move to the next non-repeated element.
++          permutations *= binomial(n, r);
++          r = 0;
++          if (!isPositiveInt(permutations)) {
++            return Integer.MAX_VALUE;
+           }
+         }
+-        permutations *= binomialCoefficient(n, r);
+-        if (!isPositiveInt(permutations)) {
+-          return Integer.MAX_VALUE;
+-        }
+-        return (int) permutations;
+-      } catch (IllegalArgumentException e) {
+-        // Overflow. Fall back to max size.
++        n++;
++        r++;
++      }
++      permutations *= binomial(n, r);
++      if (!isPositiveInt(permutations)) {
+         return Integer.MAX_VALUE;
+       }
++      return (int) permutations;
+     }",Buggy,"Nuke 85 lines of code in Collections2 by adopting common.math. Which apparently fixed a size calculation bug that wasn't found due to a bad test that thought C(34,14) > MAX_VALUE.  (?)
+
+Also snuck a call to IntMath.pow() into cartesianProduct.
+-------------
+Created by MOE: http://code.google.com/p/moe-java
+MOE_MIGRATED_REVID=28310475",Buggy,
+guava,1857.json,a0f748e78516c8c80c945f6a4c4fae752d11bff5,"@@ -1,9 +1,7 @@
+   private void readObject(ObjectInputStream stream) throws IOException, ClassNotFoundException {
+     stream.defaultReadObject();
+     keyType = (Class<K>) stream.readObject();
+     valueType = (Class<V>) stream.readObject();
+-    setDelegates(
+-        WellBehavedMap.wrap(new EnumMap<K, V>(keyType)),
+-        WellBehavedMap.wrap(new EnumMap<V, K>(valueType)));
++    setDelegates(new EnumMap<K, V>(keyType), new EnumMap<V, K>(valueType));
+     Serialization.populateMap(this, stream);
+   }",NotBuggy,"Delete WellBehavedMap.
+
+The bug it worked around was fixed in Java 7:
+https://bugs.java.com/bugdatabase/view_bug.do?bug_id=6312706
+
+And I don't believe it was ever present under Android:
+https://android.googlesource.com/platform/libcore/+/fdb2704414a9ed92394ada0d1395e4db86889465/luni/src/main/java/java/util/EnumMap.java#146
+
+I haven't looked for the absolute first version ever of GWT, but the still very old GWT file doesn't have the bug, either.
+
+Deleting this class will simplify some work I'm doing around our EnumMap usage for j2cl.
+
+RELNOTES=n/a
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=233418344",NotBuggy,
+guava,13304.json,a0f748e78516c8c80c945f6a4c4fae752d11bff5,"@@ -1,8 +1,7 @@
+   private void readObject(ObjectInputStream stream) throws IOException, ClassNotFoundException {
+     stream.defaultReadObject();
+     keyType = (Class<K>) stream.readObject();
+     setDelegates(
+-        WellBehavedMap.wrap(new EnumMap<K, V>(keyType)),
+-        new HashMap<V, K>(keyType.getEnumConstants().length * 3 / 2));
++        new EnumMap<K, V>(keyType), new HashMap<V, K>(keyType.getEnumConstants().length * 3 / 2));
+     Serialization.populateMap(this, stream);
+   }",NotBuggy,"Delete WellBehavedMap.
+
+The bug it worked around was fixed in Java 7:
+https://bugs.java.com/bugdatabase/view_bug.do?bug_id=6312706
+
+And I don't believe it was ever present under Android:
+https://android.googlesource.com/platform/libcore/+/fdb2704414a9ed92394ada0d1395e4db86889465/luni/src/main/java/java/util/EnumMap.java#146
+
+I haven't looked for the absolute first version ever of GWT, but the still very old GWT file doesn't have the bug, either.
+
+Deleting this class will simplify some work I'm doing around our EnumMap usage for j2cl.
+
+RELNOTES=n/a
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=233418344",NotBuggy,
+guava,22245.json,c5231cfd14de78cd50099e095798fba6726cbe9e,"@@ -1,7 +1,7 @@
+   public static RegularImmutableAsList<Object> instantiate(SerializationStreamReader reader)
+       throws SerializationException {
+-    @SuppressWarnings(""unchecked"") // serialization is necessarily type unsafe
+-    ImmutableCollection<Object> delegateCollection = (ImmutableCollection) reader.readObject();
+-    ImmutableList<?> delegateList = (ImmutableList<?>) reader.readObject();
+-    return new RegularImmutableAsList<Object>(delegateCollection, delegateList);
++    ArrayList<Object> elements = new ArrayList<Object>();
++    Collection_CustomFieldSerializerBase.deserialize(reader, elements);
++    ImmutableList<Object> delegate = ImmutableList.copyOf(elements);
++    return new RegularImmutableAsList<Object>(delegate, delegate);
+   }",Buggy,"fixes serialization errors when serializing a
+RegularImmutableAsList
+
+the issue occur when ImmutableList is included in gwt's serialization
+policy and ImmutableSet not and a list created by ImmutableSet.asList
+needs to be serialized
+
+Fixes #2614
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=137724815",Buggy,
+guava,22246.json,c5231cfd14de78cd50099e095798fba6726cbe9e,"@@ -1,5 +1,4 @@
+   public static void serialize(SerializationStreamWriter writer, RegularImmutableAsList<?> instance)
+       throws SerializationException {
+-    writer.writeObject(instance.delegateCollection());
+-    writer.writeObject(instance.delegateList());
++    Collection_CustomFieldSerializerBase.serialize(writer, instance);
+   }",Buggy,"fixes serialization errors when serializing a
+RegularImmutableAsList
+
+the issue occur when ImmutableList is included in gwt's serialization
+policy and ImmutableSet not and a list created by ImmutableSet.asList
+needs to be serialized
+
+Fixes #2614
+
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=137724815",Buggy,
+guava,11944.json,946ebccece2c45cce528cdc6d2db1aa31d2cfa73,"@@ -1,20 +1,26 @@
+   private Type resolveTypeArgsForSubclass(Class<?> subclass) {
+-    if (runtimeType instanceof Class) {
++    // If both runtimeType and subclass are not parameterized, return subclass
++    // If runtimeType is not parameterized but subclass is, process subclass as a parameterized type
++    // If runtimeType is a raw type (i.e. is a parameterized type specified as a Class<?>), we
++    // return subclass as a raw type
++    if (runtimeType instanceof Class
++        && ((subclass.getTypeParameters().length == 0)
++            || (getRawType().getTypeParameters().length != 0))) {
+       // no resolution needed
+       return subclass;
+     }
+     // class Base<A, B> {}
+     // class Sub<X, Y> extends Base<X, Y> {}
+     // Base<String, Integer>.subtype(Sub.class):
+ 
+     // Sub<X, Y>.getSupertype(Base.class) => Base<X, Y>
+     // => X=String, Y=Integer
+     // => Sub<X, Y>=Sub<String, Integer>
+     TypeToken<?> genericSubtype = toGenericType(subclass);
+     @SuppressWarnings({""rawtypes"", ""unchecked""}) // subclass isn't <? extends T>
+     Type supertypeWithArgsFromSubtype =
+         genericSubtype.getSupertype((Class) getRawType()).runtimeType;
+     return new TypeResolver()
+         .where(supertypeWithArgsFromSubtype, runtimeType)
+         .resolveType(genericSubtype.runtimeType);
+   }",Buggy,"Currently, SomeClass<?>.getSubType(SubClass<?, OtherT>) returns SubClass<?, OtherT>.
+However, if we do NotGeneric.getSubtype(SubClass<OtherT>), we get SubClass as a raw type instead of
+SubClass<OtherT>.
+
+If we fix that bug, then as it turns out we weren't generating proper owners for static classes, so fix that too
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=119755147",Buggy,
+guava,11937.json,946ebccece2c45cce528cdc6d2db1aa31d2cfa73,"@@ -1,24 +1,26 @@
+   static <T> TypeToken<? extends T> toGenericType(Class<T> cls) {
+     if (cls.isArray()) {
+       Type arrayOfGenericType =
+           Types.newArrayType(
+               // If we are passed with int[].class, don't turn it to GenericArrayType
+               toGenericType(cls.getComponentType()).runtimeType);
+       @SuppressWarnings(""unchecked"") // array is covariant
+       TypeToken<? extends T> result = (TypeToken<? extends T>) of(arrayOfGenericType);
+       return result;
+     }
+     TypeVariable<Class<T>>[] typeParams = cls.getTypeParameters();
+     Type ownerType =
+-        cls.isMemberClass() ? toGenericType(cls.getEnclosingClass()).runtimeType : null;
++        cls.isMemberClass() && !Modifier.isStatic(cls.getModifiers())
++            ? toGenericType(cls.getEnclosingClass()).runtimeType
++            : null;
+ 
+-    if ((typeParams.length > 0) || (ownerType != cls.getEnclosingClass())) {
++    if ((typeParams.length > 0) || ((ownerType != null) && ownerType != cls.getEnclosingClass())) {
+       @SuppressWarnings(""unchecked"") // Like, it's Iterable<T> for Iterable.class
+       TypeToken<? extends T> type =
+           (TypeToken<? extends T>)
+               of(Types.newParameterizedTypeWithOwner(ownerType, cls, typeParams));
+       return type;
+     } else {
+       return of(cls);
+     }
+   }",Buggy,"Currently, SomeClass<?>.getSubType(SubClass<?, OtherT>) returns SubClass<?, OtherT>.
+However, if we do NotGeneric.getSubtype(SubClass<OtherT>), we get SubClass as a raw type instead of
+SubClass<OtherT>.
+
+If we fix that bug, then as it turns out we weren't generating proper owners for static classes, so fix that too
+-------------
+Created by MOE: https://github.com/google/moe
+MOE_MIGRATED_REVID=119755147",Buggy,
