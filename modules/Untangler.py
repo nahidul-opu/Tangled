@@ -43,7 +43,7 @@ class Untangler:
 
         self.__batch_file_name = "request.jsonl"
 
-        self.__initial_prompt = "You are a Git commit review assistant. Given a Java source code diff and its commit message, analyze both to determine if the changes align with the described bug fix. Assess the relevance between the commit message and code modifications, identifying patterns such as error-handling updates, logical corrections, exception-handling improvements, and other indicators of bug-related changes. Use the provided examples as reference points to enhance accuracy in detecting bug-related changes."
+        self.__initial_prompt = "You are a Git commit review assistant. Given a Java source code diff and its commit message, analyze both to determine if the changes align with the described bug fix. Assess the relevance between the commit message and code modifications, identifying patterns such as error-handling updates, logical corrections, exception-handling improvements, and other indicators of bug-related changes. Use the provided examples as reference points to enhance accuracy in detecting bug-related changes. The output should be a single word. If the changes align, output 'Buggy'; otherwise, output 'NotBuggy'."
         self.__prepare_few_shot_data()
 
     def change_model(self, model_name):
@@ -228,7 +228,7 @@ class Untangler:
                         error = False
                     except genai.errors.ClientError:
                         error = True
-                        time.sleep(120)
+                        time.sleep(60)
                 if self.enable_cot:
                     e, a = self.__extract_cot_based_result(pred)
                     explanations.append(e)
@@ -236,7 +236,7 @@ class Untangler:
                 else:
                     explanations.append("")
                     answers.append(pred)
-                time.sleep(5)
+                time.sleep(4)
 
             df["Detection"] = answers
             df["Explanation"] = explanations
