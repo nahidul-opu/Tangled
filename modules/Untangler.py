@@ -34,7 +34,9 @@ class BaseUntangler:
 
         self.initial_prompt = f"{persona} {instruction} {context} {format}"
 
-    def get_token_count(self, prompt):
+    def get_token_count(self, prompt = None):
+        if prompt is None:
+            prompt = self.prompt
         try:
             encoding = tiktoken.encoding_for_model(self.model_name)
             total_tokens = 0
@@ -390,6 +392,8 @@ class FreeUntangler(BaseUntangler):
             max_new_tokens=500,
             do_sample=False,
         )
+
+        self.__prepare_few_shot_data()
 
     def __prepare_few_shot_data(self):
         if self.shot_count == 0:
