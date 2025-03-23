@@ -364,3 +364,119 @@ class OpenAIUntangler(BaseUntangler):
                     [answers], columns=["Detection"]
                 )
         return batch, df
+
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
+
+class FreeUntangler(BaseUntangler):
+    def __init__(self, model_name="microsoft/Phi-3-mini-4k-instruct", shot_count=0, enable_cot=False):
+        super().__init__(model_name, shot_count, enable_cot)
+        self.__setup()
+
+    def __setup(self):
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.model_name,
+            device_map="cuda",
+            torch_dtype="auto",
+            trust_remote_code=True,
+        )
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        self.pipe = pipeline(
+            "text-generation",
+            model=self.model,
+            tokenizer=self.tokenizer,
+            return_full_text=False,
+            max_new_tokens=500,
+            do_sample=False,
+        )
+
+    def __prepare_few_shot_data(self):
+        if self.shot_count == 0:
+            self.__few_shot_data = []
+        else:
+            few_shot_data = json.load(open("./data/FewShots.json", "r"))
+            few_shots = []
+
+            for indx, item in enumerate(few_shot_data):
+                if indx == self.shot_count:
+                    break
+                commit_message = item["Message"].strip()
+                git_diff = item["Diff"].strip()
+                explanation = item["Explanation"].strip()
+                answer = item["Answer"].strip()
+
+                few_shots.append(
+                    {
+                        "role": "user",
+                        "content": f"Commit Messaage: {commit_message}\nGit Diff:\n{git_diff}",
+                    }
+                )
+
+                if self.enable_cot:
+                    few_shots.append(
+                        {
+                            "role": "assistant",
+                            "content": f"{explanation} The answer is **{answer}**.",
+                        }
+                    )
+                else:
+                    few_shots.append({"role": "assistant", "content": answer})
+
+            self.__few_shot_data = few_shots
+
+    def prepare_prompt(self, commitMessage, diff):
+        messages = [{"role": "user", "content": self.initial_prompt}]
+        for item in self.__few_shot_data:
+            messages.append(item)
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Commit Messaage: {commitMessage}\nGit Diff:\n{diff}",
+            }
+        )
+        self.prompt = messages
+
+    def detect(self):
+        if self.prompt == "":
+            raise ValueError("Provide a new diff using prepare_prompt()")
+        output = self.pipe(self.prompt)
+        prediction = output[0]["generated_text"]
+
+        if self.enable_cot:
+            return self.extract_cot_based_result(prediction)
+
+        return prediction.strip()
+
+    def batch_detect(self, df):
+        df = df.copy()
+
+        explanations = []
+        answers = []
+
+        for index, row in tqdm(df.iterrows()):
+            error = True
+            self.prepare_prompt(row["CommitMessage"], row["Diff"])
+
+            while error:
+                try:
+                    pred = self.detect()
+                    error = False
+                except Exception as e:
+                    error = True
+                    print(f"Error - {e}.\nRetrying...")
+                    time.sleep(1)
+
+            if self.enable_cot:
+                e, a = self.extract_cot_based_result(pred)
+                explanations.append(e)
+                answers.append(a)
+            else:
+                explanations.append("")
+                answers.append(pred)
+
+        df["Detection"] = answers
+        if self.enable_cot:
+            df["Explanation"] = explanations
+
+        return df
