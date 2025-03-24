@@ -76,7 +76,7 @@ class BaseUntangler:
         print(prompt)
 
     def extract_cot_based_result(self, result):
-        patterns = [r"\*\*(Buggy|NotBuggy)\*\*", r"\*\*Conclusion:\s*(Buggy|NotBuggy)\*\*", r"\*\*Concluding:\s*(Buggy|NotBuggy)\*\*"]
+        patterns = [r"\*\*(Buggy|NotBuggy)\*\*", r"(Buggy|NotBuggy)", r"\*\*Conclusion:\s*(Buggy|NotBuggy)\*\*", r"\*\*Concluding:\s*(Buggy|NotBuggy)\*\*", r"Final Assessment: (Buggy|NotBuggy)"]
         def extract_last_sentence(text):
             sentences = re.split(r"(?<=[.!?])\s+", text.strip())
             return sentences[-1] if sentences else ""
@@ -88,7 +88,7 @@ class BaseUntangler:
             if len(bold_buggy_words) == 0:
                 return extract_bold_buggy(result, pattern + 1)
             else:
-                return ", ".join(bold_buggy_words)
+                return ", ".join(set(bold_buggy_words))
 
         #answer = extract_last_sentence(result)
         answer = extract_bold_buggy(result)
