@@ -1,3 +1,4 @@
+from xml.etree.ElementInclude import include
 from google import genai
 from openai import OpenAI
 import configparser
@@ -12,25 +13,31 @@ import tiktoken
 
 
 class BaseUntangler:
-    def __init__(self, model_name="", shot_count=0, enable_cot=False):
+    def __init__(self, model_name="", include_msg=True, shot_count=0, enable_cot=False):
         if model_name == "":
             raise ValueError("Model name is required")
 
         self.model_name = model_name
+        self.include_msg = include_msg
         self.shot_count = shot_count
         self.enable_cot = enable_cot
 
         self.__setup_prompts()
 
     def __setup_prompts(self):
-        persona = "You are a Git commit review assistant. You excel at analyzing Java source code diffs and commit messages."
-        instruction = "Given a Java source code diff and its commit message, analyze both to determine if the changes align with the described bug fix."
-        context = "Assess the relevance between the commit message and code modifications, identifying patterns such as error-handling updates, logical corrections, exception-handling improvements, and other indicators of bug-related changes."
-
-        if self.enable_cot:
-            format = "Think step by step, exaplain the reasoning, and provide an answer as **Buggy** if the changes align; otherwise, answer with **NotBuggy**."
+        if self.include_msg:
+            persona = "You are a Git commit review assistant. You excel at analyzing Java source code diffs and commit messages."
+            instruction = "Given a Java source code diff and its commit message, analyze both to determine if the changes align with the commit message and indicate a bug fix."
+            context = "Assess the relevance between the commit message and code modifications, identifying error-handling updates, logical corrections, exception-handling improvements, and other signs of bug-related changes."
         else:
-            format = "The output should be a single word. If the changes align, output 'Buggy'; otherwise, output 'NotBuggy'."
+            persona = "You are a Git commit review assistant. You excel at analyzing Java source code diffs."
+            instruction = "Given a Java source code diff, analyze it to determine if the changes are related to a bug fix."
+            context = "Examine the modifications carefully, looking for error-handling updates, logical corrections, exception-handling improvements, and other signs of bug-related changes."
+                
+        if self.enable_cot:
+            format = "Think step by step, explain your reasoning, and conclude with **Buggy** if the changes indicate a bug fix; otherwise, conclude with **NotBuggy**."
+        else:
+            format = "Output only a single word: 'Buggy' if the changes indicate a bug fix, otherwise 'NotBuggy'."
 
         self.initial_prompt = f"{persona} {instruction} {context} {format}"
 
@@ -64,6 +71,7 @@ class BaseUntangler:
 
         print("Prompt for:", self.model_name)
         print("Token count:", self.get_token_count(prompt))
+        print("InitialPrompt:", self.initial_prompt)
         print()
         print(prompt)
 
@@ -87,8 +95,8 @@ class BaseUntangler:
 
 
 class GeminiUntangler(BaseUntangler):
-    def __init__(self, model_name="gemini-2.0-flash", shot_count=0, enable_cot=False):
-        super().__init__(model_name, shot_count, enable_cot)
+    def __init__(self, model_name="gemini-2.0-flash", include_msg=True, shot_count=0, enable_cot=False):
+        super().__init__(model_name, include_msg, shot_count, enable_cot)
         self.__setup()
 
     def __setup(self):
@@ -115,15 +123,26 @@ class GeminiUntangler(BaseUntangler):
                 explanation = item["Explanation"].strip()
                 answer = item["Answer"].strip()
 
-                if self.enable_cot:
-                    few_shots += f"\nCommit Messaage: {commit_message}\nGit Diff:\n{git_diff}\nAnswer: {explanation} The answer is **{answer}**.\n"
+                if self.include_msg:
+                    input = f"\nCommit Messaage: {commit_message}\nGit Diff:\n{git_diff}"
                 else:
-                    few_shots += f"\nCommit Messaage: {commit_message}\nGit Diff:\n{git_diff}\nAnswer: {answer}\n"
+                    input = f"\nGit Diff:\n{git_diff}"
+
+                if self.enable_cot:
+                    output = f"\nAnswer: {explanation} The answer is **{answer}**.\n"
+                else:
+                    output = f"\nAnswer: {answer}\n"
+                
+                few_shots += f"{input}{output}\n"
 
             self.__few_shot_data = few_shots + "</EXAMPLE>\n"
 
     def prepare_prompt(self, commitMessage, diff):
-        question = f"\nCommit Messaage: {commitMessage}\nGit Diff:\n{diff}\nAnswer:"
+        if self.include_msg:
+            question = f"\nCommit Messaage: {commitMessage}\nGit Diff:\n{diff}\nAnswer:"
+        else:
+            question = f"Git Diff:\n{diff}\nAnswer:"
+
         self.prompt = self.__few_shot_data + question
 
     def detect(self):
@@ -181,8 +200,8 @@ class GeminiUntangler(BaseUntangler):
 
 
 class OpenAIUntangler(BaseUntangler):
-    def __init__(self, model_name="gpt-4o-mini", shot_count=0, enable_cot=False):
-        super().__init__(model_name, shot_count, enable_cot)
+    def __init__(self, model_name="gpt-4o-mini", include_msg=True, shot_count=0, enable_cot=False):
+        super().__init__(model_name, include_msg, shot_count, enable_cot)
         self.__setup()
 
     def __setup(self):
@@ -210,13 +229,21 @@ class OpenAIUntangler(BaseUntangler):
                 git_diff = item["Diff"].strip()
                 explanation = item["Explanation"].strip()
                 answer = item["Answer"].strip()
-
-                few_shots.append(
-                    {
-                        "role": "user",
-                        "content": f"Commit Messaage: {commit_message}\nGit Diff:\n{git_diff}",
-                    }
-                )
+                
+                if self.include_msg:
+                    few_shots.append(
+                        {
+                            "role": "user",
+                            "content": f"Commit Messaage: {commit_message}\nGit Diff:\n{git_diff}",
+                        }
+                    )
+                else:
+                    few_shots.append(
+                        {
+                            "role": "user",
+                            "content": f"Git Diff:\n{git_diff}",
+                        }
+                    )
 
                 if self.enable_cot:
                     few_shots.append(
@@ -234,12 +261,22 @@ class OpenAIUntangler(BaseUntangler):
         messages = [{"role": "developer", "content": self.initial_prompt}]
         for item in self.__few_shot_data:
             messages.append(item)
-        messages.append(
-            {
-                "role": "user",
-                "content": f"Commit Messaage: {commitMessage}\nGit Diff:\n{diff}",
-            }
-        )
+        
+        if self.include_msg:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Commit Messaage: {commitMessage}\nGit Diff:\n{diff}",
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Git Diff:\n{diff}",
+                }
+            )
+
         self.prompt = messages
 
     def __prepare_batch_prompt(self, model, messages):
@@ -372,8 +409,8 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 class FreeUntangler(BaseUntangler):
-    def __init__(self, model_name="microsoft/Phi-3-mini-4k-instruct", shot_count=0, enable_cot=False):
-        super().__init__(model_name, shot_count, enable_cot)
+    def __init__(self, model_name="microsoft/Phi-3-mini-4k-instruct", include_msg=True, shot_count=0, enable_cot=False):
+        super().__init__(model_name, include_msg, shot_count, enable_cot)
         self.__setup()
 
     def __setup(self):
@@ -389,7 +426,6 @@ class FreeUntangler(BaseUntangler):
             model=self.model,
             tokenizer=self.tokenizer,
             return_full_text=False,
-            max_new_tokens=500,
             do_sample=False,
         )
 
@@ -410,12 +446,20 @@ class FreeUntangler(BaseUntangler):
                 explanation = item["Explanation"].strip()
                 answer = item["Answer"].strip()
 
-                few_shots.append(
-                    {
-                        "role": "user",
-                        "content": f"Commit Messaage: {commit_message}\nGit Diff:\n{git_diff}",
-                    }
-                )
+                if self.include_msg:
+                    few_shots.append(
+                        {
+                            "role": "user",
+                            "content": f"Commit Messaage: {commit_message}\nGit Diff:\n{git_diff}",
+                        }
+                    )
+                else:
+                    few_shots.append(
+                        {
+                            "role": "user",
+                            "content": f"Git Diff:\n{git_diff}",
+                        }
+                    )
 
                 if self.enable_cot:
                     few_shots.append(
@@ -433,12 +477,22 @@ class FreeUntangler(BaseUntangler):
         messages = [{"role": "user", "content": self.initial_prompt}]
         for item in self.__few_shot_data:
             messages.append(item)
-        messages.append(
-            {
-                "role": "user",
-                "content": f"Commit Messaage: {commitMessage}\nGit Diff:\n{diff}",
-            }
-        )
+
+        if self.include_msg:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Commit Messaage: {commitMessage}\nGit Diff:\n{diff}",
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Git Diff:\n{diff}",
+                }
+            )
+
         self.prompt = messages
 
     def detect(self):
