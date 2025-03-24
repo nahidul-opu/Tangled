@@ -133,7 +133,7 @@ class GeminiUntangler(BaseUntangler):
                 else:
                     output = f"\nAnswer: {answer}\n"
                 
-                few_shots += f"{input}{output}\n"
+                few_shots += f"{input}{output}"
 
             self.__few_shot_data = few_shots + "</EXAMPLE>\n"
 
@@ -183,7 +183,7 @@ class GeminiUntangler(BaseUntangler):
                     time.sleep(10)
 
             if self.enable_cot:
-                e, a = self.extract_cot_based_result(pred)
+                e, a = pred[0], pred[1]
                 explanations.append(e)
                 answers.append(a)
             else:
