@@ -426,9 +426,7 @@ class FreeUntangler(BaseUntangler):
         self.pipe = pipeline(
             "text-generation",
             model=self.model,
-            tokenizer=self.tokenizer,
-            return_full_text=False,
-            do_sample=False,
+            tokenizer=self.tokenizer
         )
 
         self.__prepare_few_shot_data()
@@ -476,7 +474,7 @@ class FreeUntangler(BaseUntangler):
             self.__few_shot_data = few_shots
 
     def prepare_prompt(self, commitMessage, diff):
-        messages = [{"role": "user", "content": self.initial_prompt}]
+        messages = []
         for item in self.__few_shot_data:
             messages.append(item)
 
@@ -494,14 +492,15 @@ class FreeUntangler(BaseUntangler):
                     "content": f"Git Diff:\n{diff}",
                 }
             )
-
+        
+        messages[0]["content"] = self.initial_prompt + "\n" + messages[0]["content"]
         self.prompt = messages
 
     def detect(self):
         if self.prompt == "":
             raise ValueError("Provide a new diff using prepare_prompt()")
         output = self.pipe(self.prompt)
-        prediction = output[0]["generated_text"]
+        prediction = output[0]["generated_text"][-1]["content"]
 
         if self.enable_cot:
             return self.extract_cot_based_result(prediction)
