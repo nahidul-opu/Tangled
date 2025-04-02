@@ -1,0 +1,303 @@
+From fe87b23fbd86d8f978142dc326231ea6bd4a61f0 Mon Sep 17 00:00:00 2001
+From: Sergey Edunov <edunov@fb.com>
+Date: Wed, 8 Jun 2016 15:01:40 -0700
+Subject: [PATCH] GIRAPH-1069 Race condition in all *ConfOption classes
+
+Summary:
+*ConfOption classes, such as ClassConfOption, IntConfOption, FloatConfOption etc, call AllOtions.add(this) from their constructor. This call updates static list without any synchronization. Hence, if you create conf option classes in different threads you run into race condition.
+The only reason we have AllOptions is to create documentation. It can be done with reflection instead. So, let's remove AllOtions.add(this) from all conf classes and implement reflection based approach in AllOptions
+
+Test Plan:
+mvn clean verify -Phadoop_facebook
+
+checked that generated options.xml is the same as before
+
+Reviewers: majakabiljo, dionysis.logothetis, heslami, maja.kabiljo
+
+Reviewed By: heslami, maja.kabiljo
+
+Differential Revision: https://reviews.facebook.net/D59331
+---
+ giraph-core/pom.xml                           | 22 +++----
+ .../flow_control/CreditBasedFlowControl.java  |  2 +-
+ .../org/apache/giraph/conf/AllOptions.java    | 57 ++++++++-----------
+ .../apache/giraph/conf/BooleanConfOption.java |  1 -
+ .../apache/giraph/conf/ClassConfOption.java   |  1 -
+ .../apache/giraph/conf/EnumConfOption.java    |  1 -
+ .../apache/giraph/conf/FloatConfOption.java   |  1 -
+ .../org/apache/giraph/conf/IntConfOption.java |  2 -
+ .../apache/giraph/conf/LongConfOption.java    |  1 -
+ .../org/apache/giraph/conf/StrConfOption.java |  1 -
+ 10 files changed, 35 insertions(+), 54 deletions(-)
+
+diff --git a/giraph-core/pom.xml b/giraph-core/pom.xml
+index ddf3cd143..27cb27a03 100644
+--- a/giraph-core/pom.xml
++++ b/giraph-core/pom.xml
+@@ -119,25 +119,21 @@ under the License.
+         <artifactId>apache-rat-plugin</artifactId>
+       </plugin>
+       <plugin>
+-        <artifactId>maven-antrun-plugin</artifactId>
+-        <version>1.6</version>
++        <groupId>org.codehaus.mojo</groupId>
++        <artifactId>exec-maven-plugin</artifactId>
++        <version>1.5.0</version>
+         <executions>
+           <execution>
+             <phase>compile</phase>
+             <goals>
+-              <goal>run</goal>
++              <goal>java</goal>
+             </goals>
+             <configuration>
+-              <target>
+-                <java classname="org.apache.giraph.conf.AllOptions">
+-                  <classpath>
+-                    <pathelement location="${project.jar}"/>
+-                    <pathelement path="${maven.dependency.org.apache.hadoop.hadoop-common.jar.path}"/>
+-                    <pathelement path="${maven.dependency.org.apache.hadoop.hadoop-core.jar.path}"/>
+-                  </classpath>
+-                  <arg value="${top.dir}/src/site/xdoc/options.xml" />
+-                </java>
+-              </target>
++              <mainClass>org.apache.giraph.conf.AllOptions</mainClass>
++              <arguments>
++                <argument>${top.dir}/src/site/xdoc/options.xml</argument>
++              </arguments>
++              <classpathScope>compile</classpathScope>
+             </configuration>
+           </execution>
+         </executions>
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/flow_control/CreditBasedFlowControl.java b/giraph-core/src/main/java/org/apache/giraph/comm/flow_control/CreditBasedFlowControl.java
+index 36d4f207f..0e1d3d64f 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/flow_control/CreditBasedFlowControl.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/flow_control/CreditBasedFlowControl.java
+@@ -171,7 +171,7 @@ public class CreditBasedFlowControl implements FlowControl {
+    * worker is important so we can determine if a received response is for a
+    * resume signal or not.
+    */
+-  private final Map<Integer, Set<Long>> resumeRequestsId =
++  private final ConcurrentMap<Integer, Set<Long>> resumeRequestsId =
+       Maps.newConcurrentMap();
+   /**
+    * Semaphore to control number of cached unsent requests. Maximum number of
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/AllOptions.java b/giraph-core/src/main/java/org/apache/giraph/conf/AllOptions.java
+index ea9a37018..9711ec9ad 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/AllOptions.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/AllOptions.java
+@@ -19,16 +19,15 @@
+ 
+ import org.apache.log4j.Logger;
+ 
+-import com.google.common.collect.Lists;
+-
+ import java.io.BufferedWriter;
+ import java.io.FileWriter;
+ import java.io.IOException;
++import java.lang.reflect.Field;
++import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.List;
+ 
+-import static org.apache.giraph.conf.GiraphConstants.COMPUTATION_CLASS;
+-
+ /**
+  * Tracks all of the Giraph options
+  */
+@@ -36,37 +35,24 @@ public class AllOptions {
+   /**  logger object */
+   private static final Logger LOG = Logger.getLogger(AllOptions.class);
+ 
+-  /** Configuration options */
+-  private static final List<AbstractConfOption> CONF_OPTIONS =
+-      Lists.newArrayList();
+-
+   /** page name for the HTML page generation */
+   private static final String PAGE_NAME = "Giraph Options";
+ 
+   /** Don't construct */
+   private AllOptions() { }
+ 
+-  /**
+-   * Add an option. Subclasses of {@link AbstractConfOption} should call this
+-   * at the end of their constructor.
+-   *
+-   * @param confOption option
+-   */
+-  public static void add(AbstractConfOption confOption) {
+-    CONF_OPTIONS.add(confOption);
+-  }
+ 
+   /**
+    * String representation of all of the options stored
+-   *
++   * @param options List of loaded options
+    * @return string
+    */
+-  public static String allOptionsString() {
+-    Collections.sort(CONF_OPTIONS);
+-    StringBuilder sb = new StringBuilder(CONF_OPTIONS.size() * 30);
++  private static String allOptionsString(List<AbstractConfOption> options) {
++    Collections.sort(options);
++    StringBuilder sb = new StringBuilder(options.size() * 30);
+     sb.append("All Options:\n");
+     ConfOptionType lastType = null;
+-    for (AbstractConfOption confOption : CONF_OPTIONS) {
++    for (AbstractConfOption confOption : options) {
+       if (!confOption.getType().equals(lastType)) {
+         sb.append(confOption.getType().toString().toLowerCase()).append(":\n");
+         lastType = confOption.getType();
+@@ -78,11 +64,12 @@ public static String allOptionsString() {
+ 
+   /**
+    * HTML String representation of all the options stored
++   * @param options List of loaded options
+    * @return String the HTML representation of the registered options
+    */
+-  public static String allOptionsHTMLString() {
+-    Collections.sort(CONF_OPTIONS);
+-    StringBuilder sb = new StringBuilder(CONF_OPTIONS.size() * 30);
++  private static String allOptionsHTMLString(List<AbstractConfOption> options) {
++    Collections.sort(options);
++    StringBuilder sb = new StringBuilder(options.size() * 30);
+ 
+     sb.append("<?xml version='1.0' encoding='UTF-8'?>\n" +
+               "<!--\n" +
+@@ -123,7 +110,7 @@ public static String allOptionsHTMLString() {
+               "        <th>description</th>\n" +
+               "       </tr>\n");
+ 
+-    for (AbstractConfOption confOption : CONF_OPTIONS) {
++    for (AbstractConfOption confOption : options) {
+       String type = confOption.getType().toString().toLowerCase();
+ 
+       sb.append("       <tr>\n");
+@@ -147,15 +134,21 @@ public static String allOptionsHTMLString() {
+    *
+    * @param args cmdline args
+    */
+-  public static void main(String[] args) {
+-    // This is necessary to trigger the static constants in GiraphConstants to
+-    // get loaded. Without it we get no output.
+-    COMPUTATION_CLASS.toString();
++  public static void main(String[] args) throws IllegalAccessException {
++
++    List<Field> fields = Arrays.asList(GiraphConstants.class.getFields());
++    List<AbstractConfOption> options = new ArrayList<>();
++    for (Field field : fields) {
++      if (AbstractConfOption.class.isAssignableFrom(field.getType())) {
++        AbstractConfOption option = (AbstractConfOption) field.get(null);
++        options.add(option);
++      }
++    }
+ 
+     // in case an options was specified, this option is treated as the output
+     // file in which to write the HTML version of the list of available options
+     if (args.length == 1) {
+-      String html = allOptionsHTMLString();
++      String html = allOptionsHTMLString(options);
+ 
+       try {
+         FileWriter     fs  = new FileWriter(args[0]);
+@@ -169,6 +162,6 @@ public static void main(String[] args) {
+       }
+     }
+ 
+-    LOG.info(allOptionsString());
++    LOG.info(allOptionsString(options));
+   }
+ }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/BooleanConfOption.java b/giraph-core/src/main/java/org/apache/giraph/conf/BooleanConfOption.java
+index 0aa4d670d..8c30b16de 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/BooleanConfOption.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/BooleanConfOption.java
+@@ -37,7 +37,6 @@ public BooleanConfOption(String key, boolean defaultValue,
+       String description) {
+     super(key, description);
+     this.defaultValue = defaultValue;
+-    AllOptions.add(this);
+   }
+ 
+   /**
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/ClassConfOption.java b/giraph-core/src/main/java/org/apache/giraph/conf/ClassConfOption.java
+index 1ec8720a9..61496bfb3 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/ClassConfOption.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/ClassConfOption.java
+@@ -50,7 +50,6 @@ private ClassConfOption(String key, Class<? extends C> defaultClass,
+     super(key, description);
+     this.defaultClass = defaultClass;
+     this.interfaceClass = interfaceClass;
+-    AllOptions.add(this);
+   }
+ 
+   /**
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/EnumConfOption.java b/giraph-core/src/main/java/org/apache/giraph/conf/EnumConfOption.java
+index a0effe168..9b7dee6ac 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/EnumConfOption.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/EnumConfOption.java
+@@ -45,7 +45,6 @@ public EnumConfOption(String key, Class<T> klass, T defaultValue,
+     super(key, description);
+     this.klass = klass;
+     this.defaultValue = defaultValue;
+-    AllOptions.add(this);
+   }
+ 
+   /**
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/FloatConfOption.java b/giraph-core/src/main/java/org/apache/giraph/conf/FloatConfOption.java
+index 802456fc6..c57dfcbc5 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/FloatConfOption.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/FloatConfOption.java
+@@ -36,7 +36,6 @@ public class FloatConfOption extends AbstractConfOption {
+   public FloatConfOption(String key, float defaultValue, String description) {
+     super(key, description);
+     this.defaultValue = defaultValue;
+-    AllOptions.add(this);
+   }
+ 
+   public float getDefaultValue() {
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/IntConfOption.java b/giraph-core/src/main/java/org/apache/giraph/conf/IntConfOption.java
+index 2ab8f597e..759e9492e 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/IntConfOption.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/IntConfOption.java
+@@ -36,7 +36,6 @@ public class IntConfOption extends AbstractConfOption {
+   public IntConfOption(String key, int defaultValue, String description) {
+     super(key, description);
+     this.defaultValue = defaultValue;
+-    AllOptions.add(this);
+   }
+ 
+   /**
+@@ -49,7 +48,6 @@ public IntConfOption(String key, int defaultValue, String description) {
+   public IntConfOption(String key, long defaultValue, String description) {
+     super(key, description);
+     this.defaultValue = (int) defaultValue;
+-    AllOptions.add(this);
+   }
+ 
+   public int getDefaultValue() {
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/LongConfOption.java b/giraph-core/src/main/java/org/apache/giraph/conf/LongConfOption.java
+index 437bbb662..22388036f 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/LongConfOption.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/LongConfOption.java
+@@ -36,7 +36,6 @@ public class LongConfOption extends AbstractConfOption {
+   public LongConfOption(String key, long defaultValue, String description) {
+     super(key, description);
+     this.defaultValue = defaultValue;
+-    AllOptions.add(this);
+   }
+ 
+   public long getDefaultValue() {
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/StrConfOption.java b/giraph-core/src/main/java/org/apache/giraph/conf/StrConfOption.java
+index 69e246ce6..5a8d66a9e 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/StrConfOption.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/StrConfOption.java
+@@ -41,7 +41,6 @@ public class StrConfOption extends AbstractConfOption {
+   public StrConfOption(String key, String defaultValue, String description) {
+     super(key, description);
+     this.defaultValue = defaultValue;
+-    AllOptions.add(this);
+   }
+ 
+   public String getDefaultValue() {

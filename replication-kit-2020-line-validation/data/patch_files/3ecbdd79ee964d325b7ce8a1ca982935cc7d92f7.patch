@@ -1,0 +1,1118 @@
+From 30fce9d42c5675e9cae0db0401181f84a73a293b Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Fri, 14 Apr 2017 11:18:19 -0400
+Subject: [PATCH 1/8] COMPRESS-385, first draft
+
+---
+ RELEASE-NOTES.txt                             |  12 ++
+ .../compressors/CompressorStreamFactory.java  | 110 +++++++++++-------
+ .../compressors/DetectCompressorTestCase.java |  63 +++++++++-
+ 3 files changed, 136 insertions(+), 49 deletions(-)
+
+diff --git a/RELEASE-NOTES.txt b/RELEASE-NOTES.txt
+index 21c9c4c8bd8..b16a4eacf2e 100644
+--- a/RELEASE-NOTES.txt
++++ b/RELEASE-NOTES.txt
+@@ -5,6 +5,18 @@ compression and archive formats.  These include: bzip2, gzip, pack200,
+ lzma, xz, Snappy, traditional Unix Compress, DEFLATE and ar, cpio,
+ jar, tar, zip, dump, 7z, arj.
+ 
++Release 1.14
++------------
++
++Commons Compress 1.13 is the first version to require Java 7 at
++runtime.
++
++Changes in this version include:
++
++New features:
++o detect(InputStream) now available in CompressorStreamFactory
++   Issue: Compress-385.
++
+ Release 1.13
+ ------------
+ 
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index 55da36a3b50..c347cca457c 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -374,20 +374,17 @@ public CompressorStreamFactory(final boolean decompressUntilEOF) {
+     }
+ 
+     /**
+-     * Create an compressor input stream from an input stream, autodetecting the
+-     * compressor type from the first few bytes of the stream. The InputStream
+-     * must support marks, like BufferedInputStream.
+-     * 
+-     * @param in
+-     *            the input stream
+-     * @return the compressor input stream
+-     * @throws CompressorException
+-     *             if the compressor name is not known
+-     * @throws IllegalArgumentException
+-     *             if the stream is null or does not support mark
+-     * @since 1.1
++     * Try to detect the type of compressor stream.
++     *
++     * @param in input stream
++     * @return type of compressor stream detected
++     * @throws CompressorException if no compressor stream type was detected
++     *                             or if something else went wrong
++     * @throws IllegalArgumentException if stream is null or does not support mark
++     *
++     * @since 1.14
+      */
+-    public CompressorInputStream createCompressorInputStream(final InputStream in) throws CompressorException {
++    public static String detect(final InputStream in) throws CompressorException {
+         if (in == null) {
+             throw new IllegalArgumentException("Stream must not be null.");
+         }
+@@ -398,52 +395,69 @@ public CompressorInputStream createCompressorInputStream(final InputStream in) t
+ 
+         final byte[] signature = new byte[12];
+         in.mark(signature.length);
++        int signatureLength = -1;
+         try {
+-            final int signatureLength = IOUtils.readFully(in, signature);
++            signatureLength = IOUtils.readFully(in, signature);
+             in.reset();
++        } catch (IOException e) {
++            throw new CompressorException("Failed while reading signature from InputStream.", e);
++        }
+ 
+-            if (BZip2CompressorInputStream.matches(signature, signatureLength)) {
+-                return new BZip2CompressorInputStream(in, decompressConcatenated);
+-            }
+-
+-            if (GzipCompressorInputStream.matches(signature, signatureLength)) {
+-                return new GzipCompressorInputStream(in, decompressConcatenated);
+-            }
++        if (BZip2CompressorInputStream.matches(signature, signatureLength)) {
++            return BZIP2;
++        }
+ 
+-            if (Pack200CompressorInputStream.matches(signature, signatureLength)) {
+-                return new Pack200CompressorInputStream(in);
+-            }
++        if (GzipCompressorInputStream.matches(signature, signatureLength)) {
++            return GZIP;
++        }
+ 
+-            if (FramedSnappyCompressorInputStream.matches(signature, signatureLength)) {
+-                return new FramedSnappyCompressorInputStream(in);
+-            }
++        if (Pack200CompressorInputStream.matches(signature, signatureLength)) {
++            return PACK200;
++        }
+ 
+-            if (ZCompressorInputStream.matches(signature, signatureLength)) {
+-                return new ZCompressorInputStream(in);
+-            }
++        if (FramedSnappyCompressorInputStream.matches(signature, signatureLength)) {
++            return SNAPPY_FRAMED;
++        }
+ 
+-            if (DeflateCompressorInputStream.matches(signature, signatureLength)) {
+-                return new DeflateCompressorInputStream(in);
+-            }
++        if (ZCompressorInputStream.matches(signature, signatureLength)) {
++            return Z;
++        }
+ 
+-            if (XZUtils.matches(signature, signatureLength) && XZUtils.isXZCompressionAvailable()) {
+-                return new XZCompressorInputStream(in, decompressConcatenated);
+-            }
++        if (DeflateCompressorInputStream.matches(signature, signatureLength)) {
++            return DEFLATE;
++        }
+ 
+-            if (LZMAUtils.matches(signature, signatureLength) && LZMAUtils.isLZMACompressionAvailable()) {
+-                return new LZMACompressorInputStream(in);
+-            }
++        if (XZUtils.matches(signature, signatureLength)) {
++            return XZ;
++        }
+ 
+-            if (FramedLZ4CompressorInputStream.matches(signature, signatureLength)) {
+-                return new FramedLZ4CompressorInputStream(in);
+-            }
++        if (LZMAUtils.matches(signature, signatureLength)) {
++            return LZMA;
++        }
+ 
+-        } catch (final IOException e) {
+-            throw new CompressorException("Failed to detect Compressor from InputStream.", e);
++        if (FramedLZ4CompressorInputStream.matches(signature, signatureLength)) {
++            return LZ4_FRAMED;
+         }
+ 
+         throw new CompressorException("No Compressor found for the stream signature.");
+     }
++    /**
++     * Create an compressor input stream from an input stream, autodetecting the
++     * compressor type from the first few bytes of the stream. The InputStream
++     * must support marks, like BufferedInputStream.
++     * 
++     * @param in
++     *            the input stream
++     * @return the compressor input stream
++     * @throws CompressorException
++     *             if the compressor name is not known
++     * @throws IllegalArgumentException
++     *             if the stream is null or does not support mark
++     * @since 1.1
++     */
++    public CompressorInputStream createCompressorInputStream(final InputStream in) throws CompressorException {
++        return createCompressorInputStream(detect(in), in);
++    }
+ 
+     /**
+      * Creates a compressor input stream from a compressor name and an input
+@@ -459,7 +473,7 @@ public CompressorInputStream createCompressorInputStream(final InputStream in) t
+      *            the input stream
+      * @return compressor input stream
+      * @throws CompressorException
+-     *             if the compressor name is not known
++     *             if the compressor name is not known or not available
+      * @throws IllegalArgumentException
+      *             if the name or input stream is null
+      */
+@@ -486,10 +500,16 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+             }
+ 
+             if (XZ.equalsIgnoreCase(name)) {
++                if (! XZUtils.isXZCompressionAvailable()) {
++                    throw new CompressorException("XZ compression is not available.");
++                }
+                 return new XZCompressorInputStream(in, actualDecompressConcatenated);
+             }
+ 
+             if (LZMA.equalsIgnoreCase(name)) {
++                if (! LZMAUtils.isLZMACompressionAvailable()) {
++                    throw new CompressorException("LZMA compression is not available");
++                }
+                 return new LZMACompressorInputStream(in);
+             }
+ 
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index 674a2a07eb5..187d9319884 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -19,16 +19,18 @@
+ package org.apache.commons.compress.compressors;
+ 
+ import static org.apache.commons.compress.AbstractTestCase.getFile;
+-import static org.junit.Assert.*;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
+ 
+ import java.io.BufferedInputStream;
+ import java.io.ByteArrayInputStream;
+ import java.io.FileInputStream;
+ import java.io.IOException;
++import java.io.InputStream;
+ 
+-import org.apache.commons.compress.compressors.CompressorException;
+-import org.apache.commons.compress.compressors.CompressorInputStream;
+-import org.apache.commons.compress.compressors.CompressorStreamFactory;
+ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
+ import org.apache.commons.compress.compressors.deflate.DeflateCompressorInputStream;
+ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+@@ -117,6 +119,47 @@ public void testDetection() throws Exception {
+         }
+     }
+ 
++    @Test
++    public void testDetect() throws Exception {
++        assertEquals(CompressorStreamFactory.BZIP2, detect("bla.txt.bz2"));
++        assertEquals(CompressorStreamFactory.GZIP, detect("bla.tgz"));
++        assertEquals(CompressorStreamFactory.PACK200, detect("bla.pack"));
++        assertEquals(CompressorStreamFactory.XZ, detect("bla.tar.xz"));
++        assertEquals(CompressorStreamFactory.DEFLATE, detect("bla.tar.deflatez"));
++
++        try {
++            CompressorStreamFactory.detect(new BufferedInputStream(new ByteArrayInputStream(new byte[0])));
++            fail("shouldn't be able to detect empty stream");
++        } catch (CompressorException e) {
++            assertTrue(e.getMessage().contains("No Compressor found"));
++        }
++
++        try {
++            CompressorStreamFactory.detect(null);
++            fail("shouldn't be able to detect null stream");
++        } catch (IllegalArgumentException e) {
++            assertEquals("Stream must not be null.", e.getMessage());
++        }
++
++        try {
++            CompressorStreamFactory.detect(new BufferedInputStream(new BadInputStream()));
++            fail("Expected IOException");
++        } catch (CompressorException e) {
++            assertEquals("Failed while reading signature from InputStream.", e.getMessage());
++        }
++
++
++    }
++
++    private String detect(String testFileName) throws IOException, CompressorException {
++        String name = null;
++        try (InputStream is = new BufferedInputStream(
++                new FileInputStream(getFile(testFileName)))) {
++            name = CompressorStreamFactory.detect(is);
++        }
++        return name;
++    }
++
+     @Test
+     public void testOverride() {
+         CompressorStreamFactory fac = new CompressorStreamFactory();
+@@ -174,4 +217,16 @@ private CompressorInputStream getStreamFor(final String resource, final Compress
+                        getFile(resource))));
+     }
+ 
++    private static class BadInputStream extends InputStream {
++        @Override
++        public int read() throws IOException {
++            throw new IOException("Bad");
++        }
++
++        @Override
++        public int read(byte[] bytes, int offset, int length) throws IOException {
++            throw new IOException("Bad");
++        }
++    }
++
+ }
+
+From 2cf575115748e9865daaa369507019141573b86c Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Fri, 14 Apr 2017 12:35:01 -0400
+Subject: [PATCH 2/8] COMPRESS-385, add ArchiveStreamFactory; undo boneheaded
+ RELEASE-NOTES.txt fiasco.
+
+---
+ RELEASE-NOTES.txt                             |  12 --
+ src/changes/changes.xml                       |   4 +
+ .../archivers/ArchiveStreamFactory.java       | 110 +++++++++++-------
+ .../compressors/CompressorStreamFactory.java  |   2 +-
+ .../commons/compress/MockEvilInputStream.java |  39 +++++++
+ .../archivers/ArchiveStreamFactoryTest.java   |  44 +++++++
+ .../compressors/DetectCompressorTestCase.java |  21 +---
+ 7 files changed, 158 insertions(+), 74 deletions(-)
+ create mode 100644 src/test/java/org/apache/commons/compress/MockEvilInputStream.java
+
+diff --git a/RELEASE-NOTES.txt b/RELEASE-NOTES.txt
+index b16a4eacf2e..21c9c4c8bd8 100644
+--- a/RELEASE-NOTES.txt
++++ b/RELEASE-NOTES.txt
+@@ -5,18 +5,6 @@ compression and archive formats.  These include: bzip2, gzip, pack200,
+ lzma, xz, Snappy, traditional Unix Compress, DEFLATE and ar, cpio,
+ jar, tar, zip, dump, 7z, arj.
+ 
+-Release 1.14
+-------------
+-
+-Commons Compress 1.13 is the first version to require Java 7 at
+-runtime.
+-
+-Changes in this version include:
+-
+-New features:
+-o detect(InputStream) now available in CompressorStreamFactory
+-   Issue: Compress-385.
+-
+ Release 1.13
+ ------------
+ 
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 44d57f0f5f1..f1ac318a7b6 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -44,6 +44,10 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+     <release version="1.14" date="not released, yet"
+              description="Release 1.14">
++      <action issue="COMPRESS-385" type="add" date="2017-04-14">
++        Add static detect(InputStream in) to CompressorStreamFactory
++        and ArchiveStreamFactory
++      </action>
+       <action issue="COMPRESS-378" type="fix" date="2017-01-09">
+         SnappyCompressorInputStream slides the window too early
+         leading to ArrayIndexOutOfBoundsExceptions for some streams.
+diff --git a/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java b/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
+index 6ca043771d4..cc51458cf84 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
+@@ -473,6 +473,16 @@ public ArchiveOutputStream createArchiveOutputStream(
+      */
+     public ArchiveInputStream createArchiveInputStream(final InputStream in)
+             throws ArchiveException {
++        return createArchiveInputStream(detect(in), in);
++    }
++
++    /**
++     * Try to determine the type of Archiver
++     * @param in input stream
++     * @return type of archiver if found
++     * @throws ArchiveException if an archiver cannot be detected in the stream
++     */
++    public static String detect(InputStream in) throws ArchiveException {
+         if (in == null) {
+             throw new IllegalArgumentException("Stream must not be null.");
+         }
+@@ -483,62 +493,72 @@ public ArchiveInputStream createArchiveInputStream(final InputStream in)
+ 
+         final byte[] signature = new byte[SIGNATURE_SIZE];
+         in.mark(signature.length);
++        int signatureLength = -1;
+         try {
+-            int signatureLength = IOUtils.readFully(in, signature);
++            signatureLength = IOUtils.readFully(in, signature);
+             in.reset();
+-            if (ZipArchiveInputStream.matches(signature, signatureLength)) {
+-                return createArchiveInputStream(ZIP, in);
+-            } else if (JarArchiveInputStream.matches(signature, signatureLength)) {
+-                return createArchiveInputStream(JAR, in);
+-            } else if (ArArchiveInputStream.matches(signature, signatureLength)) {
+-                return createArchiveInputStream(AR, in);
+-            } else if (CpioArchiveInputStream.matches(signature, signatureLength)) {
+-                return createArchiveInputStream(CPIO, in);
+-            } else if (ArjArchiveInputStream.matches(signature, signatureLength)) {
+-                return createArchiveInputStream(ARJ, in);
+-            } else if (SevenZFile.matches(signature, signatureLength)) {
+-                throw new StreamingNotSupportedException(SEVEN_Z);
+-            }
++        } catch (IOException e) {
++            throw new ArchiveException("IOException while reading signature.");
++        }
+ 
+-            // Dump needs a bigger buffer to check the signature;
+-            final byte[] dumpsig = new byte[DUMP_SIGNATURE_SIZE];
+-            in.mark(dumpsig.length);
++        if (JarArchiveInputStream.matches(signature, signatureLength)) {
++            return JAR;
++        } else if (ZipArchiveInputStream.matches(signature, signatureLength)) {
++            return ZIP;
++        } else if (ArArchiveInputStream.matches(signature, signatureLength)) {
++            return AR;
++        } else if (CpioArchiveInputStream.matches(signature, signatureLength)) {
++            return CPIO;
++        } else if (ArjArchiveInputStream.matches(signature, signatureLength)) {
++            return ARJ;
++        } else if (SevenZFile.matches(signature, signatureLength)) {
++            throw new StreamingNotSupportedException(SEVEN_Z);
++        }
++
++        // Dump needs a bigger buffer to check the signature;
++        final byte[] dumpsig = new byte[DUMP_SIGNATURE_SIZE];
++        in.mark(dumpsig.length);
++        try {
+             signatureLength = IOUtils.readFully(in, dumpsig);
+             in.reset();
+-            if (DumpArchiveInputStream.matches(dumpsig, signatureLength)) {
+-                return createArchiveInputStream(DUMP, in);
+-            }
++        } catch (IOException e) {
++            throw new ArchiveException("IOException while reading dump signature");
++        }
++        if (DumpArchiveInputStream.matches(dumpsig, signatureLength)) {
++            return DUMP;
++        }
+ 
+-            // Tar needs an even bigger buffer to check the signature; read the first block
+-            final byte[] tarHeader = new byte[TAR_HEADER_SIZE];
+-            in.mark(tarHeader.length);
++        // Tar needs an even bigger buffer to check the signature; read the first block
++        final byte[] tarHeader = new byte[TAR_HEADER_SIZE];
++        in.mark(tarHeader.length);
++        try {
+             signatureLength = IOUtils.readFully(in, tarHeader);
+             in.reset();
+-            if (TarArchiveInputStream.matches(tarHeader, signatureLength)) {
+-                return createArchiveInputStream(TAR, in);
+-            }
+-            // COMPRESS-117 - improve auto-recognition
+-            if (signatureLength >= TAR_HEADER_SIZE) {
+-                TarArchiveInputStream tais = null;
+-                try {
+-                    tais = new TarArchiveInputStream(new ByteArrayInputStream(tarHeader));
+-                    // COMPRESS-191 - verify the header checksum
+-                    if (tais.getNextTarEntry().isCheckSumOK()) {
+-                        return createArchiveInputStream(TAR, in);
+-                    }
+-                } catch (final Exception e) { // NOPMD
+-                    // can generate IllegalArgumentException as well
+-                    // as IOException
+-                    // autodetection, simply not a TAR
+-                    // ignored
+-                } finally {
+-                    IOUtils.closeQuietly(tais);
++        } catch (IOException e) {
++            throw new ArchiveException("IOException while reading tar signature");
++        }
++        if (TarArchiveInputStream.matches(tarHeader, signatureLength)) {
++            return TAR;
++        }
++
++        // COMPRESS-117 - improve auto-recognition
++        if (signatureLength >= TAR_HEADER_SIZE) {
++            TarArchiveInputStream tais = null;
++            try {
++                tais = new TarArchiveInputStream(new ByteArrayInputStream(tarHeader));
++                // COMPRESS-191 - verify the header checksum
++                if (tais.getNextTarEntry().isCheckSumOK()) {
++                    return TAR;
+                 }
++            } catch (final Exception e) { // NOPMD
++                // can generate IllegalArgumentException as well
++                // as IOException
++                // autodetection, simply not a TAR
++                // ignored
++            } finally {
++                IOUtils.closeQuietly(tais);
+             }
+-        } catch (final IOException e) {
+-            throw new ArchiveException("Could not use reset and mark operations.", e);
+         }
+-
+         throw new ArchiveException("No Archiver found for the stream signature");
+     }
+ 
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index c347cca457c..87c12095974 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -400,7 +400,7 @@ public static String detect(final InputStream in) throws CompressorException {
+             signatureLength = IOUtils.readFully(in, signature);
+             in.reset();
+         } catch (IOException e) {
+-            throw new CompressorException("Failed while reading signature from InputStream.", e);
++            throw new CompressorException("IOException while reading signature.", e);
+         }
+ 
+         if (BZip2CompressorInputStream.matches(signature, signatureLength)) {
+diff --git a/src/test/java/org/apache/commons/compress/MockEvilInputStream.java b/src/test/java/org/apache/commons/compress/MockEvilInputStream.java
+new file mode 100644
+index 00000000000..884cf504952
+--- /dev/null
++++ b/src/test/java/org/apache/commons/compress/MockEvilInputStream.java
+@@ -0,0 +1,39 @@
++package org.apache.commons.compress;/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ */
++
++import java.io.IOException;
++import java.io.InputStream;
++
++/**
++ * Simple mock InputStream that always throws an IOException
++ * when {@link #read()} or {@link #read(byte[], int, int)}
++ * is called.
++ */
++public class MockEvilInputStream extends InputStream {
++
++    @Override
++    public int read() throws IOException {
++        throw new IOException("Evil");
++    }
++
++    @Override
++    public int read(byte[] bytes, int offset, int length) throws IOException {
++        throw new IOException("Evil");
++    }
++}
++
+diff --git a/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java b/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
+index 4236b284c57..27e2790d879 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
+@@ -32,6 +32,7 @@
+ import java.io.InputStream;
+ import java.lang.reflect.Field;
+ 
++import org.apache.commons.compress.MockEvilInputStream;
+ import org.apache.commons.compress.archivers.arj.ArjArchiveInputStream;
+ import org.apache.commons.compress.archivers.cpio.CpioArchiveInputStream;
+ import org.apache.commons.compress.archivers.dump.DumpArchiveInputStream;
+@@ -226,6 +227,49 @@ static ArchiveStreamFactory getFactory(final String entryEncoding) {
+         DUMP_DEFAULT = dflt;
+     }
+ 
++    @Test
++    public void testDetect() throws Exception {
++        for (String extension : new String[]{
++                ArchiveStreamFactory.ARJ,
++                ArchiveStreamFactory.CPIO,
++                ArchiveStreamFactory.DUMP,
++                ArchiveStreamFactory.JAR,
++                ArchiveStreamFactory.TAR,
++ //TODO-- figure out how to differentiate btwn JAR and ZIP
++ //               ArchiveStreamFactory.ZIP
++        }) {
++            assertEquals(extension, detect("bla."+extension));
++        }
++
++        try {
++            ArchiveStreamFactory.detect(new BufferedInputStream(new ByteArrayInputStream(new byte[0])));
++            fail("shouldn't be able to detect empty stream");
++        } catch (ArchiveException e) {
++            assertEquals("No Archiver found for the stream signature", e.getMessage());
++        }
++
++        try {
++            ArchiveStreamFactory.detect(null);
++            fail("shouldn't be able to detect null stream");
++        } catch (IllegalArgumentException e) {
++            assertEquals("Stream must not be null.", e.getMessage());
++        }
++
++        try {
++            ArchiveStreamFactory.detect(new BufferedInputStream(new MockEvilInputStream()));
++            fail("Expected ArchiveException");
++        } catch (ArchiveException e) {
++            assertEquals("IOException while reading signature.", e.getMessage());
++        }
++    }
++
++    private String detect(String resource) throws IOException, ArchiveException {
++        try(InputStream in = new BufferedInputStream(new FileInputStream(
++                getFile(resource)))) {
++            return ArchiveStreamFactory.detect(in);
++        }
++    }
++
+     static final TestData[] TESTS = {
+         new TestData("bla.arj", ArchiveStreamFactory.ARJ, false, ARJ_DEFAULT, FACTORY, "charsetName"),
+         new TestData("bla.arj", ArchiveStreamFactory.ARJ, false, "UTF-8", FACTORY_UTF8, "charsetName"),
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index 187d9319884..8ccf5791b19 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -31,6 +31,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
++import org.apache.commons.compress.MockEvilInputStream;
+ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
+ import org.apache.commons.compress.compressors.deflate.DeflateCompressorInputStream;
+ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+@@ -121,6 +122,7 @@ public void testDetection() throws Exception {
+ 
+     @Test
+     public void testDetect() throws Exception {
++
+         assertEquals(CompressorStreamFactory.BZIP2, detect("bla.txt.bz2"));
+         assertEquals(CompressorStreamFactory.GZIP, detect("bla.tgz"));
+         assertEquals(CompressorStreamFactory.PACK200, detect("bla.pack"));
+@@ -131,7 +133,7 @@ public void testDetect() throws Exception {
+             CompressorStreamFactory.detect(new BufferedInputStream(new ByteArrayInputStream(new byte[0])));
+             fail("shouldn't be able to detect empty stream");
+         } catch (CompressorException e) {
+-            assertTrue(e.getMessage().contains("No Compressor found"));
++            assertEquals("No Compressor found for the stream signature.", e.getMessage());
+         }
+ 
+         try {
+@@ -142,10 +144,10 @@ public void testDetect() throws Exception {
+         }
+ 
+         try {
+-            CompressorStreamFactory.detect(new BufferedInputStream(new BadInputStream()));
++            CompressorStreamFactory.detect(new BufferedInputStream(new MockEvilInputStream()));
+             fail("Expected IOException");
+         } catch (CompressorException e) {
+-            assertEquals("Failed while reading signature from InputStream.", e.getMessage());
++            assertEquals("IOException while reading signature.", e.getMessage());
+         }
+ 
+ 
+@@ -216,17 +218,4 @@ private CompressorInputStream getStreamFor(final String resource, final Compress
+                    new BufferedInputStream(new FileInputStream(
+                        getFile(resource))));
+     }
+-
+-    private static class BadInputStream extends InputStream {
+-        @Override
+-        public int read() throws IOException {
+-            throw new IOException("Bad");
+-        }
+-
+-        @Override
+-        public int read(byte[] bytes, int offset, int length) throws IOException {
+-            throw new IOException("Bad");
+-        }
+-    }
+-
+ }
+
+From abf07558021a0ecc50c265dcbdc5f2f99fdbeb35 Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Fri, 14 Apr 2017 13:05:29 -0400
+Subject: [PATCH 3/8] COMPRESS-385, flip jar/zip back to where they belong
+
+---
+ .../commons/compress/archivers/ArchiveStreamFactory.java  | 8 ++++----
+ .../compress/archivers/ArchiveStreamFactoryTest.java      | 6 +++---
+ 2 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java b/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
+index cc51458cf84..2d43463c36d 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
+@@ -501,11 +501,11 @@ public static String detect(InputStream in) throws ArchiveException {
+             throw new ArchiveException("IOException while reading signature.");
+         }
+ 
+-        if (JarArchiveInputStream.matches(signature, signatureLength)) {
+-            return JAR;
+-        } else if (ZipArchiveInputStream.matches(signature, signatureLength)) {
++        if (ZipArchiveInputStream.matches(signature, signatureLength)) {
+             return ZIP;
+-        } else if (ArArchiveInputStream.matches(signature, signatureLength)) {
++        } else if (JarArchiveInputStream.matches(signature, signatureLength)) {
++            return JAR;
++        } if (ArArchiveInputStream.matches(signature, signatureLength)) {
+             return AR;
+         } else if (CpioArchiveInputStream.matches(signature, signatureLength)) {
+             return CPIO;
+diff --git a/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java b/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
+index 27e2790d879..3fafa5d0ce7 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
+@@ -233,10 +233,10 @@ public void testDetect() throws Exception {
+                 ArchiveStreamFactory.ARJ,
+                 ArchiveStreamFactory.CPIO,
+                 ArchiveStreamFactory.DUMP,
+-                ArchiveStreamFactory.JAR,
++                //TODO-- figure out how to differentiate btwn JAR and ZIP
++ //               ArchiveStreamFactory.JAR,
+                 ArchiveStreamFactory.TAR,
+- //TODO-- figure out how to differentiate btwn JAR and ZIP
+- //               ArchiveStreamFactory.ZIP
++                ArchiveStreamFactory.ZIP
+         }) {
+             assertEquals(extension, detect("bla."+extension));
+         }
+
+From f05101e28403494b81704029cc50e66703c34151 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Tue, 18 Apr 2017 16:40:02 +0200
+Subject: [PATCH 4/8] COMPRESS-385 some tweaks to Tim's code, allow detection
+ of 7z
+
+closes #18
+---
+ src/changes/changes.xml                       |  8 ++---
+ .../archivers/ArchiveStreamFactory.java       |  3 +-
+ .../compressors/CompressorStreamFactory.java  |  4 +--
+ .../commons/compress/MockEvilInputStream.java | 30 ++++++++++---------
+ .../archivers/ArchiveStreamFactoryTest.java   |  4 ++-
+ .../compressors/DetectCompressorTestCase.java |  4 +++
+ 6 files changed, 31 insertions(+), 22 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index f1ac318a7b6..055d11b166f 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -44,10 +44,6 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+     <release version="1.14" date="not released, yet"
+              description="Release 1.14">
+-      <action issue="COMPRESS-385" type="add" date="2017-04-14">
+-        Add static detect(InputStream in) to CompressorStreamFactory
+-        and ArchiveStreamFactory
+-      </action>
+       <action issue="COMPRESS-378" type="fix" date="2017-01-09">
+         SnappyCompressorInputStream slides the window too early
+         leading to ArrayIndexOutOfBoundsExceptions for some streams.
+@@ -76,6 +72,10 @@ The <action> type attribute can be add,update,fix,remove.
+         Fixed an integer overflow in CPIO's CRC calculation.
+         Pull Request #17.
+       </action>
++      <action issue="COMPRESS-385" type="add" date="2017-04-18">
++        Add static detect(InputStream in) to CompressorStreamFactory
++        and ArchiveStreamFactory
++      </action>
+     </release>
+     <release version="1.13" date="2016-12-29"
+              description="Release 1.13 - API compatible to 1.12 but requires Java 7 at runtime.">
+diff --git a/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java b/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
+index 2d43463c36d..ca15363804e 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/archivers/ArchiveStreamFactory.java
+@@ -481,6 +481,7 @@ public ArchiveInputStream createArchiveInputStream(final InputStream in)
+      * @param in input stream
+      * @return type of archiver if found
+      * @throws ArchiveException if an archiver cannot be detected in the stream
++     * @since 1.14
+      */
+     public static String detect(InputStream in) throws ArchiveException {
+         if (in == null) {
+@@ -512,7 +513,7 @@ public static String detect(InputStream in) throws ArchiveException {
+         } else if (ArjArchiveInputStream.matches(signature, signatureLength)) {
+             return ARJ;
+         } else if (SevenZFile.matches(signature, signatureLength)) {
+-            throw new StreamingNotSupportedException(SEVEN_Z);
++            return SEVEN_Z;
+         }
+ 
+         // Dump needs a bigger buffer to check the signature;
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index 87c12095974..a29179cd557 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -500,14 +500,14 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+             }
+ 
+             if (XZ.equalsIgnoreCase(name)) {
+-                if (! XZUtils.isXZCompressionAvailable()) {
++                if (!XZUtils.isXZCompressionAvailable()) {
+                     throw new CompressorException("XZ compression is not available.");
+                 }
+                 return new XZCompressorInputStream(in, actualDecompressConcatenated);
+             }
+ 
+             if (LZMA.equalsIgnoreCase(name)) {
+-                if (! LZMAUtils.isLZMACompressionAvailable()) {
++                if (!LZMAUtils.isLZMACompressionAvailable()) {
+                     throw new CompressorException("LZMA compression is not available");
+                 }
+                 return new LZMACompressorInputStream(in);
+diff --git a/src/test/java/org/apache/commons/compress/MockEvilInputStream.java b/src/test/java/org/apache/commons/compress/MockEvilInputStream.java
+index 884cf504952..9c03a2124cd 100644
+--- a/src/test/java/org/apache/commons/compress/MockEvilInputStream.java
++++ b/src/test/java/org/apache/commons/compress/MockEvilInputStream.java
+@@ -1,20 +1,22 @@
+-package org.apache.commons.compress;/*
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
+  *
+- *   http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * http://www.apache.org/licenses/LICENSE-2.0
+  *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
+  */
++package org.apache.commons.compress;
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
+diff --git a/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java b/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
+index 3fafa5d0ce7..ff8010ff541 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/ArchiveStreamFactoryTest.java
+@@ -230,11 +230,13 @@ static ArchiveStreamFactory getFactory(final String entryEncoding) {
+     @Test
+     public void testDetect() throws Exception {
+         for (String extension : new String[]{
++                ArchiveStreamFactory.AR,
+                 ArchiveStreamFactory.ARJ,
+                 ArchiveStreamFactory.CPIO,
+                 ArchiveStreamFactory.DUMP,
+-                //TODO-- figure out how to differentiate btwn JAR and ZIP
++                // Compress doesn't know how to detect JARs, see COMPRESS-91
+  //               ArchiveStreamFactory.JAR,
++                ArchiveStreamFactory.SEVEN_Z,
+                 ArchiveStreamFactory.TAR,
+                 ArchiveStreamFactory.ZIP
+         }) {
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index 8ccf5791b19..67abcd3a780 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -128,6 +128,10 @@ public void testDetect() throws Exception {
+         assertEquals(CompressorStreamFactory.PACK200, detect("bla.pack"));
+         assertEquals(CompressorStreamFactory.XZ, detect("bla.tar.xz"));
+         assertEquals(CompressorStreamFactory.DEFLATE, detect("bla.tar.deflatez"));
++        assertEquals(CompressorStreamFactory.LZ4_FRAMED, detect("bla.tar.lz4"));
++        assertEquals(CompressorStreamFactory.LZMA, detect("bla.tar.lzma"));
++        assertEquals(CompressorStreamFactory.SNAPPY_FRAMED, detect("bla.tar.sz"));
++        assertEquals(CompressorStreamFactory.Z, detect("bla.tar.Z"));
+ 
+         try {
+             CompressorStreamFactory.detect(new BufferedInputStream(new ByteArrayInputStream(new byte[0])));
+
+From 3112bc302f32a74c827d672ca84a80091b0700d4 Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Fri, 14 Apr 2017 13:31:50 -0400
+Subject: [PATCH 5/8] COMPRESS-387
+
+---
+ .../apache/commons/compress/ArchiveReadTest.java  | 11 ++++++++++-
+ .../commons/compress/archivers/LongPathTest.java  | 15 ++++++++++++---
+ .../compress/archivers/LongSymLinkTest.java       | 13 ++++++++++---
+ 3 files changed, 32 insertions(+), 7 deletions(-)
+
+diff --git a/src/test/java/org/apache/commons/compress/ArchiveReadTest.java b/src/test/java/org/apache/commons/compress/ArchiveReadTest.java
+index 4d32dfcc92f..501224384da 100644
+--- a/src/test/java/org/apache/commons/compress/ArchiveReadTest.java
++++ b/src/test/java/org/apache/commons/compress/ArchiveReadTest.java
+@@ -25,6 +25,7 @@
+ import java.io.File;
+ import java.io.FileReader;
+ import java.io.FilenameFilter;
++import java.net.URISyntaxException;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ 
+@@ -48,9 +49,17 @@
+ public class ArchiveReadTest extends AbstractTestCase {
+ 
+     private static final ClassLoader CLASSLOADER = ArchiveReadTest.class.getClassLoader();
+-    private static final File ARCDIR = new File(CLASSLOADER.getResource("archives").getFile());
++    private static final File ARCDIR;
+     private static final ArrayList<String> FILELIST = new ArrayList<>();
+ 
++    static {
++        try {
++            ARCDIR = new File(CLASSLOADER.getResource("archives").toURI().getPath());
++        } catch (URISyntaxException e) {
++            throw new RuntimeException(e);
++        }
++    }
++
+     private final File file;
+ 
+     public ArchiveReadTest(final String file){
+diff --git a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+index 6ee381168b6..46df6429fe7 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+@@ -27,13 +27,12 @@
+ import java.io.FileInputStream;
+ import java.io.FileReader;
+ import java.io.FilenameFilter;
++import java.net.URISyntaxException;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ 
+ import junit.framework.AssertionFailedError;
+-
+ import org.apache.commons.compress.AbstractTestCase;
+-import org.apache.commons.compress.archivers.ArchiveEntry;
+ import org.apache.commons.compress.archivers.ar.ArArchiveInputStream;
+ import org.apache.commons.compress.archivers.cpio.CpioArchiveInputStream;
+ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+@@ -55,11 +54,21 @@
+ public class LongPathTest extends AbstractTestCase {
+ 
+     private static final ClassLoader CLASSLOADER = LongPathTest.class.getClassLoader();
+-    private static final File ARCDIR = new File(CLASSLOADER.getResource("longpath").getFile());
++    private static File ARCDIR;
+     private static final ArrayList<String> FILELIST = new ArrayList<>();
+ 
++    static {
++        try {
++            ARCDIR = new File(CLASSLOADER.getResource("longpath").toURI().getPath());
++        } catch (URISyntaxException e) {
++            throw new RuntimeException(e);
++        }
++    }
++
+     private final File file;
+ 
++
++
+     public LongPathTest(final String file){
+         this.file = new File(ARCDIR, file);
+     }
+diff --git a/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java b/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java
+index 469478329ae..d8ed7f7e9b3 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java
+@@ -27,13 +27,12 @@
+ import java.io.FileInputStream;
+ import java.io.FileReader;
+ import java.io.FilenameFilter;
++import java.net.URISyntaxException;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ 
+ import junit.framework.AssertionFailedError;
+-
+ import org.apache.commons.compress.AbstractTestCase;
+-import org.apache.commons.compress.archivers.ArchiveEntry;
+ import org.apache.commons.compress.archivers.ar.ArArchiveInputStream;
+ import org.apache.commons.compress.archivers.cpio.CpioArchiveInputStream;
+ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+@@ -55,9 +54,17 @@
+ public class LongSymLinkTest extends AbstractTestCase {
+ 
+     private static final ClassLoader CLASSLOADER = LongSymLinkTest.class.getClassLoader();
+-    private static final File ARCDIR = new File(CLASSLOADER.getResource("longsymlink").getFile());
++    private static final File ARCDIR;
+     private static final ArrayList<String> FILELIST = new ArrayList<>();
+ 
++    static {
++        try {
++            ARCDIR = new File(CLASSLOADER.getResource("longsymlink").toURI().getPath());
++        } catch (URISyntaxException e) {
++            throw new RuntimeException(e);
++        }
++    }
++
+     private final File file;
+ 
+     public LongSymLinkTest(final String file){
+
+From f668f7bb87d3b0a0ad0642acdbf56d6e2fb18476 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Tue, 18 Apr 2017 17:02:12 +0200
+Subject: [PATCH 6/8] COMPRESS-387 record changes
+
+closes #19
+---
+ src/changes/changes.xml                                        | 3 +++
+ .../org/apache/commons/compress/archivers/LongPathTest.java    | 2 +-
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 055d11b166f..8b1bedc6011 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -76,6 +76,9 @@ The <action> type attribute can be add,update,fix,remove.
+         Add static detect(InputStream in) to CompressorStreamFactory
+         and ArchiveStreamFactory
+       </action>
++      <action issue="COMPRESS-387" type="fix" date="2017-04-18">
++        Make unit tests work on Windows paths with spaces in their names.
++      </action>
+     </release>
+     <release version="1.13" date="2016-12-29"
+              description="Release 1.13 - API compatible to 1.12 but requires Java 7 at runtime.">
+diff --git a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+index 46df6429fe7..45125f3a4a7 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+@@ -54,7 +54,7 @@
+ public class LongPathTest extends AbstractTestCase {
+ 
+     private static final ClassLoader CLASSLOADER = LongPathTest.class.getClassLoader();
+-    private static File ARCDIR;
++    private static final File ARCDIR;
+     private static final ArrayList<String> FILELIST = new ArrayList<>();
+ 
+     static {
+
+From 674886f560b2b1ca051b4cb6346a09a04a3cb628 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Tue, 18 Apr 2017 17:22:20 +0200
+Subject: [PATCH 7/8] COMPRESS-362 fix last remaining try-with-resources
+ candidate
+
+---
+ .../pack200/Pack200CompressorOutputStream.java         | 10 +---------
+ 1 file changed, 1 insertion(+), 9 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/compress/compressors/pack200/Pack200CompressorOutputStream.java b/src/main/java/org/apache/commons/compress/compressors/pack200/Pack200CompressorOutputStream.java
+index 41857ac8bcf..9da3d246ea0 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/pack200/Pack200CompressorOutputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/pack200/Pack200CompressorOutputStream.java
+@@ -130,16 +130,8 @@ public void finish() throws IOException {
+             if (properties != null) {
+                 p.properties().putAll(properties);
+             }
+-            JarInputStream ji = null;
+-            boolean success = false;
+-            try {
+-                ji = new JarInputStream(streamBridge.getInput());
++            try (JarInputStream ji = new JarInputStream(streamBridge.getInput())) {
+                 p.pack(ji, originalOutput);
+-                success = true;
+-            } finally {
+-                if (!success) {
+-                    IOUtils.closeQuietly(ji);
+-                }
+             }
+         }
+     }
+
+From 13a039029ca7d7fca9862cfb792f7148c555f05f Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Wed, 19 Apr 2017 15:15:20 +0200
+Subject: [PATCH 8/8] COMPRESS-387 tweak
+
+---
+ src/test/java/org/apache/commons/compress/ArchiveReadTest.java  | 2 +-
+ .../org/apache/commons/compress/archivers/LongPathTest.java     | 2 +-
+ .../org/apache/commons/compress/archivers/LongSymLinkTest.java  | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/test/java/org/apache/commons/compress/ArchiveReadTest.java b/src/test/java/org/apache/commons/compress/ArchiveReadTest.java
+index 501224384da..e2170353776 100644
+--- a/src/test/java/org/apache/commons/compress/ArchiveReadTest.java
++++ b/src/test/java/org/apache/commons/compress/ArchiveReadTest.java
+@@ -54,7 +54,7 @@ public class ArchiveReadTest extends AbstractTestCase {
+ 
+     static {
+         try {
+-            ARCDIR = new File(CLASSLOADER.getResource("archives").toURI().getPath());
++            ARCDIR = new File(CLASSLOADER.getResource("archives").toURI());
+         } catch (URISyntaxException e) {
+             throw new RuntimeException(e);
+         }
+diff --git a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+index 45125f3a4a7..2573583a199 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+@@ -59,7 +59,7 @@ public class LongPathTest extends AbstractTestCase {
+ 
+     static {
+         try {
+-            ARCDIR = new File(CLASSLOADER.getResource("longpath").toURI().getPath());
++            ARCDIR = new File(CLASSLOADER.getResource("longpath").toURI());
+         } catch (URISyntaxException e) {
+             throw new RuntimeException(e);
+         }
+diff --git a/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java b/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java
+index d8ed7f7e9b3..7279de1bef6 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/LongSymLinkTest.java
+@@ -59,7 +59,7 @@ public class LongSymLinkTest extends AbstractTestCase {
+ 
+     static {
+         try {
+-            ARCDIR = new File(CLASSLOADER.getResource("longsymlink").toURI().getPath());
++            ARCDIR = new File(CLASSLOADER.getResource("longsymlink").toURI());
+         } catch (URISyntaxException e) {
+             throw new RuntimeException(e);
+         }

@@ -1,0 +1,432 @@
+From 7129090417afd60dad011c1823f927c0f1a1fd37 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sun, 18 Jul 2010 21:33:39 +0000
+Subject: [PATCH] Merged changes for IVY-1005 and IVY-1207 from trunk into
+ 2.2.x branch.
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/branches/2.2.x@965297 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  5 ++
+ doc/use/makepom.html                          |  1 +
+ src/java/org/apache/ivy/ant/IvyMakePom.java   | 12 +++-
+ .../parser/m2/PomModuleDescriptorWriter.java  | 34 +++++++---
+ .../parser/xml/XmlModuleDescriptorWriter.java |  3 +
+ .../m2/PomModuleDescriptorWriterTest.java     | 62 +++++++++++++++++--
+ .../m2/test-write-compile-dependencies.xml    | 47 ++++++++++++++
+ .../xml/XmlModuleDescriptorWriterTest.java    | 53 ++++++++++++++++
+ 8 files changed, 202 insertions(+), 15 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/m2/test-write-compile-dependencies.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 6b7e2d01b..d9c8baf31 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -69,6 +69,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Sakari Maaranen
+ 	Jan Materne
+ 	Markus M. May
++	Abel Muino
+ 	J. Lewis Muir
+ 	Stephen Nesbitt
+ 	Joshua Nichols
+@@ -79,6 +80,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Mathias Muller
+ 	Randy Nott
+ 	Peter Oxenham
++	Jesper Pedersen
+ 	Emmanuel Pellereau
+ 	Roshan Punnoose
+ 	Jean-Baptiste Quenot
+@@ -108,6 +110,9 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	
+    2.2.0
+ =====================================
++- IMPROVEMENT: ivy:makepom now accepts a list of configurations to include (IVY-1005) (thanks to Jesper Pedersen)
++
++- FIX: XmlModuleDescriptorWriter does not write the transitive attribute (IVY-1207) (thanks to Abel Muino)
+ - FIX: Ivy info/extends/extendsType attribute is misspelled by XmlModuleDescriptorWriter (IVY-1203) (thanks to Jason Trump)
+ 
+    2.2.0-rc1
+diff --git a/doc/use/makepom.html b/doc/use/makepom.html
+index b38bc77de..8c9c2be2a 100644
+--- a/doc/use/makepom.html
++++ b/doc/use/makepom.html
+@@ -42,6 +42,7 @@ <h1>Attributes</h1>
+         <td>Yes</td></tr>
+     <tr><td>pomfile</td><td>the destination pom file to write</td>
+         <td>Yes</td></tr>
++    <tr><td>conf</td><td>a comma separated list of the configurations to include in the generated pom. Wildcards are supported here. <span class="since">(since 2.2)</span></td><td>No, defaults to all configurations.</td></tr>
+ <tr><td>settingsRef</td><td>A reference to the ivy settings that must be used by this task</td><td>No, 'ivy.instance' is taken by default.</td></tr>
+ </tbody>
+ </table>
+diff --git a/src/java/org/apache/ivy/ant/IvyMakePom.java b/src/java/org/apache/ivy/ant/IvyMakePom.java
+index 22afa10b1..0bea60fb5 100644
+--- a/src/java/org/apache/ivy/ant/IvyMakePom.java
++++ b/src/java/org/apache/ivy/ant/IvyMakePom.java
+@@ -59,6 +59,8 @@ public void setScope(String scope) {
+ 
+     private File headerFile = null;
+ 
++    private String conf;
++   
+     private File ivyFile = null;
+ 
+     private Collection mappings = new ArrayList();
+@@ -87,6 +89,14 @@ public void setHeaderFile(File headerFile) {
+         this.headerFile = headerFile;
+     }
+     
++    public String getConf() {
++        return conf;
++    }
++   
++    public void setConf(String conf) {
++        this.conf = conf;
++    }
++   
+     public Mapping createMapping() {
+         Mapping mapping = new Mapping();
+         this.mappings.add(mapping);
+@@ -103,7 +113,7 @@ public void doExecute() throws BuildException {
+             }
+             ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
+                 getSettings(), ivyFile.toURI().toURL(), false);
+-            PomModuleDescriptorWriter.write(md,
++            PomModuleDescriptorWriter.write(md, splitConfs(conf),
+                 headerFile == null ? null : FileUtil.readEntirely(getHeaderFile()),
+                 mappings.isEmpty() 
+                     ? PomModuleDescriptorWriter.DEFAULT_MAPPING
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java
+index 502083fc2..f2b4036bd 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java
+@@ -22,14 +22,20 @@
+ import java.io.IOException;
+ import java.io.OutputStreamWriter;
+ import java.io.PrintWriter;
++import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.util.ConfigurationUtils;
+ import org.apache.ivy.util.StringUtils;
+ 
+ public final class PomModuleDescriptorWriter {
+@@ -42,12 +48,7 @@ static void setAddIvyVersion(boolean addIvyVersion) {
+     private PomModuleDescriptorWriter() {
+     }
+     
+-    public static void write(ModuleDescriptor md, 
+-            ConfigurationScopeMapping mapping, File output) throws IOException {
+-        write(md, null, mapping, output);
+-    }
+-
+-    public static void write(ModuleDescriptor md, 
++    public static void write(ModuleDescriptor md, String[] confs,
+             String licenseHeader, ConfigurationScopeMapping mapping, File output)
+             throws IOException {
+         if (output.getParentFile() != null) {
+@@ -74,7 +75,7 @@ public static void write(ModuleDescriptor md,
+                     + "http://maven.apache.org/maven-v4_0_0.xsd\">\n");
+             out.println("  <modelVersion>4.0.0</modelVersion>");
+             printModuleId(md, out);
+-            printDependencies(md, mapping, out);
++            printDependencies(md, confs, mapping, out);
+             out.println("</project>");
+         } finally {
+             out.close();
+@@ -121,8 +122,8 @@ private static Artifact findArtifact(ModuleDescriptor md) {
+     }
+ 
+     private static void printDependencies(
+-            ModuleDescriptor md, ConfigurationScopeMapping mapping, PrintWriter out) {
+-        DependencyDescriptor[] dds = md.getDependencies();
++            ModuleDescriptor md, String[] confs, ConfigurationScopeMapping mapping, PrintWriter out) {
++        DependencyDescriptor[] dds = getDependencies(md, confs);
+         if (dds.length > 0) {
+             out.println("  <dependencies>");
+             for (int i = 0; i < dds.length; i++) {
+@@ -144,6 +145,21 @@ private static void printDependencies(
+         }
+     }
+     
++    private static DependencyDescriptor[] getDependencies(ModuleDescriptor md, String[] confs) {
++        confs = ConfigurationUtils.replaceWildcards(confs, md);
++
++        List result = new ArrayList();
++        DependencyDescriptor[] dds = md.getDependencies();
++        for (int i = 0; i < dds.length; i++) {
++            String[] depConfs = dds[i].getDependencyConfigurations(confs);
++            if ((depConfs != null) && (depConfs.length > 0)) {
++                result.add(dds[i]);
++            }
++        }
++        
++        return (DependencyDescriptor[]) result.toArray(new DependencyDescriptor[result.size()]);
++    }
++    
+     public static final ConfigurationScopeMapping DEFAULT_MAPPING 
+         = new ConfigurationScopeMapping(new HashMap() {
+             {
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+index 720fc3e5f..691615cb1 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+@@ -425,6 +425,9 @@ protected static void printConfiguration(Configuration conf, PrintWriter out) {
+             }
+             out.print("\"");
+         }
++        if (!conf.isTransitive()) {
++            out.println(" transitive=\"false\"");
++        }
+         if (conf.getDeprecated() != null) {
+             out.print(" deprecated=\"" + XMLHelper.escape(conf.getDeprecated()) + "\"");
+         }
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriterTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriterTest.java
+index 54935e646..844ebb924 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriterTest.java
+@@ -44,7 +44,7 @@ public class PomModuleDescriptorWriterTest extends TestCase {
+     public void testSimple() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             new IvySettings(), getClass().getResource("test-simple.pom"), false);
+-        PomModuleDescriptorWriter.write(md, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        PomModuleDescriptorWriter.write(md, null, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
+         assertTrue(_dest.exists());
+ 
+         String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
+@@ -57,7 +57,7 @@ public void testSimple() throws Exception {
+     public void testSimpleDependencies() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             new IvySettings(), getClass().getResource("test-dependencies.pom"), false);
+-        PomModuleDescriptorWriter.write(md, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        PomModuleDescriptorWriter.write(md, null, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
+         assertTrue(_dest.exists());
+ 
+         String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
+@@ -70,7 +70,7 @@ public void testSimpleDependencies() throws Exception {
+     public void testDependenciesWithScope() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             new IvySettings(), getClass().getResource("test-dependencies-with-scope.pom"), false);
+-        PomModuleDescriptorWriter.write(md, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        PomModuleDescriptorWriter.write(md, null, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
+         assertTrue(_dest.exists());
+ 
+         String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
+@@ -83,7 +83,7 @@ public void testDependenciesWithScope() throws Exception {
+     public void testOptional() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             new IvySettings(), getClass().getResource("test-optional.pom"), false);
+-        PomModuleDescriptorWriter.write(md, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        PomModuleDescriptorWriter.write(md, null, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
+         assertTrue(_dest.exists());
+ 
+         String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
+@@ -96,7 +96,7 @@ public void testOptional() throws Exception {
+     public void testPackaging() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             new IvySettings(), getClass().getResource("test-packaging.pom"), false);
+-        PomModuleDescriptorWriter.write(md, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        PomModuleDescriptorWriter.write(md, null, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
+         assertTrue(_dest.exists());
+ 
+         String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
+@@ -106,6 +106,58 @@ public void testPackaging() throws Exception {
+         assertEquals(expected, wrote);
+     }
+     
++    public void testWriteCompileConfigurationOnly() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
++            new IvySettings(), getClass().getResource("test-dependencies-with-scope.pom"), false);
++        PomModuleDescriptorWriter.write(md, new String[] {"compile"}, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        assertTrue(_dest.exists());
++
++        String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
++            "\r\n", "\n").replace('\r', '\n');
++        String expected = readEntirely("test-write-compile-dependencies.xml")
++            .replaceAll("\r\n", "\n").replace('\r', '\n');
++        assertEquals(expected, wrote);
++    }
++    
++    public void testWriteRuntimeConfigurationOnly() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
++            new IvySettings(), getClass().getResource("test-dependencies-with-scope.pom"), false);
++        PomModuleDescriptorWriter.write(md, new String[] {"runtime"}, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        assertTrue(_dest.exists());
++
++        String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
++            "\r\n", "\n").replace('\r', '\n');
++        String expected = readEntirely("test-write-dependencies-with-scope.xml")
++            .replaceAll("\r\n", "\n").replace('\r', '\n');
++        assertEquals(expected, wrote);
++    }
++    
++    public void testWriteAllConfiguration() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
++            new IvySettings(), getClass().getResource("test-dependencies-with-scope.pom"), false);
++        PomModuleDescriptorWriter.write(md, new String[] {"*"}, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        assertTrue(_dest.exists());
++
++        String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
++            "\r\n", "\n").replace('\r', '\n');
++        String expected = readEntirely("test-write-dependencies-with-scope.xml")
++            .replaceAll("\r\n", "\n").replace('\r', '\n');
++        assertEquals(expected, wrote);
++    }
++    
++    public void testWriteAllExceptRuntimeConfiguration() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
++            new IvySettings(), getClass().getResource("test-dependencies-with-scope.pom"), false);
++        PomModuleDescriptorWriter.write(md, new String[] {"*", "!runtime"}, LICENSE, PomModuleDescriptorWriter.DEFAULT_MAPPING, _dest);
++        assertTrue(_dest.exists());
++
++        String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(_dest))).replaceAll(
++            "\r\n", "\n").replace('\r', '\n');
++        String expected = readEntirely("test-write-compile-dependencies.xml")
++            .replaceAll("\r\n", "\n").replace('\r', '\n');
++        assertEquals(expected, wrote);
++    }
++    
+     private String readEntirely(String resource) throws IOException {
+         return FileUtil.readEntirely(new BufferedReader(new InputStreamReader(
+             PomModuleDescriptorWriterTest.class.getResource(resource).openStream())));
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-write-compile-dependencies.xml b/test/java/org/apache/ivy/plugins/parser/m2/test-write-compile-dependencies.xml
+new file mode 100644
+index 000000000..b5eb6350c
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-write-compile-dependencies.xml
+@@ -0,0 +1,47 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<!--
++   Apache Maven 2 POM generated by Apache Ivy
++   http://ant.apache.org/ivy/
++-->
++<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
++
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test</artifactId>
++  <packaging>jar</packaging>
++  <version>1.0</version>
++  <url>http://ant.apache.org/ivy</url>
++  <dependencies>
++    <dependency>
++      <groupId>commons-logging</groupId>
++      <artifactId>commons-logging</artifactId>
++      <version>1.0.4</version>
++      <scope>compile</scope>
++    </dependency>
++    <dependency>
++      <groupId>cglib</groupId>
++      <artifactId>cglib</artifactId>
++      <version>2.0.2</version>
++      <scope>compile</scope>
++    </dependency>
++  </dependencies>
++</project>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+index 6b5e48a19..f43234418 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+@@ -22,13 +22,17 @@
+ import java.io.FileReader;
+ import java.io.IOException;
+ import java.io.InputStreamReader;
++import java.util.Date;
+ import java.util.GregorianCalendar;
+ 
+ import junit.framework.TestCase;
+ 
+ import org.apache.ivy.Ivy;
++import org.apache.ivy.core.module.descriptor.Configuration;
+ import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
++import org.apache.ivy.core.module.descriptor.Configuration.Visibility;
++import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.util.FileUtil;
+@@ -121,6 +125,55 @@ public void testExtends() throws Exception {
+ 		assertEquals(expected, wrote);
+ 	}
+ 
++    /**
++     * Test that the transitive attribute is written for non-transitive configurations.
++     * 
++     * <code><conf ... transitive="false" ... /></code>
++     * 
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1207">IVY-1207</a>
++     * @throws Exception
++     */
++    public void testTransitiveAttributeForNonTransitiveConfs() throws Exception {
++        // Given a ModuleDescriptor with a non-transitive configuration
++        DefaultModuleDescriptor md = new DefaultModuleDescriptor(new ModuleRevisionId(new ModuleId(
++                "myorg", "myname"), "1.0"), "integration", new Date());
++        Configuration conf = new Configuration("conf", Visibility.PUBLIC, "desc", null, false, null);
++        md.addConfiguration(conf);
++
++        // When the ModuleDescriptor is written
++        XmlModuleDescriptorWriter.write(md, LICENSE, dest);
++
++        // Then the transitive attribute must be set to false
++        String output = FileUtil.readEntirely(dest);
++        String writtenConf = output.substring(output.indexOf("<configurations>") + 16, output.indexOf("</configurations>")).trim();
++        assertTrue("Transitive attribute not set to false: " + writtenConf, writtenConf.indexOf("transitive=\"false\"") >= 0);
++    }
++
++    /**
++     * Test that the transitive attribute is not written when the configuration IS transitive.
++     * 
++     * This is the default and writing it will only add noise and cause a deviation from the known
++     * behavior (before fixing IVY-1207).
++     * 
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1207">IVY-1207</a>
++     * @throws Exception
++     */
++    public void testTransitiveAttributeNotWrittenForTransitiveConfs() throws Exception {
++        // Given a ModuleDescriptor with a transitive configuration
++        DefaultModuleDescriptor md = new DefaultModuleDescriptor(new ModuleRevisionId(new ModuleId(
++                "myorg", "myname"), "1.0"), "integration", new Date());
++        Configuration conf = new Configuration("conf", Visibility.PUBLIC, "desc", null, true, null);
++        md.addConfiguration(conf);
++
++        // When the ModuleDescriptor is written
++        XmlModuleDescriptorWriter.write(md, LICENSE, dest);
++
++        // Then the transitive attribute must NOT be written
++        String output = FileUtil.readEntirely(dest);
++        String writtenConf = output.substring(output.indexOf("<configurations>") + 16, output.indexOf("</configurations>")).trim();
++        assertFalse("Transitive attribute set: " + writtenConf, writtenConf.indexOf("transitive=") >= 0);
++    }
++
+     private String readEntirely(String resource) throws IOException {
+         return FileUtil.readEntirely(new BufferedReader(new InputStreamReader(
+                 XmlModuleDescriptorWriterTest.class.getResource(resource).openStream())));

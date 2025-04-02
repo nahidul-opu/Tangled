@@ -1,0 +1,405 @@
+From c66b23747627a2b432e0068561d457cab9f97ead Mon Sep 17 00:00:00 2001
+From: Antoine Levy-Lambert <antoine@apache.org>
+Date: Sun, 27 Apr 2014 18:19:50 +0000
+Subject: [PATCH] FIX: impossible to get artifacts when data has not been
+ loaded (IVY-1399) (thanks to David Turner)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1590442 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  3 ++
+ .../conflict/LatestConflictManager.java       | 10 ++++++
+ .../conflict/LatestConflictManagerTest.java   | 31 +++++++++++++++++
+ .../plugins/conflict/ivysettings-evicted.xml  | 29 ++++++++++++++++
+ .../IVY-1399/MyCompany/A/ivy-1.xml            | 32 ++++++++++++++++++
+ .../IVY-1399/MyCompany/B/ivy-1.xml            | 33 +++++++++++++++++++
+ .../IVY-1399/MyCompany/C/ivy-1.xml            | 31 +++++++++++++++++
+ .../IVY-1399/MyCompany/target/ivy-1.xml       | 32 ++++++++++++++++++
+ .../OtherCompany/prefers-later/ivy-1.xml      | 31 +++++++++++++++++
+ .../conflicting-dependency/dep/ivy-1.xml      | 28 ++++++++++++++++
+ .../conflicting-dependency/dep/ivy-2.xml      | 28 ++++++++++++++++
+ 11 files changed, 288 insertions(+)
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivysettings-evicted.xml
+ create mode 100644 test/repositories/IVY-1399/MyCompany/A/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1399/MyCompany/B/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1399/MyCompany/C/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1399/MyCompany/target/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1399/OtherCompany/prefers-later/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1399/conflicting-dependency/dep/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1399/conflicting-dependency/dep/ivy-2.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 94b526b8f..26a4367ce 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -126,6 +126,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	John Tinetti
+ 	Erwin Tratar
+ 	Jason Trump
++	David Turner
+ 	Tjeerd Verhagen
+ 	Richard Vowles
+ 	Sven Walter
+@@ -142,6 +143,8 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - IMPROVEMENT: Add support for packed jar within an OSGi bundle
+ 
++- FIX: impossible to get artifacts when data has not been loaded. (IVY-1399) (Thanks to David Turner)
++
+    2.4.0-rc1
+ =====================================
+ - DOCUMENTATION: Broken link in <dependency> documentation (IVY-1405)
+diff --git a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+index 7c851ac4d..aafe069d1 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+@@ -103,6 +103,16 @@ public Collection resolveConflicts(IvyNode parent, Collection conflicts) {
+             }
+         }
+ 
++        ArrayList unevicted = new ArrayList();
++        for (Iterator iter = conflicts.iterator(); iter.hasNext();) {
++            IvyNode node = (IvyNode) iter.next();
++            if (!node.isCompletelyEvicted())
++                unevicted.add(node);
++        }
++        if (unevicted.size() > 0) {
++            conflicts = unevicted;
++        }
++
+         try {
+             IvyNodeArtifactInfo latest = (IvyNodeArtifactInfo) getStrategy().findLatest(
+                 toArtifactInfo(conflicts), null);
+diff --git a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+index 0da1c6e37..2596e0ae1 100644
+--- a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
++++ b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+@@ -187,6 +187,37 @@ else if (mrid.getName().equals("B")) {
+         }
+     }
+ 
++    /*
++     * Test case for issue IVY-1399:
++     * Dependency tree:
++     * Mycompany#target;1
++     *     MyCompany#A;1
++     *         conflicting-dependency#dep;1
++     *         OtherCompany#prefers-later;1
++     *             conflicting-dependency#dep;2
++     *     MyCompany#B;1
++     *         MyCompany#A;1
++     *             ...
++     *         OtherCompany#prefers-later;1
++     *             ...
++     *         MyCompany#C;1
++     *             conflicting-dependency#dep;1
++     */
++    public void testEvictedModules() throws Exception {
++        ivy.configure(LatestConflictManagerTest.class
++                .getResource("ivysettings-evicted.xml"));
++
++        ivy.getSettings().setVariable("ivy.log.conflict.resolution", "true", true);
++        try {
++            ResolveReport report = ivy.resolve(
++                new File("test/repositories/IVY-1399/MyCompany/target/ivy-1.xml"),
++                getResolveOptions());
++            report.getConfigurationReport("all");
++        } catch (IllegalStateException e) {
++            fail("Resolving target should not throw an exception");
++        }
++    }
++
+     private ResolveOptions getResolveOptions() {
+         return new ResolveOptions().setValidate(false);
+     }
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivysettings-evicted.xml b/test/java/org/apache/ivy/plugins/conflict/ivysettings-evicted.xml
+new file mode 100644
+index 000000000..518c8bf24
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivysettings-evicted.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++    <settings defaultCache="${ivy.basedir}/build/cache" defaultResolver="test" defaultConflictManager="latest-revision" />
++
++    <resolvers>
++       <filesystem name="test" latest="latest-revision" checkmodified="true">
++	<artifact pattern="${ivy.basedir}/test/repositories/IVY-1399/[organisation]/[module]/[type]/[artifact]-[revision].[ext]" />
++	<ivy pattern="${ivy.basedir}/test/repositories/IVY-1399/[organisation]/[module]/ivy-[revision].xml" />
++      </filesystem>
++   </resolvers>
++
++</ivysettings>
+diff --git a/test/repositories/IVY-1399/MyCompany/A/ivy-1.xml b/test/repositories/IVY-1399/MyCompany/A/ivy-1.xml
+new file mode 100644
+index 000000000..8f9cd76c1
+--- /dev/null
++++ b/test/repositories/IVY-1399/MyCompany/A/ivy-1.xml
+@@ -0,0 +1,32 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="A" revision="1" status="integration" publication="20140426010101"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="A" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="conflicting-dependency" name="dep" rev="1" force="true"/>
++    <dependency org="OtherCompany" name="prefers-later" rev="1" force="true"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1399/MyCompany/B/ivy-1.xml b/test/repositories/IVY-1399/MyCompany/B/ivy-1.xml
+new file mode 100644
+index 000000000..eeab6ae92
+--- /dev/null
++++ b/test/repositories/IVY-1399/MyCompany/B/ivy-1.xml
+@@ -0,0 +1,33 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="B" revision="1" status="integration" publication="20140426010101"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="B" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="MyCompany" name="A" rev="1" force="true"/>
++    <dependency org="OtherCompany" name="prefers-later" rev="1" force="true"/>
++    <dependency org="MyCompany" name="C" rev="1" force="true"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1399/MyCompany/C/ivy-1.xml b/test/repositories/IVY-1399/MyCompany/C/ivy-1.xml
+new file mode 100644
+index 000000000..8f09bb016
+--- /dev/null
++++ b/test/repositories/IVY-1399/MyCompany/C/ivy-1.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="C" revision="1" status="integration" publication="20140426010101"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="C" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="conflicting-dependency" name="dep" rev="1" force="true"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1399/MyCompany/target/ivy-1.xml b/test/repositories/IVY-1399/MyCompany/target/ivy-1.xml
+new file mode 100644
+index 000000000..3201088fb
+--- /dev/null
++++ b/test/repositories/IVY-1399/MyCompany/target/ivy-1.xml
+@@ -0,0 +1,32 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="target" revision="1" status="integration" publication="20140426010101"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="target" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="MyCompany" name="A" rev="1" force="true"/>
++    <dependency org="MyCompany" name="B" rev="1" force="true"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1399/OtherCompany/prefers-later/ivy-1.xml b/test/repositories/IVY-1399/OtherCompany/prefers-later/ivy-1.xml
+new file mode 100644
+index 000000000..200f5f72f
+--- /dev/null
++++ b/test/repositories/IVY-1399/OtherCompany/prefers-later/ivy-1.xml
+@@ -0,0 +1,31 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++  <info organisation="OtherCompany" module="prefers-later" revision="1" status="integration" publication="20140426010101"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="prefers-later" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="conflicting-dependency" name="dep" rev="2" force="true" conf="all"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1399/conflicting-dependency/dep/ivy-1.xml b/test/repositories/IVY-1399/conflicting-dependency/dep/ivy-1.xml
+new file mode 100644
+index 000000000..80f26093c
+--- /dev/null
++++ b/test/repositories/IVY-1399/conflicting-dependency/dep/ivy-1.xml
+@@ -0,0 +1,28 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++  <info organisation="conflicting-dependency" module="dep" revision="1" status="integration" publication="20140423010101"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="dep" ext="jar" type="lib" conf="all"/>
++  </publications>
++</ivy-module>
+diff --git a/test/repositories/IVY-1399/conflicting-dependency/dep/ivy-2.xml b/test/repositories/IVY-1399/conflicting-dependency/dep/ivy-2.xml
+new file mode 100644
+index 000000000..bfc7e3e7a
+--- /dev/null
++++ b/test/repositories/IVY-1399/conflicting-dependency/dep/ivy-2.xml
+@@ -0,0 +1,28 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++  <info organisation="conflicting-dependency" module="dep" revision="2" status="integration" publication="20140426010101"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="dep" ext="jar" type="lib" conf="all"/>
++  </publications>
++</ivy-module>

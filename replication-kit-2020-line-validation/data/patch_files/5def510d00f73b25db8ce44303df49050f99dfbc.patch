@@ -1,0 +1,1772 @@
+From 70594bcaff1d553cbd35312bb63a33bcba0680d3 Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Fri, 14 Apr 2017 15:04:20 -0400
+Subject: [PATCH 1/7] COMPRESS-382 first draft of preventing OOM in LZMA
+
+---
+ .../compressors/CompressorStreamFactory.java  |  15 +++++++++--
+ .../lzma/LZMACompressorInputStream.java       |  14 ++++++++--
+ .../compressors/DetectCompressorTestCase.java |  24 +++++++++++++++---
+ src/test/resources/COMPRESS-382               | Bin 0 -> 19 bytes
+ 4 files changed, 45 insertions(+), 8 deletions(-)
+ create mode 100644 src/test/resources/COMPRESS-382
+
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index 55da36a3b50..d569a8a1ea6 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -349,6 +349,8 @@ private static String toKey(final String name) {
+      */
+     private volatile boolean decompressConcatenated = false;
+ 
++    private volatile int lzmaMemoryLimitKb = -1;
++
+     /**
+      * Create an instance with the decompress Concatenated option set to false.
+      */
+@@ -431,7 +433,7 @@ public CompressorInputStream createCompressorInputStream(final InputStream in) t
+             }
+ 
+             if (LZMAUtils.matches(signature, signatureLength) && LZMAUtils.isLZMACompressionAvailable()) {
+-                return new LZMACompressorInputStream(in);
++                return new LZMACompressorInputStream(in, lzmaMemoryLimitKb);
+             }
+ 
+             if (FramedLZ4CompressorInputStream.matches(signature, signatureLength)) {
+@@ -666,5 +668,14 @@ public void setDecompressConcatenated(final boolean decompressConcatenated) {
+         }
+         this.decompressConcatenated = decompressConcatenated;
+     }
+-    
++
++    /**
++     * Set the maximum calculated memory usage for LZMA
++     * in KB.
++     *
++     * @param lzmaMemoryLimitKb
++     */
++    public void setLzmaMemoryLimitKb(int lzmaMemoryLimitKb) {
++        this.lzmaMemoryLimitKb = lzmaMemoryLimitKb;
++    }
+ }
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+index 556c78c7c51..ea8a49860ca 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+@@ -31,21 +31,31 @@
+ public class LZMACompressorInputStream extends CompressorInputStream {
+     private final InputStream in;
+ 
++    public LZMACompressorInputStream(final InputStream inputStream)
++            throws IOException {
++        in = new LZMAInputStream(inputStream, -1);
++    }
++
+     /**
+      * Creates a new input stream that decompresses LZMA-compressed data
+      * from the specified input stream.
+      *
+      * @param       inputStream where to read the compressed data
+      *
++     * @param       memoryLimitKb calculated memory use threshold.  Throws MemoryLimitException
++     *                            if calculate memory use is above this threshold
++     *
+      * @throws      IOException if the input is not in the .lzma format,
+      *                          the input is corrupt or truncated, the .lzma
+      *                          headers specify sizes that are not supported
+      *                          by this implementation, or the underlying
+      *                          <code>inputStream</code> throws an exception
++     *
++     * @since 1.14
+      */
+-    public LZMACompressorInputStream(final InputStream inputStream)
++    public LZMACompressorInputStream(final InputStream inputStream, int memoryLimitKb)
+             throws IOException {
+-        in = new LZMAInputStream(inputStream);
++        in = new LZMAInputStream(inputStream, memoryLimitKb);
+     }
+ 
+     /** {@inheritDoc} */
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index 674a2a07eb5..9c446fa924f 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -19,22 +19,25 @@
+ package org.apache.commons.compress.compressors;
+ 
+ import static org.apache.commons.compress.AbstractTestCase.getFile;
+-import static org.junit.Assert.*;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
+ 
+ import java.io.BufferedInputStream;
+ import java.io.ByteArrayInputStream;
+ import java.io.FileInputStream;
+ import java.io.IOException;
++import java.io.InputStream;
+ 
+-import org.apache.commons.compress.compressors.CompressorException;
+-import org.apache.commons.compress.compressors.CompressorInputStream;
+-import org.apache.commons.compress.compressors.CompressorStreamFactory;
+ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
+ import org.apache.commons.compress.compressors.deflate.DeflateCompressorInputStream;
+ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+ import org.apache.commons.compress.compressors.pack200.Pack200CompressorInputStream;
+ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream;
+ import org.junit.Test;
++import org.tukaani.xz.MemoryLimitException;
+ 
+ @SuppressWarnings("deprecation") // deliberately tests setDecompressConcatenated
+ public final class DetectCompressorTestCase {
+@@ -160,6 +163,19 @@ public void testMutiples() throws Exception {
+         }
+     }
+ 
++    @Test
++    public void testLZMAMemoryLimit() throws Exception {
++        CompressorStreamFactory compressorStreamFactory = new CompressorStreamFactory();
++        compressorStreamFactory.setLzmaMemoryLimitKb(500);
++        try {
++            InputStream is = compressorStreamFactory.createCompressorInputStream(
++                    new BufferedInputStream(new FileInputStream(getFile("COMPRESS-382"))));
++            fail("Should have thrown memory limit exception");
++        } catch (CompressorException e) {
++            assertTrue(e.getCause() instanceof MemoryLimitException);
++        }
++    }
++
+     private CompressorInputStream getStreamFor(final String resource)
+             throws CompressorException, IOException {
+         return factory.createCompressorInputStream(
+diff --git a/src/test/resources/COMPRESS-382 b/src/test/resources/COMPRESS-382
+new file mode 100644
+index 0000000000000000000000000000000000000000..be257f21e7b2bff117af01dfa6141161955ff948
+GIT binary patch
+literal 19
+Vcma!LU|=X=C}JpONCmRM000~$0v-SW
+
+literal 0
+HcmV?d00001
+
+
+From 7d73baf10e435fcaa4927495afc185fb473c416b Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Fri, 21 Apr 2017 19:21:42 -0400
+Subject: [PATCH 2/7] COMPRESS-382 and COMPRESS-386 -- add memoryLimit to
+ CompressorStreamFactory and ZCompressorInputStream and
+ LZMACompressorInputStream
+
+---
+ .../CompressorMemoryLimitException.java       | 36 ++++++++++++++++
+ .../compressors/CompressorStreamFactory.java  | 43 ++++++++++++++++---
+ .../lzma/LZMACompressorInputStream.java       |  6 +--
+ .../compressors/lzw/LZWInputStream.java       | 17 ++++++++
+ .../compressors/z/ZCompressorInputStream.java | 24 +++++++++--
+ .../compressors/DetectCompressorTestCase.java | 24 +++++++++++
+ src/test/resources/COMPRESS-386               |  1 +
+ 7 files changed, 140 insertions(+), 11 deletions(-)
+ create mode 100644 src/main/java/org/apache/commons/compress/compressors/CompressorMemoryLimitException.java
+ create mode 100644 src/test/resources/COMPRESS-386
+
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorMemoryLimitException.java b/src/main/java/org/apache/commons/compress/compressors/CompressorMemoryLimitException.java
+new file mode 100644
+index 00000000000..4c87d1ea71d
+--- /dev/null
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorMemoryLimitException.java
+@@ -0,0 +1,36 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.commons.compress.compressors;
++
++/**
++ * If a stream checks for estimated memory allocation, and the estimate
++ * goes above the memory limit, this is thrown.
++ *
++ * @since 1.14
++ */
++public class CompressorMemoryLimitException extends CompressorException {
++
++    public CompressorMemoryLimitException(String message) {
++        super(message);
++    }
++
++    public CompressorMemoryLimitException(String message, Exception e) {
++        super(message, e);
++    }
++}
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index a29179cd557..a0a816f1452 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -57,6 +57,7 @@
+ import org.apache.commons.compress.utils.Lists;
+ import org.apache.commons.compress.utils.ServiceLoaderIterator;
+ import org.apache.commons.compress.utils.Sets;
++import org.tukaani.xz.MemoryLimitException;
+ 
+ /**
+  * <p>
+@@ -349,28 +350,52 @@ private static String toKey(final String name) {
+      */
+     private volatile boolean decompressConcatenated = false;
+ 
++    private final int memoryLimitInKb;
+     /**
+      * Create an instance with the decompress Concatenated option set to false.
+      */
+     public CompressorStreamFactory() {
+         this.decompressUntilEOF = null;
++        this.memoryLimitInKb = -1;
+     }
+ 
+     /**
+      * Create an instance with the provided decompress Concatenated option.
+-     * 
++     *
+      * @param decompressUntilEOF
+      *            if true, decompress until the end of the input; if false, stop
+      *            after the first stream and leave the input position to point
+      *            to the next byte after the stream. This setting applies to the
+      *            gzip, bzip2 and xz formats only.
+-     * @since 1.10
++     *
++     * @param memoryLimitInKb
++     *            Some streams require allocation of potentially significant
++     *            byte arrays/tables, and they can offer checks to prevent OOMs
++     *            on corrupt files.  Set the maximum allowed memory allocation in KBs.
++     *
++     * @since 1.14
+      */
+-    public CompressorStreamFactory(final boolean decompressUntilEOF) {
++    public CompressorStreamFactory(final boolean decompressUntilEOF, final int memoryLimitInKb) {
+         this.decompressUntilEOF = Boolean.valueOf(decompressUntilEOF);
+         // Also copy to existing variable so can continue to use that as the
+         // current value
+         this.decompressConcatenated = decompressUntilEOF;
++        this.memoryLimitInKb = memoryLimitInKb;
++    }
++
++
++    /**
++     * Create an instance with the provided decompress Concatenated option.
++     * 
++     * @param decompressUntilEOF
++     *            if true, decompress until the end of the input; if false, stop
++     *            after the first stream and leave the input position to point
++     *            to the next byte after the stream. This setting applies to the
++     *            gzip, bzip2 and xz formats only.
++     * @since 1.10
++     */
++    public CompressorStreamFactory(final boolean decompressUntilEOF) {
++        this(decompressUntilEOF, -1);
+     }
+ 
+     /**
+@@ -510,7 +535,11 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+                 if (!LZMAUtils.isLZMACompressionAvailable()) {
+                     throw new CompressorException("LZMA compression is not available");
+                 }
+-                return new LZMACompressorInputStream(in);
++                try {
++                    return new LZMACompressorInputStream(in, memoryLimitInKb);
++                } catch (MemoryLimitException e) {
++                    throw new CompressorMemoryLimitException("exceeded calculated memory limit", e);
++                }
+             }
+ 
+             if (PACK200.equalsIgnoreCase(name)) {
+@@ -526,7 +555,11 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+             }
+ 
+             if (Z.equalsIgnoreCase(name)) {
+-                return new ZCompressorInputStream(in);
++                try {
++                    return new ZCompressorInputStream(in, memoryLimitInKb);
++                } catch (ZCompressorInputStream.IOExceptionWrappingMemoryLimitException e) {
++                    throw new CompressorMemoryLimitException(e.getMessage());
++                }
+             }
+ 
+             if (DEFLATE.equalsIgnoreCase(name)) {
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+index ea8a49860ca..0520e623f8f 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+@@ -42,7 +42,7 @@ public LZMACompressorInputStream(final InputStream inputStream)
+      *
+      * @param       inputStream where to read the compressed data
+      *
+-     * @param       memoryLimitKb calculated memory use threshold.  Throws MemoryLimitException
++     * @param       memoryLimitInKb calculated memory use threshold.  Throws MemoryLimitException
+      *                            if calculate memory use is above this threshold
+      *
+      * @throws      IOException if the input is not in the .lzma format,
+@@ -53,9 +53,9 @@ public LZMACompressorInputStream(final InputStream inputStream)
+      *
+      * @since 1.14
+      */
+-    public LZMACompressorInputStream(final InputStream inputStream, int memoryLimitKb)
++    public LZMACompressorInputStream(final InputStream inputStream, int memoryLimitInKb)
+             throws IOException {
+-        in = new LZMAInputStream(inputStream, memoryLimitKb);
++        in = new LZMAInputStream(inputStream, memoryLimitInKb);
+     }
+ 
+     /** {@inheritDoc} */
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+index 5967f66b50a..b61d9a12ef5 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+@@ -23,6 +23,7 @@
+ import java.nio.ByteOrder;
+ 
+ import org.apache.commons.compress.compressors.CompressorInputStream;
++import org.apache.commons.compress.compressors.CompressorMemoryLimitException;
+ import org.apache.commons.compress.utils.BitInputStream;
+ 
+ /**
+@@ -111,6 +112,22 @@ protected void setClearCode(final int codeSize) {
+         clearCode = (1 << (codeSize - 1));
+     }
+ 
++    /**
++     * Initializes the arrays based on the maximum code size.
++     * @param maxCodeSize maximum code size
++     * @param memoryLimitInKb maximum allowed table size in Kb
++     * @throws CompressorMemoryLimitException if maxTableSize is > memoryLimitInKb
++     */
++    protected void initializeTables(final int maxCodeSize, final int memoryLimitInKb)
++            throws CompressorMemoryLimitException {
++        final int maxTableSize = 1 << maxCodeSize;
++        if (memoryLimitInKb > -1 && maxTableSize > memoryLimitInKb*1024) {
++            throw new CompressorMemoryLimitException("Tried to allocate "+maxTableSize +
++                    " but memoryLimitInKb only allows "+(memoryLimitInKb*1024));
++        }
++        initializeTables(maxCodeSize);
++    }
++
+     /**
+      * Initializes the arrays based on the maximum code size.
+      * @param maxCodeSize maximum code size
+diff --git a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+index 799e58d5f2c..22d7c0c4483 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+@@ -22,6 +22,7 @@
+ import java.io.InputStream;
+ import java.nio.ByteOrder;
+ 
++import org.apache.commons.compress.compressors.CompressorMemoryLimitException;
+ import org.apache.commons.compress.compressors.lzw.LZWInputStream;
+ 
+ /**
+@@ -37,8 +38,9 @@ public class ZCompressorInputStream extends LZWInputStream {
+     private final boolean blockMode;
+     private final int maxCodeSize;
+     private long totalCodesRead = 0;
+-    
+-    public ZCompressorInputStream(final InputStream inputStream) throws IOException {
++
++    public ZCompressorInputStream(final InputStream inputStream, int memoryLimitInKb)
++            throws IOException {
+         super(inputStream, ByteOrder.LITTLE_ENDIAN);
+         final int firstByte = (int) in.readBits(8);
+         final int secondByte = (int) in.readBits(8);
+@@ -51,9 +53,17 @@ public ZCompressorInputStream(final InputStream inputStream) throws IOException
+         if (blockMode) {
+             setClearCode(DEFAULT_CODE_SIZE);
+         }
+-        initializeTables(maxCodeSize);
++        try {
++            initializeTables(maxCodeSize, memoryLimitInKb);
++        } catch (CompressorMemoryLimitException e) {
++            throw new IOExceptionWrappingMemoryLimitException(e.getMessage());
++        }
+         clearEntries();
+     }
++
++    public ZCompressorInputStream(final InputStream inputStream) throws IOException {
++        this(inputStream, -1);
++    }
+     
+     private void clearEntries() {
+         setTableSize((1 << 8) + (blockMode ? 1 : 0));
+@@ -163,4 +173,12 @@ public static boolean matches(final byte[] signature, final int length) {
+         return length > 3 && signature[0] == MAGIC_1 && signature[1] == (byte) MAGIC_2;
+     }
+ 
++    /**
++     * Wrapper that subclasses IOException to wrap a MemoryLimitException
++     */
++    public static class IOExceptionWrappingMemoryLimitException extends IOException {
++        public IOExceptionWrappingMemoryLimitException(String message) {
++            super(message);
++        }
++    }
+ }
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index 67abcd3a780..7cec5df73b8 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -133,6 +133,10 @@ public void testDetect() throws Exception {
+         assertEquals(CompressorStreamFactory.SNAPPY_FRAMED, detect("bla.tar.sz"));
+         assertEquals(CompressorStreamFactory.Z, detect("bla.tar.Z"));
+ 
++        //make sure we don't oom on detect
++        assertEquals(CompressorStreamFactory.Z, detect("COMPRESS-386"));
++        assertEquals(CompressorStreamFactory.LZMA, detect("COMPRESS-382"));
++
+         try {
+             CompressorStreamFactory.detect(new BufferedInputStream(new ByteArrayInputStream(new byte[0])));
+             fail("shouldn't be able to detect empty stream");
+@@ -166,6 +170,26 @@ private String detect(String testFileName) throws IOException, CompressorExcepti
+         return name;
+     }
+ 
++    @Test
++    public void testMemoryLimit() throws Exception {
++        testMemoryLimit("COMPRESS-382");
++        testMemoryLimit("COMPRESS-386");
++    }
++
++    private void testMemoryLimit(String fileName) throws IOException, CompressorException {
++        CompressorStreamFactory fac = new CompressorStreamFactory(true,
++                100);
++        try (InputStream is = new BufferedInputStream(
++                new FileInputStream(getFile(fileName)))) {
++            InputStream compressorInputStream = fac.createCompressorInputStream(is);
++            fail("Should have thrown CompressorMemoryLimitException");
++        } catch (CompressorMemoryLimitException e) {
++
++        }
++
++    }
++
++
+     @Test
+     public void testOverride() {
+         CompressorStreamFactory fac = new CompressorStreamFactory();
+diff --git a/src/test/resources/COMPRESS-386 b/src/test/resources/COMPRESS-386
+new file mode 100644
+index 00000000000..36d7f52f04b
+--- /dev/null
++++ b/src/test/resources/COMPRESS-386
+@@ -0,0 +1 @@
++ùB
+\ No newline at end of file
+
+From b10528a62e51b2c5fdc0c4b7884cc93f03f8ce96 Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Mon, 24 Apr 2017 10:10:30 -0400
+Subject: [PATCH 3/7] COMPRESS-382 and COMPRESS-386 -- break out unit tests;
+ add memory limit for xz.
+
+---
+ ...ception.java => MemoryLimitException.java} | 14 +++--
+ .../compressors/CompressorStreamFactory.java  | 19 ++----
+ .../lzma/LZMACompressorInputStream.java       |  9 ++-
+ .../compressors/lzw/LZWInputStream.java       |  8 +--
+ .../xz/XZCompressorInputStream.java           | 62 ++++++++++++++++---
+ .../compressors/z/ZCompressorInputStream.java | 15 +----
+ .../compressors/DetectCompressorTestCase.java | 54 ++++++++++++----
+ 7 files changed, 123 insertions(+), 58 deletions(-)
+ rename src/main/java/org/apache/commons/compress/{compressors/CompressorMemoryLimitException.java => MemoryLimitException.java} (70%)
+
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorMemoryLimitException.java b/src/main/java/org/apache/commons/compress/MemoryLimitException.java
+similarity index 70%
+rename from src/main/java/org/apache/commons/compress/compressors/CompressorMemoryLimitException.java
+rename to src/main/java/org/apache/commons/compress/MemoryLimitException.java
+index 4c87d1ea71d..8922ed2e969 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorMemoryLimitException.java
++++ b/src/main/java/org/apache/commons/compress/MemoryLimitException.java
+@@ -16,21 +16,25 @@
+  * specific language governing permissions and limitations
+  * under the License.
+  */
+-package org.apache.commons.compress.compressors;
++package org.apache.commons.compress;
++
++import java.io.IOException;
+ 
+ /**
+  * If a stream checks for estimated memory allocation, and the estimate
+- * goes above the memory limit, this is thrown.
++ * goes above the memory limit, this is thrown.  This can also be thrown
++ * if a stream tries to allocate a byte array that is larger than
++ * the allowable limit.
+  *
+  * @since 1.14
+  */
+-public class CompressorMemoryLimitException extends CompressorException {
++public class MemoryLimitException extends IOException {
+ 
+-    public CompressorMemoryLimitException(String message) {
++    public MemoryLimitException(String message) {
+         super(message);
+     }
+ 
+-    public CompressorMemoryLimitException(String message, Exception e) {
++    public MemoryLimitException(String message, Exception e) {
+         super(message, e);
+     }
+ }
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index a0a816f1452..f3433d9f298 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -57,7 +57,6 @@
+ import org.apache.commons.compress.utils.Lists;
+ import org.apache.commons.compress.utils.ServiceLoaderIterator;
+ import org.apache.commons.compress.utils.Sets;
+-import org.tukaani.xz.MemoryLimitException;
+ 
+ /**
+  * <p>
+@@ -498,7 +497,9 @@ public CompressorInputStream createCompressorInputStream(final InputStream in) t
+      *            the input stream
+      * @return compressor input stream
+      * @throws CompressorException
+-     *             if the compressor name is not known or not available
++     *             if the compressor name is not known or not available,
++     *             or if there's an IOException or MemoryLimitException thrown
++     *             during initialization
+      * @throws IllegalArgumentException
+      *             if the name or input stream is null
+      */
+@@ -528,18 +529,14 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+                 if (!XZUtils.isXZCompressionAvailable()) {
+                     throw new CompressorException("XZ compression is not available.");
+                 }
+-                return new XZCompressorInputStream(in, actualDecompressConcatenated);
++                return new XZCompressorInputStream(in, actualDecompressConcatenated, memoryLimitInKb);
+             }
+ 
+             if (LZMA.equalsIgnoreCase(name)) {
+                 if (!LZMAUtils.isLZMACompressionAvailable()) {
+                     throw new CompressorException("LZMA compression is not available");
+                 }
+-                try {
+-                    return new LZMACompressorInputStream(in, memoryLimitInKb);
+-                } catch (MemoryLimitException e) {
+-                    throw new CompressorMemoryLimitException("exceeded calculated memory limit", e);
+-                }
++                return new LZMACompressorInputStream(in, memoryLimitInKb);
+             }
+ 
+             if (PACK200.equalsIgnoreCase(name)) {
+@@ -555,11 +552,7 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+             }
+ 
+             if (Z.equalsIgnoreCase(name)) {
+-                try {
+-                    return new ZCompressorInputStream(in, memoryLimitInKb);
+-                } catch (ZCompressorInputStream.IOExceptionWrappingMemoryLimitException e) {
+-                    throw new CompressorMemoryLimitException(e.getMessage());
+-                }
++                return new ZCompressorInputStream(in, memoryLimitInKb);
+             }
+ 
+             if (DEFLATE.equalsIgnoreCase(name)) {
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+index 0520e623f8f..7782be81e34 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+@@ -20,6 +20,8 @@
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
++
++import org.apache.commons.compress.MemoryLimitException;
+ import org.tukaani.xz.LZMAInputStream;
+ 
+ import org.apache.commons.compress.compressors.CompressorInputStream;
+@@ -55,7 +57,12 @@ public LZMACompressorInputStream(final InputStream inputStream)
+      */
+     public LZMACompressorInputStream(final InputStream inputStream, int memoryLimitInKb)
+             throws IOException {
+-        in = new LZMAInputStream(inputStream, memoryLimitInKb);
++        try {
++            in = new LZMAInputStream(inputStream, memoryLimitInKb);
++        } catch (org.tukaani.xz.MemoryLimitException e) {
++            //convert to commons-compress exception
++            throw new MemoryLimitException("exceeded calculated memory limit", e);
++        }
+     }
+ 
+     /** {@inheritDoc} */
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+index b61d9a12ef5..350b4b01ba7 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+@@ -22,8 +22,8 @@
+ import java.io.InputStream;
+ import java.nio.ByteOrder;
+ 
++import org.apache.commons.compress.MemoryLimitException;
+ import org.apache.commons.compress.compressors.CompressorInputStream;
+-import org.apache.commons.compress.compressors.CompressorMemoryLimitException;
+ import org.apache.commons.compress.utils.BitInputStream;
+ 
+ /**
+@@ -116,13 +116,13 @@ protected void setClearCode(final int codeSize) {
+      * Initializes the arrays based on the maximum code size.
+      * @param maxCodeSize maximum code size
+      * @param memoryLimitInKb maximum allowed table size in Kb
+-     * @throws CompressorMemoryLimitException if maxTableSize is > memoryLimitInKb
++     * @throws MemoryLimitException if maxTableSize is > memoryLimitInKb
+      */
+     protected void initializeTables(final int maxCodeSize, final int memoryLimitInKb)
+-            throws CompressorMemoryLimitException {
++            throws MemoryLimitException {
+         final int maxTableSize = 1 << maxCodeSize;
+         if (memoryLimitInKb > -1 && maxTableSize > memoryLimitInKb*1024) {
+-            throw new CompressorMemoryLimitException("Tried to allocate "+maxTableSize +
++            throw new MemoryLimitException("Tried to allocate "+maxTableSize +
+                     " but memoryLimitInKb only allows "+(memoryLimitInKb*1024));
+         }
+         initializeTables(maxCodeSize);
+diff --git a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+index 27d70d2363b..b378212037e 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+@@ -20,6 +20,8 @@
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
++
++import org.apache.commons.compress.MemoryLimitException;
+ import org.tukaani.xz.XZ;
+ import org.tukaani.xz.SingleXZInputStream;
+ import org.tukaani.xz.XZInputStream;
+@@ -92,30 +94,72 @@ public XZCompressorInputStream(final InputStream inputStream)
+     public XZCompressorInputStream(final InputStream inputStream,
+                                    final boolean decompressConcatenated)
+             throws IOException {
++        this(inputStream, decompressConcatenated, -1);
++    }
++
++    /**
++     * Creates a new input stream that decompresses XZ-compressed data
++     * from the specified input stream.
++     *
++     * @param       inputStream where to read the compressed data
++     * @param       decompressConcatenated
++     *                          if true, decompress until the end of the
++     *                          input; if false, stop after the first .xz
++     *                          stream and leave the input position to point
++     *                          to the next byte after the .xz stream
++     * @param       memoryLimitInKb memory limit used when reading blocks.  If
++     *                          the estimated memory limit is exceeded on {@link #read()},
++     *                          a {@link MemoryLimitException} is thrown.
++     *
++     * @throws      IOException if the input is not in the .xz format,
++     *                          the input is corrupt or truncated, the .xz
++     *                          headers specify options that are not supported
++     *                          by this implementation,
++     *                          or the underlying <code>inputStream</code> throws an exception
++     *
++     * @since 1.14
++     */
++    public XZCompressorInputStream(InputStream inputStream,
++                                   boolean decompressConcatenated, int memoryLimitInKb)
++            throws IOException {
+         if (decompressConcatenated) {
+-            in = new XZInputStream(inputStream);
++            in = new XZInputStream(inputStream, memoryLimitInKb);
+         } else {
+-            in = new SingleXZInputStream(inputStream);
++            in = new SingleXZInputStream(inputStream, memoryLimitInKb);
+         }
+     }
+ 
+     @Override
+     public int read() throws IOException {
+-        final int ret = in.read();
+-        count(ret == -1 ? -1 : 1);
+-        return ret;
++        try {
++            final int ret = in.read();
++            count(ret == -1 ? -1 : 1);
++            return ret;
++        } catch (org.tukaani.xz.MemoryLimitException e) {
++            throw new MemoryLimitException("Exceeded memory limit", e);
++        }
+     }
+ 
+     @Override
+     public int read(final byte[] buf, final int off, final int len) throws IOException {
+-        final int ret = in.read(buf, off, len);
+-        count(ret);
+-        return ret;
++        try {
++            final int ret = in.read(buf, off, len);
++            count(ret);
++            return ret;
++        } catch (org.tukaani.xz.MemoryLimitException e) {
++            //convert to commons-compress MemoryLimtException
++            throw new MemoryLimitException("Exceeded memory limit", e);
++        }
+     }
+ 
+     @Override
+     public long skip(final long n) throws IOException {
+-        return in.skip(n);
++        try {
++            return in.skip(n);
++        } catch (org.tukaani.xz.MemoryLimitException e) {
++            //convert to commons-compress MemoryLimtException
++            throw new MemoryLimitException("Excedded memory limit", e);
++        }
+     }
+ 
+     @Override
+diff --git a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+index 22d7c0c4483..64387e3a6ae 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+@@ -22,7 +22,6 @@
+ import java.io.InputStream;
+ import java.nio.ByteOrder;
+ 
+-import org.apache.commons.compress.compressors.CompressorMemoryLimitException;
+ import org.apache.commons.compress.compressors.lzw.LZWInputStream;
+ 
+ /**
+@@ -53,11 +52,7 @@ public ZCompressorInputStream(final InputStream inputStream, int memoryLimitInKb
+         if (blockMode) {
+             setClearCode(DEFAULT_CODE_SIZE);
+         }
+-        try {
+-            initializeTables(maxCodeSize, memoryLimitInKb);
+-        } catch (CompressorMemoryLimitException e) {
+-            throw new IOExceptionWrappingMemoryLimitException(e.getMessage());
+-        }
++        initializeTables(maxCodeSize, memoryLimitInKb);
+         clearEntries();
+     }
+ 
+@@ -173,12 +168,4 @@ public static boolean matches(final byte[] signature, final int length) {
+         return length > 3 && signature[0] == MAGIC_1 && signature[1] == (byte) MAGIC_2;
+     }
+ 
+-    /**
+-     * Wrapper that subclasses IOException to wrap a MemoryLimitException
+-     */
+-    public static class IOExceptionWrappingMemoryLimitException extends IOException {
+-        public IOExceptionWrappingMemoryLimitException(String message) {
+-            super(message);
+-        }
+-    }
+ }
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index 7cec5df73b8..b70d3c70359 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -31,6 +31,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
++import org.apache.commons.compress.MemoryLimitException;
+ import org.apache.commons.compress.MockEvilInputStream;
+ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
+ import org.apache.commons.compress.compressors.deflate.DeflateCompressorInputStream;
+@@ -170,21 +171,50 @@ private String detect(String testFileName) throws IOException, CompressorExcepti
+         return name;
+     }
+ 
+-    @Test
+-    public void testMemoryLimit() throws Exception {
+-        testMemoryLimit("COMPRESS-382");
+-        testMemoryLimit("COMPRESS-386");
++    @Test(expected = MemoryLimitException.class)
++    public void testLZMAMemoryLimit() throws Exception {
++        getStreamFor("COMPRESS-382", 100);
+     }
+ 
+-    private void testMemoryLimit(String fileName) throws IOException, CompressorException {
+-        CompressorStreamFactory fac = new CompressorStreamFactory(true,
+-                100);
+-        try (InputStream is = new BufferedInputStream(
+-                new FileInputStream(getFile(fileName)))) {
+-            InputStream compressorInputStream = fac.createCompressorInputStream(is);
+-            fail("Should have thrown CompressorMemoryLimitException");
+-        } catch (CompressorMemoryLimitException e) {
++    @Test(expected = MemoryLimitException.class)
++    public void testZMemoryLimit() throws Exception {
++        getStreamFor("COMPRESS-386", 100);
++    }
++
++    @Test(expected = MemoryLimitException.class)
++    public void testXZMemoryLimitOnRead() throws Exception {
++        //Even though the file is very small, the memory limit
++        //has to be quite large (8296 KiB) because of the dictionary size
++
++        //This is triggered on read(); not during initialization.
++        //This test is here instead of the xz unit test to make sure
++        //that the parameter is properly passed via the CompressorStreamFactory
++        try (InputStream compressorIs = getStreamFor("bla.tar.xz", 100)) {
++            int c = compressorIs.read();
++        }
++    }
+ 
++    @Test(expected = MemoryLimitException.class)
++    public void testXZMemoryLimitOnSkip() throws Exception {
++        try (InputStream compressorIs = getStreamFor("bla.tar.xz", 100)) {
++            compressorIs.skip(10);
++        }
++    }
++
++    private InputStream getStreamFor(final String fileName, final int memoryLimitInKb) throws Exception {
++        CompressorStreamFactory fac = new CompressorStreamFactory(true,
++                memoryLimitInKb);
++        InputStream is = new BufferedInputStream(
++                new FileInputStream(getFile(fileName)));
++        try {
++            return fac.createCompressorInputStream(is);
++        } catch (CompressorException e) {
++            if (e.getCause() != null && e.getCause() instanceof Exception) {
++                //unwrap cause to reveal MemoryLimiteException
++                throw (Exception)e.getCause();
++            } else {
++                throw e;
++            }
+         }
+ 
+     }
+
+From 0e8ff9c44058afbca9c9126a8feebe41cd682626 Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Mon, 24 Apr 2017 21:06:35 -0400
+Subject: [PATCH 4/7] COMPRESS-382 and COMPRESS-386 -- take 3, create static
+ MemoryLimit and remove new ctors.
+
+---
+ .../apache/commons/compress/MemoryLimit.java  | 65 +++++++++++++++++++
+ .../compressors/CompressorStreamFactory.java  | 36 ++--------
+ .../lzma/LZMACompressorInputStream.java       | 19 ++----
+ .../xz/XZCompressorInputStream.java           | 32 +--------
+ .../compressors/z/ZCompressorInputStream.java | 10 +--
+ .../commons/compress/MemoryLimitTest.java     | 29 +++++++++
+ .../compressors/DetectCompressorTestCase.java | 21 +++++-
+ 7 files changed, 131 insertions(+), 81 deletions(-)
+ create mode 100644 src/main/java/org/apache/commons/compress/MemoryLimit.java
+ create mode 100644 src/test/java/org/apache/commons/compress/MemoryLimitTest.java
+
+diff --git a/src/main/java/org/apache/commons/compress/MemoryLimit.java b/src/main/java/org/apache/commons/compress/MemoryLimit.java
+new file mode 100644
+index 00000000000..e03e8e72d38
+--- /dev/null
++++ b/src/main/java/org/apache/commons/compress/MemoryLimit.java
+@@ -0,0 +1,65 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.commons.compress;
++
++/**
++ *
++ * During initialization, some streams compute expected memory use.
++ * They should check this value and throw a MemoryLimitException if the
++ * estimated memory use is greater that {@link MemoryLimit#MEMORY_LIMIT_IN_KB}.
++ * <p/>
++ * During compression/archiving, streams can allocate byte arrays based
++ * on a value read in from the stream.  Corrupt files can cause compressors/archivers
++ * to cause {@link OutOfMemoryError}s.  Compressors/archivers should check
++ * this maximum threshold before allocating memory and throw a {@link MemoryLimitException}
++ * if the allocation would exceed this limit.
++ * <p/>
++ * To avoid changes in legacy behavior, {@link MemoryLimit#MEMORY_LIMIT_IN_KB}
++ * is set to {@link MemoryLimit#NO_LIMIT}.  However, in applications that might
++ * encounter untrusted/corrupt files, we encourage setting the limit to something
++ * reasonable for the application.
++ * <p/>
++ * As of 1.14, this limit should be observed when instantiating CompressorStreams.
++ * Work remains to propagate memory limit checks throughout the codebase.
++ *
++ * @since 1.14
++ */
++public class MemoryLimit {
++
++    public static final int NO_LIMIT = -1;
++    public static volatile int MEMORY_LIMIT_IN_KB = NO_LIMIT;
++
++    /**
++     * Sets {@link MemoryLimit#MEMORY_LIMIT_IN_KB}.
++     * @param memoryLimitInKb limit in kilobytes
++     *
++     * @throws IllegalArgumentException if value is &lt; -1
++     */
++    public static void setMemoryLimitInKb(int memoryLimitInKb) {
++        if (memoryLimitInKb < -1) {
++            throw new IllegalArgumentException("MemoryLimit must be > -2");
++        }
++        //TODO: do we want to set an absolute upper limit?!
++        MEMORY_LIMIT_IN_KB = memoryLimitInKb;
++    }
++
++    public static int getMemoryLimitInKb() {
++        return MEMORY_LIMIT_IN_KB;
++    }
++}
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index f3433d9f298..7daa2913239 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -349,52 +349,28 @@ private static String toKey(final String name) {
+      */
+     private volatile boolean decompressConcatenated = false;
+ 
+-    private final int memoryLimitInKb;
+     /**
+      * Create an instance with the decompress Concatenated option set to false.
+      */
+     public CompressorStreamFactory() {
+         this.decompressUntilEOF = null;
+-        this.memoryLimitInKb = -1;
+     }
+ 
+     /**
+      * Create an instance with the provided decompress Concatenated option.
+-     *
++     * 
+      * @param decompressUntilEOF
+      *            if true, decompress until the end of the input; if false, stop
+      *            after the first stream and leave the input position to point
+      *            to the next byte after the stream. This setting applies to the
+      *            gzip, bzip2 and xz formats only.
+-     *
+-     * @param memoryLimitInKb
+-     *            Some streams require allocation of potentially significant
+-     *            byte arrays/tables, and they can offer checks to prevent OOMs
+-     *            on corrupt files.  Set the maximum allowed memory allocation in KBs.
+-     *
+-     * @since 1.14
++     * @since 1.10
+      */
+-    public CompressorStreamFactory(final boolean decompressUntilEOF, final int memoryLimitInKb) {
++    public CompressorStreamFactory(final boolean decompressUntilEOF) {
+         this.decompressUntilEOF = Boolean.valueOf(decompressUntilEOF);
+         // Also copy to existing variable so can continue to use that as the
+         // current value
+         this.decompressConcatenated = decompressUntilEOF;
+-        this.memoryLimitInKb = memoryLimitInKb;
+-    }
+-
+-
+-    /**
+-     * Create an instance with the provided decompress Concatenated option.
+-     * 
+-     * @param decompressUntilEOF
+-     *            if true, decompress until the end of the input; if false, stop
+-     *            after the first stream and leave the input position to point
+-     *            to the next byte after the stream. This setting applies to the
+-     *            gzip, bzip2 and xz formats only.
+-     * @since 1.10
+-     */
+-    public CompressorStreamFactory(final boolean decompressUntilEOF) {
+-        this(decompressUntilEOF, -1);
+     }
+ 
+     /**
+@@ -529,14 +505,14 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+                 if (!XZUtils.isXZCompressionAvailable()) {
+                     throw new CompressorException("XZ compression is not available.");
+                 }
+-                return new XZCompressorInputStream(in, actualDecompressConcatenated, memoryLimitInKb);
++                return new XZCompressorInputStream(in, actualDecompressConcatenated);
+             }
+ 
+             if (LZMA.equalsIgnoreCase(name)) {
+                 if (!LZMAUtils.isLZMACompressionAvailable()) {
+                     throw new CompressorException("LZMA compression is not available");
+                 }
+-                return new LZMACompressorInputStream(in, memoryLimitInKb);
++                return new LZMACompressorInputStream(in);
+             }
+ 
+             if (PACK200.equalsIgnoreCase(name)) {
+@@ -552,7 +528,7 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+             }
+ 
+             if (Z.equalsIgnoreCase(name)) {
+-                return new ZCompressorInputStream(in, memoryLimitInKb);
++                return new ZCompressorInputStream(in);
+             }
+ 
+             if (DEFLATE.equalsIgnoreCase(name)) {
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+index 7782be81e34..69315410f87 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+@@ -21,6 +21,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
++import org.apache.commons.compress.MemoryLimit;
+ import org.apache.commons.compress.MemoryLimitException;
+ import org.tukaani.xz.LZMAInputStream;
+ 
+@@ -33,32 +34,26 @@
+ public class LZMACompressorInputStream extends CompressorInputStream {
+     private final InputStream in;
+ 
+-    public LZMACompressorInputStream(final InputStream inputStream)
+-            throws IOException {
+-        in = new LZMAInputStream(inputStream, -1);
+-    }
+-
+     /**
+      * Creates a new input stream that decompresses LZMA-compressed data
+      * from the specified input stream.
+      *
+      * @param       inputStream where to read the compressed data
+      *
+-     * @param       memoryLimitInKb calculated memory use threshold.  Throws MemoryLimitException
+-     *                            if calculate memory use is above this threshold
+-     *
+      * @throws      IOException if the input is not in the .lzma format,
+      *                          the input is corrupt or truncated, the .lzma
+      *                          headers specify sizes that are not supported
+-     *                          by this implementation, or the underlying
+-     *                          <code>inputStream</code> throws an exception
++     *                          by this implementation, the underlying
++     *                          <code>inputStream</code> throws an exception or
++     *                          if the calculated memory usage
++     *                          is &gt; {@link MemoryLimit#MEMORY_LIMIT_IN_KB}.
+      *
+      * @since 1.14
+      */
+-    public LZMACompressorInputStream(final InputStream inputStream, int memoryLimitInKb)
++    public LZMACompressorInputStream(final InputStream inputStream)
+             throws IOException {
+         try {
+-            in = new LZMAInputStream(inputStream, memoryLimitInKb);
++            in = new LZMAInputStream(inputStream, MemoryLimit.getMemoryLimitInKb());
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+             //convert to commons-compress exception
+             throw new MemoryLimitException("exceeded calculated memory limit", e);
+diff --git a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+index b378212037e..3f977ef966e 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+@@ -21,6 +21,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
++import org.apache.commons.compress.MemoryLimit;
+ import org.apache.commons.compress.MemoryLimitException;
+ import org.tukaani.xz.XZ;
+ import org.tukaani.xz.SingleXZInputStream;
+@@ -94,38 +95,11 @@ public XZCompressorInputStream(final InputStream inputStream)
+     public XZCompressorInputStream(final InputStream inputStream,
+                                    final boolean decompressConcatenated)
+             throws IOException {
+-        this(inputStream, decompressConcatenated, -1);
+-    }
+ 
+-    /**
+-     * Creates a new input stream that decompresses XZ-compressed data
+-     * from the specified input stream.
+-     *
+-     * @param       inputStream where to read the compressed data
+-     * @param       decompressConcatenated
+-     *                          if true, decompress until the end of the
+-     *                          input; if false, stop after the first .xz
+-     *                          stream and leave the input position to point
+-     *                          to the next byte after the .xz stream
+-     * @param       memoryLimitInKb memory limit used when reading blocks.  If
+-     *                          the estimated memory limit is exceeded on {@link #read()},
+-     *                          a {@link MemoryLimitException} is thrown.
+-     *
+-     * @throws      IOException if the input is not in the .xz format,
+-     *                          the input is corrupt or truncated, the .xz
+-     *                          headers specify options that are not supported
+-     *                          by this implementation,
+-     *                          or the underlying <code>inputStream</code> throws an exception
+-     *
+-     * @since 1.14
+-     */
+-    public XZCompressorInputStream(InputStream inputStream,
+-                                   boolean decompressConcatenated, int memoryLimitInKb)
+-            throws IOException {
+         if (decompressConcatenated) {
+-            in = new XZInputStream(inputStream, memoryLimitInKb);
++            in = new XZInputStream(inputStream, MemoryLimit.getMemoryLimitInKb());
+         } else {
+-            in = new SingleXZInputStream(inputStream, memoryLimitInKb);
++            in = new SingleXZInputStream(inputStream, MemoryLimit.getMemoryLimitInKb());
+         }
+     }
+ 
+diff --git a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+index 64387e3a6ae..ca61cd3ebec 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+@@ -22,6 +22,7 @@
+ import java.io.InputStream;
+ import java.nio.ByteOrder;
+ 
++import org.apache.commons.compress.MemoryLimit;
+ import org.apache.commons.compress.compressors.lzw.LZWInputStream;
+ 
+ /**
+@@ -38,8 +39,7 @@ public class ZCompressorInputStream extends LZWInputStream {
+     private final int maxCodeSize;
+     private long totalCodesRead = 0;
+ 
+-    public ZCompressorInputStream(final InputStream inputStream, int memoryLimitInKb)
+-            throws IOException {
++    public ZCompressorInputStream(final InputStream inputStream) throws IOException {
+         super(inputStream, ByteOrder.LITTLE_ENDIAN);
+         final int firstByte = (int) in.readBits(8);
+         final int secondByte = (int) in.readBits(8);
+@@ -52,13 +52,9 @@ public ZCompressorInputStream(final InputStream inputStream, int memoryLimitInKb
+         if (blockMode) {
+             setClearCode(DEFAULT_CODE_SIZE);
+         }
+-        initializeTables(maxCodeSize, memoryLimitInKb);
++        initializeTables(maxCodeSize, MemoryLimit.getMemoryLimitInKb());
+         clearEntries();
+     }
+-
+-    public ZCompressorInputStream(final InputStream inputStream) throws IOException {
+-        this(inputStream, -1);
+-    }
+     
+     private void clearEntries() {
+         setTableSize((1 << 8) + (blockMode ? 1 : 0));
+diff --git a/src/test/java/org/apache/commons/compress/MemoryLimitTest.java b/src/test/java/org/apache/commons/compress/MemoryLimitTest.java
+new file mode 100644
+index 00000000000..fdbaa86d646
+--- /dev/null
++++ b/src/test/java/org/apache/commons/compress/MemoryLimitTest.java
+@@ -0,0 +1,29 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ * 
++ */
++
++package org.apache.commons.compress;
++
++import org.junit.Test;
++
++public class MemoryLimitTest {
++
++    @Test(expected = IllegalArgumentException.class)
++    public void testRangeCheck() throws Exception {
++        MemoryLimit.setMemoryLimitInKb(-2);
++    }
++}
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index b70d3c70359..6c8543f2b06 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -31,6 +31,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
++import org.apache.commons.compress.MemoryLimit;
+ import org.apache.commons.compress.MemoryLimitException;
+ import org.apache.commons.compress.MockEvilInputStream;
+ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
+@@ -38,6 +39,8 @@
+ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+ import org.apache.commons.compress.compressors.pack200.Pack200CompressorInputStream;
+ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream;
++import org.junit.AfterClass;
++import org.junit.Before;
+ import org.junit.Test;
+ 
+ @SuppressWarnings("deprecation") // deliberately tests setDecompressConcatenated
+@@ -71,6 +74,18 @@ static class TestData {
+         }
+     }
+ 
++    @Before
++    public void setUp() {
++        //make sure to reset this before each test
++        MemoryLimit.setMemoryLimitInKb(MemoryLimit.NO_LIMIT);
++    }
++
++    @AfterClass
++    public static void tearDown() {
++        //make sure this is really, truly reset after all the tests
++        MemoryLimit.setMemoryLimitInKb(MemoryLimit.NO_LIMIT);
++    }
++
+     private final TestData[] tests = {
+         new TestData("multiple.bz2", new char[]{'a','b'}, factoryTrue, true),
+         new TestData("multiple.bz2", new char[]{'a','b'}, factorySetTrue, true),
+@@ -190,7 +205,7 @@ public void testXZMemoryLimitOnRead() throws Exception {
+         //This test is here instead of the xz unit test to make sure
+         //that the parameter is properly passed via the CompressorStreamFactory
+         try (InputStream compressorIs = getStreamFor("bla.tar.xz", 100)) {
+-            int c = compressorIs.read();
++            compressorIs.read();
+         }
+     }
+ 
+@@ -202,8 +217,8 @@ public void testXZMemoryLimitOnSkip() throws Exception {
+     }
+ 
+     private InputStream getStreamFor(final String fileName, final int memoryLimitInKb) throws Exception {
+-        CompressorStreamFactory fac = new CompressorStreamFactory(true,
+-                memoryLimitInKb);
++        MemoryLimit.setMemoryLimitInKb(memoryLimitInKb);
++        CompressorStreamFactory fac = new CompressorStreamFactory(true);
+         InputStream is = new BufferedInputStream(
+                 new FileInputStream(getFile(fileName)));
+         try {
+
+From 26eab98e3a0d403587cc915eaa8f7d4b7b894cef Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Mon, 24 Apr 2017 22:09:59 -0400
+Subject: [PATCH 5/7] COMPRESS-382 and COMPRESS-386 -- take 4, clean up and
+ allow for overflow via longs.
+
+---
+ .../apache/commons/compress/MemoryLimit.java  | 15 +++++++++++
+ .../compress/MemoryLimitException.java        | 18 ++++++++-----
+ .../lzma/LZMACompressorInputStream.java       |  2 +-
+ .../compressors/lzw/LZWInputStream.java       | 26 +++++++------------
+ .../xz/XZCompressorInputStream.java           |  6 ++---
+ .../compressors/z/ZCompressorInputStream.java |  3 +--
+ 6 files changed, 42 insertions(+), 28 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/compress/MemoryLimit.java b/src/main/java/org/apache/commons/compress/MemoryLimit.java
+index e03e8e72d38..b43eb869a56 100644
+--- a/src/main/java/org/apache/commons/compress/MemoryLimit.java
++++ b/src/main/java/org/apache/commons/compress/MemoryLimit.java
+@@ -62,4 +62,19 @@ public static void setMemoryLimitInKb(int memoryLimitInKb) {
+     public static int getMemoryLimitInKb() {
+         return MEMORY_LIMIT_IN_KB;
+     }
++
++    public static void checkLimitInKb(long memoryNeeded) throws MemoryLimitException {
++        if (memoryNeeded < 0) {
++            throw new IllegalArgumentException("MemoryLimit must be > -1");
++        }
++
++        if (memoryNeeded >> 10 > Integer.MAX_VALUE) {
++            throw new MemoryLimitException(memoryNeeded,
++                    (MEMORY_LIMIT_IN_KB < 0) ? Integer.MAX_VALUE : MEMORY_LIMIT_IN_KB);
++        }
++
++        if (MEMORY_LIMIT_IN_KB > -1 && memoryNeeded > MEMORY_LIMIT_IN_KB) {
++                throw new MemoryLimitException(memoryNeeded, MEMORY_LIMIT_IN_KB);
++        }
++    }
+ }
+diff --git a/src/main/java/org/apache/commons/compress/MemoryLimitException.java b/src/main/java/org/apache/commons/compress/MemoryLimitException.java
+index 8922ed2e969..a243a176fb2 100644
+--- a/src/main/java/org/apache/commons/compress/MemoryLimitException.java
++++ b/src/main/java/org/apache/commons/compress/MemoryLimitException.java
+@@ -26,15 +26,21 @@
+  * if a stream tries to allocate a byte array that is larger than
+  * the allowable limit.
+  *
++ * <p/>
++ * Set the global memory limit via {@link MemoryLimit#setMemoryLimitInKb(int)}.
++ *
+  * @since 1.14
+  */
+ public class MemoryLimitException extends IOException {
+ 
+-    public MemoryLimitException(String message) {
+-        super(message);
+-    }
+-
+-    public MemoryLimitException(String message, Exception e) {
+-        super(message, e);
++    /**
++     *
++     * @param memoryNeeded estimated memory needed
++     * @param memoryLimit memory limit applied
++     */
++    public MemoryLimitException(long memoryNeeded, int memoryLimit) {
++        super("" + memoryNeeded + " KiB of memory would be needed; limit was "
++                + memoryLimit + " KiB.  If the file is not corrupt, consider " +
++                "increasing MemoryLimit.MEMORY_LIMIT_IN_KB.");
+     }
+ }
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+index 69315410f87..35d7e12eda7 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+@@ -56,7 +56,7 @@ public LZMACompressorInputStream(final InputStream inputStream)
+             in = new LZMAInputStream(inputStream, MemoryLimit.getMemoryLimitInKb());
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+             //convert to commons-compress exception
+-            throw new MemoryLimitException("exceeded calculated memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit());
+         }
+     }
+ 
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+index 350b4b01ba7..ed2c476a88a 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+@@ -22,6 +22,7 @@
+ import java.io.InputStream;
+ import java.nio.ByteOrder;
+ 
++import org.apache.commons.compress.MemoryLimit;
+ import org.apache.commons.compress.MemoryLimitException;
+ import org.apache.commons.compress.compressors.CompressorInputStream;
+ import org.apache.commons.compress.utils.BitInputStream;
+@@ -115,25 +116,18 @@ protected void setClearCode(final int codeSize) {
+     /**
+      * Initializes the arrays based on the maximum code size.
+      * @param maxCodeSize maximum code size
+-     * @param memoryLimitInKb maximum allowed table size in Kb
+-     * @throws MemoryLimitException if maxTableSize is > memoryLimitInKb
++     *
++     * @throws MemoryLimitException
++     *      if the calculated memory usage, based on the maxTableSize,
++     *      is &gt; {@link MemoryLimit#MEMORY_LIMIT_IN_KB}
+      */
+-    protected void initializeTables(final int maxCodeSize, final int memoryLimitInKb)
+-            throws MemoryLimitException {
++    protected void initializeTables(final int maxCodeSize) throws MemoryLimitException {
+         final int maxTableSize = 1 << maxCodeSize;
+-        if (memoryLimitInKb > -1 && maxTableSize > memoryLimitInKb*1024) {
+-            throw new MemoryLimitException("Tried to allocate "+maxTableSize +
+-                    " but memoryLimitInKb only allows "+(memoryLimitInKb*1024));
+-        }
+-        initializeTables(maxCodeSize);
+-    }
+ 
+-    /**
+-     * Initializes the arrays based on the maximum code size.
+-     * @param maxCodeSize maximum code size
+-     */
+-    protected void initializeTables(final int maxCodeSize) {
+-        final int maxTableSize = 1 << maxCodeSize;
++        //account for potential overflow
++        long memoryUsageInBytes = (long)maxTableSize * 6;//(4 (prefixes) + 1 (characters) +1 (outputStack))
++        MemoryLimit.checkLimitInKb(memoryUsageInBytes >> 10);
++
+         prefixes = new int[maxTableSize];
+         characters = new byte[maxTableSize];
+         outputStack = new byte[maxTableSize];
+diff --git a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+index 3f977ef966e..e80cbcf0044 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+@@ -110,7 +110,7 @@ public int read() throws IOException {
+             count(ret == -1 ? -1 : 1);
+             return ret;
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+-            throw new MemoryLimitException("Exceeded memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit());
+         }
+     }
+ 
+@@ -122,7 +122,7 @@ public int read(final byte[] buf, final int off, final int len) throws IOExcepti
+             return ret;
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+             //convert to commons-compress MemoryLimtException
+-            throw new MemoryLimitException("Exceeded memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit());
+         }
+     }
+ 
+@@ -132,7 +132,7 @@ public long skip(final long n) throws IOException {
+             return in.skip(n);
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+             //convert to commons-compress MemoryLimtException
+-            throw new MemoryLimitException("Excedded memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit());
+         }
+     }
+ 
+diff --git a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+index ca61cd3ebec..28b69a29800 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+@@ -22,7 +22,6 @@
+ import java.io.InputStream;
+ import java.nio.ByteOrder;
+ 
+-import org.apache.commons.compress.MemoryLimit;
+ import org.apache.commons.compress.compressors.lzw.LZWInputStream;
+ 
+ /**
+@@ -52,7 +51,7 @@ public ZCompressorInputStream(final InputStream inputStream) throws IOException
+         if (blockMode) {
+             setClearCode(DEFAULT_CODE_SIZE);
+         }
+-        initializeTables(maxCodeSize, MemoryLimit.getMemoryLimitInKb());
++        initializeTables(maxCodeSize);
+         clearEntries();
+     }
+     
+
+From 4e442bb44280243f6e0e72d845fa8275d665ca84 Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Tue, 25 Apr 2017 08:44:21 -0400
+Subject: [PATCH 6/7] COMPRESS-382 and COMPRESS-386 -- hard reset to expunge
+ static parameter proposal.  Updated MemoryLimitException to include cause
+ when it exists. Updated LZWInputStream to calculate estimated memory on
+ maxTableSize*6 to account for int[] and byte[], byte[].
+
+---
+ .../compress/MemoryLimitException.java        | 30 ++++++++++++++++---
+ .../lzma/LZMACompressorInputStream.java       |  2 +-
+ .../compressors/lzw/LZWInputStream.java       | 20 +++++++++----
+ .../xz/XZCompressorInputStream.java           |  8 ++---
+ .../compressors/z/ZCompressorInputStream.java |  2 +-
+ .../compressors/DetectCompressorTestCase.java |  2 +-
+ 6 files changed, 47 insertions(+), 17 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/compress/MemoryLimitException.java b/src/main/java/org/apache/commons/compress/MemoryLimitException.java
+index 8922ed2e969..122edb16402 100644
+--- a/src/main/java/org/apache/commons/compress/MemoryLimitException.java
++++ b/src/main/java/org/apache/commons/compress/MemoryLimitException.java
+@@ -30,11 +30,33 @@
+  */
+ public class MemoryLimitException extends IOException {
+ 
+-    public MemoryLimitException(String message) {
+-        super(message);
++    //long instead of int to account for overflow for corrupt files
++    private final long memoryNeededInKb;
++    private final int memoryLimitInKb;
++
++    public MemoryLimitException(long memoryNeededInKb, int memoryLimitInKb) {
++        super(buildMessage(memoryNeededInKb, memoryLimitInKb));
++        this.memoryNeededInKb = memoryNeededInKb;
++        this.memoryLimitInKb = memoryLimitInKb;
++    }
++
++    public MemoryLimitException(long memoryNeededInKb, int memoryLimitInKb, Exception e) {
++        super(buildMessage(memoryNeededInKb, memoryLimitInKb), e);
++        this.memoryNeededInKb = memoryNeededInKb;
++        this.memoryLimitInKb = memoryLimitInKb;
++    }
++
++    public long getMemoryNeededInKb() {
++        return memoryNeededInKb;
++    }
++
++    public int getMemoryLimitInKb() {
++        return memoryLimitInKb;
+     }
+ 
+-    public MemoryLimitException(String message, Exception e) {
+-        super(message, e);
++    private static String buildMessage(long memoryNeededInKb, int memoryLimitInKb) {
++        return "" + memoryNeededInKb + " kb of memory would be needed; limit was "
++                + memoryLimitInKb + " kb. " +
++                "If the file is not corrupt, consider increasing the memory limit.";
+     }
+ }
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+index 7782be81e34..5723b5c27e7 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzma/LZMACompressorInputStream.java
+@@ -61,7 +61,7 @@ public LZMACompressorInputStream(final InputStream inputStream, int memoryLimitI
+             in = new LZMAInputStream(inputStream, memoryLimitInKb);
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+             //convert to commons-compress exception
+-            throw new MemoryLimitException("exceeded calculated memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit(), e);
+         }
+     }
+ 
+diff --git a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+index 350b4b01ba7..2a6127dbb6c 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/lzw/LZWInputStream.java
+@@ -114,16 +114,24 @@ protected void setClearCode(final int codeSize) {
+ 
+     /**
+      * Initializes the arrays based on the maximum code size.
++     * First checks that the estimated memory usage is below memoryLimitInKb
++     *
+      * @param maxCodeSize maximum code size
+-     * @param memoryLimitInKb maximum allowed table size in Kb
+-     * @throws MemoryLimitException if maxTableSize is > memoryLimitInKb
++     * @param memoryLimitInKb maximum allowed estimated memory usage in Kb
++     * @throws MemoryLimitException if estimated memory usage is greater than memoryLimitInKb
+      */
+     protected void initializeTables(final int maxCodeSize, final int memoryLimitInKb)
+             throws MemoryLimitException {
+-        final int maxTableSize = 1 << maxCodeSize;
+-        if (memoryLimitInKb > -1 && maxTableSize > memoryLimitInKb*1024) {
+-            throw new MemoryLimitException("Tried to allocate "+maxTableSize +
+-                    " but memoryLimitInKb only allows "+(memoryLimitInKb*1024));
++
++        if (memoryLimitInKb > -1) {
++            final int maxTableSize = 1 << maxCodeSize;
++            //account for potential overflow
++            long memoryUsageInBytes = (long) maxTableSize * 6;//(4 (prefixes) + 1 (characters) +1 (outputStack))
++            long memoryUsageInKb = memoryUsageInBytes >> 10;
++
++            if (memoryUsageInKb > (long)memoryLimitInKb) {
++                throw new MemoryLimitException(memoryUsageInKb, memoryLimitInKb);
++            }
+         }
+         initializeTables(maxCodeSize);
+     }
+diff --git a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+index b378212037e..fc0cbf520ed 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/xz/XZCompressorInputStream.java
+@@ -120,7 +120,7 @@ public XZCompressorInputStream(final InputStream inputStream,
+      * @since 1.14
+      */
+     public XZCompressorInputStream(InputStream inputStream,
+-                                   boolean decompressConcatenated, int memoryLimitInKb)
++                                   boolean decompressConcatenated, final int memoryLimitInKb)
+             throws IOException {
+         if (decompressConcatenated) {
+             in = new XZInputStream(inputStream, memoryLimitInKb);
+@@ -136,7 +136,7 @@ public int read() throws IOException {
+             count(ret == -1 ? -1 : 1);
+             return ret;
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+-            throw new MemoryLimitException("Exceeded memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit(), e);
+         }
+     }
+ 
+@@ -148,7 +148,7 @@ public int read(final byte[] buf, final int off, final int len) throws IOExcepti
+             return ret;
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+             //convert to commons-compress MemoryLimtException
+-            throw new MemoryLimitException("Exceeded memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit(), e);
+         }
+     }
+ 
+@@ -158,7 +158,7 @@ public long skip(final long n) throws IOException {
+             return in.skip(n);
+         } catch (org.tukaani.xz.MemoryLimitException e) {
+             //convert to commons-compress MemoryLimtException
+-            throw new MemoryLimitException("Excedded memory limit", e);
++            throw new MemoryLimitException(e.getMemoryNeeded(), e.getMemoryLimit(), e);
+         }
+     }
+ 
+diff --git a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+index 64387e3a6ae..994e102e5e5 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
++++ b/src/main/java/org/apache/commons/compress/compressors/z/ZCompressorInputStream.java
+@@ -38,7 +38,7 @@ public class ZCompressorInputStream extends LZWInputStream {
+     private final int maxCodeSize;
+     private long totalCodesRead = 0;
+ 
+-    public ZCompressorInputStream(final InputStream inputStream, int memoryLimitInKb)
++    public ZCompressorInputStream(final InputStream inputStream, final int memoryLimitInKb)
+             throws IOException {
+         super(inputStream, ByteOrder.LITTLE_ENDIAN);
+         final int firstByte = (int) in.readBits(8);
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index b70d3c70359..844b1682413 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -210,7 +210,7 @@ private InputStream getStreamFor(final String fileName, final int memoryLimitInK
+             return fac.createCompressorInputStream(is);
+         } catch (CompressorException e) {
+             if (e.getCause() != null && e.getCause() instanceof Exception) {
+-                //unwrap cause to reveal MemoryLimiteException
++                //unwrap cause to reveal MemoryLimitException
+                 throw (Exception)e.getCause();
+             } else {
+                 throw e;
+
+From 2247ff9601374845012558ecf5963ebb7e1066c5 Mon Sep 17 00:00:00 2001
+From: tballison <tallison@mitre.org>
+Date: Tue, 25 Apr 2017 09:01:28 -0400
+Subject: [PATCH 7/7] merge hard reset -- move from other change list...ugh
+
+---
+ .../compressors/CompressorStreamFactory.java  | 36 +++++++++++++++----
+ .../compressors/DetectCompressorTestCase.java | 19 ++--------
+ 2 files changed, 32 insertions(+), 23 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+index 7daa2913239..f3433d9f298 100644
+--- a/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
++++ b/src/main/java/org/apache/commons/compress/compressors/CompressorStreamFactory.java
+@@ -349,28 +349,52 @@ private static String toKey(final String name) {
+      */
+     private volatile boolean decompressConcatenated = false;
+ 
++    private final int memoryLimitInKb;
+     /**
+      * Create an instance with the decompress Concatenated option set to false.
+      */
+     public CompressorStreamFactory() {
+         this.decompressUntilEOF = null;
++        this.memoryLimitInKb = -1;
+     }
+ 
+     /**
+      * Create an instance with the provided decompress Concatenated option.
+-     * 
++     *
+      * @param decompressUntilEOF
+      *            if true, decompress until the end of the input; if false, stop
+      *            after the first stream and leave the input position to point
+      *            to the next byte after the stream. This setting applies to the
+      *            gzip, bzip2 and xz formats only.
+-     * @since 1.10
++     *
++     * @param memoryLimitInKb
++     *            Some streams require allocation of potentially significant
++     *            byte arrays/tables, and they can offer checks to prevent OOMs
++     *            on corrupt files.  Set the maximum allowed memory allocation in KBs.
++     *
++     * @since 1.14
+      */
+-    public CompressorStreamFactory(final boolean decompressUntilEOF) {
++    public CompressorStreamFactory(final boolean decompressUntilEOF, final int memoryLimitInKb) {
+         this.decompressUntilEOF = Boolean.valueOf(decompressUntilEOF);
+         // Also copy to existing variable so can continue to use that as the
+         // current value
+         this.decompressConcatenated = decompressUntilEOF;
++        this.memoryLimitInKb = memoryLimitInKb;
++    }
++
++
++    /**
++     * Create an instance with the provided decompress Concatenated option.
++     * 
++     * @param decompressUntilEOF
++     *            if true, decompress until the end of the input; if false, stop
++     *            after the first stream and leave the input position to point
++     *            to the next byte after the stream. This setting applies to the
++     *            gzip, bzip2 and xz formats only.
++     * @since 1.10
++     */
++    public CompressorStreamFactory(final boolean decompressUntilEOF) {
++        this(decompressUntilEOF, -1);
+     }
+ 
+     /**
+@@ -505,14 +529,14 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+                 if (!XZUtils.isXZCompressionAvailable()) {
+                     throw new CompressorException("XZ compression is not available.");
+                 }
+-                return new XZCompressorInputStream(in, actualDecompressConcatenated);
++                return new XZCompressorInputStream(in, actualDecompressConcatenated, memoryLimitInKb);
+             }
+ 
+             if (LZMA.equalsIgnoreCase(name)) {
+                 if (!LZMAUtils.isLZMACompressionAvailable()) {
+                     throw new CompressorException("LZMA compression is not available");
+                 }
+-                return new LZMACompressorInputStream(in);
++                return new LZMACompressorInputStream(in, memoryLimitInKb);
+             }
+ 
+             if (PACK200.equalsIgnoreCase(name)) {
+@@ -528,7 +552,7 @@ public CompressorInputStream createCompressorInputStream(final String name, fina
+             }
+ 
+             if (Z.equalsIgnoreCase(name)) {
+-                return new ZCompressorInputStream(in);
++                return new ZCompressorInputStream(in, memoryLimitInKb);
+             }
+ 
+             if (DEFLATE.equalsIgnoreCase(name)) {
+diff --git a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+index 2be690a6ff4..6fde36d4086 100644
+--- a/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
++++ b/src/test/java/org/apache/commons/compress/compressors/DetectCompressorTestCase.java
+@@ -31,7 +31,6 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ 
+-import org.apache.commons.compress.MemoryLimit;
+ import org.apache.commons.compress.MemoryLimitException;
+ import org.apache.commons.compress.MockEvilInputStream;
+ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
+@@ -39,8 +38,6 @@
+ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+ import org.apache.commons.compress.compressors.pack200.Pack200CompressorInputStream;
+ import org.apache.commons.compress.compressors.xz.XZCompressorInputStream;
+-import org.junit.AfterClass;
+-import org.junit.Before;
+ import org.junit.Test;
+ 
+ @SuppressWarnings("deprecation") // deliberately tests setDecompressConcatenated
+@@ -74,18 +71,6 @@ static class TestData {
+         }
+     }
+ 
+-    @Before
+-    public void setUp() {
+-        //make sure to reset this before each test
+-        MemoryLimit.setMemoryLimitInKb(MemoryLimit.NO_LIMIT);
+-    }
+-
+-    @AfterClass
+-    public static void tearDown() {
+-        //make sure this is really, truly reset after all the tests
+-        MemoryLimit.setMemoryLimitInKb(MemoryLimit.NO_LIMIT);
+-    }
+-
+     private final TestData[] tests = {
+         new TestData("multiple.bz2", new char[]{'a','b'}, factoryTrue, true),
+         new TestData("multiple.bz2", new char[]{'a','b'}, factorySetTrue, true),
+@@ -217,8 +202,8 @@ public void testXZMemoryLimitOnSkip() throws Exception {
+     }
+ 
+     private InputStream getStreamFor(final String fileName, final int memoryLimitInKb) throws Exception {
+-        MemoryLimit.setMemoryLimitInKb(memoryLimitInKb);
+-        CompressorStreamFactory fac = new CompressorStreamFactory(true);
++        CompressorStreamFactory fac = new CompressorStreamFactory(true,
++                memoryLimitInKb);
+         InputStream is = new BufferedInputStream(
+                 new FileInputStream(getFile(fileName)));
+         try {

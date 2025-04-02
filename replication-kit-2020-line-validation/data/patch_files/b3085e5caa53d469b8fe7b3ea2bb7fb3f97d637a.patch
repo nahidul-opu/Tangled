@@ -1,0 +1,109 @@
+From b3085e5caa53d469b8fe7b3ea2bb7fb3f97d637a Mon Sep 17 00:00:00 2001
+From: Nicolas Lalevee <hibou@apache.org>
+Date: Mon, 9 Apr 2012 15:16:00 +0000
+Subject: [PATCH] merge of r1311267 and r1311261 => IVY-1309: a circular
+ dependency is unconclusive about the exclusion of a dependency
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/branches/2.3.x@1311279 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ RELEASE_NOTES                                 |  1 +
+ .../ivy/core/resolve/IvyNodeCallers.java      | 32 +++++++++++--------
+ 3 files changed, 21 insertions(+), 13 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index c15d1560a..836bdfaf9 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -146,6 +146,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: Exclude doesn't work when there is some circular dependencies (IVY-1309)
+ - FIX: Impossible to get artifacts when data has not been loaded for multiple dynamic revisions (IVY-1333)
+ - FIX: Ivy didn't properly handle some file: URLs (IVY-1340)
+ - FIX: fallback mechanism didn't work properly for private configurations
+diff --git a/RELEASE_NOTES b/RELEASE_NOTES
+index 705242abc..c19d94e59 100644
+--- a/RELEASE_NOTES
++++ b/RELEASE_NOTES
+@@ -109,6 +109,7 @@ List of changes since Ivy 2.2.0:
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: Exclude doesn't work when there is some circular dependencies (IVY-1309)
+ - FIX: Impossible to get artifacts when data has not been loaded for multiple dynamic revisions (IVY-1333)
+ - FIX: Ivy didn't properly handle some file: URLs (IVY-1340)
+ - FIX: fallback mechanism didn't work properly for private configurations
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java b/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java
+index 14e8fb996..957b42a52 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java
+@@ -266,48 +266,54 @@ boolean doesCallersExclude(String rootModuleConf, Artifact artifact) {
+     }
+ 
+     boolean doesCallersExclude(String rootModuleConf, Artifact artifact, Stack callersStack) {
+-        if (callersStack.contains(node.getId())) {
+-            return false;
+-        }
+         callersStack.push(node.getId());
+         try {
+             Caller[] callers = getCallers(rootModuleConf);
+             if (callers.length == 0) {
+                 return false;
+             }
++            boolean allUnconclusive = true;
+             for (int i = 0; i < callers.length; i++) {
+                 if (!callers[i].canExclude()) {
+                     return false;
+                 }
+                 ModuleDescriptor md = callers[i].getModuleDescriptor();
+-                if (!doesExclude(md, rootModuleConf, callers[i].getCallerConfigurations(),
+-                    callers[i].getDependencyDescriptor(), artifact, callersStack)) {
+-                    return false;
+-                }
++                Boolean doesExclude = doesExclude(md, rootModuleConf, callers[i].getCallerConfigurations(),
++                    callers[i].getDependencyDescriptor(), artifact, callersStack);
++                if (doesExclude != null) {
++                    if (!doesExclude.booleanValue()) {
++                        return false;
++                    }
++                    allUnconclusive = false;
++                } 
+             }
+-            return true;
++            return allUnconclusive ? false : true;
+         } finally {
+             callersStack.pop();
+         }
+     }
+ 
+-    private boolean doesExclude(ModuleDescriptor md, String rootModuleConf, String[] moduleConfs,
++    private Boolean doesExclude(ModuleDescriptor md, String rootModuleConf, String[] moduleConfs,
+             DependencyDescriptor dd, Artifact artifact, Stack callersStack) {
+         // artifact is excluded if it match any of the exclude pattern for this dependency...
+         if (dd != null) {
+             if (dd.doesExclude(moduleConfs, artifact.getId().getArtifactId())) {
+-                return true;
++                return Boolean.TRUE;
+             }
+         }
+         if (md.doesExclude(moduleConfs, artifact.getId().getArtifactId())) {
+-            return true;
++            return Boolean.TRUE;
+         }
+         // ... or if it is excluded by all its callers
+         IvyNode c = node.getData().getNode(md.getModuleRevisionId());
+         if (c != null) {
+-            return c.doesCallersExclude(rootModuleConf, artifact, callersStack);
++            if (callersStack.contains(c.getId())) {
++                // a circular dependency, we cannot be conclusive here
++                return null;
++            }
++            return Boolean.valueOf(c.doesCallersExclude(rootModuleConf, artifact, callersStack));
+         } else {
+-            return false;
++            return Boolean.FALSE;
+         }
+     }
+ 

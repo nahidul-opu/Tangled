@@ -1,0 +1,181 @@
+From e6726553084b184498cb3eef47df76583dd606e6 Mon Sep 17 00:00:00 2001
+From: Emmanuel Bourg <ebourg@apache.org>
+Date: Mon, 18 Feb 2008 12:43:07 +0000
+Subject: [PATCH] Fixed the date format for XMLPropertyListConfiguration
+ (CONFIGURATION-260)
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@628707 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../plist/PropertyListConfiguration.java      |  2 +-
+ .../plist/XMLPropertyListConfiguration.java   | 38 +++++++++++++++----
+ .../TestXMLPropertyListConfiguration.java     | 31 +++++++++++----
+ src/test/resources/test.plist.xml             |  5 ++-
+ 4 files changed, 60 insertions(+), 16 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/plist/PropertyListConfiguration.java b/src/main/java/org/apache/commons/configuration2/plist/PropertyListConfiguration.java
+index 4d05cffc0d..bfe22fcf69 100644
+--- a/src/main/java/org/apache/commons/configuration2/plist/PropertyListConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/plist/PropertyListConfiguration.java
+@@ -41,7 +41,7 @@
+ 
+ /**
+  * NeXT / OpenStep style configuration. This configuration can read and write
+- * ASCII plist files. It support the GNUStep extension to specify date objects.
++ * ASCII plist files. It supports the GNUStep extension to specify date objects.
+  * <p>
+  * References:
+  * <ul>
+diff --git a/src/main/java/org/apache/commons/configuration2/plist/XMLPropertyListConfiguration.java b/src/main/java/org/apache/commons/configuration2/plist/XMLPropertyListConfiguration.java
+index d8b4638a56..6032752807 100644
+--- a/src/main/java/org/apache/commons/configuration2/plist/XMLPropertyListConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/plist/XMLPropertyListConfiguration.java
+@@ -28,10 +28,12 @@
+ import java.text.SimpleDateFormat;
+ import java.util.ArrayList;
+ import java.util.Calendar;
++import java.util.Collection;
+ import java.util.Date;
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
++import java.util.TimeZone;
+ import javax.xml.parsers.SAXParser;
+ import javax.xml.parsers.SAXParserFactory;
+ 
+@@ -73,7 +75,7 @@
+  *         &lt;true/>
+  *
+  *         &lt;key>date&lt;/key>
+- *         &lt;date>2005-01-01T12:00:00-0700&lt;/date>
++ *         &lt;date>2005-01-01T12:00:00Z&lt;/date>
+  *
+  *         &lt;key>data&lt;/key>
+  *         &lt;data>RHJhY28gRG9ybWllbnMgTnVucXVhbSBUaXRpbGxhbmR1cw==&lt;/data>
+@@ -556,8 +558,15 @@ public static class PListNode extends Node
+          */
+         private static final long serialVersionUID = -7614060264754798317L;
+ 
+-        /** The standard format of dates in plist files. */
+-        private static DateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ");
++        /** The MacOS format of dates in plist files. */
++        private static DateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
++        static
++        {
++            format.setTimeZone(TimeZone.getTimeZone("UTC"));
++        }
++
++        /** The GNUstep format of dates in plist files. */
++        private static DateFormat gnustepFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z");
+ 
+         /**
+          * Update the value of the node. If the existing value is null, it's
+@@ -573,10 +582,10 @@ public void addValue(Object value)
+             {
+                 setValue(value);
+             }
+-            else if (getValue() instanceof List)
++            else if (getValue() instanceof Collection)
+             {
+-                List list = (List) getValue();
+-                list.add(value);
++                Collection collection = (Collection) getValue();
++                collection.add(value);
+             }
+             else
+             {
+@@ -596,7 +605,22 @@ public void addDateValue(String value)
+         {
+             try
+             {
+-                addValue(format.parse(value));
++                if (value.indexOf(' ') != -1)
++                {
++                    // parse the date using the GNUstep format
++                    synchronized (gnustepFormat)
++                    {
++                        addValue(gnustepFormat.parse(value));
++                    }
++                }
++                else
++                {
++                    // parse the date using the MacOS X format
++                    synchronized (format)
++                    {
++                        addValue(format.parse(value));
++                    }
++                }
+             }
+             catch (ParseException e)
+             {
+diff --git a/src/test/java/org/apache/commons/configuration2/plist/TestXMLPropertyListConfiguration.java b/src/test/java/org/apache/commons/configuration2/plist/TestXMLPropertyListConfiguration.java
+index 823cac5956..f3dc3be9b5 100644
+--- a/src/test/java/org/apache/commons/configuration2/plist/TestXMLPropertyListConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/plist/TestXMLPropertyListConfiguration.java
+@@ -18,12 +18,10 @@
+ package org.apache.commons.configuration2.plist;
+ 
+ import java.io.File;
+-import java.util.*;
+-
+-import junit.framework.TestCase;
+-import junitx.framework.ObjectAssert;
+-import junitx.framework.ArrayAssert;
+-import junitx.framework.ListAssert;
++import java.util.Calendar;
++import java.util.Iterator;
++import java.util.List;
++import java.util.TimeZone;
+ 
+ import org.apache.commons.configuration2.Configuration;
+ import org.apache.commons.configuration2.ConfigurationAssert;
+@@ -31,7 +29,11 @@
+ import org.apache.commons.configuration2.FileConfiguration;
+ import org.apache.commons.configuration2.HierarchicalConfiguration;
+ import org.apache.commons.configuration2.StrictConfigurationComparator;
+-import org.apache.commons.configuration2.plist.XMLPropertyListConfiguration;
++
++import junit.framework.TestCase;
++import junitx.framework.ArrayAssert;
++import junitx.framework.ListAssert;
++import junitx.framework.ObjectAssert;
+ 
+ /**
+  * @author Emmanuel Bourg
+@@ -76,6 +78,21 @@ public void testDictionary()
+         assertEquals("3rd element", "value3", config.getProperty("dictionary.key3"));
+     }
+ 
++    public void testDate() throws Exception
++    {
++        Calendar calendar = Calendar.getInstance();
++        calendar.clear();
++        calendar.setTimeZone(TimeZone.getTimeZone("UTC"));
++        calendar.set(2005, Calendar.JANUARY, 1, 12, 0, 0);
++
++        assertEquals("'date' property", calendar.getTime(), config.getProperty("date"));
++
++        calendar.setTimeZone(TimeZone.getTimeZone("CET"));
++        calendar.set(2002, Calendar.MARCH, 22, 11, 30, 0);
++
++        assertEquals("'date-gnustep' property", calendar.getTime(), config.getProperty("date-gnustep"));
++    }
++
+     public void testSubset()
+     {
+         Configuration subset = config.subset("dictionary");
+diff --git a/src/test/resources/test.plist.xml b/src/test/resources/test.plist.xml
+index 867ca89fca..0dfb57fb91 100644
+--- a/src/test/resources/test.plist.xml
++++ b/src/test/resources/test.plist.xml
+@@ -19,7 +19,10 @@
+         <false/>
+ 
+         <key>date</key>
+-        <date>2005-01-01T12:00:00-0700</date>
++        <date>2005-01-01T12:00:00Z</date>
++
++        <key>date-gnustep</key>
++        <date>2002-03-22 11:30:00 +0100</date>
+ 
+         <key>data</key>
+         <data>RHJhY28gRG9ybWllbnMgTnVucXVhbSBUaXRpbGxhbmR1cw==</data>

@@ -1,0 +1,84 @@
+From 6d603ec7ddbb78cfa1b0bf14e3efa22a0676f5c8 Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <majakabiljo@fb.com>
+Date: Fri, 7 Mar 2014 13:38:56 -0800
+Subject: [PATCH] GIRAPH-868: Fix race condition with WorkerProgress
+ (majakabiljo)
+
+---
+ CHANGELOG                                        |  1 +
+ .../apache/giraph/worker/BspServiceWorker.java   |  1 -
+ .../giraph/worker/WorkerProgressWriter.java      | 16 ++++++++++++----
+ 3 files changed, 13 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index fa93d1386..c2419713f 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,7 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-868: Fix race condition with WorkerProgress (majakabiljo)
+ 
+   GIRAPH-867: Fix comments in PageRankComputation (ssc)
+   
+diff --git a/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java b/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java
+index c0b28dd29..6b721b3f6 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java
++++ b/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java
+@@ -1180,7 +1180,6 @@ public void cleanup(FinishedSuperstepStats finishedSuperstepStats)
+     saveEdges();
+     WorkerProgress.get().finishStoring();
+     if (workerProgressWriter != null) {
+-      WorkerProgress.writeToZnode(getZkExt(), myProgressPath);
+       workerProgressWriter.stop();
+     }
+     getPartitionStore().shutdown();
+diff --git a/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java b/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java
+index 95e46e477..4ff5bb13a 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java
++++ b/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java
+@@ -35,6 +35,10 @@ public class WorkerProgressWriter {
+   private final Thread writerThread;
+   /** Whether worker finished application */
+   private volatile boolean finished = false;
++  /** Path where this worker's progress should be stored */
++  private final String myProgressPath;
++  /** ZooKeeperExt */
++  private final ZooKeeperExt zk;
+ 
+   /**
+    * Constructor, starts separate thread to periodically update worker's
+@@ -43,15 +47,17 @@ public class WorkerProgressWriter {
+    * @param myProgressPath Path where this worker's progress should be stored
+    * @param zk ZooKeeperExt
+    */
+-  public WorkerProgressWriter(final String myProgressPath,
+-      final ZooKeeperExt zk) {
++  public WorkerProgressWriter(String myProgressPath, ZooKeeperExt zk) {
++    this.myProgressPath = myProgressPath;
++    this.zk = zk;
+     writerThread = new Thread(new Runnable() {
+       @Override
+       public void run() {
+         try {
+           while (!finished) {
+             WorkerProgress.get().updateMemory();
+-            WorkerProgress.writeToZnode(zk, myProgressPath);
++            WorkerProgress.writeToZnode(WorkerProgressWriter.this.zk,
++                WorkerProgressWriter.this.myProgressPath);
+             double factor = 1 + Math.random();
+             Thread.sleep((long) (WRITE_UPDATE_PERIOD_MILLISECONDS * factor));
+           }
+@@ -69,8 +75,10 @@ public void run() {
+   /**
+    * Stop the thread which writes worker's progress
+    */
+-  public void stop() {
++  public void stop() throws InterruptedException {
+     finished = true;
+     writerThread.interrupt();
++    writerThread.join();
++    WorkerProgress.writeToZnode(zk, myProgressPath);
+   }
+ }

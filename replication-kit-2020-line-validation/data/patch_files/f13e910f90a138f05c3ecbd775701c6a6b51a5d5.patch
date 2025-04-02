@@ -1,0 +1,199 @@
+From f13e910f90a138f05c3ecbd775701c6a6b51a5d5 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 4 Mar 2008 17:49:10 +0000
+Subject: [PATCH] FIX: StackOverflowError when configuration extends itself
+ (IVY-696)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@633568 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../descriptor/DefaultModuleDescriptor.java   | 37 ++++++++++++++++---
+ .../xml/XmlModuleDescriptorParserTest.java    | 20 ++++++++++
+ .../plugins/parser/xml/test-cyclic-confs1.xml | 28 ++++++++++++++
+ .../plugins/parser/xml/test-cyclic-confs2.xml | 29 +++++++++++++++
+ 5 files changed, 109 insertions(+), 6 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs1.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs2.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index a571b9dd1..2b0a24a0c 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -70,6 +70,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Make Ivy standalone runnable with no required dependencies (IVY-757)
+ - IMPROVEMENT: add branch attribute in ivy:install task (IVY-727)
+ 
++- FIX: StackOverflowError when configuration extends itself (IVY-696)
+ - FIX: XML schema ambiguity (IVY-750)
+ - FIX: ivy-resolve fails when a project has different dependencies in different branches (IVY-717)
+ - FIX: PublishEventsTest fails when Ivy sources are located in a directory with a + (IVY-755)
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+index 6eb4e6dc4..497f30c4f 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+@@ -31,6 +31,7 @@
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
++import java.util.Stack;
+ 
+ import org.apache.ivy.core.module.id.ArtifactId;
+ import org.apache.ivy.core.module.id.ModuleId;
+@@ -511,22 +512,46 @@ public void setNamespace(Namespace ns) {
+     }
+ 
+     /**
+-     * Throws an exception if the module descriptor is inconsistent For the moment, only extended
+-     * configurations existence is checked
++     * Throws an exception if the module descriptor is inconsistent 
++     * For the moment, only extended configurations existence and cycles are checked
+      */
+     public void check() {
++        Stack confs = new Stack();
+         for (Iterator iter = configurations.values().iterator(); iter.hasNext();) {
+             Configuration conf = (Configuration) iter.next();
+             String[] ext = conf.getExtends();
+             for (int i = 0; i < ext.length; i++) {
+-                if (!configurations.containsKey(ext[i].trim())) {
+-                    throw new IllegalStateException("unknown configuration '" + ext[i]
+-                            + "'. It is extended by " + conf.getName());
+-                }
++                confs.push(conf.getName());
++                checkConf(confs, ext[i].trim());
++                confs.pop();
+             }
+         }
+     }
+ 
++    private void checkConf(Stack confs, String confName) {
++        int index = confs.indexOf(confName);
++        if (index != -1) {
++            StringBuffer cycle = new StringBuffer();
++            for (; index < confs.size(); index++) {
++                cycle.append(confs.get(index)).append(" => ");
++            }
++            cycle.append(confName);
++            throw new IllegalStateException(
++                "illegal cycle detected in configuration extension: " + cycle);
++        }
++        Configuration conf = getConfiguration(confName);
++        if (conf == null) {
++            throw new IllegalStateException("unknown configuration '" + confName
++                    + "'. It is extended by " + confs.get(confs.size() - 1));
++        }
++        String[] ext = conf.getExtends();
++        for (int i = 0; i < ext.length; i++) {
++            confs.push(conf.getName());
++            checkConf(confs, ext[i].trim());
++            confs.pop();
++        }
++    }
++
+     public void setMappingOverride(boolean override) {
+         mappingOverride = override;
+     }
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+index dbecb790f..13a5b8d02 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+@@ -147,11 +147,31 @@ public void testBadConfs() throws IOException {
+                 getClass().getResource("test-bad-confs.xml"), true);
+             fail("bad ivy file raised no error");
+         } catch (ParseException ex) {
++            ex.printStackTrace();
+             assertTrue("invalid exception: " + ex.getMessage(), ex.getMessage().indexOf(
+                 "invalidConf") != -1);
+         }
+     }
+ 
++    public void testCyclicConfs() throws IOException {
++        try {
++            XmlModuleDescriptorParser.getInstance().parseDescriptor(settings,
++                getClass().getResource("test-cyclic-confs1.xml"), true);
++            fail("bad ivy file raised no error");
++        } catch (ParseException ex) {
++            assertTrue("invalid exception: " + ex.getMessage(), ex.getMessage().indexOf(
++                "A => B => A") != -1);
++        }
++        try {
++            XmlModuleDescriptorParser.getInstance().parseDescriptor(settings,
++                getClass().getResource("test-cyclic-confs2.xml"), true);
++            fail("bad ivy file raised no error");
++        } catch (ParseException ex) {
++            assertTrue("invalid exception: " + ex.getMessage(), ex.getMessage().indexOf(
++                "A => C => B => A") != -1);
++        }
++    }
++
+     public void testNoValidate() throws IOException, ParseException {
+         XmlModuleDescriptorParser.getInstance().parseDescriptor(settings,
+             getClass().getResource("test-novalidate.xml"), false);
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs1.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs1.xml
+new file mode 100644
+index 000000000..389036967
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs1.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info  organisation="myorg"
++	       module="mymodule"
++	       status="integration"
++	/>
++	<configurations>
++		<conf name="A" extends="B"/>
++		<conf name="B" extends="A"/>
++	</configurations>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs2.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs2.xml
+new file mode 100644
+index 000000000..abd2a1b58
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-cyclic-confs2.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info  organisation="myorg"
++	       module="mymodule"
++	       status="integration"
++	/>
++	<configurations>
++		<conf name="A" extends="C"/>
++		<conf name="B" extends="A"/>
++		<conf name="C" extends="B"/>
++	</configurations>
++</ivy-module>

@@ -1,0 +1,351 @@
+From 1c28714c8cdce0831ffa79d5c60e59ab019fff97 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 6 Sep 2006 17:22:54 +0000
+Subject: [PATCH] FIX: Problem with multiple artifact includes in transitive
+ dependencies (IVY-283)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484505 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../DefaultDependencyArtifactDescriptor.java  |  3 +++
+ src/java/fr/jayasoft/ivy/Ivy.java             |  1 +
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 24 ++++++++++++++++++
+ test/repositories/IVY-283/ivy-d.xml           | 25 +++++++++++++++++++
+ .../IVY-283/module_a/ivy-local.xml            | 20 +++++++++++++++
+ .../IVY-283/module_a/lib_a_a-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_b-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_c-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_d-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_e-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_f-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_g-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_h-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_i-local.jar        |  1 +
+ .../IVY-283/module_a/lib_a_j-local.jar        |  1 +
+ .../IVY-283/module_b/ivy-local.xml            | 22 ++++++++++++++++
+ .../IVY-283/module_b/lib_b_a-local.jar        |  1 +
+ .../IVY-283/module_c/ivy-local.xml            | 24 ++++++++++++++++++
+ .../IVY-283/module_c/lib_c_a-local.jar        |  1 +
+ .../IVY-283/module_e/ivy-local.xml            | 18 +++++++++++++
+ .../IVY-283/module_e/lib_e_a-local.jar        |  1 +
+ 22 files changed, 151 insertions(+)
+ create mode 100644 test/repositories/IVY-283/ivy-d.xml
+ create mode 100644 test/repositories/IVY-283/module_a/ivy-local.xml
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_a-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_b-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_c-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_d-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_e-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_f-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_g-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_h-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_i-local.jar
+ create mode 100644 test/repositories/IVY-283/module_a/lib_a_j-local.jar
+ create mode 100644 test/repositories/IVY-283/module_b/ivy-local.xml
+ create mode 100644 test/repositories/IVY-283/module_b/lib_b_a-local.jar
+ create mode 100644 test/repositories/IVY-283/module_c/ivy-local.xml
+ create mode 100644 test/repositories/IVY-283/module_c/lib_c_a-local.jar
+ create mode 100644 test/repositories/IVY-283/module_e/ivy-local.xml
+ create mode 100644 test/repositories/IVY-283/module_e/lib_e_a-local.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index c2eae17e9..94f2f4735 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -54,6 +54,7 @@ Changes:
+   - IMPROVE: isolate dependency resolution from artifact downloading (IVY-254)
+   - IMPROVE: Pass artifact to repository when calling "put" (IVY-192)
+ 
++  - FIX: Problem with multiple artifact includes in transitive dependencies (IVY-283)
+   - FIX: Endless recursion in report (IVY-284)
+   - FIX: http url lister doesn't work when link text has spaces (IVY-282)
+   - FIX: Incorrect ant log level (IVY-279)
+diff --git a/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java b/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java
+index 159b0b5ae..111e17f01 100644
+--- a/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java
++++ b/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java
+@@ -117,4 +117,7 @@ public URL getUrl() {
+ 		return _url;
+ 	}
+ 
++	public String toString() {
++		return (_includes?"I":"E")+":"+_id+"("+_confs+")"+(_url==null?"":_url.toString());
++	}
+ }
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index f3d938ac5..eb57c4348 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -1433,6 +1433,7 @@ private void doFetchDependencies(IvyNode node, String conf) {
+             Collection dependencies = node.getDependencies(conf, true);
+             for (Iterator iter = dependencies.iterator(); iter.hasNext();) {
+                 IvyNode dep = (IvyNode)iter.next();
++                dep = dep.getRealNode(); // the node may have been resolved to another real one while resolving other deps
+                 node.traverse(conf, dep); // dependency traversal data may have been changed while resolving other deps, we update it
+                 if (dep.isCircular()) {
+                     continue;
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index faceacb29..b3c326517 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -614,6 +614,30 @@ public void testResolveSeveralDefaultWithArtifactsAndConfs() throws Exception {
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "C", "1.0", "lib_c_d", "jar", "jar").exists());
+     }
+     
++    public void testResolveSeveralDefaultWithArtifactsAndConfs2() throws Exception {
++    	// second test case for IVY-283
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/IVY-283/ivyconf.xml"));
++        ResolveReport report = ivy.resolve(new File("test/repositories/IVY-283/ivy-d.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertFalse(report.hasError());
++        
++        // dependencies
++        ConfigurationResolveReport crr = report.getConfigurationReport("build");
++        assertNotNull(crr);
++        assertEquals(9, crr.getDownloadReports(ModuleRevisionId.newInstance("medicel", "module_a", "local")).length);
++
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_a", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_b", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_c", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_d", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_e", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_f", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_g", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_h", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "medicel", "module_a", "local", "lib_a_i", "jar", "jar").exists());
++    }
++    
+ 
+ 
+     public void testResolveDefaultWithArtifactsConf1() throws Exception {
+diff --git a/test/repositories/IVY-283/ivy-d.xml b/test/repositories/IVY-283/ivy-d.xml
+new file mode 100644
+index 000000000..a6f7d30a5
+--- /dev/null
++++ b/test/repositories/IVY-283/ivy-d.xml
+@@ -0,0 +1,25 @@
++<ivy-module version="1.4">
++  <info organisation="medicel" module="module_d" />
++  <configurations defaultconfmapping="*->#;test->runtime">
++    <conf name="build" description="Buildtime dependency configuration" />
++    <conf name="runtime" extends="build" description="Runtime dependency configuration" />
++    <conf name="test" extends="runtime" description="Test dependency configuration" />
++  </configurations>
++  <publications>
++    <artifact name="lib_d_a" type="jar" />
++  </publications>
++  <dependencies>
++    <dependency name="module_b" rev="latest.integration" conf="build">
++      <artifact name="lib_b_a" type="jar" />
++    </dependency>
++    <dependency name="module_c" rev="latest.integration" conf="build">
++      <artifact name="lib_c_a" type="jar" />
++    </dependency>
++    <dependency name="module_a" rev="latest.integration" conf="build">
++      <artifact name="lib_a_a" type="jar" />
++      <artifact name="lib_a_c" type="jar" />
++      <artifact name="lib_a_d" type="jar" />
++      <artifact name="lib_a_e" type="jar" />
++    </dependency>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-283/module_a/ivy-local.xml b/test/repositories/IVY-283/module_a/ivy-local.xml
+new file mode 100644
+index 000000000..74b91a988
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/ivy-local.xml
+@@ -0,0 +1,20 @@
++<ivy-module version="1.0">
++	<info organisation="medicel" module="module_a" revision="local" status="integration" publication="20060906104705"/>
++	<configurations>
++		<conf name="build" visibility="public" description="Buildtime dependency configuration"/>
++		<conf name="runtime" visibility="public" description="Runtime dependency configuration" extends="build"/>
++		<conf name="test" visibility="public" description="Test dependency configuration" extends="runtime"/>
++	</configurations>
++	<publications>
++		<artifact name="lib_a_a" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_b" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_c" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_d" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_e" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_f" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_g" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_h" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_i" type="jar" ext="jar" conf="build,runtime,test"/>
++		<artifact name="lib_a_j" type="jar" ext="jar" conf="build,runtime,test"/>
++	</publications>
++</ivy-module>
+diff --git a/test/repositories/IVY-283/module_a/lib_a_a-local.jar b/test/repositories/IVY-283/module_a/lib_a_a-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_a-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_b-local.jar b/test/repositories/IVY-283/module_a/lib_a_b-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_b-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_c-local.jar b/test/repositories/IVY-283/module_a/lib_a_c-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_c-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_d-local.jar b/test/repositories/IVY-283/module_a/lib_a_d-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_d-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_e-local.jar b/test/repositories/IVY-283/module_a/lib_a_e-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_e-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_f-local.jar b/test/repositories/IVY-283/module_a/lib_a_f-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_f-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_g-local.jar b/test/repositories/IVY-283/module_a/lib_a_g-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_g-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_h-local.jar b/test/repositories/IVY-283/module_a/lib_a_h-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_h-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_i-local.jar b/test/repositories/IVY-283/module_a/lib_a_i-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_i-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_a/lib_a_j-local.jar b/test/repositories/IVY-283/module_a/lib_a_j-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_a/lib_a_j-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_b/ivy-local.xml b/test/repositories/IVY-283/module_b/ivy-local.xml
+new file mode 100644
+index 000000000..7754ce4ab
+--- /dev/null
++++ b/test/repositories/IVY-283/module_b/ivy-local.xml
+@@ -0,0 +1,22 @@
++<ivy-module version="1.0">
++	<info organisation="medicel" module="module_b" revision="local" status="integration" publication="20060906104742"/>
++	<configurations>
++		<conf name="build" visibility="public" description="Buildtime dependency configuration"/>
++		<conf name="runtime" visibility="public" description="Runtime dependency configuration" extends="build"/>
++		<conf name="test" visibility="public" description="Test dependency configuration" extends="runtime"/>
++	</configurations>
++	<publications>
++		<artifact name="lib_b_a" type="jar" ext="jar" conf="build,runtime,test"/>
++	</publications>
++	<dependencies>
++		<dependency org="medicel" name="module_e" rev="local" conf="build->build">
++			<include name="lib_e_a" type="jar" ext="jar"/>
++		</dependency>
++		<dependency org="medicel" name="module_a" rev="latest.integration" conf="build->build">
++			<include name="lib_a_d" type="jar" ext="jar"/>
++			<include name="lib_a_b" type="jar" ext="jar"/>
++			<include name="lib_a_h" type="jar" ext="jar"/>
++			<include name="lib_a_f" type="jar" ext="jar"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-283/module_b/lib_b_a-local.jar b/test/repositories/IVY-283/module_b/lib_b_a-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_b/lib_b_a-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_c/ivy-local.xml b/test/repositories/IVY-283/module_c/ivy-local.xml
+new file mode 100644
+index 000000000..407b8ef3f
+--- /dev/null
++++ b/test/repositories/IVY-283/module_c/ivy-local.xml
+@@ -0,0 +1,24 @@
++<ivy-module version="1.0">
++	<info organisation="medicel" module="module_c" revision="local" status="integration" publication="20060906104750"/>
++	<configurations>
++		<conf name="build" visibility="public" description="Buildtime dependency configuration"/>
++		<conf name="runtime" visibility="public" description="Runtime dependency configuration" extends="build"/>
++		<conf name="test" visibility="public" description="Test dependency configuration" extends="runtime"/>
++	</configurations>
++	<publications>
++		<artifact name="lib_c_a" type="jar" ext="jar" conf="build,runtime,test"/>
++	</publications>
++	<dependencies>
++		<dependency org="medicel" name="module_b" rev="local" conf="build->build">
++			<include name="lib_b_a" type="jar" ext="jar"/>
++		</dependency>
++		<dependency org="medicel" name="module_a" rev="latest.integration" conf="build->build">
++			<include name="lib_a_d" type="jar" ext="jar"/>
++			<include name="lib_a_a" type="jar" ext="jar"/>
++			<include name="lib_a_b" type="jar" ext="jar"/>
++			<include name="lib_a_h" type="jar" ext="jar"/>
++			<include name="lib_a_g" type="jar" ext="jar"/>
++			<include name="lib_a_f" type="jar" ext="jar"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-283/module_c/lib_c_a-local.jar b/test/repositories/IVY-283/module_c/lib_c_a-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_c/lib_c_a-local.jar
+@@ -0,0 +1 @@
++
+diff --git a/test/repositories/IVY-283/module_e/ivy-local.xml b/test/repositories/IVY-283/module_e/ivy-local.xml
+new file mode 100644
+index 000000000..a96b89f60
+--- /dev/null
++++ b/test/repositories/IVY-283/module_e/ivy-local.xml
+@@ -0,0 +1,18 @@
++<ivy-module version="1.0">
++	<info organisation="medicel" module="module_e" revision="local" status="integration" publication="20060906104723"/>
++	<configurations>
++		<conf name="build" visibility="public" description="Buildtime dependency configuration"/>
++		<conf name="runtime" visibility="public" description="Runtime dependency configuration" extends="build"/>
++		<conf name="test" visibility="public" description="Test dependency configuration" extends="runtime"/>
++	</configurations>
++	<publications>
++		<artifact name="lib_e_a" type="jar" ext="jar" conf="build,runtime,test"/>
++	</publications>
++	<dependencies>
++		<dependency org="medicel" name="module_a" rev="local" conf="build->build">
++			<include name="lib_a_a" type="jar" ext="jar"/>
++			<include name="lib_a_b" type="jar" ext="jar"/>
++			<include name="lib_a_i" type="jar" ext="jar"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-283/module_e/lib_e_a-local.jar b/test/repositories/IVY-283/module_e/lib_e_a-local.jar
+new file mode 100644
+index 000000000..8b1378917
+--- /dev/null
++++ b/test/repositories/IVY-283/module_e/lib_e_a-local.jar
+@@ -0,0 +1 @@
++

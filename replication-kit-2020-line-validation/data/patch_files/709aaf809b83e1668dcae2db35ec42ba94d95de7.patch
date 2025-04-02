@@ -1,0 +1,160 @@
+From 709aaf809b83e1668dcae2db35ec42ba94d95de7 Mon Sep 17 00:00:00 2001
+From: Niall Pemberton <niallp@apache.org>
+Date: Sun, 21 Nov 2010 02:11:21 +0000
+Subject: [PATCH] BEANUTILS-381 getMatchingAccessibleMethod does not correctly
+ handle inheritance and method overloading - thanks to Todd Nine for the patch
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/beanutils/trunk@1037369 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 +
+ .../apache/commons/beanutils/MethodUtils.java |  6 +-
+ .../beanutils/bugs/Jira381TestCase.java       | 95 +++++++++++++++++++
+ 3 files changed, 102 insertions(+), 3 deletions(-)
+ create mode 100644 src/test/java/org/apache/commons/beanutils/bugs/Jira381TestCase.java
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 3d5f32d1c..10ac83852 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -50,6 +50,10 @@ The <action> type attribute can be add,update,fix,remove.
+       <action dev="niallp" type="fix" issue="BEANUTILS-378" due-to="Christian Schneider">
+          BeanMap does not work in osgi (fixed by BEANUTILS-379)
+       </action>
++      <action dev="niallp" type="fix" issue="BEANUTILS-381" due-to="Todd Nine">
++         MethodUtils getMatchingAccessibleMethod() does not correctly handle inheritance
++         and method overloading.
++      </action>
+     </release>
+ 
+     <release version="1.8.3" date="2010-03-28" description="Bug fix for 1.8.2">
+diff --git a/src/main/java/org/apache/commons/beanutils/MethodUtils.java b/src/main/java/org/apache/commons/beanutils/MethodUtils.java
+index afad48472..d01191daa 100644
+--- a/src/main/java/org/apache/commons/beanutils/MethodUtils.java
++++ b/src/main/java/org/apache/commons/beanutils/MethodUtils.java
+@@ -1118,7 +1118,7 @@ private static float getTotalTransformationCost(Class[] srcArgs, Class[] destArg
+      */
+     private static float getObjectTransformationCost(Class srcClass, Class destClass) {
+         float cost = 0.0f;
+-        while (destClass != null && !destClass.equals(srcClass)) {
++        while (srcClass != null && !destClass.equals(srcClass)) {
+             if (destClass.isInterface() && isAssignmentCompatible(destClass,srcClass)) {
+                 // slight penalty for interface match. 
+                 // we still want an exact match to override an interface match, but  
+@@ -1128,14 +1128,14 @@ private static float getObjectTransformationCost(Class srcClass, Class destClass
+                 break;
+             }
+             cost++;
+-            destClass = destClass.getSuperclass();
++            srcClass = srcClass.getSuperclass();
+         }
+ 
+         /*
+          * If the destination class is null, we've travelled all the way up to 
+          * an Object match. We'll penalize this by adding 1.5 to the cost.
+          */
+-        if (destClass == null) {
++        if (srcClass == null) {
+             cost += 1.5f;
+         }
+ 
+diff --git a/src/test/java/org/apache/commons/beanutils/bugs/Jira381TestCase.java b/src/test/java/org/apache/commons/beanutils/bugs/Jira381TestCase.java
+new file mode 100644
+index 000000000..1f6291903
+--- /dev/null
++++ b/src/test/java/org/apache/commons/beanutils/bugs/Jira381TestCase.java
+@@ -0,0 +1,95 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.beanutils.bugs;
++
++import java.lang.reflect.Method;
++
++import junit.framework.TestCase;
++
++import org.apache.commons.beanutils.MethodUtils;
++
++/**
++ * MethodUtils's getMatchingAccessibleMethod() does not correctly
++ * handle inheritance and method overloading.
++ *
++ * <p />
++ * See https://issues.apache.org/jira/browse/BEANUTILS-381
++ * <p />
++ *
++ * @version $Revision$ $Date$
++ */
++public class Jira381TestCase extends TestCase {
++
++    /**
++     * Create a test case with the specified name.
++     *
++     * @param name The name of the test
++     */
++    public Jira381TestCase(String name) {
++        super(name);
++    }
++
++    /**
++     * Test with an private class that overrides a public method
++     * of a "grand parent" public class.
++     * <p />
++     * See Jira issue# BEANUTILS-381.
++     */
++    public void testIssue_BEANUTILS_381_getMatchingAccessibleMethod() {
++        
++        Class target = TestServiceBean.class;
++        String methodName = "performOp";
++        Class[] runtimeClasses = new Class[]{TestObjectSubclass.class};
++        
++        Method returned = MethodUtils.getMatchingAccessibleMethod(target, methodName, runtimeClasses);
++        
++        assertEquals(target, returned.getDeclaringClass());
++        assertEquals(methodName, returned.getName());
++        assertEquals(TestObject.class, returned.getParameterTypes()[0]);
++    }
++
++    /**
++     * Test bean.
++     */
++    public class TestServiceBean{
++        
++        /**
++         * Generic object method
++         */
++        public void performOp(Object o){
++        }
++        
++        /**
++         * Object method
++         */
++        public void performOp(TestObject o){
++        }
++    }
++    
++    /**
++     * Test object.
++     *
++     */
++    public class TestObject{
++    }
++
++    /**
++     * Used to match performop with test object
++     */
++    public class TestObjectSubclass extends TestObject{
++    }
++}

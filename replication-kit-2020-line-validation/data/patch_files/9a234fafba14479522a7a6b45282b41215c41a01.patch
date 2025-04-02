@@ -1,0 +1,94 @@
+From 9a234fafba14479522a7a6b45282b41215c41a01 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 7 Feb 2008 17:50:09 +0000
+Subject: [PATCH] FIX: Resolving for muyltiple configurations when one is not
+ in the list of available configurations does not abort the build (IVY-720)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@619527 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                        |  1 +
+ .../org/apache/ivy/core/resolve/ResolveEngine.java | 14 +++++++++++---
+ test/java/org/apache/ivy/ant/IvyResolveTest.java   | 12 +++++++++++-
+ 3 files changed, 23 insertions(+), 4 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index b363fd79f..897b9c856 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -78,6 +78,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Downgrade Ant version requirement to 1.6 to build Ivy (IVY-687)
+ - IMPROVEMENT: In the ResolveReport class, add the possibility to filter the evicted module while getting the list of DownloadArtifact (IVY-704) (thanks to Nicolas Lalevée)
+ 
++- FIX: Resolving for muyltiple configurations when one is not in the list of available configurations does not abort the build (IVY-720)
+ - FIX: Branch attribute considered as both a standard and extra attribute on module info (IVY-726)
+ - FIX: Branch attribute not set on deliver when using a non default branch (IVY-724)
+ - FIX: NullPointerException reported instead of error in ivy:cachepath (IVY-690)
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 881dada90..24dc51b11 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -22,6 +22,7 @@
+ import java.io.IOException;
+ import java.net.URL;
+ import java.text.ParseException;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.Collections;
+@@ -447,7 +448,7 @@ public IvyNode[] getDependencies(ModuleDescriptor md, ResolveOptions options,
+                 context.setResolveData(data);
+             }
+             IvyNode rootNode = new IvyNode(data, md);
+-    
++            
+             for (int i = 0; i < confs.length; i++) {
+                 if (confs[i] == null) {
+                     throw new NullPointerException("null conf not allowed: confs where: "
+@@ -460,8 +461,15 @@ public IvyNode[] getDependencies(ModuleDescriptor md, ResolveOptions options,
+     
+                 Configuration configuration = md.getConfiguration(confs[i]);
+                 if (configuration == null) {
+-                    Message.error("asked configuration not found in " 
+-                        + md.getModuleRevisionId() + ": " + confs[i]);
++                    Collection missingConfs = new ArrayList();
++                    missingConfs.add(" '" + confs[i] + "' ");
++                    for (i++; i < confs.length; i++) {
++                        if (md.getConfiguration(confs[i]) == null) {
++                            missingConfs.add(" '" + confs[i] + "' ");
++                        }
++                    }
++                    throw new IllegalArgumentException("asked configuration(s) not found in " 
++                        + md.getModuleRevisionId() + ": " + missingConfs);
+                 } else {
+                     ConfigurationResolveReport confReport = null;
+                     if (report != null) {
+diff --git a/test/java/org/apache/ivy/ant/IvyResolveTest.java b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+index aea817abf..3cc1cd45c 100644
+--- a/test/java/org/apache/ivy/ant/IvyResolveTest.java
++++ b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+@@ -23,7 +23,6 @@
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.TestHelper;
+-import org.apache.ivy.core.cache.RepositoryCacheManager;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.Project;
+@@ -195,6 +194,17 @@ public void testFailure() throws Exception {
+         }
+     }
+ 
++    public void testFailureWithMissingConfigurations() throws Exception {
++        try {
++            resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-simple.xml"));
++            resolve.setConf("default,unknown");
++            resolve.execute();
++            fail("missing configurations didn't raised an exception");
++        } catch (BuildException ex) {
++            assertTrue(ex.getMessage().indexOf("unknown") != -1);
++        }
++    }
++
+     public void testFailureOnBadDependencyIvyFile() throws Exception {
+         try {
+             resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-failure2.xml"));

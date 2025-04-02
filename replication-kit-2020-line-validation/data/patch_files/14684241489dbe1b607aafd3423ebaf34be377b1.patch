@@ -1,0 +1,77 @@
+From 14684241489dbe1b607aafd3423ebaf34be377b1 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Wed, 17 Feb 2010 16:00:21 +0000
+Subject: [PATCH] it looks as if CPIO was writing files in blocks with 512
+ being the default blocksize.  COMPRESS-85
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@911031 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../cpio/CpioArchiveOutputStream.java         | 30 +++++++++++++++++--
+ .../archivers/cpio/CpioConstants.java         |  3 ++
+ 2 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveOutputStream.java b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveOutputStream.java
+index d05529c9ad1..be7964c3b11 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveOutputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveOutputStream.java
+@@ -91,7 +91,7 @@ public class CpioArchiveOutputStream extends ArchiveOutputStream implements
+      *            The format of the stream
+      */
+     public CpioArchiveOutputStream(final OutputStream out, final short format) {
+-        this.out = new FilterOutputStream(out);
++        this.out = new CountingStream(out);
+         switch (format) {
+         case FORMAT_NEW:
+         case FORMAT_NEW_CRC:
+@@ -336,7 +336,13 @@ public void finish() throws IOException {
+         this.entry.setNumberOfLinks(1);
+         writeHeader(this.entry);
+         closeArchiveEntry();
+-        
++
++        int lengthOfLastBlock =
++            (int) (((CountingStream) out).getTotalWritten() % BLOCK_SIZE);
++        if (lengthOfLastBlock != 0) {
++            pad(BLOCK_SIZE - lengthOfLastBlock);
++        }
++
+         finished = true;
+     }
+ 
+@@ -418,4 +424,24 @@ public ArchiveEntry createArchiveEntry(File inputFile, String entryName)
+         return new CpioArchiveEntry(inputFile, entryName);
+     }
+ 
++    private static class CountingStream extends FilterOutputStream {
++        private long totalWritten = 0;
++
++        private CountingStream(final OutputStream out) {
++            super(out);
++        }
++        public void write(byte[] b) throws IOException {
++            write(b, 0, b.length);
++        }
++        public void write(int b) throws IOException {
++            totalWritten++;
++            out.write(b);
++        }
++        public void write(byte[] b, int off, int len)
++            throws IOException {
++            totalWritten += len;
++            out.write(b, off, len);
++        }
++        private long getTotalWritten() { return totalWritten; }
++    }
+ }
+diff --git a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioConstants.java b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioConstants.java
+index 199215fc4a0..48cc2ce4b7e 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioConstants.java
++++ b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioConstants.java
+@@ -134,4 +134,7 @@ public interface CpioConstants {
+ 
+     /** The special trailer marker */
+     final String CPIO_TRAILER = "TRAILER!!!";
++
++    /** The default block size */
++    final int BLOCK_SIZE = 512;
+ }

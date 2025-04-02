@@ -1,0 +1,195 @@
+From 77680e867c18a49a1c6bdca290434b0d565dc8c0 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sun, 18 Mar 2007 23:08:16 +0000
+Subject: [PATCH] LatestRevisionStrategy.sort() doesn't sort as specified
+ (IVY-435)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@519726 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../latest/AbstractLatestStrategy.java        |  9 ++-
+ .../latest/ComparatorLatestStrategy.java      | 21 -------
+ .../ivy/plugins/latest/LatestStrategy.java    |  2 +-
+ .../latest/LatestRevisionStrategyTest.java    | 61 +++++++++++++++++++
+ 5 files changed, 70 insertions(+), 25 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 16a812eef..9b600c75f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -15,7 +15,9 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVE: Refactoring / documentation / test of matcher package (IVY-375) (thanks to Stephane Baillez)
+ - IMPROVE: Add a unit test to verify that latest.integration accepts released modules (IVY-394) (thanks to Gilles Scokart)
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
++- IMPROVE: Generated XML reports now contains more information about the resolved module (IVY-408)
+ 
++- FIX: LatestRevisionStrategy.sort() doesn't sort as specified (IVY-435)
+ - FIX: setting m2compatible on ibiblio resolver overwrite root and pattern settings (IVY-437)
+ - FIX: ivy.revision property not set correctly for second resolve (IVY-429)
+ - FIX: NPE when no organisation or no name is provided in module element of ivyconf (IVY-422)
+diff --git a/src/java/org/apache/ivy/plugins/latest/AbstractLatestStrategy.java b/src/java/org/apache/ivy/plugins/latest/AbstractLatestStrategy.java
+index b72c7055f..93520412f 100644
+--- a/src/java/org/apache/ivy/plugins/latest/AbstractLatestStrategy.java
++++ b/src/java/org/apache/ivy/plugins/latest/AbstractLatestStrategy.java
+@@ -18,8 +18,8 @@
+ package org.apache.ivy.plugins.latest;
+ 
+ import java.util.Date;
+-import java.util.Iterator;
+ import java.util.List;
++import java.util.ListIterator;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.plugins.IvyAware;
+@@ -51,8 +51,11 @@ public String toString() {
+     
+     public ArtifactInfo findLatest(ArtifactInfo[] infos, Date date) {
+     	List l = sort(infos);
+-    	for (Iterator iter = l.iterator(); iter.hasNext();) {
+-			ArtifactInfo info = (ArtifactInfo) iter.next();
++    	
++    	// the latest revision comes last, use a ListIterator to iterate the
++    	// sorted list in the reverse direction.
++    	for (ListIterator iter = l.listIterator(l.size()); iter.hasPrevious();) {
++			ArtifactInfo info = (ArtifactInfo) iter.previous();
+ 			if (date == null || info.getLastModified() < date.getTime()) {
+ 				return info;
+ 			}
+diff --git a/src/java/org/apache/ivy/plugins/latest/ComparatorLatestStrategy.java b/src/java/org/apache/ivy/plugins/latest/ComparatorLatestStrategy.java
+index 9a05834f6..26df6c41d 100644
+--- a/src/java/org/apache/ivy/plugins/latest/ComparatorLatestStrategy.java
++++ b/src/java/org/apache/ivy/plugins/latest/ComparatorLatestStrategy.java
+@@ -21,7 +21,6 @@
+ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.Comparator;
+-import java.util.Date;
+ import java.util.List;
+ 
+ 
+@@ -37,26 +36,6 @@ public ComparatorLatestStrategy(Comparator comparator) {
+ 		_comparator = comparator;
+ 	}
+ 
+-    public ArtifactInfo findLatest(ArtifactInfo[] artifacts, Date date) {
+-        if (artifacts == null) {
+-            return null;
+-        }
+-        ArtifactInfo found = null;
+-        for (int i = 0; i < artifacts.length; i++) {
+-            ArtifactInfo art = artifacts[i];
+-            if (found == null || _comparator.compare(art, found) > 0) {
+-                if (date != null) {
+-                    long lastModified = art.getLastModified();
+-                    if (lastModified > date.getTime()) {
+-                        continue;
+-                    }
+-                }
+-                found = art;
+-            }
+-        } 
+-        return found;
+-    }
+-    
+     public List sort(ArtifactInfo[] infos) {
+     	List ret = new ArrayList(Arrays.asList(infos));
+     	Collections.sort(ret, _comparator);
+diff --git a/src/java/org/apache/ivy/plugins/latest/LatestStrategy.java b/src/java/org/apache/ivy/plugins/latest/LatestStrategy.java
+index 2afc068a6..d79d3c55f 100644
+--- a/src/java/org/apache/ivy/plugins/latest/LatestStrategy.java
++++ b/src/java/org/apache/ivy/plugins/latest/LatestStrategy.java
+@@ -35,7 +35,7 @@ public interface LatestStrategy {
+      */
+     ArtifactInfo findLatest(ArtifactInfo[] infos, Date date);
+     /**
+-     * Sorts the given artifacts info from the latest one to the oldest one.
++     * Sorts the given artifacts info from the oldest one to the latest one.
+      * The definition of 'latest' depends on the strategy itself.
+      * Given artifacts info are all good candidate. 
+      * @param infos
+diff --git a/test/java/org/apache/ivy/plugins/latest/LatestRevisionStrategyTest.java b/test/java/org/apache/ivy/plugins/latest/LatestRevisionStrategyTest.java
+index 9e278d365..f2e6dd217 100644
+--- a/test/java/org/apache/ivy/plugins/latest/LatestRevisionStrategyTest.java
++++ b/test/java/org/apache/ivy/plugins/latest/LatestRevisionStrategyTest.java
+@@ -20,6 +20,7 @@
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collections;
++import java.util.Date;
+ import java.util.List;
+ 
+ import junit.framework.TestCase;
+@@ -51,6 +52,63 @@ public void testComparator() {
+         assertEquals(Arrays.asList(revs), shuffled);
+     }
+     
++    public void testSort() {
++        ArtifactInfo[] revs = toMockAI(new String[] {
++                "0.2a", 
++                "0.2_b", 
++                "0.2rc1", 
++                "0.2-final", 
++                "1.0-dev1", 
++                "1.0-dev2", 
++                "1.0-alpha1", 
++                "1.0-alpha2", 
++                "1.0-beta1", 
++                "1.0-beta2", 
++                "1.0-gamma",
++                "1.0-rc1",
++                "1.0-rc2",
++                "1.0", 
++                "1.0.1", 
++                "2.0" 
++                });
++        
++        List shuffled = new ArrayList(Arrays.asList(revs)); 
++        ArtifactInfo[] shuffledRevs = (ArtifactInfo[]) shuffled.toArray(new ArtifactInfo[revs.length]);
++        
++        LatestRevisionStrategy latestRevisionStrategy = new LatestRevisionStrategy();
++        List sorted = latestRevisionStrategy.sort(shuffledRevs);
++    	assertEquals(Arrays.asList(revs), sorted);
++    }
++    
++    public void testFindLatest() {
++        ArtifactInfo[] revs = toMockAI(new String[] {
++                "0.2a", 
++                "0.2_b", 
++                "0.2rc1", 
++                "0.2-final", 
++                "1.0-dev1", 
++                "1.0-dev2", 
++                "1.0-alpha1", 
++                "1.0-alpha2", 
++                "1.0-beta1", 
++                "1.0-beta2", 
++                "1.0-gamma",
++                "1.0-rc1",
++                "1.0-rc2",
++                "1.0", 
++                "1.0.1", 
++                "2.0" 
++                });
++        
++        List shuffled = new ArrayList(Arrays.asList(revs)); 
++        ArtifactInfo[] shuffledRevs = (ArtifactInfo[]) shuffled.toArray(new ArtifactInfo[revs.length]);
++        
++        LatestRevisionStrategy latestRevisionStrategy = new LatestRevisionStrategy();
++        ArtifactInfo latest = latestRevisionStrategy.findLatest(shuffledRevs, new Date());
++        assertNotNull(latest);
++        assertEquals("2.0", latest.getRevision());
++    }
++    
+     public void testSpecialMeaningComparator() {
+         ArtifactInfo[] revs = toMockAI(new String[] {
+                 "0.1", 
+@@ -97,6 +155,9 @@ public long getLastModified() {
+             return _lastModified;
+         }
+         
++        public String toString() {
++        	return _rev;
++        }
+     }
+     private ArtifactInfo[] toMockAI(String[] revs) {
+         ArtifactInfo[] artifactInfos = new ArtifactInfo[revs.length];

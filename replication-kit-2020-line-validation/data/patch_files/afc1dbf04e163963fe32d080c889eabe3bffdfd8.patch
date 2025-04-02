@@ -1,0 +1,239 @@
+From afc1dbf04e163963fe32d080c889eabe3bffdfd8 Mon Sep 17 00:00:00 2001
+From: Nicolas Lalevee <hibou@apache.org>
+Date: Mon, 1 Jun 2009 17:58:28 +0000
+Subject: [PATCH] IVY-983:  - make the 'callers' aggregated by the requested
+ conf more than the conf currently resolve in the hierarchy of confs
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@780757 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  5 +--
+ .../org/apache/ivy/core/resolve/IvyNode.java  |  6 ++--
+ .../ivy/core/resolve/IvyNodeCallers.java      | 18 ++++++++--
+ .../apache/ivy/core/resolve/ResolveTest.java  | 28 +++++++++++++++
+ .../1/org2/mod2.5/ivys/ivy-0.9.xml            | 28 +++++++++++++++
+ .../1/org2/mod2.6/ivys/ivy-0.13.xml           | 35 +++++++++++++++++++
+ 6 files changed, 113 insertions(+), 7 deletions(-)
+ create mode 100644 test/repositories/1/org2/mod2.5/ivys/ivy-0.9.xml
+ create mode 100644 test/repositories/1/org2/mod2.6/ivys/ivy-0.13.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 982981f7a..635b7a7aa 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -8,7 +8,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+  Committers
+  	Maarten Coene
+  	Xavier Hanin
+-	Nicolas Lalevée
++	Nicolas Lalevee
+  	Gilles Scokart
+   
+  Contributors
+@@ -95,7 +95,8 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: PomModuleDescriptorBuilder does not resolve ejb type dependencies to jar extension (IVY-1058) (thanks to Andrey Lomakin)
+ - FIX: Ivy doesn't handle maven dependencies with type 'test-jar' correctly (IVY-1066)
+ - FIX: transitive dependencies and conflict management (IVY-1083)
+-	
++- FIX: exclude does not work in non-trivial conf case (IVY-983)
++
+    2.1.0-rc1
+ =====================================
+ - IMPROVEMENT: Fail the retrieve when multiple artifacts of same module are mapped to same file (IVY-1050)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 9c904e57f..63c2c718a 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -348,7 +348,7 @@ public Collection getDependencies(String rootModuleConf, String conf, String req
+             depNode.addRootModuleConfigurations(depNode.usage, rootModuleConf, confsArray);
+             depNode.usage.setRequiredConfs(this, conf, confs);
+ 
+-            depNode.addCaller(rootModuleConf, this, conf, dependencyConfigurations, dd);
++            depNode.addCaller(rootModuleConf, this, conf, requestedConf, dependencyConfigurations, dd);
+             dependencies.add(depNode);
+         }
+         return dependencies;
+@@ -1021,8 +1021,8 @@ public Caller[] getAllRealCallers() {
+     }
+ 
+     public void addCaller(String rootModuleConf, IvyNode callerNode, String callerConf,
+-            String[] dependencyConfs, DependencyDescriptor dd) {
+-        callers.addCaller(rootModuleConf, callerNode, callerConf, dependencyConfs, dd);
++            String requestedConf, String[] dependencyConfs, DependencyDescriptor dd) {
++        callers.addCaller(rootModuleConf, callerNode, callerConf, requestedConf, dependencyConfs, dd);
+         boolean isCircular = callers.getAllCallersModuleIds().contains(getId().getModuleId());
+         if (isCircular) {
+             IvyContext.getContext().getCircularDependencyStrategy().handleCircularDependency(
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java b/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java
+index 0b6e470cf..d2555dce6 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeCallers.java
+@@ -17,16 +17,19 @@
+  */
+ package org.apache.ivy.core.resolve;
+ 
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.Stack;
+ 
+ import org.apache.ivy.core.module.descriptor.Artifact;
++import org.apache.ivy.core.module.descriptor.Configuration;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleId;
+@@ -55,6 +58,17 @@ public Caller(ModuleDescriptor md, ModuleRevisionId mrid, DependencyDescriptor d
+         }
+ 
+         public void addConfiguration(String callerConf, String[] dependencyConfs) {
++            updateConfs(callerConf, dependencyConfs);
++            Configuration conf = md.getConfiguration(callerConf);
++            String[] confExtends = conf.getExtends();
++            if (confExtends != null) {
++                for (int i = 0; i < confExtends.length; i++) {
++                    addConfiguration(confExtends[i], dependencyConfs);
++                }
++            }
++        }
++
++        private void updateConfs(String callerConf, String[] dependencyConfs) {
+             String[] prevDepConfs = (String[]) confs.get(callerConf);
+             if (prevDepConfs != null) {
+                 Set newDepConfs = new HashSet(Arrays.asList(prevDepConfs));
+@@ -146,7 +160,7 @@ public IvyNodeCallers(IvyNode node) {
+      *            the dependency revision id asked by the caller
+      */
+     public void addCaller(String rootModuleConf, IvyNode callerNode, String callerConf,
+-            String[] dependencyConfs, DependencyDescriptor dd) {
++            String requestedConf, String[] dependencyConfs, DependencyDescriptor dd) {
+         ModuleDescriptor md = callerNode.getDescriptor();
+         ModuleRevisionId mrid = callerNode.getResolvedId();
+         if (mrid.getModuleId().equals(node.getId().getModuleId())) {
+@@ -163,7 +177,7 @@ public void addCaller(String rootModuleConf, IvyNode callerNode, String callerCo
+             caller = new Caller(md, mrid, dd, callerNode.canExclude(rootModuleConf));
+             callers.put(mrid, caller);
+         }
+-        caller.addConfiguration(callerConf, dependencyConfs);
++        caller.addConfiguration(requestedConf, dependencyConfs);
+ 
+         IvyNode parent = callerNode.getRealNode();
+         for (Iterator iter = parent.getAllCallersModuleIds().iterator(); iter.hasNext();) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 6d8aaae31..66b999ebe 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3605,6 +3605,34 @@ public void testResolveExcludesModuleWide() throws Exception {
+         assertFalse(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testResolveExcludesConf() throws Exception {
++        // mod2.6 depends on mod2.3 in conf default and mod2.5 in conf exclude
++        // mod2.5 depends on mod2.3
++        // mod2.6 globally exclude mod2.3 in conf exclude
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/1/org2/mod2.6/ivys/ivy-0.13.xml").toURL(),
++            getResolveOptions(new String[] {"include"}));
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertEquals(ModuleRevisionId.newInstance("org2", "mod2.6", "0.13"), md
++                .getModuleRevisionId());
++
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org2", "mod2.3", "0.4")).exists());
++    }
++
++    public void testResolveExcludesConf2() throws Exception {
++        // same as testResolveExcludesConf
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/1/org2/mod2.6/ivys/ivy-0.13.xml").toURL(),
++            getResolveOptions(new String[] {"exclude"}));
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertEquals(ModuleRevisionId.newInstance("org2", "mod2.6", "0.13"), md
++                .getModuleRevisionId());
++
++        assertFalse(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org2", "mod2.3", "0.4")).exists());
++    }
++
+     public void testResolveExceptConfiguration() throws Exception {
+         // mod10.2 depends on mod5.1 conf *, !A
+         ivy.resolve(new File("test/repositories/2/mod10.2/ivy-2.0.xml").toURL(),
+diff --git a/test/repositories/1/org2/mod2.5/ivys/ivy-0.9.xml b/test/repositories/1/org2/mod2.5/ivys/ivy-0.9.xml
+new file mode 100644
+index 000000000..dd28357cc
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.5/ivys/ivy-0.9.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.5"
++	       revision="0.9"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.3" rev="0.4" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.13.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.13.xml
+new file mode 100644
+index 000000000..b54eb5a98
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.13.xml
+@@ -0,0 +1,35 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.6"
++	       revision="0.13"
++	       status="integration"
++	/>
++    <configurations>
++        <conf name="default" />
++        <conf name="include" extends="default" />
++        <conf name="exclude" extends="default" />
++    </configurations>
++	<dependencies>
++		<dependency name="mod2.3" rev="0.4" conf="include->default" />
++		<dependency name="mod2.5" rev="0.9" conf="default->default" />
++        <exclude module="mod2.3" conf="exclude" />
++	</dependencies>
++</ivy-module>

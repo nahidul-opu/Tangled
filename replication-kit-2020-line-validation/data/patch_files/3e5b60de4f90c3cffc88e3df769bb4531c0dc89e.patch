@@ -1,0 +1,115 @@
+From 3e5b60de4f90c3cffc88e3df769bb4531c0dc89e Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 10 Mar 2008 21:10:48 +0000
+Subject: [PATCH] FIX: Ivy reports a conflict when the same file is supposed to
+ be retrieved at the same location twice (or more) (IVY-743)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@635695 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/retrieve/RetrieveEngine.java     | 17 ++++++++++++----
+ .../ivy/core/retrieve/RetrieveTest.java       | 20 +++++++++++++++++++
+ 3 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2b0a24a0c..8ac128222 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -70,6 +70,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Make Ivy standalone runnable with no required dependencies (IVY-757)
+ - IMPROVEMENT: add branch attribute in ivy:install task (IVY-727)
+ 
++- FIX: Ivy reports a conflict when the same file is supposed to be retrieved at the same location twice (or more) (IVY-743)
+ - FIX: StackOverflowError when configuration extends itself (IVY-696)
+ - FIX: XML schema ambiguity (IVY-750)
+ - FIX: ivy-resolve fails when a project has different dependencies in different branches (IVY-717)
+diff --git a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+index 937212772..376705fa0 100644
+--- a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
++++ b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+@@ -257,8 +257,10 @@ public Map determineArtifactsToCopy(ModuleRevisionId mrid, String destFilePatter
+ 
+         // ArtifactDownloadReport source -> Set (String copyDestAbsolutePath)
+         final Map artifactsToCopy = new HashMap();
+-        // String copyDestAbsolutePath -> Set (ArtifactDownloadReport source)
++        // String copyDestAbsolutePath -> Set (ArtifactRevisionId source)
+         final Map conflictsMap = new HashMap(); 
++        // String copyDestAbsolutePath -> Set (ArtifactDownloadReport source)
++        final Map conflictsReportsMap = new HashMap(); 
+         // String copyDestAbsolutePath -> Set (String conf)
+         final Map conflictsConfMap = new HashMap(); 
+         
+@@ -299,17 +301,24 @@ public Map determineArtifactsToCopy(ModuleRevisionId mrid, String destFilePatter
+                 dest.add(copyDest);
+ 
+                 Set conflicts = (Set) conflictsMap.get(copyDest);
++                Set conflictsReports = (Set) conflictsReportsMap.get(copyDest);
+                 Set conflictsConf = (Set) conflictsConfMap.get(copyDest);
+                 if (conflicts == null) {
+                     conflicts = new HashSet();
+                     conflictsMap.put(copyDest, conflicts);
+                 }
++                if (conflictsReports == null) {
++                    conflictsReports = new HashSet();
++                    conflictsReportsMap.put(copyDest, conflictsReports);
++                }
+                 if (conflictsConf == null) {
+                     conflictsConf = new HashSet();
+                     conflictsConfMap.put(copyDest, conflictsConf);
+                 }
+-                conflicts.add(artifact);
+-                conflictsConf.add(conf);
++                if (conflicts.add(artifact.getArtifact().getId())) {
++                    conflictsReports.add(artifact);
++                    conflictsConf.add(conf);
++                }
+             }
+         }
+ 
+@@ -319,7 +328,7 @@ public Map determineArtifactsToCopy(ModuleRevisionId mrid, String destFilePatter
+             Set artifacts = (Set) conflictsMap.get(copyDest);
+             Set conflictsConfs = (Set) conflictsConfMap.get(copyDest);
+             if (artifacts.size() > 1) {
+-                List artifactsList = new ArrayList(artifacts);
++                List artifactsList = new ArrayList((Collection) conflictsReportsMap.get(copyDest));
+                 // conflicts battle is resolved by a sort using a conflict resolving policy
+                 // comparator
+                 // which consider as greater a winning artifact
+diff --git a/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java b/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
+index 5b3a364ff..978d12b69 100644
+--- a/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
++++ b/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
+@@ -33,6 +33,8 @@
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.report.ResolveReport;
+ import org.apache.ivy.core.resolve.ResolveOptions;
++import org.apache.ivy.util.Message;
++import org.apache.ivy.util.MockMessageLogger;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Delete;
+ 
+@@ -87,6 +89,24 @@ public void testRetrieveSimple() throws Exception {
+             "jar", "jar", "default")).exists());
+     }
+ 
++    public void testRetrieveSameFileConflict() throws Exception {
++        // mod1.1 depends on mod1.2
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/1/org1/mod1.4/ivys/ivy-1.0.1.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++
++        String pattern = "build/test/retrieve/[module]/[artifact]-[revision].[ext]";
++        MockMessageLogger mockLogger = new MockMessageLogger();
++        Message.setDefaultLogger(mockLogger);
++        ivy.retrieve(md.getModuleRevisionId(), pattern, getRetrieveOptions());
++        assertTrue(new File(IvyPatternHelper.substitute(pattern, "org1", "mod1.2", "2.2", "mod1.2",
++            "jar", "jar", "default")).exists());
++        mockLogger.assertLogDoesntContain("conflict on");
++    }
++
+     public void testEvent() throws Exception {
+         ResolveReport report = ivy.resolve(new File(
+                 "test/repositories/1/org1/mod1.1/ivys/ivy-1.0.xml").toURL(),

@@ -1,0 +1,227 @@
+From 8bbf8370c328e75d8e926fea9a114178a708db28 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 25 Jun 2008 15:16:31 +0000
+Subject: [PATCH] FIX: haltonmissing on publish task does not prevent the other
+ files to be published, even with an atomic publisher (IVY-656)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@671578 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/org/apache/ivy/ant/IvyPublish.java   | 15 ++---
+ .../ivy/core/publish/PublishEngine.java       |  9 ++-
+ .../ivy/core/publish/PublishOptions.java      | 11 ++++
+ .../org/apache/ivy/ant/IvyPublishTest.java    | 63 ++++++++++++++++---
+ test/repositories/ivysettings.xml             |  4 ++
+ 6 files changed, 87 insertions(+), 16 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d431cc876..1af045ec4 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -90,6 +90,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: haltonmissing on publish task does not prevent the other files to be published, even with an atomic publisher (IVY-656)
+ - FIX: Transitive dependencies resolves incorrectly when different modules uses the same dependency with different configurations in the same build (IVY-541)
+ - FIX: transitive attribute set to false because of dependency (IVY-105)
+ - FIX: Wrong check for defaultCacheArtifactPattern (IVY-840)
+diff --git a/src/java/org/apache/ivy/ant/IvyPublish.java b/src/java/org/apache/ivy/ant/IvyPublish.java
+index 4dcd2cd57..f53ef9ba5 100644
+--- a/src/java/org/apache/ivy/ant/IvyPublish.java
++++ b/src/java/org/apache/ivy/ant/IvyPublish.java
+@@ -294,20 +294,21 @@ public void doExecute() throws BuildException {
+                     .setPubdate(pubdate)
+                     .setExtraArtifacts(
+                         (Artifact[]) artifacts.toArray(new Artifact[artifacts.size()]))
+-                    .setValidate(doValidate(settings)).setOverwrite(overwrite).setUpdate(
+-                        update).setConfs(splitConfs(conf)));
++                    .setValidate(doValidate(settings))
++                    .setOverwrite(overwrite)
++                    .setUpdate(update)
++                    .setHaltOnMissing(haltonmissing)
++                    .setConfs(splitConfs(conf)));
+             if (warnonmissing) {
+                 for (Iterator iter = missing.iterator(); iter.hasNext();) {
+                     Artifact artifact = (Artifact) iter.next();
+                     Message.warn("missing artifact: " + artifact);
+                 }
+             }
+-            if (haltonmissing && !missing.isEmpty()) {
+-                throw new BuildException(
+-                    "missing published artifacts for " + mrid + ": " + missing);
+-            }
+-
+         } catch (Exception e) {
++            if (e instanceof BuildException) {
++                throw (BuildException) e;
++            }
+             throw new BuildException("impossible to publish artifacts for " + mrid + ": " + e, e);
+         }
+     }
+diff --git a/src/java/org/apache/ivy/core/publish/PublishEngine.java b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+index 85ad34899..305f89386 100644
+--- a/src/java/org/apache/ivy/core/publish/PublishEngine.java
++++ b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+@@ -28,6 +28,7 @@
+ import java.util.Date;
+ import java.util.HashSet;
+ import java.util.Iterator;
++import java.util.LinkedHashSet;
+ import java.util.Set;
+ 
+ import org.apache.ivy.core.IvyContext;
+@@ -166,7 +167,7 @@ public Collection publish(ModuleRevisionId mrid, Collection srcArtifactPattern,
+     public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+             DependencyResolver resolver, PublishOptions options) throws IOException {
+         Collection missing = new ArrayList();
+-        Set artifactsSet = new HashSet();
++        Set artifactsSet = new LinkedHashSet();
+         String[] confs = options.getConfs();
+         if (confs == null || (confs.length == 1 && "*".equals(confs[0]))) {
+             confs = md.getConfigurationsNames();
+@@ -208,6 +209,9 @@ public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+                                 + new File(IvyPatternHelper.substitute(pattern, artifact))
+                                 + " file does not exist");
+                     }
++                    if (options.isHaltOnMissing()) {
++                        throw new IOException("missing artifact " + artifact);
++                    }
+                     missing.add(artifact);
+                 }
+             }
+@@ -220,6 +224,9 @@ public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+                             + ": "
+                             + new File(IvyPatternHelper.substitute(options.getSrcIvyPattern(),
+                                 artifact)) + " file does not exist");
++                    if (options.isHaltOnMissing()) {
++                        throw new IOException("missing ivy artifact " + artifact);
++                    }
+                     missing.add(artifact);
+                 }
+             }
+diff --git a/src/java/org/apache/ivy/core/publish/PublishOptions.java b/src/java/org/apache/ivy/core/publish/PublishOptions.java
+index 346daf3fb..1dafa8806 100644
+--- a/src/java/org/apache/ivy/core/publish/PublishOptions.java
++++ b/src/java/org/apache/ivy/core/publish/PublishOptions.java
+@@ -55,6 +55,8 @@ public class PublishOptions {
+ 
+     private String[] confs;
+ 
++    private boolean haltonmissing;
++
+     public String[] getConfs() {
+         return confs;
+     }
+@@ -136,4 +138,13 @@ public PublishOptions setValidate(boolean validate) {
+         return this;
+     }
+ 
++    public boolean isHaltOnMissing() {
++        return haltonmissing;
++    }
++
++    public PublishOptions setHaltOnMissing(boolean haltonmissing) {
++        this.haltonmissing = haltonmissing;
++        return this;
++    }
++
+ }
+diff --git a/test/java/org/apache/ivy/ant/IvyPublishTest.java b/test/java/org/apache/ivy/ant/IvyPublishTest.java
+index e41a25feb..c39057413 100644
+--- a/test/java/org/apache/ivy/ant/IvyPublishTest.java
++++ b/test/java/org/apache/ivy/ant/IvyPublishTest.java
+@@ -70,17 +70,12 @@ protected void tearDown() throws Exception {
+     }
+ 
+     private void cleanCache() {
+-        Delete del = new Delete();
+-        del.setProject(new Project());
+-        del.setDir(cache);
+-        del.execute();
++        FileUtil.forceDelete(cache);
+     }
+ 
+     private void cleanTestDir() {
+-        Delete del = new Delete();
+-        del.setProject(new Project());
+-        del.setDir(new File("build/test/publish"));
+-        del.execute();
++        FileUtil.forceDelete(new File("build/test/publish"));
++        FileUtil.forceDelete(new File("build/test/transactional"));
+     }
+ 
+     private void cleanRep() {
+@@ -117,6 +112,58 @@ public void testSimple() throws Exception {
+         assertEquals("1.2", md.getModuleRevisionId().getRevision());
+     }
+ 
++    public void testHaltOnMissing() throws Exception {
++        project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-multiconf.xml");
++        IvyResolve res = new IvyResolve();
++        res.setProject(project);
++        res.execute();
++
++        publish.setPubrevision("1.2");
++        publish.setResolver("1");
++        publish.setHaltonmissing(true);
++        try {
++            publish.execute();
++            fail("publish with haltonmissing and a missing artifact should raise an exception");
++        } catch (BuildException ex) {
++            assertTrue(ex.getMessage().indexOf("missing") != -1);
++            assertTrue(ex.getMessage().indexOf("resolve-simple.jar") != -1);
++            // should have do the ivy delivering
++            assertTrue(new File("build/test/publish/ivy-1.2.xml").exists());
++            
++            // should not have published the files with "1" resolver
++            assertFalse(new File("test/repositories/1/apache/resolve-simple/ivys/ivy-1.2.xml").exists());
++            assertFalse(new File("test/repositories/1/apache/resolve-simple/jars/resolve-simple-1.2.jar").exists());
++        }
++    }
++
++    public void testHaltOnMissing2() throws Exception {
++        project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-publish-multi.xml");
++        IvyResolve res = new IvyResolve();
++        res.setProject(project);
++        res.execute();
++
++        // in this test case one artifact is available, and the other one is missing
++        // since we use a transactional resolver, no file should be published at all 
++        File art = new File("build/test/publish/multi1-1.2.jar");
++        FileUtil.copy(new File("test/repositories/1/org1/mod1.1/jars/mod1.1-1.0.jar"), art, null);
++        publish.setPubrevision("1.2");
++        publish.setResolver("transactional");
++        publish.setHaltonmissing(true);
++        try {
++            publish.execute();
++            fail("publish with haltonmissing and a missing artifact should raise an exception");
++        } catch (BuildException ex) {
++            assertTrue(ex.getMessage().indexOf("missing") != -1);
++            assertTrue(ex.getMessage().indexOf("multi2.jar") != -1);
++
++            // should have do the ivy delivering
++            assertTrue(new File("build/test/publish/ivy-1.2.xml").exists());
++
++            // should not have published the files with "transactional" resolver
++            assertFalse(new File("build/test/transactional/apache/multi/1.2").exists());
++        }
++    }
++
+     public void testPublishNotAllConfigs() throws Exception {
+         project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-multiconf.xml");
+         IvyResolve res = new IvyResolve();
+diff --git a/test/repositories/ivysettings.xml b/test/repositories/ivysettings.xml
+index 96a7e5381..c26e39f50 100644
+--- a/test/repositories/ivysettings.xml
++++ b/test/repositories/ivysettings.xml
+@@ -39,5 +39,9 @@
+ 			<ivy pattern="build/test/install/[organisation]/[module]/[artifact]-[revision].[ext]"/>
+ 			<artifact pattern="build/test/install/[organisation]/[module]/[artifact]-[revision].[ext]"/>
+ 		</filesystem>
++		<filesystem name="transactional">
++			<ivy pattern="build/test/transactional/[organisation]/[module]/[revision]/[artifact]-[revision].[ext]"/>
++			<artifact pattern="build/test/transactional/[organisation]/[module]/[revision]/[artifact]-[revision].[ext]"/>
++		</filesystem>
+ 	</resolvers>
+ </ivysettings>

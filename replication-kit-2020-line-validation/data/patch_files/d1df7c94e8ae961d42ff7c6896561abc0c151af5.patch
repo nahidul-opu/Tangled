@@ -1,0 +1,116 @@
+From d1df7c94e8ae961d42ff7c6896561abc0c151af5 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 28 Jul 2008 17:33:12 +0000
+Subject: [PATCH] FIX: Cache can't distinguish artifacts with classifiers
+ (IVY-803) (thanks to James P. White)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@680417 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 ++
+ .../cache/DefaultRepositoryCacheManager.java  |  2 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 29 ++++++++++++++-----
+ 3 files changed, 24 insertions(+), 9 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 101deeba6..957b9b19f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -66,6 +66,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Johan Stuyts
+ 	Jason Trump
+ 	Tjeerd Verhagen
++	James P. White
+ 	John Williams
+ 	Patrick Woodworth
+ 	Jaroslaw Wypychowski
+@@ -99,6 +100,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ - IMPROVEMENT: Check branch consistency during resolve (IVY-858)
+ 
++- FIX: Cache can't distinguish artifacts with classifiers (IVY-803) (thanks to James P. White)
+ - FIX: Reports showing double dependencies in certain cases (IVY-578)
+ - FIX: Dynamic revision resolve does not throw error when configuration is missing (IVY-861)
+ - FIX: Referenced resolver not found in macro (IVY-860)
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index 7e44fc6d8..ee01a0a7e 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -60,7 +60,7 @@
+ 
+ public class DefaultRepositoryCacheManager implements RepositoryCacheManager, IvySettingsAware {
+     private static final String DEFAULT_ARTIFACT_PATTERN =
+-        "[organisation]/[module](/[branch])/[type]s/[artifact]-[revision](.[ext])";
++        "[organisation]/[module](/[branch])/[type]s/[artifact]-[revision](-[classifier])(.[ext])";
+ 
+     private static final String DEFAULT_DATA_FILE_PATTERN = 
+         "[organisation]/[module](/[branch])/ivydata-[revision].properties";
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index d93b035df..ef0ad9f5f 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -21,6 +21,7 @@
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
++import java.util.Collections;
+ import java.util.Date;
+ import java.util.HashMap;
+ import java.util.HashSet;
+@@ -3686,8 +3687,11 @@ public void testResolveMaven2Classifiers() throws Exception {
+         // dependencies
+         assertTrue(getIvyFileInCache(
+             ModuleRevisionId.newInstance("org.apache", "test-classified", "1.0")).exists());
+-        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test-classified",
+-            "1.0", "test-classified", "jar", "jar").exists());
++        
++        Map cmap = new HashMap();
++        cmap.put("classifier", "asl");
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test-classified", null /* branch */
++                    , "1.0", "test-classified", "jar", "jar", cmap).exists());
+     }
+ 
+     public void testResolveMaven2GetSources() throws Exception {
+@@ -3704,8 +3708,8 @@ public void testResolveMaven2GetSources() throws Exception {
+         File jarFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources",
+             "1.0", "test-sources", "jar", "jar");
+         assertTrue(jarFileInCache.exists());
+-        File sourceFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources",
+-            "1.0", "test-sources", "source", "jar");
++        File sourceFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources", null,
++            "1.0", "test-sources", "source", "jar", Collections.singletonMap("classifier", "sources"));
+         assertTrue(sourceFileInCache.exists());
+         assertTrue(jarFileInCache.length() != sourceFileInCache.length());
+     }
+@@ -3724,12 +3728,12 @@ public void testResolveMaven2GetSourcesAndJavadocAuto() throws Exception {
+         File jarFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources",
+             "1.0", "test-sources", "jar", "jar");
+         assertTrue(jarFileInCache.exists());
+-        File sourceFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources",
+-            "1.0", "test-sources", "source", "jar");
++        File sourceFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources", null,
++            "1.0", "test-sources", "source", "jar", Collections.singletonMap("classifier", "sources"));
+         assertTrue(sourceFileInCache.exists());
+         assertTrue(jarFileInCache.length() != sourceFileInCache.length());
+-        File javadocFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources",
+-            "1.0", "test-sources", "javadoc", "jar");
++        File javadocFileInCache = getArchiveFileInCache(ivy, "org.apache", "test-sources", null,
++            "1.0", "test-sources", "javadoc", "jar", Collections.singletonMap("classifier", "javadoc"));
+         assertTrue(javadocFileInCache.exists());
+         assertTrue(jarFileInCache.length() != javadocFileInCache.length());
+     }
+@@ -4375,6 +4379,15 @@ private File getArchiveFileInCache(String organisation, String module, String re
+             String artifactName, String type, String ext) {
+         return getArchiveFileInCache(ivy, organisation, module, revision, artifactName, type, ext);
+     }
++    
++    private File getArchiveFileInCache(Ivy ivy, String organisation, String module, String branch, String revision,
++            String artifactName, String type, String ext, Map extraAttrs) {
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance(organisation, module,
++            branch, revision);
++        DefaultArtifact artifact = new DefaultArtifact(mrid, new Date(), artifactName, type, ext, extraAttrs);
++        return TestHelper.getRepositoryCacheManager(ivy, mrid).getArchiveFileInCache(artifact);
++    }
++        
+ 
+     private File getArchiveFileInCache(Ivy ivy, String organisation, String module, String revision,
+             String artifactName, String type, String ext) {

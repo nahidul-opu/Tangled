@@ -1,0 +1,133 @@
+From 9191fbd202cd76d03fc23057c5a16cac547d90df Mon Sep 17 00:00:00 2001
+From: Ryan Blue <blue@apache.org>
+Date: Thu, 4 Jan 2018 10:32:31 -0800
+Subject: [PATCH] PARQUET-1141: Fix field ID handling
+
+There are two places where field IDs are dropped:
+* Map and list type builders were not passing IDs when building
+* ParquetMetadataConverter was not writing field IDs or reading the ID for root schemas
+
+Author: Ryan Blue <blue@apache.org>
+
+Closes #428 from rdblue/PARQUET-1141-fix-column-ids and squashes the following commits:
+
+475a90ed7 [Ryan Blue] PARQUET-1141: Fix tests by adding Type$ID#getId.
+e110c00a7 [Ryan Blue] PARQUET-1141: Fix IDs in ParquetMetadataConverter.
+a63066a8c [Ryan Blue] PARQUET-1141: Fix IDs for lists and maps.
+---
+ .../java/org/apache/parquet/schema/Type.java   | 10 ++++++++++
+ .../java/org/apache/parquet/schema/Types.java  | 18 +++++++++++++++---
+ .../converter/ParquetMetadataConverter.java    | 12 ++++++++++++
+ 3 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/parquet-column/src/main/java/org/apache/parquet/schema/Type.java b/parquet-column/src/main/java/org/apache/parquet/schema/Type.java
+index 99222f96c3..176b9a6e27 100644
+--- a/parquet-column/src/main/java/org/apache/parquet/schema/Type.java
++++ b/parquet-column/src/main/java/org/apache/parquet/schema/Type.java
+@@ -20,6 +20,7 @@
+ 
+ import static org.apache.parquet.Preconditions.checkNotNull;
+ 
++import java.io.Serializable;
+ import java.util.List;
+ 
+ import org.apache.parquet.io.InvalidRecordException;
+@@ -45,6 +46,15 @@ public ID(int id) {
+       this.id = id;
+     }
+ 
++    /**
++     * For bean serialization, used by Cascading 3.
++     * @deprecated use {@link #intValue()} instead.
++     */
++    @Deprecated
++    public int getId() {
++      return id;
++    }
++
+     public int intValue() {
+       return id;
+     }
+diff --git a/parquet-column/src/main/java/org/apache/parquet/schema/Types.java b/parquet-column/src/main/java/org/apache/parquet/schema/Types.java
+index 5526cfc660..e81daaea9a 100644
+--- a/parquet-column/src/main/java/org/apache/parquet/schema/Types.java
++++ b/parquet-column/src/main/java/org/apache/parquet/schema/Types.java
+@@ -1030,12 +1030,18 @@ protected Type build(String name) {
+       if (keyType == null) {
+         keyType = STRING_KEY;
+       }
++
++      GroupBuilder<GroupType> builder = buildGroup(repetition).as(OriginalType.MAP);
++      if (id != null) {
++        builder.id(id.intValue());
++      }
++
+       if (valueType != null) {
+-        return buildGroup(repetition).as(OriginalType.MAP)
++        return builder
+             .repeatedGroup().addFields(keyType, valueType).named("map")
+             .named(name);
+       } else {
+-        return buildGroup(repetition).as(OriginalType.MAP)
++        return builder
+             .repeatedGroup().addFields(keyType).named("map")
+             .named(name);
+       }
+@@ -1170,7 +1176,13 @@ protected Type build(String name) {
+       Preconditions.checkState(originalType == null,
+           "LIST is already the logical type and can't be changed");
+       Preconditions.checkNotNull(elementType, "List element type");
+-      return buildGroup(repetition).as(OriginalType.LIST)
++
++      GroupBuilder<GroupType> builder = buildGroup(repetition).as(OriginalType.LIST);
++      if (id != null) {
++        builder.id(id.intValue());
++      }
++
++      return builder
+           .repeatedGroup().addFields(elementType).named("list")
+           .named(name);
+     }
+diff --git a/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java b/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java
+index bba7e62e6d..163056c4dc 100644
+--- a/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java
++++ b/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java
+@@ -162,12 +162,18 @@ public void visit(PrimitiveType primitiveType) {
+         if (primitiveType.getTypeLength() > 0) {
+           element.setType_length(primitiveType.getTypeLength());
+         }
++        if (primitiveType.getId() != null) {
++          element.setField_id(primitiveType.getId().intValue());
++        }
+         result.add(element);
+       }
+ 
+       @Override
+       public void visit(MessageType messageType) {
+         SchemaElement element = new SchemaElement(messageType.getName());
++        if (messageType.getId() != null) {
++          element.setField_id(messageType.getId().intValue());
++        }
+         visitChildren(result, messageType.asGroupType(), element);
+       }
+ 
+@@ -178,6 +184,9 @@ public void visit(GroupType groupType) {
+         if (groupType.getOriginalType() != null) {
+           element.setConverted_type(getConvertedType(groupType.getOriginalType()));
+         }
++        if (groupType.getId() != null) {
++          element.setField_id(groupType.getId().intValue());
++        }
+         visitChildren(result, groupType, element);
+       }
+ 
+@@ -881,6 +890,9 @@ MessageType fromParquetSchema(List<SchemaElement> schema) {
+     Iterator<SchemaElement> iterator = schema.iterator();
+     SchemaElement root = iterator.next();
+     Types.MessageTypeBuilder builder = Types.buildMessage();
++    if (root.isSetField_id()) {
++      builder.id(root.field_id);
++    }
+     buildChildren(builder, iterator, root.getNum_children());
+     return builder.named(root.name);
+   }

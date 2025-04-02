@@ -1,0 +1,188 @@
+From b7f625aea3e7c19b4b66351be582dbab846022d7 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 21 May 2007 21:36:49 +0000
+Subject: [PATCH] FIX: ${revision} property not recognized in poms (IVY-512)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@540308 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/m2/PomModuleDescriptorParser.java  |  1 +
+ .../apache/ivy/core/resolve/ResolveTest.java  | 18 +++++++++
+ .../m2/PomModuleDescriptorParserTest.java     | 10 +++++
+ .../ivy/plugins/parser/m2/test-version.pom    | 38 +++++++++++++++++++
+ .../test-version/1.0/test-version-1.0.jar     |  1 +
+ .../test-version/1.0/test-version-1.0.pom     | 38 +++++++++++++++++++
+ 7 files changed, 107 insertions(+)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/m2/test-version.pom
+ create mode 100644 test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.jar
+ create mode 100644 test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.pom
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 1059412f6..5ba69e1e8 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -52,6 +52,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Allow "main" parameters to be passed directly (instead of using -args flag) (IVY-480) (thanks to Archie Cobbs)
+ - IMPROVEMENT: Remove @author tags (thanks to Stephane Bailliez)
+ 
++- FIX: ${revision} property not recognized in poms (IVY-512)
+ - FIX: Bug on handling dependency artifacts when a module configuration is specified (IVY-507)
+ - FIX: Configure fails when having httpclient in classpath without commons-logging (IVY-502)
+ - FIX: packaging data not parsed in maven 2 pom (IVY-500) (thanks to Jeffrey Blattman)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index c757df06b..789a61901 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -139,6 +139,7 @@ private void fillMrid() throws SAXException {
+             _properties.put("project.artifactId", _module);
+             _properties.put("project.version", _revision);
+             _properties.put("pom.version", _revision);
++            _properties.put("version", _revision);
+             _md.setModuleRevisionId(mrid);
+             if (_type == null) {
+                 _type = _ext = "jar";
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 28af77950..c4bb8e6b5 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -2536,6 +2536,24 @@ public void testResolveMaven2Classifiers() throws Exception {
+         assertTrue(TestHelper.getArchiveFileInCache(ivy, _cache, "org.apache", "test-classified", "1.0", "test-classified", "jar", "jar").exists());
+     }
+     
++    public void testResolveMaven2WithVersionProperty() throws Exception {
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml"));
++        ResolveReport report = ivy.resolve(new File("test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.pom").toURL(),
++                getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org.apache", "test-version", "1.0");
++        assertEquals(mrid, md.getModuleRevisionId());
++        
++        assertTrue(ivy.getCacheManager(_cache).getResolvedIvyFileInCache(mrid).exists());
++        
++        // dependencies
++        assertTrue(ivy.getCacheManager(_cache).getIvyFileInCache(ModuleRevisionId.newInstance("org.apache", "test-classifier", "1.0")).exists());
++        assertTrue(TestHelper.getArchiveFileInCache(ivy, _cache, "org.apache", "test-classifier", "1.0", "test-classifier", "jar", "jar").exists());
++    }
++    
+     public void testNamespaceMapping() throws Exception {
+         // the dependency is in another namespace
+         Ivy ivy = new Ivy();
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index 3642282d6..502523f02 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -140,6 +140,16 @@ public void testDependenciesWithClassifier() throws Exception {
+         assertEquals(extraAtt, dds[0].getAllDependencyArtifacts()[0].getExtraAttributes());
+     }
+     
++    public void testWithVersionProperty() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(new IvySettings(), getClass().getResource("test-version.pom"), false);
++        assertNotNull(md);
++        
++        DependencyDescriptor[] dds = md.getDependencies();
++        assertNotNull(dds);
++        assertEquals(1, dds.length);
++        assertEquals(ModuleRevisionId.newInstance("org.apache", "test-other", "1.0"), dds[0].getDependencyRevisionId());
++    }
++    
+     // IVY-392
+     public void testDependenciesWithProfile() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(new IvySettings(), getClass().getResource("test-dependencies-with-profile.pom"), false);
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-version.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-version.pom
+new file mode 100644
+index 000000000..f456ca41e
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-version.pom
+@@ -0,0 +1,38 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test-version</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.0</version>
++  <url>http://incubator.apache.org/ivy</url>
++  <organization>
++    <name>Apache</name>
++    <url>http://www.apache.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test-other</artifactId>
++      <version>${version}</version>
++    </dependency>
++  </dependencies>
++</project>
+diff --git a/test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.jar b/test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.pom b/test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.pom
+new file mode 100644
+index 000000000..ae26494c0
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-version/1.0/test-version-1.0.pom
+@@ -0,0 +1,38 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test-version</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.0</version>
++  <url>http://incubator.apache.org/ivy</url>
++  <organization>
++    <name>Apache</name>
++    <url>http://www.apache.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test-classifier</artifactId>
++      <version>${version}</version>
++    </dependency>
++  </dependencies>
++</project>

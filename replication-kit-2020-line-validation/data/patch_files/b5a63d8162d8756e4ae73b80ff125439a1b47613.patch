@@ -1,0 +1,105 @@
+From b5a63d8162d8756e4ae73b80ff125439a1b47613 Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <majakabiljo@fb.com>
+Date: Fri, 17 Jun 2016 12:23:09 -0700
+Subject: [PATCH] GIRAPH-1075: UnsafeByteArrayOutputStream silently writes long
+ UTFs incorrectly
+
+Summary: UnsafeByteArrayOutputStream.writeUTF was copied from DataOutputStream, but part which checks the length was missed out. When we try to write long strings they serialize without an issue, but when we try to deserialize them we get a wrong value back and don't read the same number of bytes. Make it fail like DataOutputStream instead.
+
+Test Plan: Added a test
+
+Differential Revision: https://reviews.facebook.net/D59817
+---
+ .../utils/UnsafeByteArrayOutputStream.java    |  5 +++
+ .../TestUnsafeByteArrayOutputStream.java      | 37 +++++++++++++++----
+ 2 files changed, 35 insertions(+), 7 deletions(-)
+
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeByteArrayOutputStream.java b/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeByteArrayOutputStream.java
+index 87365903b..3c1bbba8e 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeByteArrayOutputStream.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeByteArrayOutputStream.java
+@@ -19,6 +19,7 @@
+ 
+ import java.io.IOException;
+ import java.io.OutputStream;
++import java.io.UTFDataFormatException;
+ import java.lang.reflect.Field;
+ import java.util.Arrays;
+ 
+@@ -289,6 +290,10 @@ public void writeUTF(String s) throws IOException {
+       }
+     }
+ 
++    if (utflen > 65535)
++      throw new UTFDataFormatException(
++          "encoded string too long: " + utflen + " bytes");
++
+     ensureSize(utflen + SIZE_OF_SHORT);
+     writeShort(utflen);
+ 
+diff --git a/giraph-core/src/test/java/org/apache/giraph/utils/TestUnsafeByteArrayOutputStream.java b/giraph-core/src/test/java/org/apache/giraph/utils/TestUnsafeByteArrayOutputStream.java
+index 2017f1f03..e821cbca9 100644
+--- a/giraph-core/src/test/java/org/apache/giraph/utils/TestUnsafeByteArrayOutputStream.java
++++ b/giraph-core/src/test/java/org/apache/giraph/utils/TestUnsafeByteArrayOutputStream.java
+@@ -17,9 +17,11 @@
+  */
+ package org.apache.giraph.utils;
+ 
++import org.junit.Assert;
+ import org.junit.Test;
+ 
+ import java.io.IOException;
++import java.io.UTFDataFormatException;
+ 
+ import static org.junit.Assert.assertEquals;
+ 
+@@ -70,21 +72,42 @@ public void testWriteChars() throws IOException {
+ 
+     @Test
+     public void testWriteUTF() throws IOException {
+-        UnsafeByteArrayOutputStream os = new UnsafeByteArrayOutputStream();
+-        int length = os.getByteArray().length;
+-
+         StringBuilder sb = new StringBuilder();
+-        for (int i = 0; i < length; i++) {
++        for (int i = 0; i < 20; i++) {
+             sb.append("\u06ea");
+         }
+ 
+         String s = sb.toString();
+-        os.writeUTF(s);
+ 
+-        UnsafeByteArrayInputStream is = new UnsafeByteArrayInputStream(os.getByteArray());
++        assertEquals(s, writeAndReadUTF(s));
++    }
+ 
+-        assertEquals(s, is.readUTF());
++    @Test
++    public void testWriteLongUTF() throws IOException {
++        int maxLength = 65535;
++        StringBuilder sb = new StringBuilder();
++        for (int i = 0; i < maxLength; i++) {
++            sb.append("a");
++        }
+ 
++        String s = sb.toString();
++
++        assertEquals(s, writeAndReadUTF(s));
++
++        s = sb.append("a").toString();
++        try {
++            writeAndReadUTF(s);
++            throw new IllegalStateException("Exception expected");
++        } catch (Exception e) {
++            Assert.assertTrue(e instanceof UTFDataFormatException);
++        }
++    }
++
++    private String writeAndReadUTF(String s) throws IOException {
++        UnsafeByteArrayOutputStream os = new UnsafeByteArrayOutputStream();
++        os.writeUTF(s);
+         os.close();
++        UnsafeByteArrayInputStream is = new UnsafeByteArrayInputStream(os.getByteArray());
++        return is.readUTF();
+     }
+ }

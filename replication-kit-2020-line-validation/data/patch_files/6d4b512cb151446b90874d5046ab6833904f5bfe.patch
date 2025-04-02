@@ -1,0 +1,125 @@
+From 6d4b512cb151446b90874d5046ab6833904f5bfe Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sun, 18 Jul 2010 20:56:30 +0000
+Subject: [PATCH] FIX: XmlModuleDescriptorWriter does not write the transitive
+ attribute (IVY-1207) (thanks to Abel Muino)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@965284 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../parser/xml/XmlModuleDescriptorWriter.java |  3 ++
+ .../xml/XmlModuleDescriptorWriterTest.java    | 53 +++++++++++++++++++
+ 3 files changed, 58 insertions(+)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index a55dca6b6..d19556653 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -69,6 +69,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Sakari Maaranen
+ 	Jan Materne
+ 	Markus M. May
++	Abel Muino
+ 	J. Lewis Muir
+ 	Stephen Nesbitt
+ 	Joshua Nichols
+@@ -111,6 +112,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - IMPROVEMENT: ivy:makepom now accepts a list of configurations to include (IVY-1005) (thanks to Jesper Pedersen)
+ 
++- FIX: XmlModuleDescriptorWriter does not write the transitive attribute (IVY-1207) (thanks to Abel Muino)
+ - FIX: Ivy info/extends/extendsType attribute is misspelled by XmlModuleDescriptorWriter (IVY-1203) (thanks to Jason Trump)
+ 
+    2.2.0-rc1
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+index 720fc3e5f..691615cb1 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+@@ -425,6 +425,9 @@ protected static void printConfiguration(Configuration conf, PrintWriter out) {
+             }
+             out.print("\"");
+         }
++        if (!conf.isTransitive()) {
++            out.println(" transitive=\"false\"");
++        }
+         if (conf.getDeprecated() != null) {
+             out.print(" deprecated=\"" + XMLHelper.escape(conf.getDeprecated()) + "\"");
+         }
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+index 6b5e48a19..f43234418 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+@@ -22,13 +22,17 @@
+ import java.io.FileReader;
+ import java.io.IOException;
+ import java.io.InputStreamReader;
++import java.util.Date;
+ import java.util.GregorianCalendar;
+ 
+ import junit.framework.TestCase;
+ 
+ import org.apache.ivy.Ivy;
++import org.apache.ivy.core.module.descriptor.Configuration;
+ import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
++import org.apache.ivy.core.module.descriptor.Configuration.Visibility;
++import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.util.FileUtil;
+@@ -121,6 +125,55 @@ public void testExtends() throws Exception {
+ 		assertEquals(expected, wrote);
+ 	}
+ 
++    /**
++     * Test that the transitive attribute is written for non-transitive configurations.
++     * 
++     * <code><conf ... transitive="false" ... /></code>
++     * 
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1207">IVY-1207</a>
++     * @throws Exception
++     */
++    public void testTransitiveAttributeForNonTransitiveConfs() throws Exception {
++        // Given a ModuleDescriptor with a non-transitive configuration
++        DefaultModuleDescriptor md = new DefaultModuleDescriptor(new ModuleRevisionId(new ModuleId(
++                "myorg", "myname"), "1.0"), "integration", new Date());
++        Configuration conf = new Configuration("conf", Visibility.PUBLIC, "desc", null, false, null);
++        md.addConfiguration(conf);
++
++        // When the ModuleDescriptor is written
++        XmlModuleDescriptorWriter.write(md, LICENSE, dest);
++
++        // Then the transitive attribute must be set to false
++        String output = FileUtil.readEntirely(dest);
++        String writtenConf = output.substring(output.indexOf("<configurations>") + 16, output.indexOf("</configurations>")).trim();
++        assertTrue("Transitive attribute not set to false: " + writtenConf, writtenConf.indexOf("transitive=\"false\"") >= 0);
++    }
++
++    /**
++     * Test that the transitive attribute is not written when the configuration IS transitive.
++     * 
++     * This is the default and writing it will only add noise and cause a deviation from the known
++     * behavior (before fixing IVY-1207).
++     * 
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1207">IVY-1207</a>
++     * @throws Exception
++     */
++    public void testTransitiveAttributeNotWrittenForTransitiveConfs() throws Exception {
++        // Given a ModuleDescriptor with a transitive configuration
++        DefaultModuleDescriptor md = new DefaultModuleDescriptor(new ModuleRevisionId(new ModuleId(
++                "myorg", "myname"), "1.0"), "integration", new Date());
++        Configuration conf = new Configuration("conf", Visibility.PUBLIC, "desc", null, true, null);
++        md.addConfiguration(conf);
++
++        // When the ModuleDescriptor is written
++        XmlModuleDescriptorWriter.write(md, LICENSE, dest);
++
++        // Then the transitive attribute must NOT be written
++        String output = FileUtil.readEntirely(dest);
++        String writtenConf = output.substring(output.indexOf("<configurations>") + 16, output.indexOf("</configurations>")).trim();
++        assertFalse("Transitive attribute set: " + writtenConf, writtenConf.indexOf("transitive=") >= 0);
++    }
++
+     private String readEntirely(String resource) throws IOException {
+         return FileUtil.readEntirely(new BufferedReader(new InputStreamReader(
+                 XmlModuleDescriptorWriterTest.class.getResource(resource).openStream())));

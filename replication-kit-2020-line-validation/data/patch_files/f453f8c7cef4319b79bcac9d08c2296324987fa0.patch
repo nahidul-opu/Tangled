@@ -1,0 +1,144 @@
+From f453f8c7cef4319b79bcac9d08c2296324987fa0 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 30 Mar 2006 09:48:52 +0000
+Subject: [PATCH] FIX: configuration http url include doesn't work with commons
+ http client (IVY-203)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484252 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../jayasoft/ivy/url/HttpClientHandler.java   | 35 ++++++++-----------
+ .../xml/XmlIvyConfigurationParserTest.java    | 24 +++++++++++++
+ 3 files changed, 40 insertions(+), 20 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f2328d663..c342891de 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,3 +1,4 @@
++- FIX: configuration http url include doesn't work with commons http client (IVY-203)
+ - FIX: problem with conflict resolution in transitive dependencies (IVY-199)
+ - FIX: pb with force when it comes after a conflict has already been solved (IVY-193)
+ - FIX: POM files that reference to the parent artifact download fails (IVY-195) (thanks to Tat Leung)
+diff --git a/src/java/fr/jayasoft/ivy/url/HttpClientHandler.java b/src/java/fr/jayasoft/ivy/url/HttpClientHandler.java
+index ecbf6a9ad..36d7f9f32 100644
+--- a/src/java/fr/jayasoft/ivy/url/HttpClientHandler.java
++++ b/src/java/fr/jayasoft/ivy/url/HttpClientHandler.java
+@@ -21,7 +21,6 @@
+ import org.apache.commons.httpclient.HttpMethodBase;
+ import org.apache.commons.httpclient.HttpStatus;
+ import org.apache.commons.httpclient.UsernamePasswordCredentials;
+-import org.apache.commons.httpclient.cookie.CookiePolicy;
+ import org.apache.commons.httpclient.methods.GetMethod;
+ import org.apache.commons.httpclient.methods.HeadMethod;
+ 
+@@ -48,7 +47,6 @@ public class HttpClientHandler extends AbstractURLHandler {
+     private String _proxyUserName = null;
+     private String _proxyPasswd = null;
+     
+-    private HttpClient _client;
+     private HttpClientHelper _httpClientHelper;
+     
+     public HttpClientHandler() {
+@@ -95,7 +93,6 @@ private void configureProxy() {
+     
+     public InputStream openStream(URL url) throws IOException {
+         GetMethod get = doGet(url);
+-        final InputStream is = get.getResponseBodyAsStream();
+         return new GETInputStream(get);
+     }
+     
+@@ -204,24 +201,22 @@ private HeadMethod doHead(URL url, int timeout) throws IOException, HttpExceptio
+     }
+ 
+     private HttpClient getClient() {
+-        if(_client == null){
+-        	_client = new HttpClient();
+-	        if (useProxy()) {
+-	            _client.getHostConfiguration().setProxy(_proxyHost, _proxyPort);
+-	            if (useProxyAuthentication()) {
+-	                _client.getState().setProxyCredentials(_proxyRealm, _proxyHost,
+-	                    new UsernamePasswordCredentials(_proxyUserName, _proxyPasswd));
+-	            }
+-	        }
+-	        if (useAuthentication()) {
+-		        _client.getState().setCredentials(
+-		            _realm,
+-		            _host,
+-		            new UsernamePasswordCredentials(_userName, _passwd)
+-		        );
+-	        }
++        HttpClient client = new HttpClient();
++        if (useProxy()) {
++            client.getHostConfiguration().setProxy(_proxyHost, _proxyPort);
++            if (useProxyAuthentication()) {
++                client.getState().setProxyCredentials(_proxyRealm, _proxyHost,
++                    new UsernamePasswordCredentials(_proxyUserName, _proxyPasswd));
++            }
++        }
++        if (useAuthentication()) {
++	        client.getState().setCredentials(
++	            _realm,
++	            _host,
++	            new UsernamePasswordCredentials(_userName, _passwd)
++	        );
+         }
+-        return _client;
++        return client;
+     }
+ 
+     private boolean useProxy() {
+diff --git a/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java b/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java
+index 4c6d1583b..319e1df38 100644
+--- a/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java
++++ b/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java
+@@ -6,6 +6,7 @@
+ package fr.jayasoft.ivy.xml;
+ 
+ import java.io.File;
++import java.net.URL;
+ import java.util.List;
+ 
+ import junit.framework.TestCase;
+@@ -18,7 +19,11 @@
+ import fr.jayasoft.ivy.parser.ModuleDescriptorParserRegistry;
+ import fr.jayasoft.ivy.resolver.ChainResolver;
+ import fr.jayasoft.ivy.resolver.FileSystemResolver;
++import fr.jayasoft.ivy.resolver.IvyRepResolver;
+ import fr.jayasoft.ivy.resolver.MockResolver;
++import fr.jayasoft.ivy.url.URLHandler;
++import fr.jayasoft.ivy.url.URLHandlerDispatcher;
++import fr.jayasoft.ivy.url.URLHandlerRegistry;
+ 
+ /**
+  * TODO write javadoc
+@@ -217,10 +222,29 @@ public void testInclude() throws Exception {
+         assertEquals("included/myrep/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]", ivyPatterns.get(0));
+     }
+     
++    public void testIncludeHttpUrl() throws Exception {
++        configureURLHandler();
++        Ivy ivy = new Ivy();
++        XmlIvyConfigurationParser parser = new XmlIvyConfigurationParser(ivy);
++        parser.parse(new URL("http://www.jayasoft.org/misc/ivy/test/ivyconf-include-http-url.xml"));
++        
++        DependencyResolver resolver = ivy.getResolver("ivyrep");
++        assertNotNull(resolver);
++        assertTrue(resolver instanceof IvyRepResolver);
++    }
++    
+     public void testParser() throws Exception {
+         Ivy ivy = new Ivy();
+         XmlIvyConfigurationParser parser = new XmlIvyConfigurationParser(ivy);
+         parser.parse(XmlIvyConfigurationParserTest.class.getResource("ivyconf-parser.xml"));
+         assertEquals("fr.jayasoft.ivy.parser.ModuleDescriptorParserRegistryTest$MyParser", ModuleDescriptorParserRegistry.getInstance().getParsers()[0].getClass().getName());
+     }
++    
++    private void configureURLHandler() {
++        URLHandlerDispatcher dispatcher = new URLHandlerDispatcher();
++        URLHandler httpHandler = URLHandlerRegistry.getHttp(null, null, null, null);
++        dispatcher.setDownloader("http", httpHandler);
++        dispatcher.setDownloader("https", httpHandler);
++        URLHandlerRegistry.setDefault(dispatcher);
++    }
+ }

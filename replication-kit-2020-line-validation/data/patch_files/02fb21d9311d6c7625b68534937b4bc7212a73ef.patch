@@ -1,0 +1,57 @@
+From 02fb21d9311d6c7625b68534937b4bc7212a73ef Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <majakabiljo@maja-mbp.thefacebook.com>
+Date: Wed, 6 Feb 2013 15:35:14 -0800
+Subject: [PATCH] GIRAPH-506: Concurrency issue - response can arrive before
+ request is added to the outstanding map (majakabiljo)
+
+---
+ CHANGELOG                                                 | 2 ++
+ .../java/org/apache/giraph/comm/netty/NettyClient.java    | 8 ++++++--
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 405d72922..05bcf91d5 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++  GIRAPH-506: Concurrency issue - response can arrive before request is added to the outstanding map (majakabiljo)
++
+   GIRAPH-501: WorkerObserver (nitay)
+ 
+   GIRAPH-502: In PageRankBenchmark, remove unneeded handling of -t 2 (ekoontz)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+index 76d38e2cb..89ef87fea 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+@@ -644,8 +644,6 @@ public void sendWritableRequest(Integer destTaskId,
+         addressRequestIdGenerator.getNextRequestId(remoteServer));
+       ClientRequestId clientRequestId =
+         new ClientRequestId(destTaskId, request.getRequestId());
+-      ChannelFuture writeFuture = channel.write(request);
+-      newRequestInfo.setWriteFuture(writeFuture);
+       RequestInfo oldRequestInfo = clientRequestIdRequestInfoMap.putIfAbsent(
+         clientRequestId, newRequestInfo);
+       if (oldRequestInfo != null) {
+@@ -654,6 +652,8 @@ public void sendWritableRequest(Integer destTaskId,
+           "request info of " + oldRequestInfo);
+       }
+     }
++    ChannelFuture writeFuture = channel.write(request);
++    newRequestInfo.setWriteFuture(writeFuture);
+ 
+     if (limitNumberOfOpenRequests &&
+         clientRequestIdRequestInfoMap.size() > maxNumberOfOpenRequests) {
+@@ -739,6 +739,10 @@ private void checkRequestsForProblems() {
+         clientRequestIdRequestInfoMap.entrySet()) {
+       RequestInfo requestInfo = entry.getValue();
+       ChannelFuture writeFuture = requestInfo.getWriteFuture();
++      // Request wasn't sent yet
++      if (writeFuture == null) {
++        continue;
++      }
+       // If not connected anymore, request failed, or the request is taking
+       // too long, re-establish and resend
+       if (!writeFuture.getChannel().isConnected() ||

@@ -1,0 +1,98 @@
+From 14097c64d243794610788d3ebb2e81ba8fd867c0 Mon Sep 17 00:00:00 2001
+From: Ryan Blue <blue@apache.org>
+Date: Fri, 4 Dec 2015 11:47:38 -0800
+Subject: [PATCH] PARQUET-387: Improve NPE message when avro arrays contain
+ null.
+
+Previously, the NPE had no error message but the Avro support accepts
+schemas that have nullable array elements.
+
+Author: Ryan Blue <blue@apache.org>
+
+Closes #291 from rdblue/PARQUET-387-fix-npe-message and squashes the following commits:
+
+39d3c83 [Ryan Blue] PARQUET-387: Update test case to verify help message.
+d6b6bd8 [Ryan Blue] PARQUET-387: Improve NPE message when avro arrays contain null.
+---
+ .../apache/parquet/avro/AvroWriteSupport.java | 38 +++++++++++++++++--
+ .../avro/TestReadWriteOldListBehavior.java    |  4 +-
+ 2 files changed, 37 insertions(+), 5 deletions(-)
+
+diff --git a/parquet-avro/src/main/java/org/apache/parquet/avro/AvroWriteSupport.java b/parquet-avro/src/main/java/org/apache/parquet/avro/AvroWriteSupport.java
+index 35e3924148..48fc01ebf2 100644
+--- a/parquet-avro/src/main/java/org/apache/parquet/avro/AvroWriteSupport.java
++++ b/parquet-avro/src/main/java/org/apache/parquet/avro/AvroWriteSupport.java
+@@ -452,8 +452,24 @@ public void writeCollection(GroupType schema, Schema avroSchema,
+                                 Collection<?> array) {
+       if (array.size() > 0) {
+         recordConsumer.startField(OLD_LIST_REPEATED_NAME, 0);
+-        for (Object elt : array) {
+-          writeValue(schema.getType(0), avroSchema.getElementType(), elt);
++        try {
++          for (Object elt : array) {
++            writeValue(schema.getType(0), avroSchema.getElementType(), elt);
++          }
++        } catch (NullPointerException e) {
++          // find the null element and throw a better error message
++          int i = 0;
++          for (Object elt : array) {
++            if (elt == null) {
++              throw new NullPointerException(
++                  "Array contains a null element at " + i + "\n" +
++                  "Set parquet.avro.write-old-list-structure=false to turn " +
++                  "on support for arrays with null elements.");
++            }
++            i += 1;
++          }
++          // no element was null, throw the original exception
++          throw e;
+         }
+         recordConsumer.endField(OLD_LIST_REPEATED_NAME, 0);
+       }
+@@ -464,8 +480,22 @@ protected void writeObjectArray(GroupType type, Schema schema,
+                                     Object[] array) {
+       if (array.length > 0) {
+         recordConsumer.startField(OLD_LIST_REPEATED_NAME, 0);
+-        for (Object element : array) {
+-          writeValue(type.getType(0), schema.getElementType(), element);
++        try {
++          for (Object element : array) {
++            writeValue(type.getType(0), schema.getElementType(), element);
++          }
++        } catch (NullPointerException e) {
++          // find the null element and throw a better error message
++          for (int i = 0; i < array.length; i += 1) {
++            if (array[i] == null) {
++              throw new NullPointerException(
++                  "Array contains a null element at " + i + "\n" +
++                  "Set parquet.avro.write-old-list-structure=false to turn " +
++                  "on support for arrays with null elements.");
++            }
++          }
++          // no element was null, throw the original exception
++          throw e;
+         }
+         recordConsumer.endField(OLD_LIST_REPEATED_NAME, 0);
+       }
+diff --git a/parquet-avro/src/test/java/org/apache/parquet/avro/TestReadWriteOldListBehavior.java b/parquet-avro/src/test/java/org/apache/parquet/avro/TestReadWriteOldListBehavior.java
+index 7c2bc27592..64caacc8b0 100644
+--- a/parquet-avro/src/test/java/org/apache/parquet/avro/TestReadWriteOldListBehavior.java
++++ b/parquet-avro/src/test/java/org/apache/parquet/avro/TestReadWriteOldListBehavior.java
+@@ -43,6 +43,7 @@
+ import org.apache.parquet.io.api.Binary;
+ import org.apache.parquet.io.api.RecordConsumer;
+ import org.apache.parquet.schema.MessageTypeParser;
++import org.junit.Assert;
+ import org.junit.Test;
+ import org.junit.runner.RunWith;
+ import org.junit.runners.Parameterized;
+@@ -347,7 +348,8 @@ public void testArrayWithNullValues() throws Exception {
+       writer.write(record);
+       fail("Should not succeed writing an array with null values");
+     } catch (Exception e) {
+-      // expected
++      Assert.assertTrue("Error message should provide context and help",
++          e.getMessage().contains("parquet.avro.write-old-list-structure"));
+     } finally {
+       writer.close();
+     }

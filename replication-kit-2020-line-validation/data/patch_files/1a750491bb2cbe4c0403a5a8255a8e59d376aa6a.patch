@@ -1,0 +1,113 @@
+From 1a750491bb2cbe4c0403a5a8255a8e59d376aa6a Mon Sep 17 00:00:00 2001
+From: Alessandro Presta <apresta@apache.org>
+Date: Fri, 17 Aug 2012 09:36:02 +0000
+Subject: [PATCH] GIRAPH-303: Regression: cleanup phase happens earlier than it
+ should. (majakabiljo via apresta)
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1374184 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                     |  3 +
+ .../apache/giraph/graph/BspServiceMaster.java | 62 +++++++++++--------
+ 2 files changed, 38 insertions(+), 27 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 473527c9d..679b96bd7 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++  GIRAPH-303: Regression: cleanup phase happens earlier than it
++  should. (majakabiljo via apresta)
++
+   GIRAPH-278: Website still tries to load incubator logo (ekoontz)
+ 
+   GIRAPH-300) Improve netty reliability with retrying failed
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceMaster.java b/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+index d341b1566..3179b28a3 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+@@ -1384,6 +1384,40 @@ private boolean barrierOnWorkerList(String finishedWorkerPath,
+     return true;
+   }
+ 
++  /**
++   * Clean up old superstep data from Zookeeper
++   *
++   * @param removeableSuperstep Supersteo to clean up
++   * @throws InterruptedException
++   */
++  private void cleanUpOldSuperstep(long removeableSuperstep) throws
++      InterruptedException {
++    if (!(getConfiguration().getBoolean(
++        GiraphJob.KEEP_ZOOKEEPER_DATA,
++        GiraphJob.KEEP_ZOOKEEPER_DATA_DEFAULT)) &&
++        (removeableSuperstep >= 0)) {
++      String oldSuperstepPath =
++          getSuperstepPath(getApplicationAttempt()) + "/" +
++              removeableSuperstep;
++      try {
++        if (LOG.isInfoEnabled()) {
++          LOG.info("coordinateSuperstep: Cleaning up old Superstep " +
++              oldSuperstepPath);
++        }
++        getZkExt().deleteExt(oldSuperstepPath,
++            -1,
++            true);
++      } catch (KeeperException.NoNodeException e) {
++        LOG.warn("coordinateBarrier: Already cleaned up " +
++            oldSuperstepPath);
++      } catch (KeeperException e) {
++        throw new IllegalStateException(
++            "coordinateSuperstep: KeeperException on " +
++                "finalizing checkpoint", e);
++      }
++    }
++  }
++
+   @Override
+   public SuperstepState coordinateSuperstep() throws
+   KeeperException, InterruptedException {
+@@ -1441,33 +1475,6 @@ public SuperstepState coordinateSuperstep() throws
+       }
+     }
+ 
+-    // Clean up the old supersteps (always keep this one)
+-    long removeableSuperstep = getSuperstep() - 1;
+-    if (!(getConfiguration().getBoolean(
+-        GiraphJob.KEEP_ZOOKEEPER_DATA,
+-        GiraphJob.KEEP_ZOOKEEPER_DATA_DEFAULT)) &&
+-        (removeableSuperstep >= 0)) {
+-      String oldSuperstepPath =
+-          getSuperstepPath(getApplicationAttempt()) + "/" +
+-              removeableSuperstep;
+-      try {
+-        if (LOG.isInfoEnabled()) {
+-          LOG.info("coordinateSuperstep: Cleaning up old Superstep " +
+-              oldSuperstepPath);
+-        }
+-        getZkExt().deleteExt(oldSuperstepPath,
+-            -1,
+-            true);
+-      } catch (KeeperException.NoNodeException e) {
+-        LOG.warn("coordinateBarrier: Already cleaned up " +
+-            oldSuperstepPath);
+-      } catch (KeeperException e) {
+-        throw new IllegalStateException(
+-            "coordinateSuperstep: KeeperException on " +
+-                "finalizing checkpoint", e);
+-      }
+-    }
+-
+     if (getSuperstep() == INPUT_SUPERSTEP) {
+       // Coordinate the workers finishing sending their vertices to the
+       // correct workers and signal when everything is done.
+@@ -1527,6 +1534,7 @@ public SuperstepState coordinateSuperstep() throws
+         getZkExt(), superstepFinishedNode, -1, globalStats);
+     updateCounters(globalStats);
+ 
++    cleanUpOldSuperstep(getSuperstep() - 1);
+     incrCachedSuperstep();
+     // Counter starts at zero, so no need to increment
+     if (getSuperstep() > 0) {

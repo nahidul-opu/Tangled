@@ -1,0 +1,61 @@
+From 9ee3a16179cb65f5fe4170257ab7cde558f1dbeb Mon Sep 17 00:00:00 2001
+From: Alex Levenson <alexlevenson@twitter.com>
+Date: Fri, 13 Mar 2015 12:54:58 -0700
+Subject: [PATCH] PARQUET-217 Use simpler heuristic in MemoryManager
+
+We found that the heuristic of throwing when:
+```
+minMemoryAllocation > 0 && newSize/maxColCount < minMemoryAllocation
+```
+in MemoryManager is not really valid when you have many (3k +) columns, due to the division by the number of columns.
+This check throws immediately when writing a single file with a 3GB heap and > 3K columns.
+
+This PR introduces a simpler heuristic, which is a min scale, and we throw when the MemoryManager's scale gets too small. By default I chose 25%, but I'm happy to change that to something else.
+
+For backwards compatibility I've left the original check in, but it's not executed by default anymore, to get this behavior the min chunk size will have to be set in the hadoop configuration. I'm also open to removing it entirely if we don't think we need it anymore.
+
+What do you think?
+@danielcweeks @rdblue @dongche @julienledem
+
+Author: Alex Levenson <alexlevenson@twitter.com>
+
+Closes #143 from isnotinvain/alexlevenson/mem-manager-heuristic and squashes the following commits:
+
+acda66f [Alex Levenson] Add units to exception
+10237c6 [Alex Levenson] Decouple DEFAULT_MIN_MEMORY_ALLOCATION from DEFAULT_PAGE_SIZE
+29c9881 [Alex Levenson] Use an absolute minimum on rowgroup size, only apply when scale < 1
+8877125 [Alex Levenson] Merge branch 'master' into alexlevenson/mem-manager-heuristic
+e5117a0 [Alex Levenson] Merge branch 'master' into alexlevenson/mem-manager-heuristic
+6ee5f46 [Alex Levenson] Use simpler heuristic in MemoryManager
+---
+ .../src/main/java/parquet/hadoop/MemoryManager.java    | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/parquet-hadoop/src/main/java/parquet/hadoop/MemoryManager.java b/parquet-hadoop/src/main/java/parquet/hadoop/MemoryManager.java
+index 7bb06653b5..9724868f7a 100644
+--- a/parquet-hadoop/src/main/java/parquet/hadoop/MemoryManager.java
++++ b/parquet-hadoop/src/main/java/parquet/hadoop/MemoryManager.java
+@@ -40,7 +40,7 @@
+ public class MemoryManager {
+   private static final Log LOG = Log.getLog(MemoryManager.class);
+   static final float DEFAULT_MEMORY_POOL_RATIO = 0.95f;
+-  static final long DEFAULT_MIN_MEMORY_ALLOCATION = ParquetWriter.DEFAULT_PAGE_SIZE;
++  static final long DEFAULT_MIN_MEMORY_ALLOCATION = 1 * 1024 * 1024; // 1MB
+   private final float memoryPoolRatio;
+ 
+   private final long totalMemoryPool;
+@@ -121,10 +121,10 @@ private void updateAllocation() {
+ 
+     for (Map.Entry<InternalParquetRecordWriter, Long> entry : writerList.entrySet()) {
+       long newSize = (long) Math.floor(entry.getValue() * scale);
+-      if(minMemoryAllocation > 0 && newSize/maxColCount < minMemoryAllocation) {
+-          throw new ParquetRuntimeException(String.format("New Memory allocation %d"+
+-          " exceeds minimum allocation size %d with largest schema having %d columns",
+-              newSize, minMemoryAllocation, maxColCount)){};
++      if(scale < 1.0 && minMemoryAllocation > 0 && newSize < minMemoryAllocation) {
++          throw new ParquetRuntimeException(String.format("New Memory allocation %d bytes" +
++          " is smaller than the minimum allocation size of %d bytes.",
++              newSize, minMemoryAllocation)){};
+       }
+       entry.getKey().setRowGroupSizeThreshold(newSize);
+       LOG.debug(String.format("Adjust block size from %,d to %,d for writer: %s",

@@ -1,0 +1,77 @@
+From 1f3e72fa069536ae20f37b29575288ff65e66803 Mon Sep 17 00:00:00 2001
+From: Steven She <steven@canopylabs.com>
+Date: Thu, 25 Jun 2015 21:48:00 -0700
+Subject: [PATCH] PARQUET-317: Fix writeMetadataFile crash when a relative root
+ path is used
+
+This commit ensures the fully-qualified path is used prior to calling mergeFooters(..).
+
+Author: Steven She <steven@canopylabs.com>
+
+Closes #228 from stevencanopy/relative-metadata-path and squashes the following commits:
+
+988772b [Steven She] use outputPath.getFileSystem(...) to get the FS for the path
+1cea508 [Steven She] PARQUET-317: Fix writeMetadataFile crash when a relative root path is used
+---
+ .../parquet/hadoop/ParquetFileWriter.java     |  2 +-
+ .../parquet/hadoop/TestParquetFileWriter.java | 27 +++++++++++++++++++
+ 2 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetFileWriter.java b/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetFileWriter.java
+index b878179b1a..1f872403ee 100644
+--- a/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetFileWriter.java
++++ b/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetFileWriter.java
+@@ -482,9 +482,9 @@ private static void serializeFooter(ParquetMetadata footer, FSDataOutputStream o
+    * @throws IOException
+    */
+   public static void writeMetadataFile(Configuration configuration, Path outputPath, List<Footer> footers) throws IOException {
+-    ParquetMetadata metadataFooter = mergeFooters(outputPath, footers);
+     FileSystem fs = outputPath.getFileSystem(configuration);
+     outputPath = outputPath.makeQualified(fs);
++    ParquetMetadata metadataFooter = mergeFooters(outputPath, footers);
+     writeMetadataFile(outputPath, metadataFooter, fs, PARQUET_METADATA_FILE);
+     metadataFooter.getBlocks().clear();
+     writeMetadataFile(outputPath, metadataFooter, fs, PARQUET_COMMON_METADATA_FILE);
+diff --git a/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java b/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java
+index 2c255d5ea6..1f172091cd 100644
+--- a/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java
++++ b/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java
+@@ -63,6 +63,7 @@
+ 
+ import org.apache.parquet.hadoop.example.GroupWriteSupport;
+ import org.junit.rules.TemporaryFolder;
++import org.mockito.Mockito;
+ 
+ public class TestParquetFileWriter {
+ 
+@@ -713,4 +714,30 @@ public void testMergeFooters() {
+     assertEquals("Should have all blocks", expected, merged.getBlocks());
+   }
+ 
++  /**
++   * {@link ParquetFileWriter#mergeFooters(Path, List)} expects a fully-qualified
++   * path for the root and crashes if a relative one is provided.
++   */
++  @Test
++  public void testWriteMetadataFileWithRelativeOutputPath() throws IOException {
++    Configuration conf = new Configuration();
++    FileSystem fs = FileSystem.get(conf);
++    Path relativeRoot = new Path("target/_test_relative");
++    Path qualifiedRoot = fs.makeQualified(relativeRoot);
++
++    ParquetMetadata mock = Mockito.mock(ParquetMetadata.class);
++    FileMetaData fileMetaData = new FileMetaData(
++            new MessageType("root1",
++                new PrimitiveType(REPEATED, BINARY, "a")),
++            new HashMap<String, String>(), "test");
++    Mockito.when(mock.getFileMetaData()).thenReturn(fileMetaData);
++
++    List<Footer> footers = new ArrayList<Footer>();
++    Footer footer = new Footer(new Path(qualifiedRoot, "one"), mock);
++    footers.add(footer);
++
++    // This should not throw an exception
++    ParquetFileWriter.writeMetadataFile(conf, relativeRoot, footers);
++  }
++
+ }

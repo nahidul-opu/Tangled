@@ -1,0 +1,374 @@
+From fbc18fb917df623a64dd7a1a3a3fa53c0b94d00e Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 24 Jun 2008 02:53:25 +0000
+Subject: [PATCH] IMPROVEMENT: Provide ant task to retrieve information from
+ published ivy modules (IVY-838) (thanks to David Maplesden)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@670998 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ doc/use/info.html                             |  43 +++++-
+ src/java/org/apache/ivy/ant/IvyInfo.java      | 141 ++++++++++++++----
+ .../apache/ivy/ant/IvyInfoRepositoryTest.java |  94 ++++++++++++
+ 4 files changed, 246 insertions(+), 33 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/ant/IvyInfoRepositoryTest.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f3fe696b3..879293013 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -75,6 +75,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - NEW: Add transitive dependency version and branch override mechanism (IVY-784)
+ - NEW: Add new packager resolver (IVY-829) (thanks to Archie Cobbs)
+ 
++- IMPROVEMENT: Provide ant task to retrieve information from published ivy modules (IVY-838) (thanks to David Maplesden)
+ - IMPROVEMENT: Install task fails but reason is not displayed without using -debug or -verbose (IVY-834)
+ - IMPROVEMENT: SSH resolver doesn't support keyboard-interactive authentication (IVY-836) (thanks to Tobias Himstedt)
+ - IMPROVEMENT: declare source and javadoc artifacts in maven2 modules (IVY-325)
+diff --git a/doc/use/info.html b/doc/use/info.html
+index ce71ca732..fb8f843d7 100644
+--- a/doc/use/info.html
++++ b/doc/use/info.html
+@@ -39,6 +39,16 @@
+ <tr><td>ivy.configurations</td><td>A comma separated list of configurations of the module, as declared in the <a href="../ivyfile/configurations.html">configurations</a> section</td></tr>
+ <tr><td>ivy.public.configurations</td><td>A comma separated list of public configurations of the module, as declared in the <a href="../ivyfile/configurations.html">configurations</a> section</td></tr>
+ </table>
++<br/>
++<span class="since">since 2.0</span>
++
++Since Ivy 2.0 this task has been enhanced to allow you to retrieve information about ivy modules in a repository.  Instead of specifying a local ivy file you may specify the organisation, module, revision pattern and (optionally) the branch of the ivy module in the repository you wish to retrieve the information for.
++
++The revision pattern is what is used when declaring a <a href="../ivyfile/dependency.html">dependency</a> on a module, identical to how the <a href="findrevision.html">findrevision</a> task works.  In fact this task can now be used in place of the findrevision task.
++
++If no matching module is found then no property values are set.
++
++You may now also set the property attribute to change the first part of the property names that are set by this task e.g. if you set the property attribute to 'mymodule' this task will set the ant properties <i>mymodule.organisation</i>, <i>mymodule.module</i>, <i>mymodule.revision</i> etc.
+ 
+ <h1>Attributes</h1>
+ <table class="ant">
+@@ -47,8 +57,18 @@ <h1>Attributes</h1>
+ </thead>
+ <tbody>
+     <tr><td>file</td><td>the ivy file to parse</td>
+-        <td>Yes</td></tr>
+-<tr><td>settingsRef</td><td>A reference to the ivy settings that must be used by this task <span class="since">(since 2.0)</span></td><td>No, 'ivy.instance' is taken by default.</td></tr></tbody>
++        <td>Yes, if you wish to parse an ivy file.<br/>No, if you are retrieving information about a module from an ivy repository.</td></tr>
++    <tr><td>organisation</td><td>the organisation of the module to find <span class="since">(since 2.0)</span></td>
++        <td>No, if you wish to parse an ivy file.<br/>Yes, if you are retrieving information about a module from an ivy repository.</td></tr>
++    <tr><td>module</td><td>the the name of the module to find <span class="since">(since 2.0)</span></td>
++        <td>No, if you wish to parse an ivy file.<br/>Yes, if you are retrieving information about a module from an ivy repository.</td></tr>
++    <tr><td>branch</td><td>the branch of the module to find <span class="since">(since 2.0)</span></td>
++        <td>No, defaults to the default branch for the given module if you are retrieving information about a module from an ivy repository.</td></tr>
++    <tr><td>revision</td><td>the revision constraint to apply <span class="since">(since 2.0)</span></td>
++        <td>No, if you wish to parse an ivy file.<br/>Yes, if you are retrieving information about a module from an ivy repository.</td></tr>
++    <tr><td>property</td><td>the name to use as the base of the property names set by this task <span class="since">(since 2.0)</span></td>
++        <td>No, will default to 'ivy' if not set.</td></tr>
++	<tr><td>settingsRef</td><td>A reference to the ivy settings that must be used by this task <span class="since">(since 2.0)</span></td><td>No, 'ivy.instance' is taken by default.</td></tr></tbody>
+ </table>
+ <h1>Examples</h1>
+ Given this ivy.xml file:
+@@ -84,6 +104,25 @@ <h1>Examples</h1>
+ ivy.extra.myextraatt=myvalue
+ ivy.configurations=default, test, private
+ ivy.public.configurations=default, test
++</code>
++Given the same ivy module in a repository:
++<code>
++<ivy:info organisation="apache" module="info-all" revision="1.0" />
++</code>
++will set the exact same set of properties as above.  Using:
++<code>
++<ivy:info organisation="apache" module="info-all" revision="1.0" property="infotest"/>
++</code>
++will set:
++<code>
++infotest.organisation=apache
++infotest.module=info-all
++infotest.branch=trunk
++infotest.revision=1.0
++infotest.status=release
++infotest.extra.myextraatt=myvalue
++infotest.configurations=default, test, private
++infotest.public.configurations=default, test
+ </code>
+ 
+ 	</textarea>
+diff --git a/src/java/org/apache/ivy/ant/IvyInfo.java b/src/java/org/apache/ivy/ant/IvyInfo.java
+index 7f7c42412..9d9200930 100644
+--- a/src/java/org/apache/ivy/ant/IvyInfo.java
++++ b/src/java/org/apache/ivy/ant/IvyInfo.java
+@@ -30,7 +30,9 @@
+ import org.apache.ivy.core.module.descriptor.Configuration;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.descriptor.Configuration.Visibility;
++import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.resolve.ResolvedModuleRevision;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.parser.ModuleDescriptorParserRegistry;
+ import org.apache.tools.ant.BuildException;
+@@ -42,6 +44,16 @@
+ public class IvyInfo extends IvyTask {
+     private File file = null;
+ 
++    private String organisation;
++
++    private String module;
++
++    private String branch;
++
++    private String revision;
++
++    private String property = "ivy";
++
+     public File getFile() {
+         return file;
+     }
+@@ -50,44 +62,81 @@ public void setFile(File file) {
+         this.file = file;
+     }
+ 
++    public String getModule() {
++        return module;
++    }
++
++    public void setModule(String module) {
++        this.module = module;
++    }
++
++    public String getOrganisation() {
++        return organisation;
++    }
++
++    public void setOrganisation(String organisation) {
++        this.organisation = organisation;
++    }
++
++    public String getRevision() {
++        return revision;
++    }
++
++    public void setRevision(String revision) {
++        this.revision = revision;
++    }
++
++    public String getBranch() {
++        return branch;
++    }
++
++    public void setBranch(String branch) {
++        this.branch = branch;
++    }
++
++    public String getProperty() {
++        return property;
++    }
++
++    public void setProperty(String prefix) {
++        this.property = prefix;
++    }
++
+     public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+-        if (file == null) {
+-            file = getProject().resolveFile(getProperty(settings, "ivy.dep.file"));
+-        }
+ 
+         try {
+-            ModuleDescriptor md = ModuleDescriptorParserRegistry.getInstance().parseDescriptor(
+-                settings, file.toURL(), doValidate(settings));
+-            ModuleRevisionId mrid = md.getModuleRevisionId();
+-            getProject().setProperty("ivy.organisation", mrid.getOrganisation());
+-            getProject().setProperty("ivy.module", mrid.getName());
+-            if (mrid.getBranch() != null) {
+-                getProject().setProperty("ivy.branch", mrid.getBranch());
+-            }
+-            getProject().setProperty("ivy.revision", mrid.getRevision());
+-            getProject().setProperty("ivy.status", md.getStatus());
+-            
+-            Map extra = mrid.getExtraAttributes();
+-            for (Iterator iter = extra.entrySet().iterator(); iter.hasNext();) {
+-                Entry entry = (Entry) iter.next();
+-                getProject().setProperty("ivy.extra." + entry.getKey(), (String) entry.getValue());
+-            }
+-            
+-            getProject().setProperty("ivy.configurations", mergeConfs(md.getConfigurationsNames()));
+-
+-            // store the public configurations in a separate property
+-            Configuration[] configs = md.getConfigurations();
+-            List publicConfigsList = new ArrayList();
+-            for (int i = 0; i < configs.length; i++) {
+-                if (Visibility.PUBLIC.equals(configs[i].getVisibility())) {
+-                    publicConfigsList.add(configs[i].getName());
++            if(organisation != null || module != null || revision != null || branch != null) {
++                if (organisation == null) {
++                    throw new BuildException("no organisation provided for ivy findmodules");
++                }
++                if (module == null) {
++                    throw new BuildException("no module name provided for ivy findmodules");
++                }
++                if (revision == null) {
++                    throw new BuildException("no revision provided for ivy findmodules");
+                 }
++
++                if (branch == null) {
++                    settings.getDefaultBranch(new ModuleId(organisation, module));
++                }
++                ResolvedModuleRevision rmr = ivy.findModule(ModuleRevisionId.newInstance(organisation,
++                    module, branch, revision));
++                if (rmr != null) {
++                    ModuleDescriptor md = rmr.getDescriptor();
++                    ModuleRevisionId mrid = rmr.getId();
++                    setProperties(md, mrid);
++                }
++            } else {
++                if (file == null) {
++                    file = getProject().resolveFile(getProperty(settings, "ivy.dep.file"));
++                }
++                ModuleDescriptor md = ModuleDescriptorParserRegistry.getInstance().parseDescriptor(
++                    settings, file.toURL(), doValidate(settings));
++                ModuleRevisionId mrid = md.getModuleRevisionId();
++                setProperties(md, mrid);
+             }
+-            String[] publicConfigs = (String[]) publicConfigsList
+-                    .toArray(new String[publicConfigsList.size()]);
+-            getProject().setProperty("ivy.public.configurations", mergeConfs(publicConfigs));
+         } catch (MalformedURLException e) {
+             throw new BuildException(
+                     "unable to convert given ivy file to url: " + file + ": " + e, e);
+@@ -98,4 +147,34 @@ public void doExecute() throws BuildException {
+             throw new BuildException("impossible to resolve dependencies: " + e, e);
+         }
+     }
++    
++    private void setProperties(ModuleDescriptor md, ModuleRevisionId mrid) {        
++        getProject().setProperty(property + ".organisation", mrid.getOrganisation());
++        getProject().setProperty(property + ".module", mrid.getName());
++        if (mrid.getBranch() != null) {
++            getProject().setProperty(property + ".branch", mrid.getBranch());
++        }
++        getProject().setProperty(property + ".revision", mrid.getRevision());
++        getProject().setProperty(property + ".status", md.getStatus());
++        
++        Map extra = mrid.getExtraAttributes();
++        for (Iterator iter = extra.entrySet().iterator(); iter.hasNext();) {
++            Entry entry = (Entry) iter.next();
++            getProject().setProperty(property + ".extra." + entry.getKey(), (String) entry.getValue());
++        }
++        
++        getProject().setProperty(property + ".configurations", mergeConfs(md.getConfigurationsNames()));
++
++        // store the public configurations in a separate property
++        Configuration[] configs = md.getConfigurations();
++        List publicConfigsList = new ArrayList();
++        for (int i = 0; i < configs.length; i++) {
++            if (Visibility.PUBLIC.equals(configs[i].getVisibility())) {
++                publicConfigsList.add(configs[i].getName());
++            }
++        }
++        String[] publicConfigs = (String[]) publicConfigsList
++                .toArray(new String[publicConfigsList.size()]);
++        getProject().setProperty(property + ".public.configurations", mergeConfs(publicConfigs));
++    }
+ }
+diff --git a/test/java/org/apache/ivy/ant/IvyInfoRepositoryTest.java b/test/java/org/apache/ivy/ant/IvyInfoRepositoryTest.java
+new file mode 100644
+index 000000000..16d4ce68f
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/IvyInfoRepositoryTest.java
+@@ -0,0 +1,94 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.ant;
++
++import java.io.File;
++
++import junit.framework.TestCase;
++
++import org.apache.tools.ant.Project;
++import org.apache.tools.ant.taskdefs.Delete;
++
++public class IvyInfoRepositoryTest extends TestCase {
++    private File cache;
++
++    private IvyInfo info;
++
++    protected void setUp() throws Exception {
++        createCache();
++        Project project = new Project();
++        project.setProperty("ivy.settings.file", "test/repositories/ivysettings.xml");
++
++        info = new IvyInfo();
++        info.setProject(project);
++    }
++
++    private void createCache() {
++        cache = new File("build/cache");
++        cache.mkdirs();
++    }
++
++    protected void tearDown() throws Exception {
++        cleanCache();
++    }
++
++    private void cleanCache() {
++        Delete del = new Delete();
++        del.setProject(new Project());
++        del.setDir(cache);
++        del.execute();
++    }
++
++    public void testProperty() throws Exception {
++        info.setOrganisation("org1");
++        info.setModule("mod1.1");
++        info.setRevision("1.0");
++        info.setProperty("test");
++        info.execute();
++        assertEquals("1.0", info.getProject().getProperty("test.revision"));
++        assertEquals("org1", info.getProject().getProperty("test.organisation"));
++        assertEquals("mod1.1", info.getProject().getProperty("test.module"));
++        assertEquals("integration", info.getProject().getProperty("test.status"));
++        assertEquals("default", info.getProject().getProperty("test.configurations"));
++    }
++
++    public void testLatest() throws Exception {
++        info.setOrganisation("org1");
++        info.setModule("mod1.1");
++        info.setRevision("latest.integration");
++        info.execute();
++        assertEquals("2.0", info.getProject().getProperty("ivy.revision"));
++        assertEquals("org1", info.getProject().getProperty("ivy.organisation"));
++        assertEquals("mod1.1", info.getProject().getProperty("ivy.module"));
++        assertEquals("integration", info.getProject().getProperty("ivy.status"));
++        assertEquals("default", info.getProject().getProperty("ivy.configurations"));
++    }
++
++    public void testLatestSubversion() throws Exception {
++        info.setOrganisation("org1");
++        info.setModule("mod1.1");
++        info.setRevision("1.0+");
++        info.execute();
++        assertEquals("1.0.1", info.getProject().getProperty("ivy.revision"));
++        assertEquals("org1", info.getProject().getProperty("ivy.organisation"));
++        assertEquals("mod1.1", info.getProject().getProperty("ivy.module"));
++        assertEquals("integration", info.getProject().getProperty("ivy.status"));
++        assertEquals("default", info.getProject().getProperty("ivy.configurations"));
++    }
++
++}

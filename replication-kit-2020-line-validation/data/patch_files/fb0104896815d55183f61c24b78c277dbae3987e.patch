@@ -1,0 +1,89 @@
+From fb0104896815d55183f61c24b78c277dbae3987e Mon Sep 17 00:00:00 2001
+From: Ryan Blue <rblue@cloudera.com>
+Date: Fri, 18 Jul 2014 16:19:25 -0700
+Subject: [PATCH] PARQUET-18: Fix all-null value pages with dict encoding.
+
+TestDictionary#testZeroValues demonstrates the problem, where a page of
+all null values is decoded using the DicitonaryValuesReader. Because
+there are no non-null values, the page values section is 0 byte, but the
+DictionaryValuesReader assumes there is at least one encoded value and
+attempts to read a bit width. The test passes a byte array to
+initFromPage with the offset equal to the array's length.
+
+The fix is to detect that there are no input bytes to read. To avoid
+adding validity checks to the read path, this sets the internal decoder
+to one that will throw an exception if any reads are attempted.
+
+Author: Ryan Blue <rblue@cloudera.com>
+
+Closes #18 from rdblue/PARQUET-18-fix-nulls-with-dictionary and squashes the following commits:
+
+0711766 [Ryan Blue] PARQUET-18: Fix all-null value pages with dict encoding.
+---
+ .../dictionary/DictionaryValuesReader.java    | 19 ++++++++++++++-----
+ .../values/dictionary/TestDictionary.java     | 14 ++++++++++++++
+ 2 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/parquet-column/src/main/java/parquet/column/values/dictionary/DictionaryValuesReader.java b/parquet-column/src/main/java/parquet/column/values/dictionary/DictionaryValuesReader.java
+index d145fc04f3..5c105ed73d 100644
+--- a/parquet-column/src/main/java/parquet/column/values/dictionary/DictionaryValuesReader.java
++++ b/parquet-column/src/main/java/parquet/column/values/dictionary/DictionaryValuesReader.java
+@@ -19,7 +19,6 @@
+ 
+ import java.io.ByteArrayInputStream;
+ import java.io.IOException;
+-import java.io.InputStream;
+ 
+ import parquet.Log;
+ import parquet.bytes.BytesUtils;
+@@ -51,11 +50,21 @@ public DictionaryValuesReader(Dictionary dictionary) {
+   @Override
+   public void initFromPage(int valueCount, byte[] page, int offset)
+       throws IOException {
+-    if (DEBUG) LOG.debug("init from page at offset "+ offset + " for length " + (page.length - offset));
+     this.in = new ByteArrayInputStream(page, offset, page.length - offset);
+-    int bitWidth = BytesUtils.readIntLittleEndianOnOneByte(in);
+-    if (DEBUG) LOG.debug("bit width " + bitWidth);
+-    decoder = new RunLengthBitPackingHybridDecoder(bitWidth, in);
++    if (page.length - offset > 0) {
++      if (DEBUG)
++        LOG.debug("init from page at offset " + offset + " for length " + (page.length - offset));
++      int bitWidth = BytesUtils.readIntLittleEndianOnOneByte(in);
++      if (DEBUG) LOG.debug("bit width " + bitWidth);
++      decoder = new RunLengthBitPackingHybridDecoder(bitWidth, in);
++    } else {
++      decoder = new RunLengthBitPackingHybridDecoder(1, in) {
++        @Override
++        public int readInt() throws IOException {
++          throw new IOException("Attempt to read from empty page");
++        }
++      };
++    }
+   }
+ 
+   @Override
+diff --git a/parquet-column/src/test/java/parquet/column/values/dictionary/TestDictionary.java b/parquet-column/src/test/java/parquet/column/values/dictionary/TestDictionary.java
+index f202305b0b..64196d4328 100644
+--- a/parquet-column/src/test/java/parquet/column/values/dictionary/TestDictionary.java
++++ b/parquet-column/src/test/java/parquet/column/values/dictionary/TestDictionary.java
+@@ -417,6 +417,20 @@ public void testFloatDictionaryFallBack() throws IOException {
+     roundTripFloat(cw, reader, maxDictionaryByteSize);
+   }
+ 
++  @Test
++  public void testZeroValues() throws IOException {
++    DictionaryValuesWriter cw = new PlainIntegerDictionaryValuesWriter(100, 100);
++    cw.writeInteger(34);
++    cw.writeInteger(34);
++    getBytesAndCheckEncoding(cw, PLAIN_DICTIONARY);
++    DictionaryValuesReader reader = initDicReader(cw, INT32);
++
++    // pretend there are 100 nulls. what matters is offset = bytes.length.
++    byte[] bytes = {0x00, 0x01, 0x02, 0x03}; // data doesn't matter
++    int offset = bytes.length;
++    reader.initFromPage(100, bytes, offset);
++  }
++
+   private DictionaryValuesReader initDicReader(ValuesWriter cw, PrimitiveTypeName type)
+       throws IOException {
+     final DictionaryPage dictionaryPage = cw.createDictionaryPage().copy();

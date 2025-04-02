@@ -1,0 +1,130 @@
+From ac7b409d4c2977e79e88d8f73e0664bded36d94d Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 14 Sep 2006 02:09:15 +0000
+Subject: [PATCH] FIX: the vfs resolver should not log passwords (IVY-292)
+ (thanks to Antoine Levy-Lambert)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484518 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/repository/vfs/VfsResource.java       |  4 +--
+ .../ivy/resolver/AbstractResolver.java        | 10 +++++++
+ .../ivy/resolver/RepositoryResolver.java      |  2 +-
+ .../fr/jayasoft/ivy/resolver/VfsResolver.java | 27 ++++++++++++++++++-
+ 5 files changed, 40 insertions(+), 4 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 6e58d2029..e195b8679 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -88,6 +88,7 @@ Changes:
+   - FIX: Ant log messsages not embedded in task log (IVY-280) (thanks to Gilles Scokart)
+   - FIX: Ivy fails when downloading from a server that supports NTLM authentication (IVY-213) (thanks to Damon Rand)
+   - FIX: Delivered Ivy files with incomplete last line. (IVY-125) (thanks to Matthias Kilian)
++  - FIX: the vfs resolver should not log passwords (IVY-292) (thanks to Antoine Levy-Lambert)
+ 
+ * thanks to Maarten Coene:
+   - NEW: Add type filtering to retrieve task (IVY-260)
+diff --git a/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java b/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java
+index 9ff7a9264..92fe4aac9 100644
+--- a/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java
++++ b/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java
+@@ -24,7 +24,7 @@
+ 
+ import fr.jayasoft.ivy.repository.Resource;
+ import fr.jayasoft.ivy.util.Message;
+-
++import fr.jayasoft.ivy.resolver.VfsResolver;
+ 
+ public class VfsResource implements Resource {	
+ 	private String _vfsURI;
+@@ -179,7 +179,7 @@ public boolean physicallyExists() {
+     }
+ 
+     public String toString() {
+-        return getName();
++        return VfsResolver.prepareForDisplay(getName());
+     }
+ 
+     public boolean isLocal() {
+diff --git a/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java b/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
+index 600ed9fc7..0be4e411e 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
+@@ -74,6 +74,16 @@ public void setName(String name) {
+         _name = name;
+     }
+ 
++
++    /**
++     * this method should remove sensitive information from a location to be displayed in a log
++     * @param name location
++     * @return location with sensitive data replaced by stars
++     */
++    public String hidePassword(String name) {
++        return name;
++    }
++
+     protected boolean doValidate(ResolveData data) {
+         if (_validate != null) {
+             return _validate.booleanValue();
+diff --git a/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java b/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java
+index 1b9d407a4..47e0128d7 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java
+@@ -168,7 +168,7 @@ public void publish(Artifact artifact, File src, boolean overwrite) throws IOExc
+                 artifact); 
+         
+         put(artifact, src, dest, overwrite);
+-        Message.info("\tpublished "+artifact.getName()+" to "+dest);
++        Message.info("\tpublished "+artifact.getName()+" to "+hidePassword(dest));
+     }
+ 
+ 	private void put(Artifact artifact, File src, String dest, boolean overwrite) throws IOException {
+diff --git a/src/java/fr/jayasoft/ivy/resolver/VfsResolver.java b/src/java/fr/jayasoft/ivy/resolver/VfsResolver.java
+index 4a89dec2b..f2d35bec8 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/VfsResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/VfsResolver.java
+@@ -7,16 +7,41 @@
+ 
+ import fr.jayasoft.ivy.repository.vfs.VfsRepository;
+ 
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++
+ /**
+  * @author S. Nesbitt
+  *
+  */
+ public class VfsResolver extends RepositoryResolver {
++    private static Pattern URLPattern = Pattern.compile("[a-z]*://(.+):(.+)@.*");
++    private static int PASSWORD_GROUP = 2;
+     public VfsResolver() {
+         setRepository(new VfsRepository());
+     }
+-    
++
+     public String getTypeName() {
+         return "vfs";
+     }
++
++    public String hidePassword(String name) {
++        return prepareForDisplay(name);
++    }
++    public static String prepareForDisplay(String name) {
++        StringBuffer s = new StringBuffer(name);
++        Matcher m = URLPattern.matcher(s);
++        if (m.matches()) {
++            final String password = m.group(PASSWORD_GROUP);
++            final int passwordposi = s.indexOf(password);
++            StringBuffer stars = new StringBuffer(password);
++            for (int posi = 0; posi < password.length(); posi++) {
++                stars.setCharAt(posi, '*');
++            }
++            String replacement = stars.toString();
++            s = s.replace(passwordposi, passwordposi + password.length(), replacement);
++        }
++        return s.toString();
++
++    }
+ }

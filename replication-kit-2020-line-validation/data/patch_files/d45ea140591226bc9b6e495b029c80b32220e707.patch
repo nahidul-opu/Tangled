@@ -1,0 +1,137 @@
+From d45ea140591226bc9b6e495b029c80b32220e707 Mon Sep 17 00:00:00 2001
+From: Mark Thomas <markt@apache.org>
+Date: Mon, 9 Dec 2013 21:19:17 +0000
+Subject: [PATCH] Fix DBCP-347 Correct implementation of
+ DelegatingStatement.isWrapperFor(). Also fix
+ DelegatingDatabaseMetaData.isWrapperFor() and
+ DelegatingResultSet.isWrapperFor() that had the same problem. Based on a
+ patch by Robert Poskrobek
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/trunk@1549685 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  5 ++++
+ .../dbcp2/DelegatingDatabaseMetaData.java     |  8 ++++-
+ .../commons/dbcp2/DelegatingResultSet.java    |  8 ++++-
+ .../commons/dbcp2/DelegatingStatement.java    |  8 ++++-
+ .../dbcp2/TestDelegatingStatement.java        | 30 +++++++++++++++++++
+ 5 files changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 53b65ca929..c10c775558 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -100,6 +100,11 @@ The <action> type attribute can be add,update,fix,remove.
+         Correct implementation of DelegatingConnection.isWrapperFor() so it
+         works correctly with older JDBC drivers.
+       </action>
++      <action dev="markt" issue="DBCP-347" type="fix" due-to="Robert Poskrobek">
++        Correct implementation of DelegatingStatement.isWrapperFor(). Also fix
++        DelegatingDatabaseMetaData.isWrapperFor() and
++        DelegatingResultSet.isWrapperFor() that had the same problem.
++      </action>
+     </release>
+     <release version="1.4.1" date="TBD" description="TBD">
+       <action dev="psteitz" issue="DBCP-334" type="update" due-to="Alberto Mozzone">
+diff --git a/src/java/org/apache/commons/dbcp2/DelegatingDatabaseMetaData.java b/src/java/org/apache/commons/dbcp2/DelegatingDatabaseMetaData.java
+index 966e481ef6..29048a0213 100644
+--- a/src/java/org/apache/commons/dbcp2/DelegatingDatabaseMetaData.java
++++ b/src/java/org/apache/commons/dbcp2/DelegatingDatabaseMetaData.java
+@@ -1287,7 +1287,13 @@ public boolean usesLocalFiles() throws SQLException {
+ 
+     @Override
+     public boolean isWrapperFor(Class<?> iface) throws SQLException {
+-        return iface.isAssignableFrom(getClass()) || _meta.isWrapperFor(iface);
++        if (iface.isAssignableFrom(getClass())) {
++            return true;
++        } else if (iface.isAssignableFrom(_meta.getClass())) {
++            return true;
++        } else {
++            return _meta.isWrapperFor(iface);
++        }
+     }
+ 
+     @Override
+diff --git a/src/java/org/apache/commons/dbcp2/DelegatingResultSet.java b/src/java/org/apache/commons/dbcp2/DelegatingResultSet.java
+index 8fbc483689..7d44fa3cc3 100644
+--- a/src/java/org/apache/commons/dbcp2/DelegatingResultSet.java
++++ b/src/java/org/apache/commons/dbcp2/DelegatingResultSet.java
+@@ -775,7 +775,13 @@ public void updateArray(String columnName, java.sql.Array x) throws SQLException
+ 
+     @Override
+     public boolean isWrapperFor(Class<?> iface) throws SQLException {
+-        return iface.isAssignableFrom(getClass()) || _res.isWrapperFor(iface);
++        if (iface.isAssignableFrom(getClass())) {
++            return true;
++        } else if (iface.isAssignableFrom(_res.getClass())) {
++            return true;
++        } else {
++            return _res.isWrapperFor(iface);
++        }
+     }
+ 
+     @Override
+diff --git a/src/java/org/apache/commons/dbcp2/DelegatingStatement.java b/src/java/org/apache/commons/dbcp2/DelegatingStatement.java
+index c8aaee7a0a..e9a91f4df1 100644
+--- a/src/java/org/apache/commons/dbcp2/DelegatingStatement.java
++++ b/src/java/org/apache/commons/dbcp2/DelegatingStatement.java
+@@ -495,7 +495,13 @@ public boolean isClosed() throws SQLException {
+ 
+     @Override
+     public boolean isWrapperFor(Class<?> iface) throws SQLException {
+-        return iface.isAssignableFrom(getClass()) || _stmt.isWrapperFor(iface);
++        if (iface.isAssignableFrom(getClass())) {
++            return true;
++        } else if (iface.isAssignableFrom(_stmt.getClass())) {
++            return true;
++        } else {
++            return _stmt.isWrapperFor(iface);
++        }
+     }
+ 
+     @Override
+diff --git a/src/test/org/apache/commons/dbcp2/TestDelegatingStatement.java b/src/test/org/apache/commons/dbcp2/TestDelegatingStatement.java
+index 2548d1a5da..95614d0e13 100644
+--- a/src/test/org/apache/commons/dbcp2/TestDelegatingStatement.java
++++ b/src/test/org/apache/commons/dbcp2/TestDelegatingStatement.java
+@@ -17,6 +17,7 @@
+ 
+ package org.apache.commons.dbcp2;
+ 
++import java.lang.reflect.Proxy;
+ import java.sql.Connection;
+ import java.sql.SQLException;
+ import java.sql.Statement;
+@@ -108,4 +109,33 @@ public void testCheckOpen() throws Exception {
+             // expected
+         }
+     }
++    
++    public void testIsWrapperFor() throws Exception {
++        TesterConnection tstConn = new TesterConnection("test", "test");
++        TesterStatement tstStmt = new TesterStatementNonWrapping(tstConn);
++        DelegatingConnection<TesterConnection> conn = new DelegatingConnection<>(tstConn);
++        DelegatingStatement stmt = new DelegatingStatement(conn, tstStmt);
++
++        Class<?> stmtProxyClass = Proxy.getProxyClass(
++                this.getClass().getClassLoader(), 
++                Statement.class);
++        
++        assertTrue(stmt.isWrapperFor(DelegatingStatement.class));
++        assertTrue(stmt.isWrapperFor(TesterStatement.class));
++        assertFalse(stmt.isWrapperFor(stmtProxyClass));
++        
++        stmt.close();
++    }
++    
++    private static class TesterStatementNonWrapping extends TesterStatement {
++
++        public TesterStatementNonWrapping(Connection conn) {
++            super(conn);
++        }
++     
++        @Override
++        public boolean isWrapperFor(Class<?> iface) throws SQLException {
++            return false;
++        }
++    }
+ }

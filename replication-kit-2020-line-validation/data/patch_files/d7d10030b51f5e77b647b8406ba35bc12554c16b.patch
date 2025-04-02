@@ -1,0 +1,62 @@
+From d7d10030b51f5e77b647b8406ba35bc12554c16b Mon Sep 17 00:00:00 2001
+From: Damjan Jovanovic <damjan@apache.org>
+Date: Tue, 4 Dec 2012 04:39:10 +0000
+Subject: [PATCH] Deal with JPEG images with bad block sizes.
+
+Jira issue key: IMAGING-99
+Submitted by: st.h <sth at lavabit dot com>
+
+
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/imaging/trunk@1416772 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                              |  3 +++
+ .../commons/imaging/formats/tiff/TiffReader.java     | 12 +++++++++---
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index fb6a02bd4..3e2d1083c 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -245,6 +245,9 @@ The <action> type attribute can be add,update,fix,remove.
+       <action issue="IMAGING-90" dev="damjan" type="fix">
+          Allow non-1 TIFF field lengths when parsing offset fields in non-strict mode.
+       </action>
++      <action issue="IMAGING-99" dev="damjan" type="fix" due-to="st.h">
++         java.io.IOException: Could not read block
++      </action>
+     </release>
+     
+   </body>
+diff --git a/src/main/java/org/apache/commons/imaging/formats/tiff/TiffReader.java b/src/main/java/org/apache/commons/imaging/formats/tiff/TiffReader.java
+index 14e7de7bd..eefbec6ee 100644
+--- a/src/main/java/org/apache/commons/imaging/formats/tiff/TiffReader.java
++++ b/src/main/java/org/apache/commons/imaging/formats/tiff/TiffReader.java
+@@ -28,6 +28,7 @@
+ import org.apache.commons.imaging.common.ByteOrder;
+ import org.apache.commons.imaging.common.bytesource.ByteSource;
+ import org.apache.commons.imaging.common.bytesource.ByteSourceFile;
++import org.apache.commons.imaging.formats.jpeg.JpegConstants;
+ import org.apache.commons.imaging.formats.tiff.TiffDirectory.ImageDataElement;
+ import org.apache.commons.imaging.formats.tiff.constants.ExifTagConstants;
+ import org.apache.commons.imaging.formats.tiff.constants.TiffConstants;
+@@ -505,11 +506,16 @@ private JpegImageData getJpegRawImageData(ByteSource byteSource,
+         ImageDataElement element = directory.getJpegRawImageDataElement();
+         int offset = element.offset;
+         int length = element.length;
+-        // Sony DCR-PC110 has an off-by-one error.
+-        if (offset + length == byteSource.getLength() + 1) {
+-            length--;
++        // In case the length is not correct, adjust it and check if the last read byte actually is the end of the image
++        if (offset + length > byteSource.getLength()) {
++            length = (int) byteSource.getLength() - offset;
+         }
+         byte data[] = byteSource.getBlock(offset, length);
++        // check if the last read byte is actually the end of the image data
++        if (length < 2 ||
++                (((data[data.length - 2] & 0xff) << 8) | (data[data.length - 1] & 0xff)) != JpegConstants.EOIMarker) {
++            throw new ImageReadException("JPEG EOI marker could not be found at expected location");
++        }
+         return new JpegImageData(offset, length, data);
+     }
+ 

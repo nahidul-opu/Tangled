@@ -1,0 +1,79 @@
+From f5af935d8f87fdc521ec962ce77b4dfc08a1ff37 Mon Sep 17 00:00:00 2001
+From: Mario Ivankovits <imario@apache.org>
+Date: Tue, 7 Nov 2006 21:59:30 +0000
+Subject: [PATCH] VFS-98: try to avoid deadlock
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/vfs/trunk@472294 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../commons/vfs/provider/AbstractFileProvider.java     | 10 +++++-----
+ .../vfs/provider/AbstractOriginatingFileProvider.java  |  5 +++--
+ 2 files changed, 8 insertions(+), 7 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/commons/vfs/provider/AbstractFileProvider.java b/core/src/main/java/org/apache/commons/vfs/provider/AbstractFileProvider.java
+index 283e86d781..404bca5c57 100644
+--- a/core/src/main/java/org/apache/commons/vfs/provider/AbstractFileProvider.java
++++ b/core/src/main/java/org/apache/commons/vfs/provider/AbstractFileProvider.java
+@@ -66,7 +66,7 @@ protected void setFileNameParser(FileNameParser parser)
+      */
+     public void close()
+     {
+-        synchronized (fileSystems)
++        synchronized (this)
+         {
+             fileSystems.clear();
+         }
+@@ -97,7 +97,7 @@ protected void addFileSystem(final Comparable key, final FileSystem fs)
+         FileSystemKey treeKey = new FileSystemKey(key, fs.getFileSystemOptions());
+         ((AbstractFileSystem) fs).setCacheKey(treeKey);
+ 
+-        synchronized (fileSystems)
++        synchronized (this)
+         {
+             fileSystems.put(treeKey, fs);
+         }
+@@ -112,7 +112,7 @@ protected FileSystem findFileSystem(final Comparable key, final FileSystemOption
+     {
+         FileSystemKey treeKey = new FileSystemKey(key, fileSystemProps);
+ 
+-        synchronized (fileSystems)
++        synchronized (this)
+         {
+             return (FileSystem) fileSystems.get(treeKey);
+         }
+@@ -126,7 +126,7 @@ public FileSystemConfigBuilder getConfigBuilder()
+     public void freeUnusedResources()
+     {
+         Object[] item;
+-        synchronized (fileSystems)
++        synchronized (this)
+         {
+             item = fileSystems.values().toArray();
+         }
+@@ -144,7 +144,7 @@ public void closeFileSystem(final FileSystem filesystem)
+     {
+         AbstractFileSystem fs = (AbstractFileSystem) filesystem;
+ 
+-        synchronized (fileSystems)
++        synchronized (this)
+         {
+             if (fs.getCacheKey() != null)
+             {
+diff --git a/core/src/main/java/org/apache/commons/vfs/provider/AbstractOriginatingFileProvider.java b/core/src/main/java/org/apache/commons/vfs/provider/AbstractOriginatingFileProvider.java
+index df4ee289e5..3675fea915 100644
+--- a/core/src/main/java/org/apache/commons/vfs/provider/AbstractOriginatingFileProvider.java
++++ b/core/src/main/java/org/apache/commons/vfs/provider/AbstractOriginatingFileProvider.java
+@@ -67,11 +67,12 @@ public FileObject findFile(final FileObject baseFile,
+     protected FileObject findFile(final FileName name, final FileSystemOptions fileSystemOptions)
+         throws FileSystemException
+     {
++		// Check in the cache for the file system
++		final FileName rootName = getContext().getFileSystemManager().resolveName(name, FileName.ROOT_PATH);
++		
+ 		FileSystem fs;
+ 		synchronized (this)
+ 		{
+-			// Check in the cache for the file system
+-			final FileName rootName = getContext().getFileSystemManager().resolveName(name, FileName.ROOT_PATH);
+ 			fs = findFileSystem(rootName, fileSystemOptions);
+ 			if (fs == null)
+ 			{

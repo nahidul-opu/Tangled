@@ -1,0 +1,272 @@
+From 80f8f1cbc9e19d2893ebe6d10aa932a29e60fc85 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Fri, 9 Nov 2012 20:48:18 +0000
+Subject: [PATCH] Fix JCS-73: Concurrent cache access causes values loss -
+ added missing synchronization
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1407624 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |   3 +
+ .../apache/jcs/access/GroupCacheAccess.java   |   3 -
+ .../jcs/engine/control/CompositeCache.java    | 163 +++++++++---------
+ .../jcs/engine/memory/lru/LRUMemoryCache.java |   2 +-
+ 4 files changed, 87 insertions(+), 84 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index f718ffdae..eba40cd02 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,9 @@
+ 	</properties>
+ 	<body>
+ 		<release version="2.0" date="unreleased" description="JDK 1.5 based major release">
++            <action dev="tv" type="fix" issue="JCS-73" due-to="Alexander Kleymenov">
++                Concurrent cache access causes values loss.
++            </action>
+             <action dev="tv" type="fix" issue="JCS-77" due-to="Matt Morrisson">
+                 NullPointerException thrown by IndexedDiskCache if IndexedDisk calls fail to 
+                 initialize.
+diff --git a/src/java/org/apache/jcs/access/GroupCacheAccess.java b/src/java/org/apache/jcs/access/GroupCacheAccess.java
+index 131d41364..585a860ad 100644
+--- a/src/java/org/apache/jcs/access/GroupCacheAccess.java
++++ b/src/java/org/apache/jcs/access/GroupCacheAccess.java
+@@ -162,9 +162,6 @@ public void putInGroup( K name, String groupName, V value, IElementAttributes at
+             throw new InvalidArgumentException( "Value must not be null" );
+         }
+ 
+-        // unbind object first if any.
+-        remove( name, groupName );
+-
+         // Create the element and update. This may throw an IOException which
+         // should be wrapped by cache access.
+         try
+diff --git a/src/java/org/apache/jcs/engine/control/CompositeCache.java b/src/java/org/apache/jcs/engine/control/CompositeCache.java
+index b7ed545fc..10f0c494a 100644
+--- a/src/java/org/apache/jcs/engine/control/CompositeCache.java
++++ b/src/java/org/apache/jcs/engine/control/CompositeCache.java
+@@ -211,7 +211,7 @@ else if ( cacheElement.getKey() instanceof GroupId )
+ 
+         if ( log.isDebugEnabled() )
+         {
+-            log.debug( "Updating memory cache" );
++            log.debug( "Updating memory cache " + cacheElement.getKey() );
+         }
+ 
+         synchronized ( this )
+@@ -466,121 +466,124 @@ protected ICacheElement<K, V> get( K key, boolean localOnly )
+             log.debug( "get: key = " + key + ", localOnly = " + localOnly );
+         }
+ 
+-        try
++        synchronized (this)
+         {
+-            // First look in memory cache
+-            element = memCache.get( key );
+-
+-            if ( element != null )
++            try
+             {
+-                // Found in memory cache
+-                if ( isExpired( element ) )
++                // First look in memory cache
++                element = memCache.get( key );
++
++                if ( element != null )
+                 {
+-                    if ( log.isDebugEnabled() )
++                    // Found in memory cache
++                    if ( isExpired( element ) )
+                     {
+-                        log.debug( cacheName + " - Memory cache hit, but element expired" );
+-                    }
++                        if ( log.isDebugEnabled() )
++                        {
++                            log.debug( cacheName + " - Memory cache hit, but element expired" );
++                        }
+ 
+-                    missCountExpired++;
++                        missCountExpired++;
+ 
+-                    remove( key );
++                        remove( key );
+ 
+-                    element = null;
+-                }
+-                else
+-                {
+-                    if ( log.isDebugEnabled() )
++                        element = null;
++                    }
++                    else
+                     {
+-                        log.debug( cacheName + " - Memory cache hit" );
++                        if ( log.isDebugEnabled() )
++                        {
++                            log.debug( cacheName + " - Memory cache hit" );
++                        }
++
++                        // Update counters
++                        hitCountRam++;
+                     }
+ 
+-                    // Update counters
+-                    hitCountRam++;
++                    found = true;
+                 }
+-
+-                found = true;
+-            }
+-            else
+-            {
+-                // Item not found in memory. If local invocation look in aux
+-                // caches, even if not local look in disk auxiliaries
+-
+-                for ( int i = 0; i < auxCaches.length; i++ )
++                else
+                 {
+-                    AuxiliaryCache<K, V> aux = auxCaches[i];
++                    // Item not found in memory. If local invocation look in aux
++                    // caches, even if not local look in disk auxiliaries
+ 
+-                    if ( aux != null )
++                    for ( int i = 0; i < auxCaches.length; i++ )
+                     {
+-                        CacheType cacheType = aux.getCacheType();
++                        AuxiliaryCache<K, V> aux = auxCaches[i];
+ 
+-                        if ( !localOnly || cacheType == CacheType.DISK_CACHE )
++                        if ( aux != null )
+                         {
+-                            if ( log.isDebugEnabled() )
+-                            {
+-                                log.debug( "Attempting to get from aux [" + aux.getCacheName() + "] which is of type: "
+-                                    + cacheType );
+-                            }
++                            CacheType cacheType = aux.getCacheType();
+ 
+-                            try
++                            if ( !localOnly || cacheType == CacheType.DISK_CACHE )
+                             {
+-                                element = aux.get( key );
++                                if ( log.isDebugEnabled() )
++                                {
++                                    log.debug( "Attempting to get from aux [" + aux.getCacheName() + "] which is of type: "
++                                        + cacheType );
++                                }
++
++                                try
++                                {
++                                    element = aux.get( key );
++                                }
++                                catch ( IOException e )
++                                {
++                                    log.error( "Error getting from aux", e );
++                                }
+                             }
+-                            catch ( IOException e )
++
++                            if ( log.isDebugEnabled() )
+                             {
+-                                log.error( "Error getting from aux", e );
++                                log.debug( "Got CacheElement: " + element );
+                             }
+-                        }
+-
+-                        if ( log.isDebugEnabled() )
+-                        {
+-                            log.debug( "Got CacheElement: " + element );
+-                        }
+ 
+-                        // Item found in one of the auxiliary caches.
+-                        if ( element != null )
+-                        {
+-                            if ( isExpired( element ) )
++                            // Item found in one of the auxiliary caches.
++                            if ( element != null )
+                             {
+-                                if ( log.isDebugEnabled() )
++                                if ( isExpired( element ) )
+                                 {
+-                                    log.debug( cacheName + " - Aux cache[" + i + "] hit, but element expired." );
+-                                }
++                                    if ( log.isDebugEnabled() )
++                                    {
++                                        log.debug( cacheName + " - Aux cache[" + i + "] hit, but element expired." );
++                                    }
+ 
+-                                missCountExpired++;
++                                    missCountExpired++;
+ 
+-                                // This will tell the remotes to remove the item
+-                                // based on the element's expiration policy. The elements attributes
+-                                // associated with the item when it created govern its behavior
+-                                // everywhere.
+-                                remove( key );
++                                    // This will tell the remotes to remove the item
++                                    // based on the element's expiration policy. The elements attributes
++                                    // associated with the item when it created govern its behavior
++                                    // everywhere.
++                                    remove( key );
+ 
+-                                element = null;
+-                            }
+-                            else
+-                            {
+-                                if ( log.isDebugEnabled() )
+-                                {
+-                                    log.debug( cacheName + " - Aux cache[" + i + "] hit" );
++                                    element = null;
+                                 }
++                                else
++                                {
++                                    if ( log.isDebugEnabled() )
++                                    {
++                                        log.debug( cacheName + " - Aux cache[" + i + "] hit" );
++                                    }
+ 
+-                                // Update counters
+-                                hitCountAux++;
+-                                auxHitCountByIndex[i]++;
++                                    // Update counters
++                                    hitCountAux++;
++                                    auxHitCountByIndex[i]++;
+ 
+-                                copyAuxiliaryRetrievedItemToMemory( element );
+-                            }
++                                    copyAuxiliaryRetrievedItemToMemory( element );
++                                }
+ 
+-                            found = true;
++                                found = true;
+ 
+-                            break;
++                                break;
++                            }
+                         }
+                     }
+                 }
+             }
+-        }
+-        catch ( Exception e )
+-        {
+-            log.error( "Problem encountered getting element.", e );
++            catch ( Exception e )
++            {
++                log.error( "Problem encountered getting element.", e );
++            }
+         }
+ 
+         if ( !found )
+diff --git a/src/java/org/apache/jcs/engine/memory/lru/LRUMemoryCache.java b/src/java/org/apache/jcs/engine/memory/lru/LRUMemoryCache.java
+index c8a1890ac..75614699f 100644
+--- a/src/java/org/apache/jcs/engine/memory/lru/LRUMemoryCache.java
++++ b/src/java/org/apache/jcs/engine/memory/lru/LRUMemoryCache.java
+@@ -29,7 +29,7 @@
+ /**
+  * A fast reference management system. The least recently used items move to the end of the list and
+  * get spooled to disk if the cache hub is configured to use a disk cache. Most of the cache
+- * bottelnecks are in IO. There are no io bottlenecks here, it's all about processing power.
++ * bottlenecks are in IO. There are no io bottlenecks here, it's all about processing power.
+  * <p>
+  * Even though there are only a few adjustments necessary to maintain the double linked list, we
+  * might want to find a more efficient memory manager for large cache regions.

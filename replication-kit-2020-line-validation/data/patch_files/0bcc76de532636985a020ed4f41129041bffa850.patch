@@ -1,0 +1,205 @@
+From 0bcc76de532636985a020ed4f41129041bffa850 Mon Sep 17 00:00:00 2001
+From: dongjinleekr <dongjin.lee.kr@gmail.com>
+Date: Wed, 24 Sep 2014 18:03:51 +0900
+Subject: [PATCH] GIRAPH-947: Compilation error with hadoop 2.5.x fixed.
+
+1. Munge symbol 'STATIC_SASL_SYMBOL' was added.
+2. STATIC_SASL_SYMBOL was added to all build profiles, except hadoop_2 and hadoop_snapshot. Profile 2.1.1-SNAPSHOT is not munge-free anymore.
+3. Default hadoop version of profile hadoop_2 was changed: 2.2.0 -> 2.5.0
+---
+ .../giraph/comm/netty/SaslNettyClient.java    | 22 +++++++++++++++---
+ .../giraph/comm/netty/SaslNettyServer.java    | 23 ++++++++++++++++---
+ pom.xml                                       | 23 ++++++++++---------
+ 3 files changed, 51 insertions(+), 17 deletions(-)
+
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyClient.java b/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyClient.java
+index 840fee4a0..431691a3b 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyClient.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyClient.java
+@@ -24,6 +24,9 @@
+ import org.apache.hadoop.mapreduce.security.TokenCache;
+ import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
+ import org.apache.hadoop.security.Credentials;
++/*if_not[STATIC_SASL_SYMBOL]*/
++import org.apache.hadoop.security.SaslPropertiesResolver;
++/*end[STATIC_SASL_SYMBOL]*/
+ import org.apache.hadoop.security.SaslRpcServer;
+ import org.apache.hadoop.security.SaslRpcServer.AuthMethod;
+ import org.apache.hadoop.security.token.Token;
+@@ -74,9 +77,22 @@ public SaslNettyClient() {
+             AuthMethod.DIGEST.getMechanismName() +
+             " client to authenticate to service at " + token.getService());
+       }
+-      saslClient = Sasl.createSaslClient(new String[] { AuthMethod.DIGEST
+-          .getMechanismName() }, null, null, SaslRpcServer.SASL_DEFAULT_REALM,
+-          SaslRpcServer.SASL_PROPS, new SaslClientCallbackHandler(token));
++      /*if[STATIC_SASL_SYMBOL]
++      saslClient =
++          Sasl.createSaslClient(
++              new String[] { AuthMethod.DIGEST.getMechanismName() }, null,
++              null, SaslRpcServer.SASL_DEFAULT_REALM, SaslRpcServer.SASL_PROPS,
++              new SaslClientCallbackHandler(token));
++      else[STATIC_SASL_SYMBOL]*/
++      SaslPropertiesResolver saslPropsResolver =
++          SaslPropertiesResolver.getInstance(new Configuration());
++      saslClient =
++          Sasl.createSaslClient(
++              new String[] { AuthMethod.DIGEST.getMechanismName() }, null,
++              null, SaslRpcServer.SASL_DEFAULT_REALM,
++              saslPropsResolver.getDefaultProperties(),
++              new SaslClientCallbackHandler(token));
++      /*end[STATIC_SASL_SYMBOL]*/
+     } catch (IOException e) {
+       LOG.error("SaslNettyClient: Could not obtain job token for Netty " +
+           "Client to use to authenticate with a Netty Server.");
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyServer.java b/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyServer.java
+index 9039141d7..a1d410fa8 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyServer.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/netty/SaslNettyServer.java
+@@ -19,12 +19,18 @@
+ 
+ import org.apache.commons.net.util.Base64;
+ import org.apache.hadoop.classification.InterfaceStability;
++/*if_not[STATIC_SASL_SYMBOL]*/
++import org.apache.hadoop.conf.Configuration;
++/*end[STATIC_SASL_SYMBOL]*/
+ /*if[HADOOP_1_SECURITY]
+ else[HADOOP_1_SECURITY]*/
+ import org.apache.hadoop.ipc.StandbyException;
+ /*end[HADOOP_1_SECURITY]*/
+ import org.apache.hadoop.mapreduce.security.token.JobTokenIdentifier;
+ import org.apache.hadoop.mapreduce.security.token.JobTokenSecretManager;
++/*if_not[STATIC_SASL_SYMBOL]*/
++import org.apache.hadoop.security.SaslPropertiesResolver;
++/*end[STATIC_SASL_SYMBOL]*/
+ import org.apache.hadoop.security.SaslRpcServer;
+ import org.apache.log4j.Logger;
+ 
+@@ -92,9 +98,20 @@ public SaslNettyServer(JobTokenSecretManager secretManager,
+     try {
+       SaslDigestCallbackHandler ch =
+           new SaslNettyServer.SaslDigestCallbackHandler(secretManager);
+-      saslServer = Sasl.createSaslServer(SaslNettyServer.AuthMethod.DIGEST
+-          .getMechanismName(), null, SaslRpcServer.SASL_DEFAULT_REALM,
+-          SaslRpcServer.SASL_PROPS, ch);
++      /*if[STATIC_SASL_SYMBOL]
++      saslServer =
++          Sasl.createSaslServer(
++              SaslNettyServer.AuthMethod.DIGEST.getMechanismName(), null,
++              SaslRpcServer.SASL_DEFAULT_REALM, SaslRpcServer.SASL_PROPS, ch);
++      else[STATIC_SASL_SYMBOL]*/
++      SaslPropertiesResolver saslPropsResolver =
++          SaslPropertiesResolver.getInstance(new Configuration());
++      saslServer =
++          Sasl.createSaslServer(
++              SaslNettyServer.AuthMethod.DIGEST.getMechanismName(), null,
++              SaslRpcServer.SASL_DEFAULT_REALM,
++              saslPropsResolver.getDefaultProperties(), ch);
++      /*end[STATIC_SASL_SYMBOL]*/
+     } catch (SaslException e) {
+       LOG.error("SaslNettyServer: Could not create SaslServer: " + e);
+     }
+diff --git a/pom.xml b/pom.xml
+index 2e3eb63f7..e654ff384 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -930,7 +930,7 @@ under the License.
+       </modules>
+       <properties>
+         <hadoop.version>0.20.203.0</hadoop.version>
+-        <munge.symbols>HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_1_SECURITY,HADOOP_1_SECRET_MANAGER</munge.symbols>
++        <munge.symbols>HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_1_SECURITY,HADOOP_1_SECRET_MANAGER,STATIC_SASL_SYMBOL</munge.symbols>
+       </properties>
+       <dependencies>
+         <!-- sorted lexicographically -->
+@@ -985,7 +985,7 @@ under the License.
+       </activation>
+       <properties>
+         <hadoop.version>1.2.1</hadoop.version>
+-        <munge.symbols>HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_1_SECURITY,HADOOP_1_SECRET_MANAGER</munge.symbols>
++        <munge.symbols>HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_1_SECURITY,HADOOP_1_SECRET_MANAGER,STATIC_SASL_SYMBOL</munge.symbols>
+       </properties>
+       <dependencies>
+         <!-- sorted lexicographically -->
+@@ -1036,7 +1036,7 @@ under the License.
+       </modules>
+       <properties>
+         <hadoop.version>0.20.2</hadoop.version>
+-        <munge.symbols>HADOOP_NON_SECURE,HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_NON_COMMIT_JOB</munge.symbols>
++        <munge.symbols>HADOOP_NON_SECURE,HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_NON_COMMIT_JOB,STATIC_SASL_SYMBOL</munge.symbols>
+       </properties>
+       <dependencies>
+         <!-- sorted lexicographically -->
+@@ -1060,7 +1060,7 @@ under the License.
+       </modules>
+       <properties>
+         <hadoop.version>0.20.0</hadoop.version>
+-        <munge.symbols>HADOOP_NON_SECURE,HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_JOB_ID_AVAILABLE</munge.symbols>
++        <munge.symbols>HADOOP_NON_SECURE,HADOOP_NON_JOBCONTEXT_IS_INTERFACE,HADOOP_JOB_ID_AVAILABLE,STATIC_SASL_SYMBOL</munge.symbols>
+       </properties>
+       <dependencies>
+         <!-- sorted lexicographically -->
+@@ -1091,7 +1091,7 @@ under the License.
+       </modules>
+       <properties>
+         <hadoop.version>0.23.1</hadoop.version>
+-        <munge.symbols>HADOOP_1_SECRET_MANAGER</munge.symbols>
++        <munge.symbols>HADOOP_1_SECRET_MANAGER,STATIC_SASL_SYMBOL</munge.symbols>
+         <!-- TODO: add these checks eventually -->
+         <project.enforcer.skip>true</project.enforcer.skip>
+         <giraph.maven.dependency.plugin.skip>true</giraph.maven.dependency.plugin.skip>
+@@ -1125,7 +1125,7 @@ under the License.
+       </modules>
+       <properties>
+         <hadoop.version>2.0.0-cdh4.1.2</hadoop.version> 
+-        <munge.symbols>HADOOP_1_SECRET_MANAGER</munge.symbols>
++        <munge.symbols>HADOOP_1_SECRET_MANAGER,STATIC_SASL_SYMBOL</munge.symbols>
+         <!-- TODO: add these checks eventually -->
+         <project.enforcer.skip>true</project.enforcer.skip>
+         <giraph.maven.dependency.plugin.skip>true</giraph.maven.dependency.plugin.skip>
+@@ -1191,7 +1191,7 @@ under the License.
+       </modules>
+       <properties>
+         <hadoop.version>SET_HADOOP_VERSION_USING_MVN_DASH_D_OPTION</hadoop.version>
+-        <munge.symbols>PURE_YARN</munge.symbols>
++        <munge.symbols>PURE_YARN,STATIC_SASL_SYMBOL</munge.symbols>
+         <!-- TODO: add these checks eventually -->
+         <project.enforcer.skip>true</project.enforcer.skip>
+         <giraph.maven.dependency.plugin.skip>true</giraph.maven.dependency.plugin.skip>
+@@ -1240,9 +1240,6 @@ under the License.
+       </dependencies>
+     </profile>
+ 
+-    <!-- Help keep future Hadoop versions munge-free:
+-         All profiles below are munge-free: avoid introducing any munge
+-         flags on any of the following profiles. -->
+     <profile>
+        <id>2.1.1-SNAPSHOT</id>
+        <modules>
+@@ -1250,6 +1247,7 @@ under the License.
+        </modules>
+        <properties>
+          <hadoop.version>2.1.1-SNAPSHOT</hadoop.version>
++         <munge.symbols>STATIC_SASL_SYMBOL</munge.symbols>
+          <!-- TODO: add these checks eventually -->
+          <project.enforcer.skip>true</project.enforcer.skip>
+          <giraph.maven.dependency.plugin.skip>true</giraph.maven.dependency.plugin.skip>
+@@ -1284,6 +1282,9 @@ under the License.
+        </dependencies>
+      </profile>
+ 
++    <!-- Help keep future Hadoop versions munge-free:
++         All profiles below are munge-free: avoid introducing any munge
++         flags on any of the following profiles. -->
+     <profile>
+        <id>hadoop_2</id>
+       <modules>
+@@ -1296,7 +1297,7 @@ under the License.
+         <module>giraph-dist</module>
+       </modules>
+        <properties>
+-         <hadoop.version>2.2.0</hadoop.version>
++         <hadoop.version>2.5.1</hadoop.version>
+          <!-- TODO: add these checks eventually -->
+          <project.enforcer.skip>true</project.enforcer.skip>
+          <giraph.maven.dependency.plugin.skip>true</giraph.maven.dependency.plugin.skip>

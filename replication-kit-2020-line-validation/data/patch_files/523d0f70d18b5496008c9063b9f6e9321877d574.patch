@@ -1,0 +1,229 @@
+From 523d0f70d18b5496008c9063b9f6e9321877d574 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 15 Mar 2011 23:11:16 +0000
+Subject: [PATCH] FIX: Valid Path does not work for Filesystem Resolver
+ (IVY-1268)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1081990 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../plugins/resolver/FileSystemResolver.java  |  15 ++-
+ src/java/org/apache/ivy/util/Checks.java      |   4 +-
+ src/java/org/apache/ivy/util/FileUtil.java    | 120 ++++++++++++++++--
+ 4 files changed, 124 insertions(+), 16 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f0aa95a82..62ab79429 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -124,6 +124,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: Valid Path does not work for Filesystem Resolver (IVY-1268)
+ - FIX: quiet="true" does not surpress download 'dots' on packager resolver (IVY-1269)
+ - FIX: Dynamic version resolution result can be incorrect when ivy metadata contains extra attributes (IVY-1236)
+ - FIX: NullPointerException in FileUtil#forceDelete.
+diff --git a/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java b/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java
+index 9ce33e672..aa61ded91 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java
+@@ -33,6 +33,7 @@
+ import org.apache.ivy.core.settings.IvyPattern;
+ import org.apache.ivy.plugins.repository.file.FileRepository;
+ import org.apache.ivy.util.Checks;
++import org.apache.ivy.util.FileUtil;
+ import org.apache.ivy.util.Message;
+ 
+ /**
+@@ -302,22 +303,24 @@ public void setTransactional(String transactional) {
+     }
+ 
+     public void addConfiguredIvy(IvyPattern p) {
+-        Checks.checkAbsolute(p.getPattern(), "ivy pattern");
++        File file = Checks.checkAbsolute(p.getPattern(), "ivy pattern");
++        p.setPattern(file.getAbsolutePath());
+         super.addConfiguredIvy(p);
+     }
+     
+     public void addIvyPattern(String pattern) {
+-        Checks.checkAbsolute(pattern, "ivy pattern");
+-        super.addIvyPattern(pattern);
++        File file = Checks.checkAbsolute(pattern, "ivy pattern");
++        super.addIvyPattern(file.getAbsolutePath());
+     }
+     
+     public void addConfiguredArtifact(IvyPattern p) {
+-        Checks.checkAbsolute(p.getPattern(), "artifact pattern");
++        File file = Checks.checkAbsolute(p.getPattern(), "artifact pattern");
++        p.setPattern(file.getAbsolutePath());
+         super.addConfiguredArtifact(p);
+     }
+     
+     public void addArtifactPattern(String pattern) {
+-        Checks.checkAbsolute(pattern, "artifact pattern");
+-        super.addArtifactPattern(pattern);
++        File file = Checks.checkAbsolute(pattern, "artifact pattern");
++        super.addArtifactPattern(file.getAbsolutePath());
+     }
+ }
+diff --git a/src/java/org/apache/ivy/util/Checks.java b/src/java/org/apache/ivy/util/Checks.java
+index f7ef4780f..bc8f9c825 100644
+--- a/src/java/org/apache/ivy/util/Checks.java
++++ b/src/java/org/apache/ivy/util/Checks.java
+@@ -47,7 +47,7 @@ public static File checkAbsolute(File f, String fileName) {
+         if (!f.isAbsolute()) {
+             throw new IllegalArgumentException(fileName + " must be absolute: " + f.getPath());
+         }
+-        return f;
++        return FileUtil.normalize(f.getPath());
+     }
+     
+     public static File checkAbsolute(String path, String fileName) {
+@@ -56,6 +56,6 @@ public static File checkAbsolute(String path, String fileName) {
+         if (!f.isAbsolute()) {
+             throw new IllegalArgumentException(fileName + " must be absolute: " + path);
+         }
+-        return f;
++        return FileUtil.normalize(f.getPath());
+     }
+ }
+diff --git a/src/java/org/apache/ivy/util/FileUtil.java b/src/java/org/apache/ivy/util/FileUtil.java
+index 848a573dc..05a9576e4 100644
+--- a/src/java/org/apache/ivy/util/FileUtil.java
++++ b/src/java/org/apache/ivy/util/FileUtil.java
+@@ -32,6 +32,8 @@
+ import java.util.Collection;
+ import java.util.Collections;
+ import java.util.List;
++import java.util.Stack;
++import java.util.StringTokenizer;
+ 
+ import org.apache.ivy.util.url.URLHandlerRegistry;
+ 
+@@ -372,15 +374,117 @@ private static Collection listAll(File file, Collection list, Collection ignore)
+     }
+ 
+     public static File resolveFile(File file, String filename) {
+-        /*
+-         * very simple resolveFile algorithm compared to what is done in Ant. It must be enough in
+-         * most common cases though.
+-         */
+-        File f = new File(filename);
+-        if (f.isAbsolute()) {
+-            return f;
++        File result = new File(filename);
++        if (!result.isAbsolute()) {
++            result = new File(file, filename);
+         }
+-        return new File(file, filename);
++        
++        return normalize(result.getPath());
+     }
++    
++    //////////////////////////////////////////////
++    // The following code comes from Ant FileUtils
++    //////////////////////////////////////////////
++    
++   /**
++    * &quot;Normalize&quot; the given absolute path.
++    *
++    * <p>This includes:
++    * <ul>
++    *   <li>Uppercase the drive letter if there is one.</li>
++    *   <li>Remove redundant slashes after the drive spec.</li>
++    *   <li>Resolve all ./, .\, ../ and ..\ sequences.</li>
++    *   <li>DOS style paths that start with a drive letter will have
++    *     \ as the separator.</li>
++    * </ul>
++    * Unlike {@link File#getCanonicalPath()} this method
++    * specifically does not resolve symbolic links.
++    *
++    * @param path the path to be normalized.
++    * @return the normalized version of the path.
++    *
++    * @throws java.lang.NullPointerException if path is null.
++    */
++    public static File normalize(final String path) {
++       Stack s = new Stack();
++       String[] dissect = dissect(path);
++       s.push(dissect[0]);
++
++       StringTokenizer tok = new StringTokenizer(dissect[1], File.separator);
++       while (tok.hasMoreTokens()) {
++           String thisToken = tok.nextToken();
++           if (".".equals(thisToken)) {
++               continue;
++           }
++           if ("..".equals(thisToken)) {
++               if (s.size() < 2) {
++                   // Cannot resolve it, so skip it.
++                   return new File(path);
++               }
++               s.pop();
++           } else { // plain component
++               s.push(thisToken);
++           }
++       }
++       StringBuffer sb = new StringBuffer();
++       for (int i = 0; i < s.size(); i++) {
++           if (i > 1) {
++               // not before the filesystem root and not after it, since root
++               // already contains one
++               sb.append(File.separatorChar);
++           }
++           sb.append(s.elementAt(i));
++       }
++       return new File(sb.toString());
++   }
++    
++    /**
++     * Dissect the specified absolute path.
++     * @param path the path to dissect.
++     * @return String[] {root, remaining path}.
++     * @throws java.lang.NullPointerException if path is null.
++     * @since Ant 1.7
++     */
++    private static String[] dissect(String path) {
++        char sep = File.separatorChar;
++        path = path.replace('/', sep).replace('\\', sep);
++
++//        // make sure we are dealing with an absolute path
++//        if (!isAbsolutePath(path)) {
++//            throw new BuildException(path + " is not an absolute path");
++//        }
++        String root = null;
++        int colon = path.indexOf(':');
++        if (colon > 0) { // && (ON_DOS || ON_NETWARE)) {
++
++            int next = colon + 1;
++            root = path.substring(0, next);
++            char[] ca = path.toCharArray();
++            root += sep;
++            //remove the initial separator; the root has it.
++            next = (ca[next] == sep) ? next + 1 : next;
++
++            StringBuffer sbPath = new StringBuffer();
++            // Eliminate consecutive slashes after the drive spec:
++            for (int i = next; i < ca.length; i++) {
++                if (ca[i] != sep || ca[i - 1] != sep) {
++                    sbPath.append(ca[i]);
++                }
++            }
++            path = sbPath.toString();
++        } else if (path.length() > 1 && path.charAt(1) == sep) {
++            // UNC drive
++            int nextsep = path.indexOf(sep, 2);
++            nextsep = path.indexOf(sep, nextsep + 1);
++            root = (nextsep > 2) ? path.substring(0, nextsep + 1) : path;
++            path = path.substring(root.length());
++        } else {
++            root = File.separator;
++            path = path.substring(1);
++        }
++        return new String[] {root, path};
++    }
++ 
++
+ 
+ }

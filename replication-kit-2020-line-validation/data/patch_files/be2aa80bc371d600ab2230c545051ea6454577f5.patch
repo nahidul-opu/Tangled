@@ -1,0 +1,145 @@
+From be2aa80bc371d600ab2230c545051ea6454577f5 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 15 Apr 2009 21:27:17 +0000
+Subject: [PATCH] FIX: PomModuleDescriptorBuilder does not resolve ejb type
+ dependencies to jar extension (IVY-1058) (thanks to Andrey Lomakin)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@765366 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  4 +-
+ .../parser/m2/PomModuleDescriptorBuilder.java |  6 ++-
+ .../m2/PomModuleDescriptorParserTest.java     | 21 ++++++++++
+ .../ivy/plugins/parser/m2/test-ejb-type.pom   | 39 +++++++++++++++++++
+ 4 files changed, 68 insertions(+), 2 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/m2/test-ejb-type.pom
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 6416d77a4..52ff7126a 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -49,6 +49,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Tat Leung
+ 	Costin Leau
+ 	Antoine Levy-Lambert
++	Andrey Lomakin
+ 	William Lyvers
+ 	Sakari Maaranen
+ 	Jan Materne
+@@ -86,7 +87,8 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	
+    trunk
+ =====================================
+-- FIX: Wrong BuildException messages (findmodules) (IVY-1056)   
++- FIX: Wrong BuildException messages (findmodules) (IVY-1056)
++- FIX: PomModuleDescriptorBuilder does not resolve ejb type dependencies to jar extension (IVY-1058) (thanks to Andrey Lomakin)   
+ 	
+    2.1.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index 0b2442e3b..876c3e02e 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -292,6 +292,10 @@ public void addDependency(Resource res, PomDependencyData dep) {
+             if (dep.getType() != null) {
+                 type = dep.getType();
+             }
++            String ext = type;
++            if (JAR_PACKAGINGS.contains(type)) {
++                ext = "jar";
++            }
+             // we deal with classifiers by setting an extra attribute and forcing the
+             // dependency to assume such an artifact is published
+             if (dep.getClassifier() != null) {
+@@ -299,7 +303,7 @@ public void addDependency(Resource res, PomDependencyData dep) {
+             }
+             DefaultDependencyArtifactDescriptor depArtifact = 
+                     new DefaultDependencyArtifactDescriptor(dd, dd.getDependencyId().getName(),
+-                        type, type, null, extraAtt);
++                        type, ext, null, extraAtt);
+             // here we have to assume a type and ext for the artifact, so this is a limitation
+             // compared to how m2 behave with classifiers
+             String optionalizedScope = dep.isOptional() ? "optional" : scope;
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index b89364370..9b12df359 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -27,6 +27,7 @@
+ 
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
++import org.apache.ivy.core.module.descriptor.DependencyArtifactDescriptor;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.ExcludeRule;
+ import org.apache.ivy.core.module.descriptor.License;
+@@ -148,6 +149,26 @@ public void testEjbPackaging() throws Exception {
+         assertEquals("ejb", artifact[0].getType());
+     }
+ 
++    public void testEjbType() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
++            settings, getClass().getResource("test-ejb-type.pom"), false);
++        assertNotNull(md);
++
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org.apache", "test", "1.0");
++        assertEquals(mrid, md.getModuleRevisionId());
++
++        DependencyDescriptor[] deps = md.getDependencies();
++        assertNotNull(deps);
++        assertEquals(1, deps.length);
++        
++        DependencyArtifactDescriptor[] artifacts = deps[0].getAllDependencyArtifacts();
++        assertNotNull(artifacts);
++        assertEquals(1, artifacts.length);
++        assertEquals("test", artifacts[0].getName());
++        assertEquals("jar", artifacts[0].getExt());
++        assertEquals("ejb", artifacts[0].getType());
++    }
++
+     public void testParent() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             settings, getClass().getResource("test-parent.pom"), false);
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-ejb-type.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-ejb-type.pom
+new file mode 100644
+index 000000000..d31309d72
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-ejb-type.pom
+@@ -0,0 +1,39 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test</artifactId>
++  <name>Test Module for dependencies with type</name>
++  <version>1.0</version>
++  <url>http://ant.apache.org/ivy</url>
++  <organization>
++    <name>Apache</name>
++    <url>http://www.apache.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test</artifactId>
++      <version>1.0</version>
++      <type>ejb</type>
++    </dependency>
++  </dependencies>
++</project>

@@ -1,0 +1,134 @@
+From 4ed0bdf1c73fd82d3080d15085675de96d5be0aa Mon Sep 17 00:00:00 2001
+From: Ryan Blue <blue@apache.org>
+Date: Tue, 31 Mar 2015 16:49:30 -0700
+Subject: [PATCH] PARQUET-214: Fix Avro string regression.
+
+At some point, parquet-avro converted string fields to binary without
+the UTF8 annotation. The change in PARQUET-139 to filter the file's
+schema using the requested projection causes a regression because the
+annotation is not present in some file schemas, but is present in the
+projection schema converted from Avro.
+
+This reverts the projection change to avoid a regression in a release.
+Fixing the projection as in PARQUET-139 will need to be done as a
+follow-up.
+
+Author: Ryan Blue <blue@apache.org>
+
+Closes #142 from rdblue/PARQUET-214-fix-avro-regression and squashes the following commits:
+
+71e0207 [Ryan Blue] PARQUET-214: Add support for old avro.schema property.
+95148f9 [Ryan Blue] PARQUET-214: Revert Schema projection change from PARQUET-139.
+---
+ .../java/parquet/avro/AvroReadSupport.java    |   9 ++--
+ .../avro/TestBackwardCompatibility.java       |  51 ++++++++++++++++++
+ .../src/test/resources/strings-2.parquet      | Bin 0 -> 282 bytes
+ 3 files changed, 57 insertions(+), 3 deletions(-)
+ create mode 100644 parquet-avro/src/test/java/parquet/avro/TestBackwardCompatibility.java
+ create mode 100644 parquet-avro/src/test/resources/strings-2.parquet
+
+diff --git a/parquet-avro/src/main/java/parquet/avro/AvroReadSupport.java b/parquet-avro/src/main/java/parquet/avro/AvroReadSupport.java
+index eacd369fdb..9df3363641 100644
+--- a/parquet-avro/src/main/java/parquet/avro/AvroReadSupport.java
++++ b/parquet-avro/src/main/java/parquet/avro/AvroReadSupport.java
+@@ -39,6 +39,8 @@ public class AvroReadSupport<T extends IndexedRecord> extends ReadSupport<T> {
+   private static final String AVRO_READ_SCHEMA = "parquet.avro.read.schema";
+ 
+   static final String AVRO_SCHEMA_METADATA_KEY = "parquet.avro.schema";
++  // older files were written with the schema in this metadata key
++  static final String OLD_AVRO_SCHEMA_METADATA_KEY = "avro.schema";
+   private static final String AVRO_READ_SCHEMA_METADATA_KEY = "avro.read.schema";
+ 
+   public static String AVRO_DATA_SUPPLIER = "parquet.avro.data.supplier";
+@@ -79,9 +81,7 @@ public ReadContext init(Configuration configuration,
+       metadata = new LinkedHashMap<String, String>();
+       metadata.put(AVRO_READ_SCHEMA_METADATA_KEY, avroReadSchema);
+     }
+-    // use getSchemaForRead because it checks that the requested schema is a
+-    // subset of the columns in the file schema
+-    return new ReadContext(getSchemaForRead(fileSchema, projection), metadata);
++    return new ReadContext(projection, metadata);
+   }
+ 
+   @Override
+@@ -97,6 +97,9 @@ public RecordMaterializer<T> prepareForRead(
+     } else if (keyValueMetaData.get(AVRO_SCHEMA_METADATA_KEY) != null) {
+       // use the Avro schema from the file metadata if present
+       avroSchema = new Schema.Parser().parse(keyValueMetaData.get(AVRO_SCHEMA_METADATA_KEY));
++    } else if (keyValueMetaData.get(OLD_AVRO_SCHEMA_METADATA_KEY) != null) {
++      // use the Avro schema from the file metadata if present
++      avroSchema = new Schema.Parser().parse(keyValueMetaData.get(OLD_AVRO_SCHEMA_METADATA_KEY));
+     } else {
+       // default to converting the Parquet schema into an Avro schema
+       avroSchema = new AvroSchemaConverter(configuration).convert(parquetSchema);
+diff --git a/parquet-avro/src/test/java/parquet/avro/TestBackwardCompatibility.java b/parquet-avro/src/test/java/parquet/avro/TestBackwardCompatibility.java
+new file mode 100644
+index 0000000000..4e614b589d
+--- /dev/null
++++ b/parquet-avro/src/test/java/parquet/avro/TestBackwardCompatibility.java
+@@ -0,0 +1,51 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package parquet.avro;
++
++import com.google.common.io.Resources;
++import java.io.IOException;
++import org.apache.avro.generic.GenericRecord;
++import org.apache.hadoop.conf.Configuration;
++import org.apache.hadoop.fs.Path;
++import org.junit.Assert;
++import org.junit.Test;
++import parquet.hadoop.ParquetReader;
++
++public class TestBackwardCompatibility {
++
++  @Test
++  public void testStringCompatibility() throws IOException {
++    // some older versions of Parquet used avro.schema instead of
++    // parquet.avro.schema and didn't annotate binary with UTF8 when the type
++    // was converted from an Avro string. this validates that the old read
++    // schema is recognized and used to read the file as expected.
++    Path testFile = new Path(Resources.getResource("strings-2.parquet").getFile());
++    Configuration conf = new Configuration();
++    ParquetReader<GenericRecord> reader = AvroParquetReader
++        .builder(new AvroReadSupport<GenericRecord>(), testFile)
++        .withConf(conf)
++        .build();
++    GenericRecord r;
++    while ((r = reader.read()) != null) {
++      Assert.assertTrue("Should read value into a String",
++          r.get("text") instanceof String);
++    }
++  }
++
++}
+diff --git a/parquet-avro/src/test/resources/strings-2.parquet b/parquet-avro/src/test/resources/strings-2.parquet
+new file mode 100644
+index 0000000000000000000000000000000000000000..3b1c94a9364b6af88e4a9399f449976accfc0457
+GIT binary patch
+literal 282
+zcmX|7!D_-l5FI3kEqdLMg&e|yVj(SAl4w>>z4cV2M@tWzWK#nh*KXFfB7SWDq$^fW
+zGw(fS-kVuHy)q2Az(tHb*C31lh5)dUO6llZ8&%)kV52o2koXyOhu)fY`+*05M`H*)
+zD}OBb9tlY}K_MQIF#>X-vE%)<zn-|wu6jViU?{$fe(bA_>_qT#r1r3rbU}@*w5e%K
+zx1u}atBqrtR;s$Ei?`!dJX<>9fAo@vp59LoEO)|u?xlU`Of)U`t*WDp&67OkB^SJ`
+f1fR>SNm<SrOJ~Wf$a9ggDlL=d9)8`mEBBQ@e=$fP
+
+literal 0
+HcmV?d00001
+

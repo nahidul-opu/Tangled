@@ -1,0 +1,150 @@
+From c208ca8d43b0c7fbd2ca517763faeadec8a6b7e3 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 6 Aug 2008 22:46:07 +0000
+Subject: [PATCH] FIX: Incorrect parsing artifactPattern attribute in a sftp
+ resolver (IVY-661) (thanks to Alexey Kiselev)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@683438 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../repository/sftp/SFTPRepository.java       | 50 ++++++++++++++++---
+ 2 files changed, 44 insertions(+), 8 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d273ea77c..234d549a1 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -38,6 +38,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Christer Jonsson
+ 	Michael Kebe
+ 	Matthias Kilian
++	Alexey Kiselev
+ 	Gregory Kisling
+ 	Tat Leung
+ 	Costin Leau
+@@ -101,6 +102,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ - IMPROVEMENT: Check branch consistency during resolve (IVY-858)
+ 
++- FIX: Incorrect parsing artifactPattern attribute in a sftp resolver (IVY-661) (thanks to Alexey Kiselev)
+ - FIX: Maven2 "ejb" packaging is not supported (IVY-873)
+ - FIX: Config files with # in path can't be read (IVY-868) (thanks to Simon Steiner)
+ - FIX: Cache can't distinguish artifacts with classifiers (IVY-803) (thanks to James P. White)
+diff --git a/src/java/org/apache/ivy/plugins/repository/sftp/SFTPRepository.java b/src/java/org/apache/ivy/plugins/repository/sftp/SFTPRepository.java
+index bd2be55df..aea85a750 100644
+--- a/src/java/org/apache/ivy/plugins/repository/sftp/SFTPRepository.java
++++ b/src/java/org/apache/ivy/plugins/repository/sftp/SFTPRepository.java
+@@ -20,6 +20,8 @@
+ import java.io.File;
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Iterator;
+@@ -87,7 +89,9 @@ public Resource getResource(String source) {
+     public Resource resolveResource(String path) {
+         try {
+             ChannelSftp c = getSftpChannel(path);
+-            Collection r = c.ls(path);
++			
++            Collection r = c.ls(getPath(path));
++			
+             if (r != null) {
+                 for (Iterator iter = r.iterator(); iter.hasNext();) {
+                     Object obj = iter.next();
+@@ -103,31 +107,44 @@ public Resource resolveResource(String path) {
+             Message.debug("reolving resource error: " + e.getMessage());
+             // silent fail, return unexisting resource
+         }
++		
+         return new BasicResource(path, false, 0, 0, false);
+     }
+ 
+     public InputStream openStream(SFTPResource resource) throws IOException {
+         ChannelSftp c = getSftpChannel(resource.getName());
+         try {
+-            return c.get(resource.getName());
++            String path = getPath(resource.getName());
++            return c.get(path);
+         } catch (SftpException e) {
+             IOException ex = new IOException("impossible to open stream for " + resource + " on "
+                     + getHost() + (e.getMessage() != null ? ": " + e.getMessage() : ""));
+             ex.initCause(e);
+             throw ex;
+-        }
++        } catch (URISyntaxException e) {
++            IOException ex = new IOException("impossible to open stream for " + resource + " on "
++                + getHost() + (e.getMessage() != null ? ": " + e.getMessage() : ""));
++            ex.initCause(e);
++            throw ex;
++        } 
+     }
+ 
+     public void get(String source, File destination) throws IOException {
+         fireTransferInitiated(getResource(source), TransferEvent.REQUEST_GET);
+         ChannelSftp c = getSftpChannel(source);
+         try {
+-            c.get(source, destination.getAbsolutePath(), new MyProgressMonitor());
++            String path = getPath(source);
++            c.get(path, destination.getAbsolutePath(), new MyProgressMonitor());
+         } catch (SftpException e) {
+             IOException ex = new IOException("impossible to get " + source + " on " + getHost()
+                     + (e.getMessage() != null ? ": " + e.getMessage() : ""));
+             ex.initCause(e);
+             throw ex;
++        } catch (URISyntaxException e) {
++            IOException ex = new IOException("impossible to get " + source + " on " + getHost()
++                + (e.getMessage() != null ? ": " + e.getMessage() : ""));
++            ex.initCause(e);
++            throw ex;
+         }
+     }
+ 
+@@ -135,17 +152,22 @@ public void put(File source, String destination, boolean overwrite) throws IOExc
+         fireTransferInitiated(getResource(destination), TransferEvent.REQUEST_PUT);
+         ChannelSftp c = getSftpChannel(destination);
+         try {
+-            if (!overwrite && checkExistence(destination, c)) {
++            String path = getPath(destination);
++            if (!overwrite && checkExistence(path, c)) {
+                 throw new IOException("destination file exists and overwrite == false");
+             }
+-            if (destination.indexOf('/') != -1) {
+-                mkdirs(destination.substring(0, destination.lastIndexOf('/')), c);
++            if (path.indexOf('/') != -1) {
++                mkdirs(path.substring(0, path.lastIndexOf('/')), c);
+             }
+-            c.put(source.getAbsolutePath(), destination, new MyProgressMonitor());
++            c.put(source.getAbsolutePath(), path, new MyProgressMonitor());
+         } catch (SftpException e) {
+             IOException ex = new IOException(e.getMessage());
+             ex.initCause(e);
+             throw ex;
++        } catch (URISyntaxException e) {
++            IOException ex = new IOException(e.getMessage());
++            ex.initCause(e);
++            throw ex;
+         }
+     }
+ 
+@@ -164,6 +186,18 @@ private void mkdirs(String directory, ChannelSftp c) throws IOException, SftpExc
+             c.mkdir(directory);
+         }
+     }
++	
++	private String getPath(String sftpURI) throws URISyntaxException {
++		String result = null;
++		URI uri = new URI(sftpURI);
++		result = uri.getPath();
++		
++		if (result == null) {
++			throw new URISyntaxException(sftpURI, "Missing path in URI.");
++		}
++		
++		return result;
++	}
+ 
+     public List list(String parent) throws IOException {
+         try {

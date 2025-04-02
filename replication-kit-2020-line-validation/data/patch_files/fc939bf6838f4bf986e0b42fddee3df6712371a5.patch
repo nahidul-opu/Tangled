@@ -1,0 +1,83 @@
+From fc939bf6838f4bf986e0b42fddee3df6712371a5 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 12 Jan 2010 10:09:16 +0000
+Subject: [PATCH] FIX: ivy.settings.dir space escaping problem (IVY-1162)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@898269 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/settings/XmlSettingsParser.java  | 22 +++++++++++++------
+ 2 files changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 7499f1aed..52e3ee61f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -105,6 +105,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Trace a message when a property file referenced from the settings doesn't exixts (IVY-1074)
+ - IMPROVEMENT: use defaultconf in combination with defaultconfmapping (IVY-1135) (thanks to Jon Schneider)
+ 
++- FIX: ivy.settings.dir space escaping problem (IVY-1162)
+ - FIX: Ivy cannot parse alternate format for Maven MD5 files (IVY-1155)
+ - FIX: Ivy does not close URL connection to ivy-report.xsl properly (IVY-1152)
+ - FIX: Artifact report throws NPE when artifact is not in cache (IVY-1150) (thanks to Steve Jones)
+diff --git a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+index 1699489aa..d9b4d5ab6 100644
+--- a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
++++ b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+@@ -415,9 +415,17 @@ private void includeStarted(Map attributes) throws IOException, ParseException {
+                 settingsURL = urlFromFileAttribute(propFilePath);
+                 Message.verbose("including file: " + settingsURL);
+                 if ("file".equals(settingsURL.getProtocol())) {
+-                    ivy.setSettingsVariables(
+-                        Checks.checkAbsolute(settingsURL.getPath(), 
+-                        "settings include path"));
++                    try {
++                        File settingsFile = new File(new URI(settingsURL.toExternalForm()));
++                        ivy.setSettingsVariables(
++                            Checks.checkAbsolute(settingsFile, 
++                            "settings include path"));
++                    } catch (URISyntaxException e) {
++                        // try to make the best of it...
++                        ivy.setSettingsVariables(
++                            Checks.checkAbsolute(settingsURL.getPath(), 
++                            "settings include path"));
++                    }
+                 } else {
+                     ivy.setSettingsVariables(settingsURL);
+                 }
+@@ -442,14 +450,14 @@ private URL urlFromFileAttribute(String filePath) throws IOException {
+         File incFile = new File(filePath);
+         if (incFile.isAbsolute()) {
+             if (!incFile.exists()) {
+-                throw new FileNotFoundException();
++                throw new FileNotFoundException(incFile.getAbsolutePath());
+             }
+             return incFile.toURI().toURL();
+         } else if ("file".equals(this.settings.getProtocol())) {
+             try {
+                 File settingsFile = new File(new URI(this.settings.toExternalForm()));
+                 if (!settingsFile.exists()) {
+-                    throw new FileNotFoundException();
++                    throw new FileNotFoundException(settingsFile.getAbsolutePath());
+                 }
+                 return new File(settingsFile.getParentFile(), filePath).toURI().toURL();
+             } catch (URISyntaxException e) {
+@@ -504,7 +512,7 @@ private void typedefStarted(Map attributes) {
+         configurator.typeDef(name, clazz);
+     }
+ 
+-    private void classpathStarted(Map attributes) throws MalformedURLException {
++    private void classpathStarted(Map attributes) throws IOException {
+         String urlStr = (String) attributes.get("url");
+         URL url = null;
+         if (urlStr == null) {
+@@ -513,7 +521,7 @@ private void classpathStarted(Map attributes) throws MalformedURLException {
+                 throw new IllegalArgumentException(
+                         "either url or file should be given for classpath element");
+             } else {
+-                url = Checks.checkAbsolute(file, "classpath").toURI().toURL();
++                url = urlFromFileAttribute(file);
+             }
+         } else {
+             url = new URL(urlStr);

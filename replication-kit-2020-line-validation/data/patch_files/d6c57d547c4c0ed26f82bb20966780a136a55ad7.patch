@@ -1,0 +1,220 @@
+From d6c57d547c4c0ed26f82bb20966780a136a55ad7 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 23 Aug 2012 22:21:00 +0000
+Subject: [PATCH] FIX: Ivy descriptors are merged incorrectly when there is an
+ <exclude> element (IVY-1356)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1376738 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/osgi/core/OsgiLatestStrategy.java     |  5 ++-
+ .../latest/LatestRevisionStrategy.java        |  5 ++-
+ .../xml/XmlModuleDescriptorUpdater.java       | 16 ++++++++-
+ .../plugins/resolver/DependencyResolver.java  |  2 +-
+ .../plugins/version/LatestVersionMatcher.java | 10 +++++-
+ .../parser/xml/XmlModuleUpdaterTest.java      | 35 +++++++++++++++++++
+ .../xml/test-extends-dependencies-exclude.xml | 31 ++++++++++++++++
+ 8 files changed, 100 insertions(+), 5 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-extends-dependencies-exclude.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 68e171564..e24436e1b 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -130,6 +130,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	
+    trunk
+ =====================================
++- FIX: Ivy descriptors are merged incorrectly when there is an <exclude> element (IVY-1356)
+ - FIX: SimpleDateFormat is not thread safe (IVY-1373)
+ - FIX: Maven 'hk2-jar' packaging is now supported (IVY-1357)
+ - FIX: Maven 'orbit' and 'pear' packaging is now supported (IVY-899)
+diff --git a/src/java/org/apache/ivy/osgi/core/OsgiLatestStrategy.java b/src/java/org/apache/ivy/osgi/core/OsgiLatestStrategy.java
+index 204fb655e..44f6f852f 100644
+--- a/src/java/org/apache/ivy/osgi/core/OsgiLatestStrategy.java
++++ b/src/java/org/apache/ivy/osgi/core/OsgiLatestStrategy.java
+@@ -71,7 +71,10 @@ public int compare(ArtifactInfo o1, ArtifactInfo o2) {
+             VersionMatcher vmatcher = IvyContext.getContext().getSettings().getVersionMatcher();
+             ModuleRevisionId mrid1 = ModuleRevisionId.newInstance("", "", rev1);
+             ModuleRevisionId mrid2 = ModuleRevisionId.newInstance("", "", rev2);
+-            if (vmatcher.isDynamic(mrid1)) {
++            
++            if (vmatcher.isDynamic(mrid1) && vmatcher.isDynamic(mrid2)) {
++                return vmatcher.compare(mrid1, mrid2, mridComparator);
++            } else if (vmatcher.isDynamic(mrid1)) {
+                 int c = vmatcher.compare(mrid1, mrid2, mridComparator);
+                 return c >= 0 ? 1 : -1;
+             } else if (vmatcher.isDynamic(mrid2)) {
+diff --git a/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java b/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java
+index 3e100e091..5d33d0f40 100644
+--- a/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java
++++ b/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java
+@@ -108,7 +108,10 @@ public int compare(Object o1, Object o2) {
+             VersionMatcher vmatcher = IvyContext.getContext().getSettings().getVersionMatcher();
+             ModuleRevisionId mrid1 = ModuleRevisionId.newInstance("", "", rev1);
+             ModuleRevisionId mrid2 = ModuleRevisionId.newInstance("", "", rev2);
+-            if (vmatcher.isDynamic(mrid1)) {
++
++            if (vmatcher.isDynamic(mrid1) && vmatcher.isDynamic(mrid2)) {
++                return vmatcher.compare(mrid1, mrid2, mridComparator);
++            } else if (vmatcher.isDynamic(mrid1)) {
+                 int c = vmatcher.compare(mrid1, mrid2, mridComparator);
+                 return c >= 0 ? 1 : -1;
+             } else if (vmatcher.isDynamic(mrid2)) {
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index bec7ea745..884c0efd5 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -271,6 +271,20 @@ public void startElement(String uri, String localName, String qName, Attributes
+             }
+ 
+             flushMergedElementsBefore(qName);
++            
++            // according to ivy.xsd, all <dependency> elements must occur before
++            // the <exclude>, <override> or <conflict> elements
++            if (options.isMerge() 
++                    && ("exclude".equals(localName)
++                            || "override".equals(localName)
++                            || "conflict".equals(localName))
++                    && "ivy-module/dependencies".equals(getContext())) {
++                ModuleDescriptor merged = options.getMergedDescriptor();
++                writeInheritedDependencies(merged);
++                out.println();
++                out.print(getIndent());
++            }
++
+             context.push(qName);
+ 
+             String path = getContext();
+@@ -360,7 +374,7 @@ public void startElement(String uri, String localName, String qName, Attributes
+                         writeInheritedDescription(merged);
+                     }
+                 }
+-
++                
+                 // copy
+                 write("<" + qName);
+                 for (int i = 0; i < attributes.getLength(); i++) {
+diff --git a/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java b/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
+index 2a690a9e3..5aecfbc09 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
+@@ -55,7 +55,7 @@ public interface DependencyResolver {
+     /**
+      * Resolve a module by id, getting its module descriptor and resolving the revision if it's a
+      * latest one (i.e. a revision uniquely identifying the revision of a module in the current
+-     * environment - If this revision is not able to identify uniquelely the revision of the module
++     * environment - If this revision is not able to identify uniquely the revision of the module
+      * outside of the current environment, then the resolved revision must begin by ##)
+      * 
+      * @throws ParseException
+diff --git a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+index ba5b153b3..5c794ba8a 100644
+--- a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+@@ -57,6 +57,14 @@ public boolean accept(ModuleRevisionId askedMrid, ModuleDescriptor foundMD) {
+      */
+     public int compare(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid,
+             Comparator staticComparator) {
+-        return needModuleDescriptor(askedMrid, foundMrid) ? 0 : 1;
++        if (isDynamic(askedMrid) && !isDynamic(foundMrid)) {
++            return needModuleDescriptor(askedMrid, null) ? 0 : 1;
++        }
++        
++        String askedStatus = askedMrid.getRevision().substring("latest.".length());
++        String foundStatus = foundMrid.getRevision().substring("latest.".length());
++        
++        List statuses = StatusManager.getCurrent().getStatuses();
++        return statuses.indexOf(askedStatus) - statuses.indexOf(foundStatus);
+     }
+ }
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+index 68e3809b2..e075d5c97 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+@@ -46,6 +46,12 @@
+ import org.xml.sax.SAXParseException;
+ 
+ public class XmlModuleUpdaterTest extends TestCase {
++    
++    protected void tearDown() throws Exception {
++        super.tearDown();
++        
++        XmlModuleDescriptorUpdater.LINE_SEPARATOR = System.getProperty("line.separator");
++    }
+ 
+     public void testUpdate() throws Exception {
+         /*
+@@ -320,6 +326,35 @@ public void testUpdateWithExcludeConfigurations5() throws Exception {
+                     .getDependencyArtifacts("myconf2").length);
+         }
+     }
++    
++    // IVY-1356
++    public void testMergedUpdateWithExtendsAndExcludes() throws Exception {
++        URL url = XmlModuleUpdaterTest.class.getResource("test-extends-dependencies-exclude.xml");
++
++        XmlModuleDescriptorParser parser = XmlModuleDescriptorParser.getInstance();
++        ModuleDescriptor md = parser.parseDescriptor(new IvySettings(), url, true);
++        
++        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
++        XmlModuleDescriptorUpdater.update(url, buffer, 
++            getUpdateOptions("release", "mynewrev")
++                .setMerge(true)
++                .setMergedDescriptor(md));
++        
++        ModuleDescriptor updatedMd = parser.parseDescriptor(new IvySettings(),
++            new ByteArrayInputStream(buffer.toByteArray()), new BasicResource("test", false, 0, 0,
++                    false), true);
++
++        DependencyDescriptor[] deps = updatedMd.getDependencies();
++        assertNotNull("Dependencies shouldn't be null", deps);
++        assertEquals("Number of dependencies is incorrect", 2, deps.length);
++        
++        // test indentation
++        String updatedXml = buffer.toString();
++        System.out.println(updatedXml);
++        assertTrue(updatedXml.indexOf(XmlModuleDescriptorUpdater.LINE_SEPARATOR 
++            + "\t\t<dependency org=\"myorg\" name=\"mymodule1\" rev=\"1.0\" conf=\"default->default\"/>" 
++            + XmlModuleDescriptorUpdater.LINE_SEPARATOR) != -1);
++    }
+ 
+     private UpdateOptions getUpdateOptions(String status, String revision) {
+         return getUpdateOptions(new IvySettings(), new HashMap(), status, revision, new Date());
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-extends-dependencies-exclude.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-extends-dependencies-exclude.xml
+new file mode 100644
+index 000000000..1a7807ac7
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-extends-dependencies-exclude.xml
+@@ -0,0 +1,31 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="myorg"
++	       module="mymodule"
++	       status="integration"
++	       publication="20091206000000">
++	       <extends organisation="myorg" module="myparent" revision="latest.revision" 
++	       			location="test-extends-parent.xml" extendType="dependencies"/>
++	</info>
++	<dependencies>
++		<dependency name="mymodule2" rev="2.0" conf="default"/>
++		<exclude org="myorg" module="mymodule3"/>
++	</dependencies>
++</ivy-module>

@@ -1,0 +1,154 @@
+From c7d6d6fd0d30f0f98b87c0a2c50f653839e4e1fe Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 2 Jun 2010 21:20:49 +0000
+Subject: [PATCH] IMPROVEMENT: added support for 'gzip' HTTP Content-Encoding
+ (IVY-1194)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@950762 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../apache/ivy/util/url/BasicURLHandler.java  | 20 ++++++++++++++--
+ .../ivy/util/url/HttpClientHandler.java       | 24 ++++++++++++++++---
+ 3 files changed, 40 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 6c2638789..28f0be2f1 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -115,6 +115,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - NEW: Support ivy.xml parent mechanism (IVY-742) (thanks to Jason Trump and Jean-Louis Boudart)
+ - NEW: Make ivy.xml <conf description> available (IVY-1158)
+ 
++- IMPROVEMENT: added support for 'gzip' HTTP Content-Encoding (IVY-1194)
+ - IMPROVEMENT: retrieve doesn't retrive files if the current one is more recent (IVY-1044)
+ - IMPROVEMENT: better diagnostics when reporting bad ivy file in cache (IVY-1190)
+ - IMPROVEMENT: Support changing="true" for inline retrieve (IVY-1180)
+diff --git a/src/java/org/apache/ivy/util/url/BasicURLHandler.java b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+index d87254ba1..9f67e920b 100644
+--- a/src/java/org/apache/ivy/util/url/BasicURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+@@ -28,6 +28,7 @@
+ import java.net.URL;
+ import java.net.URLConnection;
+ import java.net.UnknownHostException;
++import java.util.zip.GZIPInputStream;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.util.CopyProgressListener;
+@@ -116,6 +117,7 @@ public InputStream openStream(URL url) throws IOException {
+             url = normalizeToURL(url);
+             conn = url.openConnection();
+             conn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
++            conn.setRequestProperty("Accept-Encoding", "gzip");
+             if (conn instanceof HttpURLConnection) {
+                 HttpURLConnection httpCon = (HttpURLConnection) conn;
+                 if (!checkStatusCode(url, httpCon)) {
+@@ -124,7 +126,12 @@ public InputStream openStream(URL url) throws IOException {
+                                 + " See log for more detail.");
+                 }
+             }
+-            InputStream inStream  = conn.getInputStream();
++            InputStream inStream;
++            if ("gzip".equals(conn.getContentEncoding())) {
++                inStream = new GZIPInputStream(conn.getInputStream());
++            } else {
++                inStream = conn.getInputStream();
++            }
+             ByteArrayOutputStream outStream = new ByteArrayOutputStream();
+ 
+             byte[] buffer = new byte[BUFFER_SIZE];
+@@ -147,6 +154,7 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+             src = normalizeToURL(src);
+             srcConn = src.openConnection();
+             srcConn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
++            srcConn.setRequestProperty("Accept-Encoding", "gzip");
+             if (srcConn instanceof HttpURLConnection) {
+                 HttpURLConnection httpCon = (HttpURLConnection) srcConn;
+                 if (!checkStatusCode(src, httpCon)) {
+@@ -156,7 +164,15 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+                 }
+             }
+             int contentLength = srcConn.getContentLength();
+-            FileUtil.copy(srcConn.getInputStream(), dest, l);
++
++            InputStream inStream;
++            if ("gzip".equals(srcConn.getContentEncoding())) {
++                inStream = new GZIPInputStream(srcConn.getInputStream());
++            } else {
++                inStream = srcConn.getInputStream();
++            }
++
++            FileUtil.copy(inStream, dest, l);
+             if (dest.length() != contentLength && contentLength != -1) {
+                 dest.delete();
+                 throw new IOException(
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index dc9c8141f..266386abb 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -28,6 +28,7 @@
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Locale;
++import java.util.zip.GZIPInputStream;
+ 
+ import org.apache.commons.httpclient.Credentials;
+ import org.apache.commons.httpclient.Header;
+@@ -46,6 +47,7 @@
+ import org.apache.commons.httpclient.methods.HeadMethod;
+ import org.apache.commons.httpclient.methods.InputStreamRequestEntity;
+ import org.apache.commons.httpclient.methods.PutMethod;
++import org.apache.commons.httpclient.params.HttpMethodParams;
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.util.CopyProgressListener;
+ import org.apache.ivy.util.FileUtil;
+@@ -110,7 +112,16 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+                 throw new IOException("The HTTP response code for " + src
+                         + " did not indicate a success." + " See log for more detail.");
+             }
+-            FileUtil.copy(get.getResponseBodyAsStream(), dest, l);
++            
++            InputStream is;
++            Header[] contentEncodings = get.getResponseHeaders("Content-Encoding");
++            if ((contentEncodings.length > 0) && "gzip".equals(contentEncodings[0].getValue())) {
++                is = new GZIPInputStream(get.getResponseBodyAsStream());
++            } else {
++                is = get.getResponseBodyAsStream();
++            }
++
++            FileUtil.copy(is, dest, l);
+             dest.setLastModified(getLastModified(get));
+         } finally {
+             get.releaseConnection();
+@@ -244,6 +255,7 @@ private GetMethod doGet(URL url, int timeout) throws IOException {
+ 
+         GetMethod get = new GetMethod(normalizeToString(url));
+         get.setDoAuthentication(useAuthentication(url) || useProxyAuthentication());
++        get.setRequestHeader("Accept-Encoding", "gzip");
+         client.executeMethod(get);
+         return get;
+     }
+@@ -286,7 +298,7 @@ public void run() {
+             }
+ 
+             // user-agent
+-            httpClient.getParams().setParameter("http.useragent",
++            httpClient.getParams().setParameter(HttpMethodParams.USER_AGENT,
+                 "Apache Ivy/" + Ivy.getIvyVersion());
+ 
+             // authentication
+@@ -316,7 +328,13 @@ private static final class GETInputStream extends InputStream {
+ 
+         private GETInputStream(GetMethod get) throws IOException {
+             this.get = get;
+-            is = get.getResponseBodyAsStream();
++            
++            Header[] contentEncodings = get.getResponseHeaders("Content-Encoding");
++            if ((contentEncodings.length > 0) && "gzip".equals(contentEncodings[0].getValue())) {
++                is = new GZIPInputStream(get.getResponseBodyAsStream());
++            } else {
++                is = get.getResponseBodyAsStream();
++            }
+         }
+ 
+         public int available() throws IOException {

@@ -1,0 +1,211 @@
+From 2fa1c36f0a78ff2a3fab591553168b86fddc902c Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sun, 8 Mar 2009 19:24:58 +0000
+Subject: [PATCH] CONFIGURATION-368: Generate change events for
+ SubnodeConfigurations when changes of the parent configuration are detected.
+ (Ported this change to configuration2 branch.)
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@751505 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration2/SubConfiguration.java      |  3 ++
+ .../TestCombinedConfiguration.java            | 45 ++++++++++++++-----
+ .../configuration2/TestSubConfiguration.java  | 42 +++++++++++++++++
+ xdocs/changes.xml                             |  6 +++
+ 4 files changed, 84 insertions(+), 12 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/SubConfiguration.java b/src/main/java/org/apache/commons/configuration2/SubConfiguration.java
+index 84fd03d922..106d32a3f3 100644
+--- a/src/main/java/org/apache/commons/configuration2/SubConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/SubConfiguration.java
+@@ -213,7 +213,9 @@ public T getRootNode()
+                     if (currentRoot != rootNode)
+                     {
+                         // the root node was changed due to a change of the parent
++                        fireEvent(EVENT_SUBNODE_CHANGED, null, null, true);
+                         rootNode = currentRoot;
++                        fireEvent(EVENT_SUBNODE_CHANGED, null, null, false);
+                     }
+                     return currentRoot;
+                 }
+@@ -329,6 +331,7 @@ protected void initFromParent(AbstractHierarchicalConfiguration<T> parentConfig)
+      *
+      * @param value the value to be interpolated
+      */
++    @Override
+     protected Object interpolate(Object value)
+     {
+         return getParent().interpolate(value);
+diff --git a/src/test/java/org/apache/commons/configuration2/TestCombinedConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestCombinedConfiguration.java
+index 8e8d069891..93b0f48293 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestCombinedConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestCombinedConfiguration.java
+@@ -21,25 +21,18 @@
+ import java.io.IOException;
+ import java.io.PrintWriter;
+ import java.util.Collection;
+-import java.util.Set;
+ import java.util.List;
++import java.util.Set;
++
++import junit.framework.Assert;
++import junit.framework.TestCase;
+ 
+-import org.apache.commons.configuration2.AbstractConfiguration;
+-import org.apache.commons.configuration2.CombinedConfiguration;
+-import org.apache.commons.configuration2.ConfigurationRuntimeException;
+-import org.apache.commons.configuration2.HierarchicalConfiguration;
+-import org.apache.commons.configuration2.PropertiesConfiguration;
+-import org.apache.commons.configuration2.StrictConfigurationComparator;
+-import org.apache.commons.configuration2.XMLConfiguration;
+ import org.apache.commons.configuration2.event.ConfigurationEvent;
+ import org.apache.commons.configuration2.event.ConfigurationListener;
+ import org.apache.commons.configuration2.reloading.FileAlwaysReloadingStrategy;
+ import org.apache.commons.configuration2.tree.NodeCombiner;
+ import org.apache.commons.configuration2.tree.UnionCombiner;
+ 
+-import junit.framework.Assert;
+-import junit.framework.TestCase;
+-
+ /**
+  * Test class for CombinedConfiguration.
+  *
+@@ -65,6 +58,7 @@ public class TestCombinedConfiguration extends TestCase
+     /** The test event listener. */
+     CombinedListener listener;
+ 
++    @Override
+     protected void setUp() throws Exception
+     {
+         super.setUp();
+@@ -605,7 +599,6 @@ public void testGetConfigurations() throws Exception
+         assertTrue("Incorrect configuration", c == pc);
+     }
+ 
+-
+     public void testGetConfigurationNameList() throws Exception
+     {
+         config.addConfiguration(setUpTestConfiguration());
+@@ -620,6 +613,34 @@ public void testGetConfigurationNameList() throws Exception
+         assertTrue("Incorrect configuration name", TEST_NAME.equals(name));
+     }
+ 
++    /**
++     * Tests whether changes on a sub node configuration that is part of a
++     * combined configuration are detected. This test is related to
++     * CONFIGURATION-368.
++     */
++    public void testReloadWithSubNodeConfig() throws Exception
++    {
++        final String reloadContent = "<config><default><xmlReload1>%d</xmlReload1></default></config>";
++        File testDir = new File("target");
++        File testXmlFile = new File(testDir, "reload.xml");
++        config.setForceReloadCheck(true);
++        writeFile(testXmlFile, String.format(reloadContent, 0));
++        final String prefix1 = "default";
++        XMLConfiguration c1 = new XMLConfiguration(testXmlFile);
++        SubConfiguration<?> sub1 = c1.configurationAt(prefix1, true);
++        assertEquals("Inital test for sub config 1 failed", 0, sub1
++                .getInt("xmlReload1"));
++        config.addConfiguration(sub1);
++        assertEquals(
++                "Could not get value for sub config 1 from combined config", 0,
++                config.getInt("xmlReload1"));
++        c1.setReloadingStrategy(new FileAlwaysReloadingStrategy());
++        writeFile(testXmlFile, String.format(reloadContent, 1));
++        assertEquals("Reload of sub config 1 not detected", 1, config
++                .getInt("xmlReload1"));
++        assertTrue("XML file cannot be removed", testXmlFile.delete());
++    }
++
+     /**
+      * Helper method for writing a file.
+      *
+diff --git a/src/test/java/org/apache/commons/configuration2/TestSubConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestSubConfiguration.java
+index 5b0240fbbc..e2dae09fcc 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestSubConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestSubConfiguration.java
+@@ -17,6 +17,7 @@
+ package org.apache.commons.configuration2;
+ 
+ import java.io.File;
++import java.util.ArrayList;
+ import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.List;
+@@ -25,6 +26,8 @@
+ 
+ import junit.framework.TestCase;
+ 
++import org.apache.commons.configuration2.event.ConfigurationEvent;
++import org.apache.commons.configuration2.event.ConfigurationListener;
+ import org.apache.commons.configuration2.expr.ExpressionEngine;
+ import org.apache.commons.configuration2.expr.xpath.XPathExpressionEngine;
+ import org.apache.commons.configuration2.reloading.FileAlwaysReloadingStrategy;
+@@ -363,6 +366,30 @@ public void testParentReloadSupported() throws ConfigurationException
+                 .getString("tables.table(1).name"));
+     }
+ 
++    /**
++     * Tests whether events are fired if a change of the parent is detected.
++     */
++    public void testParentReloadEvents() throws ConfigurationException
++    {
++        setUpReloadTest(true);
++        ConfigurationListenerTestImpl l = new ConfigurationListenerTestImpl();
++        config.addConfigurationListener(l);
++        config.getString("name");
++        assertEquals("Wrong number of events", 2, l.events.size());
++        boolean before = true;
++        for (ConfigurationEvent e : l.events)
++        {
++            assertEquals("Wrong configuration", config, e.getSource());
++            assertEquals("Wrong event type",
++                    HierarchicalConfiguration.EVENT_SUBNODE_CHANGED, e
++                            .getType());
++            assertNull("Got a property name", e.getPropertyName());
++            assertNull("Got a property value", e.getPropertyValue());
++            assertEquals("Wrong before flag", before, e.isBeforeUpdate());
++            before = !before;
++        }
++    }
++
+     /**
+      * Tests a reload operation for the parent configuration when the subnode
+      * configuration is aware of reloads, and the parent configuration is
+@@ -519,4 +546,19 @@ protected void setUpSubnodeConfig()
+     {
+         config = new SubConfiguration<ConfigurationNode>(parent, getSubnodeRoot(parent));
+     }
++
++    /**
++     * A specialized configuration listener for testing whether the expected
++     * events are fired.
++     */
++    private static class ConfigurationListenerTestImpl implements ConfigurationListener
++    {
++        /** Stores the events received.*/
++        final List<ConfigurationEvent> events = new ArrayList<ConfigurationEvent>();
++
++        public void configurationChanged(ConfigurationEvent event)
++        {
++            events.add(event);
++        }
++    }
+ }
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index c3ccca4dd9..98b85f26e6 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -85,6 +85,12 @@
+     </release>
+ 
+     <release version="1.7" date="in SVN" description="">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-368">
++        SubnodeConfiguration now fires an event of type EVENT_SUBNODE_CHANGED
++        if a structural change of the parent configuration was detected. If the
++        SubnodeConfiguration is contained in a CombinedConfiguration, the
++        CombinedConfiguration receives this event and can update itself.
++      </action>
+       <action dev="rgoers" type="fix" issue="CONFIGURATION-361">
+         MultiFileHierarchicalConfiguration was not using basepath to
+         construct the file url. It also threw an exception if the

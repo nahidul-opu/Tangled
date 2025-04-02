@@ -1,0 +1,131 @@
+From 16728657c480f9d913a76e82d42d2d2dd68a54b2 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 25 Oct 2012 21:56:17 +0000
+Subject: [PATCH] FIX: Ivy default cache path with non-ASCII character lets it
+ crash (IVY-1378) (merged from trunk)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/branches/2.3.x@1402344 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/plugins/parser/m2/PomReader.java      | 16 +++++-----
+ src/java/org/apache/ivy/util/XMLHelper.java   | 31 ++++++++++---------
+ 3 files changed, 25 insertions(+), 23 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 6f389ad41..98911a888 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -133,6 +133,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - DOCUMENTATION: Documentation and Implementation mismatch of makepom (IVY-1383) (thanks to Thomas Kurpick)
+ - DOCUMENTATION: added link to extra beginners guide (IVY-1381)
+ 
++- FIX: Ivy default cache path with non-ASCII character lets it crash (IVY-1378)
+ - FIX: latest.integration isn't resolved against a Maven snapshot repository (when uniqueVersion = true) (IVY-1036)
+ - FIX: Resolve does not deliver all dependent artifacts (IVY-1366) (thanks to Wolfgang Frank)
+ - FIX: Ivy descriptors are merged incorrectly when there is an <exclude> element (IVY-1356)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+index 62cbc504a..84f07e692 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+@@ -48,8 +48,6 @@
+ import org.xml.sax.SAXException;
+ import org.xml.sax.SAXParseException;
+ 
+-
+-
+ /**
+  * Provides the method to read some data out of the DOM tree of a pom 
+  * file.
+@@ -91,8 +89,10 @@ public class PomReader {
+     
+     public PomReader(URL descriptorURL, Resource res) throws IOException, SAXException {
+         InputStream stream = new AddDTDFilterInputStream(URLHandlerRegistry.getDefault().openStream(descriptorURL));
++        InputSource source = new InputSource(stream);
++        source.setSystemId(XMLHelper.toSystemId(descriptorURL));
+         try {
+-            Document pomDomDoc = XMLHelper.parseToDom(stream, res, new EntityResolver() {
++            Document pomDomDoc = XMLHelper.parseToDom(source, new EntityResolver() {
+                 public InputSource resolveEntity(String publicId, String systemId) 
+                                 throws SAXException, IOException {
+                     if ((systemId != null) && systemId.endsWith("m2-entities.ent")) {
+@@ -109,12 +109,10 @@ public InputSource resolveEntity(String publicId, String systemId)
+             }
+             parentElement = getFirstChildElement(projectElement , PARENT);
+         } finally {
+-            if (stream != null) {
+-                try {
+-                    stream.close();
+-                } catch (IOException e) {
+-                    // ignore
+-                }
++            try {
++                stream.close();
++            } catch (IOException e) {
++                // ignore
+             }
+         }
+     }
+diff --git a/src/java/org/apache/ivy/util/XMLHelper.java b/src/java/org/apache/ivy/util/XMLHelper.java
+index 9f402c264..b7cfb4e68 100644
+--- a/src/java/org/apache/ivy/util/XMLHelper.java
++++ b/src/java/org/apache/ivy/util/XMLHelper.java
+@@ -19,6 +19,8 @@
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.net.URL;
+ 
+ import javax.xml.parsers.DocumentBuilder;
+@@ -77,6 +79,17 @@ private static SAXParser newSAXParser(URL schema, InputStream schemaStream)
+         return parser;
+     }
+ 
++    /**
++     * Convert an URL to a valid systemId according to RFC 2396.
++     */
++    public static String toSystemId(URL url) {
++        try {
++            return new URI(url.toExternalForm()).toASCIIString();
++        } catch (URISyntaxException e) {
++            return url.toExternalForm();
++        }
++    }
++
+     // IMPORTANT: validation errors are only notified to the given handler, and
+     // do not cause exception
+     // implement warning error and fatalError methods in handler to be informed
+@@ -92,7 +105,7 @@ public static void parse(
+         InputStream xmlStream = URLHandlerRegistry.getDefault().openStream(xmlURL);
+         try {
+             InputSource inSrc = new InputSource(xmlStream);
+-            inSrc.setSystemId(xmlURL.toExternalForm());
++            inSrc.setSystemId(toSystemId(xmlURL));
+             parse(inSrc, schema, handler, lHandler);
+         } finally {
+             try {
+@@ -189,20 +202,10 @@ public static String escape(String text) {
+     }
+ 
+     
+-    public static Document parseToDom(
+-            InputStream stream, Resource res, EntityResolver entityResolver) 
+-                throws IOException, SAXException {
++    public static Document parseToDom(InputSource source, EntityResolver entityResolver)
++            throws IOException, SAXException {
+         DocumentBuilder docBuilder = getDocBuilder(entityResolver);
+-        Document pomDomDoc;
+-        try {
+-            pomDomDoc = docBuilder.parse(stream, res.getName());
+-        } catch (SAXException e) {
+-            e.printStackTrace();
+-            throw e;
+-        } finally {
+-            stream.close();
+-        } 
+-        return pomDomDoc;
++        return docBuilder.parse(source);
+     }
+ 
+     public static DocumentBuilder getDocBuilder(EntityResolver entityResolver) {

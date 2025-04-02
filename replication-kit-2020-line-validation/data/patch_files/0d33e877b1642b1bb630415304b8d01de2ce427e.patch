@@ -1,0 +1,163 @@
+From 0d33e877b1642b1bb630415304b8d01de2ce427e Mon Sep 17 00:00:00 2001
+From: "Gary D. Gregory" <ggregory@apache.org>
+Date: Mon, 16 Oct 2017 20:32:13 +0000
+Subject: [PATCH] [BCEL-295] Fix local variable live range length; add test
+ case.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/bcel/trunk@1812323 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  1 +
+ .../apache/bcel/generic/LocalVariableGen.java | 28 +++++++++++++++----
+ .../org/apache/bcel/generic/MethodGen.java    |  6 ++--
+ .../java/org/apache/bcel/PLSETestCase.java    | 22 +++++++++++++++
+ 4 files changed, 47 insertions(+), 10 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index caf7a95f03..2923f76098 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -65,6 +65,7 @@ The <action> type attribute can be add,update,fix,remove.
+     <release version="6.2" date="tba" description="tba">
+       <action issue="BCEL-294" type="fix" dev="britter" due-to="Mark Roberts">Incorrect comment in StackMap.java</action>
+       <action issue="BCEL-296" type="fix" dev="ggregory" due-to="Mark Roberts">Incorrect comment in several classes.</action>
++      <action issue="BCEL-295" type="fix" dev="ggregory" due-to="Mark Roberts">Fix local variable live range length; add test case.</action>
+     </release>
+ 
+     <release version="6.1" date="2017-09-14" description="Experimental Java 9 Support">
+diff --git a/src/main/java/org/apache/bcel/generic/LocalVariableGen.java b/src/main/java/org/apache/bcel/generic/LocalVariableGen.java
+index d5ee8fcd29..fb27a136b9 100644
+--- a/src/main/java/org/apache/bcel/generic/LocalVariableGen.java
++++ b/src/main/java/org/apache/bcel/generic/LocalVariableGen.java
+@@ -38,6 +38,7 @@ public class LocalVariableGen implements InstructionTargeter, NamedAndTyped, Clo
+     private InstructionHandle start;
+     private InstructionHandle end;
+     private int orig_index; // never changes; used to match up with LocalVariableTypeTable entries
++    private boolean live_to_end;
+ 
+ 
+     /**
+@@ -61,6 +62,11 @@ public LocalVariableGen(final int index, final String name, final Type type, fin
+         setStart(start);
+         setEnd(end);
+         this.orig_index = index;
++        if (end == null) {
++            this.live_to_end = true;
++        } else {
++            this.live_to_end = false;
++        }
+     }
+ 
+ 
+@@ -88,11 +94,11 @@ public LocalVariableGen(final int index, final String name, final Type type, fin
+      * This relies on that the instruction list has already been dumped to byte code or
+      * or that the `setPositions' methods has been called for the instruction list.
+      *
+-     * Note that for local variables whose scope end at the last
+-     * instruction of the method's code, the JVM specification is ambiguous:
+-     * both a start_pc+length ending at the last instruction and
+-     * start_pc+length ending at first index beyond the end of the code are
+-     * valid.
++     * Note that due to the conversion from byte code offset to InstructionHandle,
++     * it is impossible to tell the difference between a live range that ends BEFORE
++     * the last insturction of the method or a live range that ends AFTER the last
++     * instruction of the method.  Hence the live_to_end flag to differentiate
++     * between these two cases.
+      *
+      * @param cp constant pool
+      */
+@@ -102,7 +108,7 @@ public LocalVariable getLocalVariable( final ConstantPoolGen cp ) {
+         if ((start != null) && (end != null)) {
+             start_pc = start.getPosition();
+             length = end.getPosition() - start_pc;
+-            if (end.getNext() == null) {
++            if ((end.getNext() == null) && live_to_end) {
+                 length += end.getInstruction().getLength();
+             }
+         }
+@@ -128,6 +134,16 @@ public int getOrigIndex() {
+     }
+ 
+ 
++    public void setLiveToEnd( final boolean live_to_end) {
++        this.live_to_end = live_to_end;
++    }
++
++
++    public boolean getLiveToEnd() {
++        return live_to_end;
++    }
++
++
+     @Override
+     public void setName( final String name ) {
+         this.name = name;
+diff --git a/src/main/java/org/apache/bcel/generic/MethodGen.java b/src/main/java/org/apache/bcel/generic/MethodGen.java
+index 6833bc9e49..5873adc0d4 100644
+--- a/src/main/java/org/apache/bcel/generic/MethodGen.java
++++ b/src/main/java/org/apache/bcel/generic/MethodGen.java
+@@ -133,7 +133,7 @@ public MethodGen(final int access_flags, final Type return_type, final Type[] ar
+         InstructionHandle end = null;
+         if (!abstract_) {
+             start = il.getStart();
+-            end = il.getEnd();
++            // end == null => live to end of method
+             /* Add local variables, namely the implicit `this' and the arguments
+              */
+             if (!isStatic() && (class_name != null)) { // Instance method -> `this' is local var 0
+@@ -725,9 +725,7 @@ private void updateLocalVariableTable(final LocalVariableTable a) {
+             if (null == start) {
+                 start = il.getStart();
+             }
+-            if (null == end) {
+-                end = il.getEnd();
+-            }
++            // end == null => live to end of method
+             // Since we are recreating the LocalVaraible, we must
+             // propagate the orig_index to new copy.
+             addLocalVariable(l.getName(), Type.getType(l.getSignature()), l
+diff --git a/src/test/java/org/apache/bcel/PLSETestCase.java b/src/test/java/org/apache/bcel/PLSETestCase.java
+index f3c00e23ef..71f01fb93c 100644
+--- a/src/test/java/org/apache/bcel/PLSETestCase.java
++++ b/src/test/java/org/apache/bcel/PLSETestCase.java
+@@ -18,7 +18,9 @@
+ 
+ package org.apache.bcel;
+ 
++import org.apache.bcel.classfile.ClassParser;
+ import org.apache.bcel.classfile.JavaClass;
++import org.apache.bcel.classfile.LocalVariable;
+ import org.apache.bcel.classfile.LocalVariableTable;
+ import org.apache.bcel.classfile.Method;
+ import org.apache.bcel.generic.ClassGen;
+@@ -28,6 +30,7 @@
+ import org.apache.bcel.generic.InvokeInstruction;
+ import org.apache.bcel.generic.MethodGen;
+ import org.apache.bcel.generic.Type;
++import java.io.FileInputStream;
+ 
+ public class PLSETestCase extends AbstractTestCase
+ {
+@@ -86,4 +89,23 @@ public void testB262() throws ClassNotFoundException
+         final String cn = ii.getClassName(pool);
+         assertEquals("[Lorg.apache.bcel.data.PLSETestEnum;", cn);
+     }
++
++    /**
++     * BCEL-295:
++     */
++    public void testB295() throws Exception
++    {
++        final JavaClass clazz = getTestClass(PACKAGE_BASE_NAME+".data.PLSETestClass2");
++        final ClassGen cg = new ClassGen(clazz);
++        final ConstantPoolGen pool = cg.getConstantPool();
++        final Method m = cg.getMethodAt(1);  // 'main'
++        final LocalVariableTable lvt = m.getLocalVariableTable();
++        final LocalVariable lv = lvt.getLocalVariable(2, 4);  // 'i'
++        //System.out.println(lv);
++        final MethodGen mg = new MethodGen(m, cg.getClassName(), pool);
++        final LocalVariableTable new_lvt = mg.getLocalVariableTable(mg.getConstantPool());
++        final LocalVariable new_lv = new_lvt.getLocalVariable(2, 4);  // 'i'
++        //System.out.println(new_lv);
++        assertEquals("live range length", lv.getLength(), new_lv.getLength());
++    }
+ }

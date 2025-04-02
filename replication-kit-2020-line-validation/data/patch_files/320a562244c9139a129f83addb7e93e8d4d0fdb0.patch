@@ -1,0 +1,176 @@
+From 320a562244c9139a129f83addb7e93e8d4d0fdb0 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 4 Feb 2008 21:24:17 +0000
+Subject: [PATCH] FIX: NullPointerException reported instead of error in
+ ivy:cachepath (IVY-690)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@618445 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/ResolveEngine.java       | 19 +++---
+ .../org/apache/ivy/ant/IvyResolveTest.java    | 14 ++++
+ .../ivy/core/resolve/ResolveEngineTest.java   | 66 +++++++++++++++++++
+ 4 files changed, 89 insertions(+), 11 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index cf7e75b4c..0729fb7b1 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -77,6 +77,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Downgrade Ant version requirement to 1.6 to build Ivy (IVY-687)
+ - IMPROVEMENT: In the ResolveReport class, add the possibility to filter the evicted module while getting the list of DownloadArtifact (IVY-704) (thanks to Nicolas Lalevée)
+ 
++- FIX: NullPointerException reported instead of error in ivy:cachepath (IVY-690)
+ - FIX: NPE when calling retrieve if some artifacts are not available locally (IVY-712)
+ - FIX: When in ssh plugin we does not set username in scheme, Ivy always try to connect with guest username, even if we change one in panel. (IVY-710) (thanks to Ruslan Shevchenko)
+ - FIX: NPE in SshCache during publish with ssh resolver without passFile (IVY-709) (thanks to Ruslan Shevchenko)
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 26e9ea232..881dada90 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -36,6 +36,7 @@
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.IvyContext;
++import org.apache.ivy.core.LogOptions;
+ import org.apache.ivy.core.cache.ResolutionCacheManager;
+ import org.apache.ivy.core.event.EventManager;
+ import org.apache.ivy.core.event.download.PrepareDownloadEvent;
+@@ -142,6 +143,7 @@ public ResolveReport resolve(URL ivySource) throws ParseException, IOException {
+     public ResolveReport resolve(final ModuleRevisionId mrid, ResolveOptions options,
+             boolean changing) throws ParseException, IOException {
+         DefaultModuleDescriptor md;
++        ResolveOptions optionsToUse = new ResolveOptions(options);
+ 
+         if (options.useSpecialConfs()) {
+             // create new resolve options because this is a different resolve than the real resolve
+@@ -149,17 +151,12 @@ public ResolveReport resolve(final ModuleRevisionId mrid, ResolveOptions options
+             ResolvedModuleRevision rmr = findModule(mrid, new ResolveOptions(options));
+             if (rmr == null) {
+                 Message.verbose("module not found " + mrid);
++                
++                // we will continue the resolve anyway to get a nice error message back
++                // to the user, however reduce the amount of logging in this case
++                optionsToUse.setLog(LogOptions.LOG_DOWNLOAD_ONLY);
+                 md = DefaultModuleDescriptor.newCallerInstance(mrid, 
+-                    options.getConfs(rmr.getDescriptor()), options.isTransitive(), changing);
+-                return new ResolveReport(md, options.getResolveId()) {
+-                    public boolean hasError() {
+-                        return true;
+-                    }
+-
+-                    public List getProblemMessages() {
+-                        return Arrays.asList(new String[] {"module not found: " + mrid});
+-                    }
+-                };
++                    new String[] {"default"}, options.isTransitive(), changing);
+             } else {
+                 String[] confs = options.getConfs(rmr.getDescriptor());
+                 md = DefaultModuleDescriptor.newCallerInstance(ModuleRevisionId.newInstance(mrid,
+@@ -170,7 +167,7 @@ public List getProblemMessages() {
+                 , options.isTransitive(), changing);
+         }
+ 
+-        return resolve(md, options);
++        return resolve(md, optionsToUse);
+     }
+ 
+     /**
+diff --git a/test/java/org/apache/ivy/ant/IvyResolveTest.java b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+index 4906105c3..aea817abf 100644
+--- a/test/java/org/apache/ivy/ant/IvyResolveTest.java
++++ b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+@@ -116,6 +116,20 @@ public void testInline() throws Exception {
+         assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testInlineForNonExistingModule() throws Exception {
++        resolve.setOrganisation("org1XX");
++        resolve.setModule("mod1.2");
++        resolve.setRevision("2.0");
++        resolve.setInline(true);
++        resolve.setHaltonfailure(false);
++        resolve.setFailureProperty("failure.property");
++        resolve.execute();
++
++        // the resolve must have failed -> the failure property must be set
++        String failure = resolve.getProject().getProperty("failure.property");
++        assertTrue("Failure property must have been specified!", Boolean.valueOf(failure).booleanValue());
++    }
++
+     public void testWithSlashes() throws Exception {
+         resolve.setFile(new File("test/java/org/apache/ivy/core/resolve/ivy-198.xml"));
+         resolve.execute();
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java b/test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java
+new file mode 100644
+index 000000000..5ce380f9c
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java
+@@ -0,0 +1,66 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.core.resolve;
++
++import java.io.File;
++
++import junit.framework.TestCase;
++
++import org.apache.ivy.Ivy;
++import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.report.ResolveReport;
++import org.apache.ivy.util.CacheCleaner;
++
++public class ResolveEngineTest extends TestCase {
++
++    private Ivy ivy;
++
++    private File cache;
++
++    protected void setUp() throws Exception {
++        cache = new File("build/cache");
++        System.setProperty("ivy.cache.dir", cache.getAbsolutePath());
++        createCache();
++
++        ivy = Ivy.newInstance();
++        ivy.configure(new File("test/repositories/ivysettings.xml"));
++    }
++
++    protected void tearDown() throws Exception {
++        CacheCleaner.deleteDir(cache);
++    }
++
++    public void testInlineResolveWithNonExistingModule() throws Exception {
++        ResolveEngine engine = new ResolveEngine(ivy.getSettings(), 
++            ivy.getEventManager(), ivy.getSortEngine());
++        
++        ResolveOptions options = new ResolveOptions();
++        options.setConfs(new String[] {"*"});
++        
++        ModuleRevisionId mRevId = ModuleRevisionId.newInstance("org1XX", "mod1.0XX", "1.0XX");
++        ResolveReport report = engine.resolve(mRevId, options, true);
++        
++        assertNotNull("The ResolveReport may never be null", report);
++        assertTrue(report.hasError());
++        assertTrue(report.getModuleIds().isEmpty());
++    }
++
++    private void createCache() {
++        cache.mkdirs();
++    }
++}

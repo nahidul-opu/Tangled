@@ -1,0 +1,174 @@
+From b7739627e8f7cd33f58c10e2df30d1dc1d311f5c Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Fri, 15 Apr 2011 16:46:09 +0000
+Subject: [PATCH] [SANTUARIO-262] - Invalid use of String.getBytes()  - Patch
+ applied.
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/branches/1.4.x-fixes@1092762 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG.txt                                 |  3 ++
+ .../xml/security/encryption/XMLCipher.java    | 44 +++++++++++++------
+ .../security/signature/XMLSignatureInput.java | 10 +++--
+ .../apache/xml/security/utils/XMLUtils.java   |  2 +-
+ .../implementations/ResolverDirectHTTP.java   |  4 +-
+ 5 files changed, 43 insertions(+), 20 deletions(-)
+
+diff --git a/CHANGELOG.txt b/CHANGELOG.txt
+index fc61f99651..9573ebf252 100644
+--- a/CHANGELOG.txt
++++ b/CHANGELOG.txt
+@@ -1,4 +1,7 @@
+ Changelog for "Apache xml-security" <http://santuario.apache.org/>
++New in v1.4.5-SNAPSHOT
++    Fixed SANTUARIO-262: Invalid use of String.getBytes(). Thanks to Martin Koegler.
++
+ New in v1.4.4
+     Fixed Bug 50248: Concurrency problem on incomplete Init.init() calls. Thanks to Oliver Moehrke.
+     Fixed Bug 50215: test_jsr105 target appears to fail certain tests because of changes to W3C xml-stylesheet spec
+diff --git a/src/org/apache/xml/security/encryption/XMLCipher.java b/src/org/apache/xml/security/encryption/XMLCipher.java
+index eec71488b8..77e81ee36a 100644
+--- a/src/org/apache/xml/security/encryption/XMLCipher.java
++++ b/src/org/apache/xml/security/encryption/XMLCipher.java
+@@ -976,7 +976,7 @@ private EncryptedData encryptData(
+                 encryptedBytes = c.doFinal(serializedOctets.getBytes("UTF-8"));
+                 logger.debug("Expected cipher.outputSize = " +
+                     Integer.toString(c.getOutputSize(
+-                        serializedOctets.getBytes().length)));
++                        serializedOctets.getBytes("UTF-8").length)));
+ 	    }
+             logger.debug("Actual cipher.outputSize = " +
+                 Integer.toString(encryptedBytes.length));
+@@ -2042,7 +2042,11 @@ AgreementMethod newAgreementMethod(Element element) throws
+                 EncryptionConstants.EncryptionSpecNS,
+                 EncryptionConstants._TAG_KA_NONCE).item(0);
+             if (null != kaNonceElement) {
+-                result.setKANonce(kaNonceElement.getNodeValue().getBytes());
++                try {
++                    result.setKANonce(kaNonceElement.getNodeValue().getBytes("UTF-8"));
++                } catch(UnsupportedEncodingException e) {
++                    throw new XMLEncryptionException("UTF-8 not supported", e);
++                }
+             }
+             // TODO: ///////////////////////////////////////////////////////////
+             // Figure out how to make this pesky line work..
+@@ -2411,8 +2415,12 @@ EncryptionMethod newEncryptionMethod(Element element) {
+                     EncryptionConstants.EncryptionSpecNS, 
+                     EncryptionConstants._TAG_OAEPPARAMS).item(0);
+             if (null != oaepParamsElement) {
+-                result.setOAEPparams(
+-                    oaepParamsElement.getNodeValue().getBytes());
++                try {
++                    result.setOAEPparams(
++                    oaepParamsElement.getNodeValue().getBytes("UTF-8"));
++                } catch(UnsupportedEncodingException e) {
++                    throw new RuntimeException("UTF-8 not supported", e);
++                }
+             }
+ 
+             // TODO: Make this mess work
+@@ -2743,11 +2751,15 @@ Element toElement() {
+                 result.setAttributeNS(
+                     null, EncryptionConstants._ATT_ALGORITHM, algorithmURI);
+                 if (null != kaNonce) {
+-                    result.appendChild(
+-                        XMLUtils.createElementInEncryptionSpace(
+-                            _contextDocument, 
+-                            EncryptionConstants._TAG_KA_NONCE)).appendChild(
+-                            _contextDocument.createTextNode(new String(kaNonce)));
++                    try {
++                        result.appendChild(
++                            XMLUtils.createElementInEncryptionSpace(
++                                _contextDocument, 
++                                EncryptionConstants._TAG_KA_NONCE)).appendChild(
++                                _contextDocument.createTextNode(new String(kaNonce, "UTF-8")));
++                    } catch(UnsupportedEncodingException e) {
++                        throw new RuntimeException("UTF-8 not supported", e);
++                    }
+                 }
+                 if (!agreementMethodInformation.isEmpty()) {
+                     Iterator itr = agreementMethodInformation.iterator();
+@@ -3428,11 +3440,15 @@ Element toElement() {
+                                 String.valueOf(keySize))));
+                 }
+                 if (null != oaepParams) {
+-                    result.appendChild(
+-                        XMLUtils.createElementInEncryptionSpace(_contextDocument,
+-                            EncryptionConstants._TAG_OAEPPARAMS).appendChild(
+-                            _contextDocument.createTextNode(
+-                                new String(oaepParams))));
++                    try {
++                        result.appendChild(
++                            XMLUtils.createElementInEncryptionSpace(
++                                _contextDocument, 
++                                EncryptionConstants._TAG_OAEPPARAMS)).appendChild(
++                                _contextDocument.createTextNode(new String(oaepParams, "UTF-8")));
++                    } catch(UnsupportedEncodingException e) {
++                        throw new RuntimeException("UTF-8 not supported", e);
++                    }
+                 }
+                 Iterator itr = encryptionMethodInformation.iterator();
+                 while (itr.hasNext()) {
+diff --git a/src/org/apache/xml/security/signature/XMLSignatureInput.java b/src/org/apache/xml/security/signature/XMLSignatureInput.java
+index 5b7dab2ddc..f776faeb8e 100644
+--- a/src/org/apache/xml/security/signature/XMLSignatureInput.java
++++ b/src/org/apache/xml/security/signature/XMLSignatureInput.java
+@@ -147,7 +147,11 @@ public XMLSignatureInput(InputStream inputOctetStream)  {
+      * @param inputStr the input String which including XML document or node
+      */
+     public XMLSignatureInput(String inputStr) {
+-        this(inputStr.getBytes());
++        try {
++            this.bytes = inputStr.getBytes("UTF-8");
++        } catch(UnsupportedEncodingException e) {
++            throw new RuntimeException("UTF-8 not supported", e);
++        }
+     }
+ 
+     /**
+@@ -614,9 +618,9 @@ void convertToNodes() throws CanonicalizationException,
+             // if a not-wellformed nodeset exists, put a container around it...
+             ByteArrayOutputStream baos = new ByteArrayOutputStream();
+ 
+-            baos.write("<container>".getBytes());
++            baos.write("<container>".getBytes("UTF-8"));
+             baos.write(this.getBytes());
+-            baos.write("</container>".getBytes());
++            baos.write("</container>".getBytes("UTF-8"));
+ 
+             byte result[] = baos.toByteArray();
+             Document document = db.parse(new ByteArrayInputStream(result));
+diff --git a/src/org/apache/xml/security/utils/XMLUtils.java b/src/org/apache/xml/security/utils/XMLUtils.java
+index b71f95b8ed..e31d1ea2ad 100644
+--- a/src/org/apache/xml/security/utils/XMLUtils.java
++++ b/src/org/apache/xml/security/utils/XMLUtils.java
+@@ -153,7 +153,7 @@ public static void outputDOM(Node contextNode, OutputStream os,
+ 
+       try {
+          if (addPreamble) {
+-            os.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n".getBytes());
++            os.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n".getBytes("UTF-8"));
+          }
+ 
+          os.write(
+diff --git a/src/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java b/src/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java
+index d817352ccb..0c16da8c00 100644
+--- a/src/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java
++++ b/src/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java
+@@ -161,7 +161,7 @@ public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
+ 
+             if ((proxyUser != null) && (proxyPass != null)) {
+                String password = proxyUser + ":" + proxyPass;
+-               String encodedPassword = Base64.encode(password.getBytes());
++               String encodedPassword = Base64.encode(password.getBytes("ISO-8859-1"));
+ 
+                // or was it Proxy-Authenticate ?
+                urlConnection.setRequestProperty("Proxy-Authorization",
+@@ -190,7 +190,7 @@ public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
+ 
+                      String password = user + ":" + pass;
+                      String encodedPassword =
+-                        Base64.encode(password.getBytes());
++                        Base64.encode(password.getBytes("ISO-8859-1"));
+ 
+                      // set authentication property in the http header
+                      urlConnection.setRequestProperty("Authorization",

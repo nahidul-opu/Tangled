@@ -1,0 +1,422 @@
+From 0facc870b8fafb0cb51b7c75ee675e8675f3eb4a Mon Sep 17 00:00:00 2001
+From: Romain Manni-Bucau <rmannibucau@apache.org>
+Date: Tue, 22 May 2018 14:49:09 +0000
+Subject: [PATCH] JCS-190 [JCACHE] listener onExpired callback not always
+ called
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/branches/commons-jcs-2.2.x@1832033 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../jcs/engine/control/CompositeCache.java    | 19 +++--
+ .../control/CompositeCacheConfigurator.java   | 14 +++-
+ .../engine/control/CompositeCacheManager.java |  8 +-
+ .../commons/jcs/jcache/ExpiryAwareCache.java  | 61 ++++++++++++++
+ .../apache/commons/jcs/jcache/JCSCache.java   | 14 ++--
+ .../commons/jcs/jcache/JCSCachingManager.java | 19 ++++-
+ .../jcs/jcache/ExpiryListenerTest.java        | 81 +++++++++++++++++++
+ 7 files changed, 192 insertions(+), 24 deletions(-)
+ create mode 100644 commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/ExpiryAwareCache.java
+ create mode 100644 commons-jcs-jcache/src/test/java/org/apache/commons/jcs/jcache/ExpiryListenerTest.java
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
+index 65cb226a7..4bc21f12f 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
+@@ -526,8 +526,7 @@ protected ICacheElement<K, V> get( K key, boolean localOnly )
+                             log.debug( cacheAttr.getCacheName() + " - Memory cache hit, but element expired" );
+                         }
+ 
+-                        missCountExpired.incrementAndGet();
+-                        remove( key );
++                        doExpires(element);
+                         element = null;
+                     }
+                     else
+@@ -586,13 +585,11 @@ protected ICacheElement<K, V> get( K key, boolean localOnly )
+                                         log.debug( cacheAttr.getCacheName() + " - Aux cache[" + aux.getCacheName() + "] hit, but element expired." );
+                                     }
+ 
+-                                    missCountExpired.incrementAndGet();
+-
+                                     // This will tell the remotes to remove the item
+                                     // based on the element's expiration policy. The elements attributes
+                                     // associated with the item when it created govern its behavior
+                                     // everywhere.
+-                                    remove( key );
++                                    doExpires(element);
+                                     element = null;
+                                 }
+                                 else
+@@ -639,6 +636,11 @@ protected ICacheElement<K, V> get( K key, boolean localOnly )
+         return element;
+     }
+ 
++    protected void doExpires(ICacheElement<K, V> element) {
++        missCountExpired.incrementAndGet();
++        remove( element.getKey() );
++    }
++
+     /**
+      * Gets multiple items from the cache based on the given set of keys.
+      * <p>
+@@ -745,8 +747,7 @@ private Map<K, ICacheElement<K, V>> getMultipleFromMemory( Set<K> keys )
+                         log.debug( cacheAttr.getCacheName() + " - Memory cache hit, but element expired" );
+                     }
+ 
+-                    missCountExpired.incrementAndGet();
+-                    remove( element.getKey() );
++                    doExpires(element);
+                     elementsFromMemory.remove( element.getKey() );
+                 }
+                 else
+@@ -1000,13 +1001,11 @@ private void processRetrievedElements( AuxiliaryCache<K, V> aux, Map<K, ICacheEl
+                         log.debug( cacheAttr.getCacheName() + " - Aux cache[" + aux.getCacheName() + "] hit, but element expired." );
+                     }
+ 
+-                    missCountExpired.incrementAndGet();
+-
+                     // This will tell the remote caches to remove the item
+                     // based on the element's expiration policy. The elements attributes
+                     // associated with the item when it created govern its behavior
+                     // everywhere.
+-                    remove( element.getKey() );
++                    doExpires(element);
+                     elementsFromAuxiliary.remove( element.getKey() );
+                 }
+                 else
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java
+index f80efcb9b..453976c8d 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java
+@@ -202,10 +202,10 @@ protected <K, V> CompositeCache<K, V> parseRegion(
+         IElementAttributes ea = parseElementAttributes( props, regName,
+                 ccm.getDefaultElementAttributes(), regionPrefix );
+ 
+-        CompositeCache<K, V> cache = ( cca == null )
+-            ? new CompositeCache<K, V>( parseCompositeCacheAttributes( props, regName,
+-                    ccm.getDefaultCacheAttributes(), regionPrefix ), ea )
+-            : new CompositeCache<K, V>( cca, ea );
++        ICompositeCacheAttributes instantiationCca = cca == null
++                ? parseCompositeCacheAttributes(props, regName, ccm.getDefaultCacheAttributes(), regionPrefix)
++                : cca;
++        CompositeCache<K, V> cache = newCache(instantiationCca, ea);
+ 
+         // Inject cache manager
+         cache.setCompositeCacheManager(ccm);
+@@ -282,6 +282,12 @@ protected <K, V> CompositeCache<K, V> parseRegion(
+         return cache;
+     }
+ 
++    protected <K, V> CompositeCache<K, V> newCache(
++            ICompositeCacheAttributes cca, IElementAttributes ea)
++    {
++        return new CompositeCache<K, V>( cca, ea );
++    }
++
+     /**
+      * Get an ICompositeCacheAttributes for the listed region.
+      *<p>
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheManager.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheManager.java
+index e62cb9ac5..e35f37d9a 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheManager.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheManager.java
+@@ -460,7 +460,7 @@ private void doConfigure( Properties properties )
+         }
+ 
+         // configure the cache
+-        CompositeCacheConfigurator configurator = new CompositeCacheConfigurator();
++        CompositeCacheConfigurator configurator = newConfigurator();
+ 
+         long start = System.currentTimeMillis();
+ 
+@@ -604,7 +604,7 @@ public <K, V> CompositeCache<K, V>  getCache( ICompositeCacheAttributes cattr, I
+ 
+                 if ( cache == null )
+                 {
+-                    CompositeCacheConfigurator configurator = new CompositeCacheConfigurator();
++                    CompositeCacheConfigurator configurator = newConfigurator();
+ 
+                     cache = configurator.parseRegion( this.getConfigurationProperties(), this, cattr.getCacheName(),
+                                                       this.defaultAuxValues, cattr );
+@@ -621,6 +621,10 @@ public <K, V> CompositeCache<K, V>  getCache( ICompositeCacheAttributes cattr, I
+         return cache;
+     }
+ 
++    protected CompositeCacheConfigurator newConfigurator() {
++        return new CompositeCacheConfigurator();
++    }
++
+     /**
+      * @param name
+      */
+diff --git a/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/ExpiryAwareCache.java b/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/ExpiryAwareCache.java
+new file mode 100644
+index 000000000..d4691eca2
+--- /dev/null
++++ b/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/ExpiryAwareCache.java
+@@ -0,0 +1,61 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.commons.jcs.jcache;
++
++import java.util.Arrays;
++import java.util.Map;
++
++import javax.cache.Cache;
++import javax.cache.configuration.CacheEntryListenerConfiguration;
++import javax.cache.event.CacheEntryEvent;
++import javax.cache.event.EventType;
++
++import org.apache.commons.jcs.engine.behavior.ICacheElement;
++import org.apache.commons.jcs.engine.behavior.ICompositeCacheAttributes;
++import org.apache.commons.jcs.engine.behavior.IElementAttributes;
++import org.apache.commons.jcs.engine.control.CompositeCache;
++
++// allows us to plug some lifecycle callbacks on the core cache without impacting too much the core
++public class ExpiryAwareCache<A, B> extends CompositeCache<A, B>
++{
++    private Map<CacheEntryListenerConfiguration<A, B>, JCSListener<A, B>> listeners;
++    private Cache<A, B> cacheRef;
++
++    ExpiryAwareCache(final ICompositeCacheAttributes cattr, final IElementAttributes attr)
++    {
++        super(cattr, attr);
++    }
++
++    @Override
++    protected void doExpires(final ICacheElement<A, B> element)
++    {
++        super.doExpires(element);
++        for (final JCSListener<A, B> listener : listeners.values())
++        {
++            listener.onExpired(Arrays.<CacheEntryEvent<? extends A, ? extends B>> asList(new JCSCacheEntryEvent<A, B>(
++                    cacheRef, EventType.REMOVED, null, element.getKey(), element.getVal())));
++        }
++    }
++
++    void init(final Cache<A, B> cache, final Map<CacheEntryListenerConfiguration<A, B>, JCSListener<A, B>> listeners)
++    {
++        this.cacheRef = cache;
++        this.listeners = listeners;
++    }
++}
+diff --git a/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCache.java b/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCache.java
+index f5e13d645..baa1ff525 100644
+--- a/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCache.java
++++ b/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCache.java
+@@ -23,7 +23,6 @@
+ import org.apache.commons.jcs.engine.behavior.ICacheElement;
+ import org.apache.commons.jcs.engine.behavior.IElementAttributes;
+ import org.apache.commons.jcs.engine.behavior.IElementSerializer;
+-import org.apache.commons.jcs.engine.control.CompositeCache;
+ import org.apache.commons.jcs.jcache.jmx.JCSCacheMXBean;
+ import org.apache.commons.jcs.jcache.jmx.JCSCacheStatisticsMXBean;
+ import org.apache.commons.jcs.jcache.jmx.JMXs;
+@@ -71,7 +70,7 @@
+ // TODO: configure serializer
+ public class JCSCache<K, V> implements Cache<K, V>
+ {
+-    private final CompositeCache<K, V> delegate;
++    private final ExpiryAwareCache<K, V> delegate;
+     private final JCSCachingManager manager;
+     private final JCSConfiguration<K, V> config;
+     private final CacheLoader<K, V> loader;
+@@ -89,7 +88,7 @@ public class JCSCache<K, V> implements Cache<K, V>
+ 
+     public JCSCache(final ClassLoader classLoader, final JCSCachingManager mgr,
+                     final String cacheName, final JCSConfiguration<K, V> configuration,
+-                    final Properties properties, final CompositeCache<K, V> cache)
++                    final Properties properties, final ExpiryAwareCache<K, V> cache)
+     {
+         manager = mgr;
+ 
+@@ -153,6 +152,7 @@ public JCSCache(final ClassLoader classLoader, final JCSCachingManager mgr,
+         {
+             listeners.put(listener, new JCSListener<K, V>(listener));
+         }
++        delegate.init(this, listeners);
+ 
+         statistics.setActive(config.isStatisticsEnabled());
+ 
+@@ -307,7 +307,7 @@ else if (elt != null)
+                 }
+                 else
+                 {
+-                    expires(key);
++                    forceExpires(key);
+                 }
+             }
+         }
+@@ -401,7 +401,7 @@ public void put(final K key, final V rawValue)
+         {
+             if (!created)
+             {
+-                expires(key);
++                forceExpires(key);
+             }
+         }
+     }
+@@ -411,7 +411,7 @@ private static boolean isNotZero(final Duration duration)
+         return duration == null || !duration.isZero();
+     }
+ 
+-    private void expires(final K cacheKey)
++    private void forceExpires(final K cacheKey)
+     {
+         final ICacheElement<K, V> elt = delegate.get(cacheKey);
+         delegate.remove(cacheKey);
+@@ -549,7 +549,7 @@ else if (statisticsEnabled)
+             final Duration expiryForAccess = expiryPolicy.getExpiryForAccess();
+             if (!isNotZero(expiryForAccess))
+             {
+-                expires(key);
++                forceExpires(key);
+             }
+             else if (expiryForAccess != null && (!elt.getElementAttributes().getIsEternal() || !expiryForAccess.isEternal()))
+             {
+diff --git a/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCachingManager.java b/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCachingManager.java
+index 23570050c..c764eb334 100644
+--- a/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCachingManager.java
++++ b/commons-jcs-jcache/src/main/java/org/apache/commons/jcs/jcache/JCSCachingManager.java
+@@ -18,6 +18,10 @@
+  */
+ package org.apache.commons.jcs.jcache;
+ 
++import org.apache.commons.jcs.engine.behavior.ICompositeCacheAttributes;
++import org.apache.commons.jcs.engine.behavior.IElementAttributes;
++import org.apache.commons.jcs.engine.control.CompositeCache;
++import org.apache.commons.jcs.engine.control.CompositeCacheConfigurator;
+ import org.apache.commons.jcs.engine.control.CompositeCacheManager;
+ import org.apache.commons.jcs.jcache.lang.Subsitutor;
+ import org.apache.commons.jcs.jcache.proxy.ClassLoaderAwareCache;
+@@ -65,6 +69,19 @@ protected static InternalManager create()
+             return new InternalManager();
+         }
+ 
++        protected CompositeCacheConfigurator newConfigurator()
++        {
++            return new CompositeCacheConfigurator()
++            {
++                @Override
++                protected <K, V> CompositeCache<K, V> newCache(
++                        final ICompositeCacheAttributes cca, final IElementAttributes ea)
++                {
++                    return new ExpiryAwareCache<K, V>( cca, ea );
++                }
++            };
++        }
++
+         @Override // needed to call it from JCSCachingManager
+         protected void initialize() {
+             super.initialize();
+@@ -197,7 +214,7 @@ public <K, V, C extends Configuration<K, V>> Cache<K, V> createCache(final Strin
+                             loader, this, cacheName,
+                             new JCSConfiguration/*<K, V>*/(configuration, keyType, valueType),
+                             properties,
+-                            delegate.getCache(cacheName)));
++                            ExpiryAwareCache.class.cast(delegate.getCache(cacheName))));
+             caches.putIfAbsent(cacheName, cache);
+         }
+         else
+diff --git a/commons-jcs-jcache/src/test/java/org/apache/commons/jcs/jcache/ExpiryListenerTest.java b/commons-jcs-jcache/src/test/java/org/apache/commons/jcs/jcache/ExpiryListenerTest.java
+new file mode 100644
+index 000000000..1ac2cc117
+--- /dev/null
++++ b/commons-jcs-jcache/src/test/java/org/apache/commons/jcs/jcache/ExpiryListenerTest.java
+@@ -0,0 +1,81 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++package org.apache.commons.jcs.jcache;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++
++import java.io.Serializable;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.concurrent.TimeUnit;
++
++import javax.cache.Cache;
++import javax.cache.CacheManager;
++import javax.cache.Caching;
++import javax.cache.configuration.FactoryBuilder;
++import javax.cache.configuration.MutableCacheEntryListenerConfiguration;
++import javax.cache.configuration.MutableConfiguration;
++import javax.cache.event.CacheEntryEvent;
++import javax.cache.event.CacheEntryExpiredListener;
++import javax.cache.event.CacheEntryListenerException;
++import javax.cache.expiry.CreatedExpiryPolicy;
++import javax.cache.expiry.Duration;
++import javax.cache.expiry.ExpiryPolicy;
++import javax.cache.spi.CachingProvider;
++
++import org.junit.Test;
++
++public class ExpiryListenerTest {
++
++    @Test
++    public void listener() throws InterruptedException {
++        final CachingProvider cachingProvider = Caching.getCachingProvider();
++        final CacheManager cacheManager = cachingProvider.getCacheManager();
++        final CacheEntryExpiredListenerImpl listener = new CacheEntryExpiredListenerImpl();
++        cacheManager.createCache("default", new MutableConfiguration<String, String>()
++                .setExpiryPolicyFactory(new FactoryBuilder.SingletonFactory<ExpiryPolicy>(
++                        new CreatedExpiryPolicy(new Duration(TimeUnit.MILLISECONDS, 1))))
++                .addCacheEntryListenerConfiguration(new MutableCacheEntryListenerConfiguration<String, String>(
++                        FactoryBuilder.factoryOf(listener),
++                        null, false, false
++                )));
++        final Cache<String, String> cache = cacheManager.getCache("default");
++        assertFalse(cache.containsKey("foo"));
++        cache.put("foo", "bar");
++        Thread.sleep(10);
++        assertFalse(cache.containsKey("foo"));
++        cachingProvider.close();
++        assertEquals(1, listener.events.size());
++    }
++
++    private static class CacheEntryExpiredListenerImpl implements CacheEntryExpiredListener<String, String>, Serializable {
++        private final Collection<CacheEntryEvent<? extends String, ? extends String>> events =
++                new ArrayList<CacheEntryEvent<? extends String, ? extends String>>();
++
++        @Override
++        public void onExpired(final Iterable<CacheEntryEvent<? extends String, ? extends String>> cacheEntryEvents)
++                throws CacheEntryListenerException {
++            for (final CacheEntryEvent<? extends String, ? extends String> cacheEntryEvent : cacheEntryEvents) {
++                events.add(cacheEntryEvent);
++            }
++        }
++    }
++}

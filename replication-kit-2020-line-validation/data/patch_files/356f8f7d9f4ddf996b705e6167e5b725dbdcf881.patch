@@ -1,0 +1,119 @@
+From 356f8f7d9f4ddf996b705e6167e5b725dbdcf881 Mon Sep 17 00:00:00 2001
+From: Thomas Hug <Thomas.Hug@ctp.com>
+Date: Wed, 30 Apr 2014 10:55:17 +0200
+Subject: [PATCH] DELTASPIKE-581 Handle count queries without where-clause
+
+---
+ .../postprocessor/CountQueryPostProcessor.java    | 14 +++++++++++---
+ .../deltaspike/data/impl/util/QueryUtils.java     | 10 ++++++++++
+ .../deltaspike/data/impl/QueryResultTest.java     | 15 +++++++++++++++
+ .../data/test/service/SimpleRepository.java       |  3 +++
+ 4 files changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/builder/postprocessor/CountQueryPostProcessor.java b/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/builder/postprocessor/CountQueryPostProcessor.java
+index c34e26972..118a58346 100644
+--- a/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/builder/postprocessor/CountQueryPostProcessor.java
++++ b/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/builder/postprocessor/CountQueryPostProcessor.java
+@@ -18,6 +18,9 @@
+  */
+ package org.apache.deltaspike.data.impl.builder.postprocessor;
+ 
++import static org.apache.deltaspike.data.impl.util.QueryUtils.isNotEmpty;
++import static org.apache.deltaspike.data.impl.util.QueryUtils.nullSafeValue;
++
+ import java.util.logging.Level;
+ import java.util.logging.Logger;
+ 
+@@ -26,7 +29,6 @@
+ import org.apache.deltaspike.data.impl.handler.CdiQueryInvocationContext;
+ import org.apache.deltaspike.data.impl.handler.JpaQueryPostProcessor;
+ import org.apache.deltaspike.data.impl.param.Parameters;
+-import org.apache.deltaspike.data.impl.util.QueryUtils;
+ import org.apache.deltaspike.data.impl.util.jpa.QueryStringExtractorFactory;
+ 
+ public class CountQueryPostProcessor implements JpaQueryPostProcessor
+@@ -51,7 +53,7 @@ public Query postProcess(CdiQueryInvocationContext context, Query query)
+ 
+     private String getQueryString(CdiQueryInvocationContext context, Query query)
+     {
+-        if (QueryUtils.isNotEmpty(context.getQueryString()))
++        if (isNotEmpty(context.getQueryString()))
+         {
+             return context.getQueryString();
+         }
+@@ -82,7 +84,13 @@ public String rewriteToCount()
+ 
+         private String rewrite()
+         {
+-            return "select count(" + (select != null ? select : entityName) + ") " + from + where;
++            return new StringBuilder()
++                    .append("select count(")
++                        .append(nullSafeValue(select, entityName))
++                    .append(") ")
++                    .append(from)
++                    .append(nullSafeValue(where))
++                    .toString();
+         }
+ 
+         private void extractEntityName()
+diff --git a/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/util/QueryUtils.java b/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/util/QueryUtils.java
+index ad96a2893..adea94d1f 100644
+--- a/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/util/QueryUtils.java
++++ b/deltaspike/modules/data/impl/src/main/java/org/apache/deltaspike/data/impl/util/QueryUtils.java
+@@ -73,6 +73,16 @@ public static boolean isString(Object value)
+         return value != null && value instanceof String;
+     }
+ 
++    public static String nullSafeValue(String value)
++    {
++        return nullSafeValue(value, null);
++    }
++
++    public static String nullSafeValue(String value, String fallback)
++    {
++        return value != null ? value : (fallback != null ? fallback : "");
++    }
++
+     public static boolean contains(Class<?> clazz, Method method)
+     {
+         return extract(clazz, method) != null;
+diff --git a/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/impl/QueryResultTest.java b/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/impl/QueryResultTest.java
+index 55db66f41..5e1351247 100644
+--- a/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/impl/QueryResultTest.java
++++ b/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/impl/QueryResultTest.java
+@@ -282,6 +282,21 @@ public void should_count_with_named_query()
+         assertEquals(2L, result);
+     }
+ 
++    @Test
++    public void should_count_without_whereclause()
++    {
++        // given
++        final String name = "testCountWithoutWhereclause";
++        builder.createSimple(name);
++        builder.createSimple(name);
++
++        // when
++        long result = repo.queryAll().count();
++
++        // then
++        assertEquals(2L, result);
++    }
++
+     @Test
+     public void should_query_optional()
+     {
+diff --git a/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/test/service/SimpleRepository.java b/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/test/service/SimpleRepository.java
+index f3d1d07ad..45301eadb 100755
+--- a/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/test/service/SimpleRepository.java
++++ b/deltaspike/modules/data/impl/src/test/java/org/apache/deltaspike/data/test/service/SimpleRepository.java
+@@ -89,6 +89,9 @@ public abstract Simple findByNamedQueryNamed(
+     @Query(named = Simple.BY_NAME_LIKE)
+     public abstract QueryResult<Simple> queryResultWithNamed(String name);
+ 
++    @Query("select s from Simple s")
++    public abstract QueryResult<Simple> queryAll();
++
+     public abstract QueryResult<Simple> findByName(String name);
+ 
+     @Override

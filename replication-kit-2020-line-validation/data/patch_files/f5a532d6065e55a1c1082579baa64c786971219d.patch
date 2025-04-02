@@ -1,0 +1,95 @@
+From f5a532d6065e55a1c1082579baa64c786971219d Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 4 Jul 2005 16:39:26 +0000
+Subject: [PATCH] FIX IVY-49: doing a retrieve after several resolves now
+ retrieves data from the last resolve by default
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484001 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                       |  2 ++
+ src/java/fr/jayasoft/ivy/ant/IvyResolve.java      |  9 +++++++++
+ test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java | 12 ++++++++++++
+ test/java/fr/jayasoft/ivy/ant/ivy-double.xml      | 10 ++++++++++
+ 4 files changed, 33 insertions(+)
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/ivy-double.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 1441dafae..7a80728ec 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -6,6 +6,8 @@
+ - new type filtering in cachepath task
+ - new cachefileset task: builds an ant fileset of artifacts in cache
+ - publish task now uses srcivypattern for ivy files finding and for delivery
++- FIX: resolve now store resolved file id in ivy variables, so that multiple resolve calls
++  can be followed by multiple retrieve, each retrieve will use the last resolve info (IVY-49)
+ - FIX: IllegalStateException on retrieve done from command line
+ - FIX: checks ivy files data consistency with asked info (org, module name and revision)
+ - FIX: use AUTH configuration for configuration file
+diff --git a/src/java/fr/jayasoft/ivy/ant/IvyResolve.java b/src/java/fr/jayasoft/ivy/ant/IvyResolve.java
+index 8e2185d78..3d863fd91 100644
+--- a/src/java/fr/jayasoft/ivy/ant/IvyResolve.java
++++ b/src/java/fr/jayasoft/ivy/ant/IvyResolve.java
+@@ -87,14 +87,23 @@ public void execute() throws BuildException {
+             }
+             ModuleDescriptor md = report.getModuleDescriptor();
+             setResolved(md);
++            
++            // put resolved infos in ant properties and ivy variables
++            // putting them in ivy variables is important to be able to change from one resolve call to the other
+             getProject().setProperty("ivy.organisation", md.getModuleRevisionId().getOrganisation());
++            ivy.setVariable("ivy.organisation", md.getModuleRevisionId().getOrganisation());
+             getProject().setProperty("ivy.module", md.getModuleRevisionId().getName());
++            ivy.setVariable("ivy.module", md.getModuleRevisionId().getName());
+             getProject().setProperty("ivy.revision", md.getResolvedModuleRevisionId().getRevision());
++            ivy.setVariable("ivy.revision", md.getResolvedModuleRevisionId().getRevision());
+             if (_conf.trim().equals("*")) {
+                 getProject().setProperty("ivy.resolved.configurations", mergeConfs(md.getConfigurationsNames()));
++                ivy.setVariable("ivy.resolved.configurations", mergeConfs(md.getConfigurationsNames()));
+             } else {
+                 getProject().setProperty("ivy.resolved.configurations", _conf);
++                ivy.setVariable("ivy.resolved.configurations", _conf);
+             }
++            
+         } catch (MalformedURLException e) {
+             throw new BuildException("unable to convert given ivy file to url: "+_file, e);
+         } catch (ParseException e) {
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+index 67948054f..bb159c720 100644
+--- a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+@@ -57,6 +57,18 @@ public void testSimple() throws Exception {
+         assertTrue(getIvy().getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testDouble() throws Exception {
++        _resolve.setFile(new File("test/java/fr/jayasoft/ivy/ant/ivy-simple.xml"));
++        _resolve.execute();
++        
++        assertEquals("resolve-simple", getIvy().getVariable("ivy.module"));
++
++        _resolve.setFile(new File("test/java/fr/jayasoft/ivy/ant/ivy-double.xml"));
++        _resolve.execute();
++        
++        assertEquals("resolve-double", getIvy().getVariable("ivy.module"));
++    }
++
+     public void testFailure() throws Exception {
+         try {
+             _resolve.setFile(new File("test/java/fr/jayasoft/ivy/ant/ivy-failure.xml"));
+diff --git a/test/java/fr/jayasoft/ivy/ant/ivy-double.xml b/test/java/fr/jayasoft/ivy/ant/ivy-double.xml
+new file mode 100644
+index 000000000..1c8ba5be7
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/ivy-double.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0"> 
++	<info organisation="jayasoft"
++	       module="resolve-double"
++	       revision="1.0"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0"/>
++	</dependencies>
++</ivy-module>

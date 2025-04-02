@@ -1,0 +1,353 @@
+From e73fbc241cd510a0fd7caec6f7cac2e4537ba699 Mon Sep 17 00:00:00 2001
+From: Joern Kottmann <kottmann@users.noreply.github.com>
+Date: Fri, 18 May 2018 12:53:50 +0200
+Subject: [PATCH] OPENNLP-1193: Add support for multi fragment annotation
+
+---
+ .../formats/brat/BratAnnotationStream.java    | 23 ++++--
+ .../formats/brat/BratDocumentParser.java      | 56 +++++++++----
+ .../tools/formats/brat/SpanAnnotation.java    | 15 ++--
+ .../formats/brat/BratDocumentParserTest.java  | 78 +++++++++++++++++++
+ .../tools/formats/brat/BratDocumentTest.java  | 35 ++++++++-
+ .../tools/formats/brat/opennlp-1193.ann       |  4 +
+ .../tools/formats/brat/opennlp-1193.txt       |  4 +
+ 7 files changed, 188 insertions(+), 27 deletions(-)
+ create mode 100644 opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentParserTest.java
+ create mode 100644 opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.ann
+ create mode 100644 opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.txt
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
+index 3d9077146..f876d5196 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
+@@ -22,7 +22,9 @@
+ import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Map;
+ 
+ import opennlp.tools.tokenize.WhitespaceTokenizer;
+@@ -66,14 +68,26 @@ BratAnnotation parse(Span[] values, CharSequence line) throws IOException {
+       if (values.length > 4) {
+         String type = values[BratAnnotationParser.TYPE_OFFSET].getCoveredText(line).toString();
+ 
+-        int endOffset = -1;
+-
+         int firstTextTokenIndex = -1;
+ 
++        int beginIndex = parseInt(values[BEGIN_OFFSET].getCoveredText(line).toString());
++
++        List<Span> fragments = new ArrayList<>();
++
+         for (int i = END_OFFSET; i < values.length; i++) {
+-          if (!values[i].getCoveredText(line).toString().contains(";")) {
++
++          int endOffset;
++          int nextBeginOffset = -1;
++          if (values[i].getCoveredText(line).toString().contains(";")) {
++            String[] parts = values[i].getCoveredText(line).toString().split(";");
++            endOffset = parseInt(parts[0]);
++            fragments.add(new Span(beginIndex, endOffset, type));
++            beginIndex = parseInt(parts[1]);
++          }
++          else {
+             endOffset = parseInt(values[i].getCoveredText(line).toString());
+             firstTextTokenIndex = i + 1;
++            fragments.add(new Span(beginIndex, endOffset, type));
+             break;
+           }
+         }
+@@ -84,8 +98,7 @@ BratAnnotation parse(Span[] values, CharSequence line) throws IOException {
+             values[values.length - 1].getEnd()).toString();
+ 
+         try {
+-          return new SpanAnnotation(id, type, new Span(parseInt(values[BEGIN_OFFSET]
+-              .getCoveredText(line).toString()), endOffset, type), coveredText);
++          return new SpanAnnotation(id, type, fragments.toArray(new Span[fragments.size()]), coveredText);
+         }
+         catch (IllegalArgumentException e) {
+           throw new InvalidFormatException(e);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratDocumentParser.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratDocumentParser.java
+index a3899ff37..aaaa5e727 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratDocumentParser.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratDocumentParser.java
+@@ -19,6 +19,7 @@
+ 
+ 
+ import java.util.ArrayList;
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
+@@ -62,13 +63,20 @@ public List<NameSample> parse(BratDocument sample) {
+       if (isSpanAnnotation(ann)) {
+         entityIdSet.add(ann.getId());
+ 
+-        Span span = ((SpanAnnotation) ann).getSpan();
+-        for (int i = span.getStart(); i < span.getEnd(); i++) {
+-          coveredIndexes.put(i, span);
++        for (Span span : ((SpanAnnotation) ann).getSpans()) {
++          for (int i = span.getStart(); i < span.getEnd(); i++) {
++            coveredIndexes.put(i, span);
++          }
+         }
+       }
+     }
+ 
++    // Map spans to tokens, and merge fragments based on token
++
++    //
++
++
++    // Detect sentence and correct sentence spans assuming no split can be inside a name annotation
+     List<Span> sentences = new ArrayList<>();
+     for (Span sentence : sentDetector.sentPosDetect(sample.getText())) {
+       Span conflictingName = coveredIndexes.get(sentence.getStart());
+@@ -122,23 +130,41 @@ public List<NameSample> parse(BratDocument sample) {
+         if (isSpanAnnotation(ann)) {
+           SpanAnnotation entity = (SpanAnnotation) ann;
+ 
+-          Span entitySpan = entity.getSpan();
++          List<Span> mappedFragments = new ArrayList<>();
++
++          for (Span entitySpan : entity.getSpans()) {
++            if (sentence.contains(entitySpan)) {
++              entityIdSet.remove(ann.getId());
+ 
+-          if (sentence.contains(entitySpan)) {
+-            entityIdSet.remove(ann.getId());
++              entitySpan = entitySpan.trim(sample.getText());
+ 
+-            entitySpan = entitySpan.trim(sample.getText());
++              Integer nameBeginIndex = tokenIndexMap.get(-entitySpan.getStart());
++              Integer nameEndIndex = tokenIndexMap.get(entitySpan.getEnd());
+ 
+-            Integer nameBeginIndex = tokenIndexMap.get(-entitySpan.getStart());
+-            Integer nameEndIndex = tokenIndexMap.get(entitySpan.getEnd());
++              if (nameBeginIndex != null && nameEndIndex != null) {
++                mappedFragments.add(new Span(nameBeginIndex, nameEndIndex, entity.getType()));
++              } else {
++                System.err.println("Dropped entity " + entity.getId() + " ("
++                    + entitySpan.getCoveredText(sample.getText()) + ") " + " in document "
++                    + sample.getId() + ", it is not matching tokenization!");
++              }
++            }
++          }
++
++          Collections.sort(mappedFragments);
+ 
+-            if (nameBeginIndex != null && nameEndIndex != null) {
+-              names.add(new Span(nameBeginIndex, nameEndIndex, entity.getType()));
++          for (int i = 1; i < mappedFragments.size(); i++) {
++            if (mappedFragments.get(i - 1).getEnd() ==
++                mappedFragments.get(i).getStart()) {
++              mappedFragments.set(i, new Span(mappedFragments.get(i - 1).getStart(),
++                  mappedFragments.get(i).getEnd(), mappedFragments.get(i).getType()));
++              mappedFragments.set(i - 1, null);
+             }
+-            else {
+-              System.err.println("Dropped entity " + entity.getId() + " ("
+-                  + entitySpan.getCoveredText(sample.getText()) + ") " + " in document "
+-                  + sample.getId() + ", it is not matching tokenization!");
++          }
++
++          for (Span span : mappedFragments) {
++            if (span != null ) {
++              names.add(span);
+             }
+           }
+         }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/SpanAnnotation.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/SpanAnnotation.java
+index c72f8a6af..3a7ecd6b8 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/SpanAnnotation.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/SpanAnnotation.java
+@@ -17,21 +17,24 @@
+ 
+ package opennlp.tools.formats.brat;
+ 
++import java.util.Arrays;
++
+ import opennlp.tools.util.Span;
+ 
+ public class SpanAnnotation extends BratAnnotation {
+ 
+-  private final Span span;
++  private final Span[] spans;
+   private final String coveredText;
+ 
+-  SpanAnnotation(String id, String type, Span span, String coveredText) {
++  SpanAnnotation(String id, String type, Span[] spans, String coveredText) {
+     super(id, type);
+-    this.span = span;
++    this.spans = Arrays.copyOf(spans, spans.length);
++    Arrays.sort(this.spans);
+     this.coveredText = coveredText;
+   }
+ 
+-  public Span getSpan() {
+-    return span;
++  public Span[] getSpans() {
++    return spans;
+   }
+ 
+   public String getCoveredText() {
+@@ -40,6 +43,6 @@ public String getCoveredText() {
+ 
+   @Override
+   public String toString() {
+-    return super.toString() + " " + span.getStart() + " " + span.getEnd() + " " + getCoveredText();
++    return super.toString() + " " + Arrays.toString(spans) + " " + getCoveredText();
+   }
+ }
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentParserTest.java b/opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentParserTest.java
+new file mode 100644
+index 000000000..88908a610
+--- /dev/null
++++ b/opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentParserTest.java
+@@ -0,0 +1,78 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.formats.brat;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import org.junit.Assert;
++import org.junit.Test;
++
++import opennlp.tools.namefind.NameSample;
++import opennlp.tools.sentdetect.NewlineSentenceDetector;
++import opennlp.tools.tokenize.WhitespaceTokenizer;
++
++public class BratDocumentParserTest {
++
++  @Test
++  public void testParse() throws IOException {
++
++    Map<String, String> typeToClassMap = new HashMap<>();
++    BratAnnotationStreamTest.addEntityTypes(typeToClassMap);
++    AnnotationConfiguration config = new AnnotationConfiguration(typeToClassMap);
++
++    InputStream txtIn = BratDocumentTest.class.getResourceAsStream(
++        "/opennlp/tools/formats/brat/opennlp-1193.txt");
++
++    InputStream annIn = BratDocumentTest.class.getResourceAsStream(
++        "/opennlp/tools/formats/brat/opennlp-1193.ann");
++
++    BratDocument doc = BratDocument.parseDocument(config, "opennlp-1193", txtIn, annIn);
++
++    BratDocumentParser parser = new BratDocumentParser(new NewlineSentenceDetector(),
++        WhitespaceTokenizer.INSTANCE);
++
++    List<NameSample> names = parser.parse(doc);
++
++    Assert.assertEquals(3, names.size());
++
++    NameSample sample1 = names.get(0);
++
++    Assert.assertEquals(1, sample1.getNames().length);
++    Assert.assertEquals(0, sample1.getNames()[0].getStart());
++    Assert.assertEquals(2, sample1.getNames()[0].getEnd());
++
++
++    NameSample sample2 = names.get(1);
++    Assert.assertEquals(1, sample2.getNames().length);
++    Assert.assertEquals(0, sample2.getNames()[0].getStart());
++    Assert.assertEquals(1, sample2.getNames()[0].getEnd());
++
++    NameSample sample3 = names.get(2);
++    Assert.assertEquals(3, sample3.getNames().length);
++    Assert.assertEquals(0, sample3.getNames()[0].getStart());
++    Assert.assertEquals(1, sample3.getNames()[0].getEnd());
++    Assert.assertEquals(1, sample3.getNames()[1].getStart());
++    Assert.assertEquals(2, sample3.getNames()[1].getEnd());
++    Assert.assertEquals(2, sample3.getNames()[2].getStart());
++    Assert.assertEquals(3, sample3.getNames()[2].getEnd());
++  }
++}
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentTest.java b/opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentTest.java
+index 8cac25f0e..c808f2eb9 100644
+--- a/opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentTest.java
++++ b/opennlp-tools/src/test/java/opennlp/tools/formats/brat/BratDocumentTest.java
+@@ -59,6 +59,39 @@ private void checkNote(BratAnnotation annotation, String expectedCoveredText, St
+     SpanAnnotation spanAnn = (SpanAnnotation) annotation;
+     Assert.assertEquals(expectedCoveredText, spanAnn.getCoveredText());
+     Assert.assertEquals(expectedNote, spanAnn.getNote());
+-    
++  }
++
++  /**
++   * Parse spans that have multiple fragments and ensure they are matched to the correct tokens.
++   *
++   * Test to ensure OPENNLP-1193 works.
++   */
++  @Test
++  public void testSpanWithMultiFragments() throws IOException {
++    Map<String, String> typeToClassMap = new HashMap<>();
++    BratAnnotationStreamTest.addEntityTypes(typeToClassMap);
++    AnnotationConfiguration config = new AnnotationConfiguration(typeToClassMap);
++
++    InputStream txtIn = BratDocumentTest.class.getResourceAsStream(
++        "/opennlp/tools/formats/brat/opennlp-1193.txt");
++
++    InputStream annIn = BratDocumentTest.class.getResourceAsStream(
++        "/opennlp/tools/formats/brat/opennlp-1193.ann");
++
++    BratDocument doc = BratDocument.parseDocument(config, "opennlp-1193", txtIn, annIn);
++
++    SpanAnnotation t1 = (SpanAnnotation) doc.getAnnotation("T1");
++    Assert.assertEquals(t1.getSpans()[0].getStart(), 0);
++    Assert.assertEquals(t1.getSpans()[0].getEnd(), 7);
++    Assert.assertEquals(t1.getSpans()[1].getStart(), 8);
++    Assert.assertEquals(t1.getSpans()[1].getEnd(), 15);
++    Assert.assertEquals(t1.getSpans()[2].getStart(), 17);
++    Assert.assertEquals(t1.getSpans()[2].getEnd(), 24);
++
++    SpanAnnotation t2 = (SpanAnnotation) doc.getAnnotation("T2");
++    Assert.assertEquals(t2.getSpans()[0].getStart(), 26);
++    Assert.assertEquals(t2.getSpans()[0].getEnd(), 33);
++    Assert.assertEquals(t2.getSpans()[1].getStart(), 40);
++    Assert.assertEquals(t2.getSpans()[1].getEnd(), 47);
+   }
+ }
+diff --git a/opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.ann b/opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.ann
+new file mode 100644
+index 000000000..df084570d
+--- /dev/null
++++ b/opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.ann
+@@ -0,0 +1,4 @@
++T1      Name 0 7;17 24;8 15     spanA_1 spanA_2 spanA_3
++T2      Name 26 33;40 47        spanB_1 spanB_2
++T3      Event 34 39  spanC
++E1      Event:T3
+diff --git a/opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.txt b/opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.txt
+new file mode 100644
+index 000000000..b5238e937
+--- /dev/null
++++ b/opennlp-tools/src/test/resources/opennlp/tools/formats/brat/opennlp-1193.txt
+@@ -0,0 +1,4 @@
++spanA_1 spanA_2
++ spanA_3
++
++spanB_1 spanC spanB_2

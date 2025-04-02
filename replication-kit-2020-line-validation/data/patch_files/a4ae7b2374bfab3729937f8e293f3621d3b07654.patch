@@ -1,0 +1,111 @@
+From a4ae7b2374bfab3729937f8e293f3621d3b07654 Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Fri, 5 Oct 2018 19:23:16 +0000
+Subject: [PATCH] NET-614 IMAP fails to quote/encode mailbox names NET-615
+ IMAPClient could simplify using empty arguments
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/net/trunk@1842969 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  6 ++++
+ .../org/apache/commons/net/imap/IMAP.java     | 31 +++++++++++++++++++
+ .../apache/commons/net/imap/IMAPClient.java   | 12 +++++--
+ 3 files changed, 46 insertions(+), 3 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index bbaf6c2ad..8b480cbfe 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -74,6 +74,12 @@ This is mainly a bug-fix release. See further details below.
+  The examples are not part of the public API, so this does not affect compatibility.
+ 
+ ">
++            <action issue="NET-615" type="add" dev="sebb">
++            IMAPClient could simplify using empty arguments
++            </action>
++            <action issue="NET-614" type="add" dev="sebb">
++            IMAP fails to quote/encode mailbox names
++            </action>
+             <action issue="NET-643" type="fix" dev="sebb" due-to="Vasily">
+             NPE when closing telnet stream
+             </action>
+diff --git a/src/main/java/org/apache/commons/net/imap/IMAP.java b/src/main/java/org/apache/commons/net/imap/IMAP.java
+index 546911604..0c17012b1 100644
+--- a/src/main/java/org/apache/commons/net/imap/IMAP.java
++++ b/src/main/java/org/apache/commons/net/imap/IMAP.java
+@@ -467,5 +467,36 @@ protected String generateCommandID()
+         }
+         return res;
+     }
++
++    /**
++     * Quote an input string if necessary.
++     * If the string is enclosed in double-quotes it is assumed
++     * to be quoted already and is returned unchanged.
++     * If it is the empty string, "" is returned.
++     * If it contains a space
++     * then it is enclosed in double quotes, escaping the
++     * characters backslash and double-quote.
++     *
++     * @param input the value to be quoted, may be null
++     * @return the quoted value
++     */
++    static String quoteString(String input) {
++        if (input == null) { // Don't throw NPE here
++            return null;
++        }
++        if (input.isEmpty()) {
++            return "\"\""; // return the string ""
++        }
++        // Length check is necessary to ensure a lone double-quote is quoted
++        if (input.length() > 1 && input.startsWith("\"") && input.endsWith("\"")) {
++            return input; // Assume already quoted
++        }
++        if (input.contains(" ")) {
++            // quoted strings must escape \ and "
++            return "\"" + input.replaceAll("([\\\\\"])", "\\\\$1") + "\"";
++        }
++        return input;
++
++    }
+ }
+ /* kate: indent-width 4; replace-tabs on; */
+diff --git a/src/main/java/org/apache/commons/net/imap/IMAPClient.java b/src/main/java/org/apache/commons/net/imap/IMAPClient.java
+index 5ae1487df..1d4e60e87 100644
+--- a/src/main/java/org/apache/commons/net/imap/IMAPClient.java
++++ b/src/main/java/org/apache/commons/net/imap/IMAPClient.java
+@@ -184,18 +184,24 @@ public boolean unsubscribe(String mailboxName) throws IOException
+ 
+     /**
+      * Send a LIST command to the server.
+-     * @param refName The reference name.
++     * Quotes the parameters if necessary.
++     * @param refName The reference name
++     *                If empty, indicates that the mailbox name is interpreted as by SELECT.
+      * @param mailboxName The mailbox name.
++     *                     If empty, this is a special request to
++     *                     return the hierarchy delimiter and the root name of the name given
++     *                     in the reference
+      * @return {@code true} if the command was successful,{@code false} if not.
+      * @throws IOException If a network I/O error occurs.
+      */
+     public boolean list(String refName, String mailboxName) throws IOException
+     {
+-        return doCommand (IMAPCommand.LIST, refName + " " + mailboxName);
++        return doCommand (IMAPCommand.LIST, quoteString(refName) + " " + quoteString(mailboxName));
+     }
+ 
+     /**
+      * Send an LSUB command to the server.
++     * Quotes the parameters if necessary.
+      * @param refName The reference name.
+      * @param mailboxName The mailbox name.
+      * @return {@code true} if the command was successful,{@code false} if not.
+@@ -203,7 +209,7 @@ public boolean list(String refName, String mailboxName) throws IOException
+      */
+     public boolean lsub(String refName, String mailboxName) throws IOException
+     {
+-        return doCommand (IMAPCommand.LSUB, refName + " " + mailboxName);
++        return doCommand (IMAPCommand.LSUB, quoteString(refName) + " " + quoteString(mailboxName));
+     }
+ 
+     /**

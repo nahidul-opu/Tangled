@@ -1,0 +1,113 @@
+From cafd9c77865ecb86ed9fd71637f2bcc87ce7e2d9 Mon Sep 17 00:00:00 2001
+From: Ate Douma <ate@apache.org>
+Date: Sun, 7 Sep 2014 19:48:46 +0000
+Subject: [PATCH] SCXML-206: External events must only be added to the event
+ queue through SCXMLExecutor#addEvent, not (also) trigger them, as the state
+ machine can/should only handle one invocation at the time (non-reentrant).
+ The event queue processing with sequentially processed such added events one
+ at a time.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/scxml/trunk@1623146 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../org/apache/commons/scxml2/SCXMLExecutor.java  | 11 +++--------
+ .../commons/scxml2/env/SimpleScheduler.java       | 15 ++-------------
+ .../commons/scxml2/invoke/SimpleSCXMLInvoker.java | 12 ++----------
+ 3 files changed, 7 insertions(+), 31 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java b/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java
+index 0bbfa6743..e68fa80f8 100644
+--- a/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java
++++ b/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java
+@@ -370,9 +370,7 @@ public int getPendingEvents() {
+      */
+     public void triggerEvent(final TriggerEvent evt)
+             throws ModelException {
+-        if (evt != null) {
+-            externalEventQueue.add(evt);
+-        }
++        addEvent(evt);
+         triggerEvents();
+     }
+ 
+@@ -390,9 +388,7 @@ public void triggerEvents(final TriggerEvent[] evts)
+             throws ModelException {
+         if (evts != null) {
+             for (TriggerEvent evt : evts) {
+-                if (evt != null) {
+-                    externalEventQueue.add(evt);
+-                }
++                addEvent(evt);
+             }
+         }
+         triggerEvents();
+@@ -437,5 +433,4 @@ protected void logState() {
+             log.debug(sb.toString());
+         }
+     }
+-}
+-
++}
+\ No newline at end of file
+diff --git a/src/main/java/org/apache/commons/scxml2/env/SimpleScheduler.java b/src/main/java/org/apache/commons/scxml2/env/SimpleScheduler.java
+index 16ac3d864..5deda4541 100644
+--- a/src/main/java/org/apache/commons/scxml2/env/SimpleScheduler.java
++++ b/src/main/java/org/apache/commons/scxml2/env/SimpleScheduler.java
+@@ -126,13 +126,7 @@ public void send(final String sendId, final String target,
+                 if (log.isWarnEnabled()) {
+                     log.warn("<send>: Unavailable target - " + target);
+                 }
+-                try {
+-                    this.executor.triggerEvent(new TriggerEvent(
+-                        EVENT_ERR_SEND_TARGETUNAVAILABLE,
+-                        TriggerEvent.ERROR_EVENT));
+-                } catch (ModelException me) {
+-                    log.error(me.getMessage(), me);
+-                }
++                this.executor.addEvent(new TriggerEvent(EVENT_ERR_SEND_TARGETUNAVAILABLE,TriggerEvent.ERROR_EVENT));
+                 return; // done
+             }
+ 
+@@ -232,12 +226,7 @@ class DelayedEventTask extends TimerTask {
+         @Override
+         public void run() {
+             timers.remove(sendId);
+-            try {
+-                executor.triggerEvent(new TriggerEvent(event,
+-                    TriggerEvent.SIGNAL_EVENT, payload));
+-            } catch (ModelException me) {
+-                log.error(me.getMessage(), me);
+-            }
++            executor.addEvent(new TriggerEvent(event, TriggerEvent.SIGNAL_EVENT, payload));
+             if (log.isDebugEnabled()) {
+                 log.debug("Fired event '" + event + "' as scheduled by "
+                     + "<send> with id '" + sendId + "'");
+diff --git a/src/main/java/org/apache/commons/scxml2/invoke/SimpleSCXMLInvoker.java b/src/main/java/org/apache/commons/scxml2/invoke/SimpleSCXMLInvoker.java
+index 51f3596f5..886184daa 100644
+--- a/src/main/java/org/apache/commons/scxml2/invoke/SimpleSCXMLInvoker.java
++++ b/src/main/java/org/apache/commons/scxml2/invoke/SimpleSCXMLInvoker.java
+@@ -125,11 +125,7 @@ public void parentEvent(final TriggerEvent evt)
+             return; // no further processing should take place
+         }
+         boolean doneBefore = executor.getCurrentStatus().isFinal();
+-        try {
+-            executor.triggerEvent(evt);
+-        } catch (ModelException me) {
+-            throw new InvokerException(me.getMessage(), me.getCause());
+-        }
++        executor.addEvent(evt);
+         if (!doneBefore && executor.getCurrentStatus().isFinal()) {
+             TriggerEvent te = new TriggerEvent("done.invoke."+parentStateId,TriggerEvent.SIGNAL_EVENT);
+             new AsyncTrigger(parentIOProcessor, te).start();
+@@ -142,11 +138,7 @@ public void parentEvent(final TriggerEvent evt)
+     public void cancel()
+     throws InvokerException {
+         cancelled = true;
+-        try {
+-            executor.triggerEvent(new TriggerEvent("cancel.invoke."+parentStateId, TriggerEvent.CANCEL_EVENT));
+-        } catch (ModelException me) {
+-            throw new InvokerException(me.getMessage(), me.getCause());
+-        }
++        executor.addEvent(new TriggerEvent("cancel.invoke."+parentStateId, TriggerEvent.CANCEL_EVENT));
+     }
+ 
+ }

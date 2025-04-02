@@ -1,0 +1,386 @@
+From 6c7c02162f1c6437cdfa98b881251827ccb696e5 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 3 Jun 2008 12:42:21 +0000
+Subject: [PATCH] FIX: dynamic resolveMode not being dynamic on branch
+ (IVY-825)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@662776 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/xml/XmlModuleDescriptorParser.java |  6 ++--
+ .../xml/XmlModuleDescriptorUpdater.java       | 12 +++++---
+ .../parser/xml/XmlModuleDescriptorWriter.java |  8 ++++++
+ .../org/apache/ivy/plugins/parser/xml/ivy.xsd |  1 +
+ .../apache/ivy/core/resolve/ResolveTest.java  | 28 +++++++++++++++++++
+ .../xml/XmlModuleDescriptorParserTest.java    |  4 ++-
+ .../parser/xml/XmlModuleUpdaterTest.java      |  8 ++++--
+ .../parser/xml/test-update-withvar.xml        |  4 +--
+ .../ivy/plugins/parser/xml/test-update.xml    |  4 +--
+ .../plugins/parser/xml/test-write-full.xml    |  2 +-
+ .../apache/ivy/plugins/parser/xml/test.xml    |  2 +-
+ .../apache/ivy/plugins/parser/xml/updated.xml |  4 +--
+ .../branches/bar/bar1/trunk/5/bar1.jar        |  1 +
+ .../branches/bar/bar1/trunk/5/ivy.xml         | 25 +++++++++++++++++
+ .../branches/bar/bar1/trunk/6/bar1.jar        |  1 +
+ .../branches/bar/bar1/trunk/6/ivy.xml         | 25 +++++++++++++++++
+ 17 files changed, 118 insertions(+), 18 deletions(-)
+ create mode 100644 test/repositories/branches/bar/bar1/trunk/5/bar1.jar
+ create mode 100644 test/repositories/branches/bar/bar1/trunk/5/ivy.xml
+ create mode 100644 test/repositories/branches/bar/bar1/trunk/6/bar1.jar
+ create mode 100644 test/repositories/branches/bar/bar1/trunk/6/ivy.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index a50b10ab5..93709457e 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -81,6 +81,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: dynamic resolveMode not being dynamic on branch (IVY-825)
+ - FIX: Filesystem repositories can not have () in the path (IVY-797)
+ - FIX: Type tag in poms not supported (IVY-762)
+ - FIX: An empty exclusion tag results in an IllegalArgumentException (IVY-821)
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index 97973746c..e00730f76 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -70,7 +70,7 @@
+  */
+ public final class XmlModuleDescriptorParser extends AbstractModuleDescriptorParser {
+     static final String[] DEPENDENCY_REGULAR_ATTRIBUTES = new String[] {"org", "name", "branch",
+-            "rev", "revConstraint", "force", "transitive", "changing", "conf"};
++            "branchConstraint", "rev", "revConstraint", "force", "transitive", "changing", "conf"};
+ 
+     private static final XmlModuleDescriptorParser INSTANCE = new XmlModuleDescriptorParser();
+ 
+@@ -507,6 +507,7 @@ private void dependencyStarted(Attributes attributes) {
+ 
+             String name = ivy.substitute(attributes.getValue("name"));
+             String branch = ivy.substitute(attributes.getValue("branch"));
++            String branchConstraint = ivy.substitute(attributes.getValue("branchConstraint"));
+             String rev = ivy.substitute(attributes.getValue("rev"));
+             String revConstraint = ivy.substitute(attributes.getValue("revConstraint"));
+             revConstraint = revConstraint == null ? rev : revConstraint;
+@@ -515,7 +516,8 @@ private void dependencyStarted(Attributes attributes) {
+             dd = new DefaultDependencyDescriptor(
+                 getMd(), 
+                 ModuleRevisionId.newInstance(org, name, branch, rev, extraAttributes), 
+-                ModuleRevisionId.newInstance(org, name, branch, revConstraint, extraAttributes), 
++                ModuleRevisionId.newInstance(
++                    org, name, branchConstraint, revConstraint, extraAttributes), 
+                 force, changing, transitive);
+             getMd().addDependency(dd);
+             String confs = ivy.substitute(attributes.getValue("conf"));
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index 383fc88d2..a9c57155a 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -349,6 +349,8 @@ private void startElementInDependency(Attributes attributes) {
+             org = org == null ? organisation : org;
+             String module = substitute(settings, attributes.getValue("name"));
+             String branch = substitute(settings, attributes.getValue("branch"));
++            String branchConstraint = substitute(settings, attributes.getValue("branchConstraint"));
++            branchConstraint = branchConstraint == null ? branch : branchConstraint;
+             
+             // look for the branch used in resolved revisions
+             if (branch == null) {
+@@ -371,12 +373,8 @@ private void startElementInDependency(Attributes attributes) {
+                 XmlModuleDescriptorParser.DEPENDENCY_REGULAR_ATTRIBUTES);
+             ModuleRevisionId localMrid = ModuleRevisionId.newInstance(org, module, branch,
+                 revision, extraAttributes);
+-            ModuleRevisionId localConstraintMrid = ModuleRevisionId.newInstance(org, module, branch,
+-                revisionConstraint, extraAttributes);
+             ModuleRevisionId systemMrid = ns == null ? localMrid : ns.getToSystemTransformer()
+                     .transform(localMrid);
+-            ModuleRevisionId systemConstraintMrid = ns == null ? localConstraintMrid 
+-                    : ns.getToSystemTransformer().transform(localConstraintMrid);
+ 
+             for (int i = 0; i < attributes.getLength(); i++) {
+                 String attName = attributes.getQName(i);
+@@ -384,6 +382,10 @@ private void startElementInDependency(Attributes attributes) {
+                     String rev = (String) resolvedRevisions.get(systemMrid);
+                     if (rev != null) {
+                         write(" rev=\"" + rev + "\"");
++                        if (attributes.getIndex("branchConstraint") == -1 
++                                && branchConstraint != null) {
++                            write(" branchConstraint=\"" + branchConstraint + "\"");
++                        }
+                         if (attributes.getIndex("revConstraint") == -1 
+                                 && !rev.equals(systemMrid.getRevision())) {
+                             write(" revConstraint=\"" + systemMrid.getRevision() + "\"");
+@@ -399,6 +401,8 @@ private void startElementInDependency(Attributes attributes) {
+                     write(" name=\"" + systemMrid.getName() + "\"");
+                 } else if ("branch".equals(attName)) {
+                     write(" branch=\"" + systemMrid.getBranch() + "\"");
++                } else if ("branchConstraint".equals(attName)) {
++                    write(" branchConstraint=\"" + branchConstraint + "\"");
+                 } else if ("conf".equals(attName)) {
+                     String oldMapping = substitute(settings, attributes.getValue("conf"));
+                     if (oldMapping.length() > 0) {
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+index 04b34dd2c..8f8c8069a 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+@@ -97,10 +97,18 @@ private static void printDependencies(ModuleDescriptor md, PrintWriter out) {
+                     + XMLHelper.escape(dds[i].getDependencyRevisionId().getOrganisation()) + "\"");
+                 out.print(" name=\"" 
+                     + XMLHelper.escape(dds[i].getDependencyRevisionId().getName()) + "\"");
++                if (dds[i].getDependencyRevisionId().getBranch() != null) {
++                    out.print(" branch=\"" 
++                        + XMLHelper.escape(dds[i].getDependencyRevisionId().getBranch()) + "\"");
++                }
+                 out.print(" rev=\"" 
+                     + XMLHelper.escape(dds[i].getDependencyRevisionId().getRevision()) + "\"");
+                 if (!dds[i].getDynamicConstraintDependencyRevisionId()
+                         .equals(dds[i].getDependencyRevisionId())) {
++                    if (dds[i].getDynamicConstraintDependencyRevisionId().getBranch() != null) {
++                        out.print(" branchConstraint=\"" + XMLHelper.escape(
++                             dds[i].getDynamicConstraintDependencyRevisionId().getBranch()) + "\"");
++                    }
+                     out.print(" revConstraint=\"" + XMLHelper.escape(
+                         dds[i].getDynamicConstraintDependencyRevisionId().getRevision()) + "\"");
+                 }
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd b/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd
+index d76f05d3b..bd710c7b3 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd
++++ b/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd
+@@ -219,6 +219,7 @@
+ 						            <xs:attribute name="org" type="xs:string"/>
+ 						            <xs:attribute name="name" type="xs:string" use="required"/>
+ 						            <xs:attribute name="branch" type="xs:string"/>
++						            <xs:attribute name="branchConstraint" type="xs:string"/>
+ 						            <xs:attribute name="rev" type="xs:string" use="required"/>
+ 						            <xs:attribute name="revConstraint" type="xs:string"/>
+ 						            <xs:attribute name="force" type="xs:boolean"/>
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index fc834a519..4fbcfbf4c 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -2630,6 +2630,34 @@ public void testResolveModeDynamic2() throws Exception {
+         assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.2", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testResolveModeDynamicWithBranch1() throws Exception {
++        // bar1;5 -> foo1#branch1|;2|[0,4]
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/branches/ivysettings.xml"));
++
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/branches/bar/bar1/trunk/5/ivy.xml").toURL(), 
++                getResolveOptions(new String[] {"*"})
++                .setResolveMode(ResolveOptions.RESOLVEMODE_DYNAMIC));
++        assertFalse(report.hasError());
++
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#trunk;3", "foo1", "jar", "jar").exists());
++    }
++
++    public void testResolveModeDynamicWithBranch2() throws Exception {
++        // bar1;5 -> foo1#trunk|branch1;3|[0,4]
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/branches/ivysettings.xml"));
++
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/branches/bar/bar1/trunk/6/ivy.xml").toURL(), 
++                getResolveOptions(new String[] {"*"})
++                .setResolveMode(ResolveOptions.RESOLVEMODE_DYNAMIC));
++        assertFalse(report.hasError());
++
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#branch1;4", "foo1", "jar", "jar").exists());
++    }
++
+     public void testResolveModeDefaultOverrideSettings() throws Exception {
+         // same as ResolveModeDynamic2, but resolve mode is set in settings, and overriden when calling resolve
+         Map attributes = new HashMap();
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+index 167a69171..c851aeb76 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+@@ -264,9 +264,11 @@ public void testFull() throws Exception {
+         dd = getDependency(dependencies, "yourmodule1");
+         assertNotNull(dd);
+         assertEquals("yourorg", dd.getDependencyId().getOrganisation());
++        assertEquals("trunk", dd.getDependencyRevisionId().getBranch());
+         assertEquals("1.1", dd.getDependencyRevisionId().getRevision());
++        assertEquals("branch1", dd.getDynamicConstraintDependencyRevisionId().getBranch());
+         assertEquals("1+", dd.getDynamicConstraintDependencyRevisionId().getRevision());
+-        assertEquals("yourorg#yourmodule1;1+", dd.getDynamicConstraintDependencyRevisionId().toString());
++        assertEquals("yourorg#yourmodule1#branch1;1+", dd.getDynamicConstraintDependencyRevisionId().toString());
+         
+         assertEquals(Arrays.asList(new String[] {"myconf1"}), Arrays.asList(dd
+                 .getModuleConfigurations()));
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+index ead21ff11..3ccfdd32e 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+@@ -56,8 +56,9 @@ public void testUpdate() throws Exception {
+         File dest = new File("build/updated-test.xml");
+         dest.deleteOnExit();
+         Map resolvedRevisions = new HashMap();
+-        resolvedRevisions.put(ModuleRevisionId.newInstance("yourorg", "yourmodule2", "2+"), "2.5");
+-        resolvedRevisions.put(ModuleRevisionId.newInstance("yourorg", "yourmodule6",
++        resolvedRevisions.put(ModuleRevisionId.newInstance(
++            "yourorg", "yourmodule2", "branch1", "2+"), "2.5");
++        resolvedRevisions.put(ModuleRevisionId.newInstance("yourorg", "yourmodule6", 
+             "latest.integration"), "6.3");
+ 
+         GregorianCalendar cal = new GregorianCalendar();
+@@ -87,7 +88,8 @@ public void testVariableReplacement() throws Exception {
+         File dest = new File("build/updated-test2.xml");
+         dest.deleteOnExit();
+         Map resolvedRevisions = new HashMap();
+-        resolvedRevisions.put(ModuleRevisionId.newInstance("yourorg", "yourmodule2", "2+"), "2.5");
++        resolvedRevisions.put(ModuleRevisionId.newInstance(
++            "yourorg", "yourmodule2", "branch1", "2+"), "2.5");
+         resolvedRevisions.put(ModuleRevisionId.newInstance("yourorg", "yourmodule6",
+             "latest.integration"), "6.3");
+ 
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml
+index 569bd4c48..f1917471b 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml
+@@ -60,8 +60,8 @@
+ 	<dependencies>
+ 		<dependency name="${mymodule2}" rev="${mymodule2rev}"/>
+ 		<dependency name="mymodule3" rev="2.0" changing="${changing}" transitive="${transitive}"/>
+-		<dependency org="yourorg" name="yourmodule1" rev="1.1" revConstraint="1+" conf="${myvar}"/>
+-		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="${myvar}"/>
++		<dependency org="yourorg" name="yourmodule2" branch="branch1" rev="2+" conf="myconf1->yourconf1"/>
+ 		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1, myconf2->yourconf1, yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1, yourconf2"/>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml
+index 7c86e6d03..dd0fc4d7c 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml
+@@ -60,8 +60,8 @@
+ 	<dependencies>
+ 		<dependency name="mymodule2" rev="2.0"/>
+ 		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
+-		<dependency org="yourorg" name="yourmodule1" rev="1.1" revConstraint="1+" conf="myconf1"/>
+-		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1"/>
++		<dependency org="yourorg" name="yourmodule2" branch="branch1" rev="2+" conf="myconf1->yourconf1"/>
+ 		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1, myconf2->yourconf1, yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1, yourconf2"/>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
+index be3548f3e..4ad78056c 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
+@@ -43,7 +43,7 @@
+ 	<dependencies>
+ 		<dependency org="myorg" name="mymodule2" rev="2.0" conf="*->*" e:attr4="value4"/>
+ 		<dependency org="myorg" name="mymodule3" rev="2.0" changing="true" transitive="false" conf="*->*"/>
+-		<dependency org="yourorg" name="yourmodule1" rev="1.1" revConstraint="1+" conf="myconf1->myconf1"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1->myconf1"/>
+ 		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
+ 		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1,yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1->yourconf1,yourconf2;myconf2->yourconf1,yourconf2"/>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test.xml b/test/java/org/apache/ivy/plugins/parser/xml/test.xml
+index d95492fa9..4fb35f466 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test.xml
+@@ -58,7 +58,7 @@
+ 	<dependencies>
+ 		<dependency name="mymodule2" rev="2.0" e:attr4="value4"/>
+ 		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
+-		<dependency org="yourorg" name="yourmodule1" rev="1.1" revConstraint="1+" conf="myconf1"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1"/>
+ 		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
+ 		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1, myconf2->yourconf1, yourconf2"/>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/updated.xml b/test/java/org/apache/ivy/plugins/parser/xml/updated.xml
+index fe7a901e3..4dace74bf 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/updated.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/updated.xml
+@@ -56,8 +56,8 @@
+ 	<dependencies defaultconfmapping="*->@">
+ 		<dependency name="mymodule2" rev="2.0"/>
+ 		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
+-		<dependency org="yourorg" name="yourmodule1" rev="1.1" revConstraint="1+" conf="myconf1"/>
+-		<dependency org="yourorg" name="yourmodule2" rev="2.5" revConstraint="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1"/>
++		<dependency org="yourorg" name="yourmodule2" branch="branch1" rev="2.5" branchConstraint="branch1" revConstraint="2+" conf="myconf1->yourconf1"/>
+ 		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1, myconf2->yourconf1, yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1, yourconf2"/>
+diff --git a/test/repositories/branches/bar/bar1/trunk/5/bar1.jar b/test/repositories/branches/bar/bar1/trunk/5/bar1.jar
+new file mode 100644
+index 000000000..56a6051ca
+--- /dev/null
++++ b/test/repositories/branches/bar/bar1/trunk/5/bar1.jar
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/test/repositories/branches/bar/bar1/trunk/5/ivy.xml b/test/repositories/branches/bar/bar1/trunk/5/ivy.xml
+new file mode 100644
+index 000000000..c0a182635
+--- /dev/null
++++ b/test/repositories/branches/bar/bar1/trunk/5/ivy.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.4">
++	<info organisation="bar" module="bar1" revision="5"/>
++	<dependencies>
++		<dependency org="foo" name="foo1" branch="branch1" rev="2" 
++		                                  revConstraint="[0,4]" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/branches/bar/bar1/trunk/6/bar1.jar b/test/repositories/branches/bar/bar1/trunk/6/bar1.jar
+new file mode 100644
+index 000000000..56a6051ca
+--- /dev/null
++++ b/test/repositories/branches/bar/bar1/trunk/6/bar1.jar
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/test/repositories/branches/bar/bar1/trunk/6/ivy.xml b/test/repositories/branches/bar/bar1/trunk/6/ivy.xml
+new file mode 100644
+index 000000000..7cbf5d809
+--- /dev/null
++++ b/test/repositories/branches/bar/bar1/trunk/6/ivy.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.4">
++	<info organisation="bar" module="bar1" revision="6"/>
++	<dependencies>
++		<dependency org="foo" name="foo1" branch="trunk" rev="3" 
++		                                  branchConstraint="branch1" revConstraint="[0,4]" />
++	</dependencies>
++</ivy-module>

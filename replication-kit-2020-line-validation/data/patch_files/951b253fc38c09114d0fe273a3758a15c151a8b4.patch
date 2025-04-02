@@ -1,0 +1,159 @@
+From 951b253fc38c09114d0fe273a3758a15c151a8b4 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sat, 6 Sep 2008 20:32:48 +0000
+Subject: [PATCH] FIX: Ivy ibiblio resolver chokes on variables while checking
+ descriptor consistency (IVY-818)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@692729 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/m2/PomModuleDescriptorBuilder.java |  2 +-
+ .../parser/m2/PomModuleDescriptorParser.java  | 53 +++++++++----------
+ .../m2/PomModuleDescriptorParserTest.java     |  3 +-
+ .../parser/m2/test-parent-properties.pom      |  2 +-
+ .../ivy/plugins/parser/m2/test-version.pom    |  1 +
+ 6 files changed, 31 insertions(+), 31 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 98e653d45..a4c47f075 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -111,6 +111,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Add a memory cache for the module descriptor that are parsed from the cache (IVY-883)
+ - IMPROVEMENT: Improve performance (IVY-872)
+ 
++- FIX: Ivy ibiblio resolver chokes on variables while checking descriptor consistency (IVY-818)
+ - FIX: Enable consistent support of the configuration negation operator (IVY-894) (thanks to Patrick Woodworth)
+ - FIX: add variable expansion in extra attributes (IVY-798)
+ - FIX: Invalid URL when using dynamic ranges (IVY-885)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index b821c0b61..5ec447b91 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -328,7 +328,7 @@ public void addDependencyMgt(PomDependencyMgt dep) {
+     public void addPlugin(PomDependencyMgt plugin) {
+         String pluginValue = plugin.getGroupId() + EXTRA_INFO_DELIMITER + plugin.getArtifactId() 
+                 + EXTRA_INFO_DELIMITER + plugin.getVersion();
+-        String pluginExtraInfo = (String) ivyModuleDescriptor.getExtraInfo().get("maven.plugins");
++        String pluginExtraInfo = (String) ivyModuleDescriptor.getExtraInfo().get("m:maven.plugins");
+         if (pluginExtraInfo == null) {
+             pluginExtraInfo = pluginValue;
+         } else {
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index cc2342bde..3eaae5e45 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -111,10 +111,33 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+         PomModuleDescriptorBuilder mdBuilder = new PomModuleDescriptorBuilder(this, res);
+         
+         try {           
+-            PomReader domReader = new PomReader(descriptorURL, res);
+-            
++            PomReader domReader = new PomReader(descriptorURL, res);            
+             domReader.setProperty("parent.version", domReader.getParentVersion());
+             
++            ModuleDescriptor parentDescr = null;
++            if (domReader.hasParent()) {
++                //Is there any other parent properties?
++                
++                ModuleRevisionId parentModRevID = ModuleRevisionId.newInstance(
++                    domReader.getParentGroupId(), 
++                    domReader.getParentArtifactId(), 
++                    domReader.getParentVersion());
++                ResolvedModuleRevision parentModule = parseOtherPom(ivySettings, 
++                    parentModRevID);
++                if (parentModule != null) {
++                    parentDescr = parentModule.getDescriptor();
++                } else {
++                   Message.warn("impossible to load parent for " + descriptorURL + "."
++                       + " Parent=" + parentModRevID); 
++                }
++                
++                Map parentPomProps = PomModuleDescriptorBuilder.extractPomProperties(parentDescr.getExtraInfo());
++                for (Iterator iter = parentPomProps.entrySet().iterator(); iter.hasNext();) {
++                    Map.Entry prop = (Map.Entry) iter.next();
++                    domReader.setProperty((String) prop.getKey(), (String) prop.getValue());
++                }                    
++            }
++                            
+             String groupId = domReader.getGroupId();
+             String artifactId = domReader.getArtifactId();
+             String version = domReader.getVersion();
+@@ -172,25 +195,6 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                 domReader.setProperty("pom.version", version);
+                 domReader.setProperty("version", version);
+ 
+-                ModuleDescriptor parentDescr = null;
+-                if (domReader.hasParent()) {
+-                    domReader.setProperty("parent.version", domReader.getParentVersion());
+-                    //Is there any other parent properties?
+-                    
+-                    ModuleRevisionId parentModRevID = ModuleRevisionId.newInstance(
+-                        domReader.getParentGroupId(), 
+-                        domReader.getParentArtifactId(), 
+-                        domReader.getParentVersion());
+-                    ResolvedModuleRevision parentModule = parseOtherPom(ivySettings, 
+-                        parentModRevID);
+-                    if (parentModule != null) {
+-                        parentDescr = parentModule.getDescriptor();
+-                    } else {
+-                       Message.warn("impossible to load parent for " + descriptorURL + "."
+-                           + " Parent=" + parentModRevID); 
+-                    }
+-                }
+-                                
+                 Map pomProperties = domReader.getPomProperties();
+                 for (Iterator iter = pomProperties.entrySet().iterator(); iter.hasNext();) {
+                     Map.Entry prop = (Map.Entry) iter.next();
+@@ -199,13 +203,6 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                 }
+                 
+                 if (parentDescr != null) {
+-                    Map parentPomProps = PomModuleDescriptorBuilder
+-                            .extractPomProperties(parentDescr.getExtraInfo());
+-                    for (Iterator iter = parentPomProps.entrySet().iterator(); iter.hasNext();) {
+-                        Map.Entry prop = (Map.Entry) iter.next();
+-                        domReader.setProperty((String) prop.getKey(), (String) prop.getValue());
+-                    }                    
+-
+                     mdBuilder.addExtraInfos(parentDescr.getExtraInfo());
+                     
+                     // add dependency management info from parent
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index decede587..d5ca10cc3 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -606,7 +606,8 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             settings, getClass().getResource("test-parent-properties.pom"), false);
+         assertNotNull(md);
+-
++        assertEquals("1.0", md.getRevision());
++        
+         DependencyDescriptor[] dds = md.getDependencies();
+         assertNotNull(dds);
+         assertEquals(3, dds.length); 
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-parent-properties.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-parent-properties.pom
+index 3affea3ef..934956a90 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/test-parent-properties.pom
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-parent-properties.pom
+@@ -27,7 +27,7 @@
+   <groupId>org.apache</groupId>
+   <artifactId>test</artifactId>
+   <name>Test Module for Ivy M2 parsing</name>
+-  <version>1.0</version>
++  <version>${test-version-version}</version>
+   <url>http://ivy.jayasoft.org/</url>
+   <organization>
+     <name>Jayasoft</name>
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-version.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-version.pom
+index 3049c2ce5..56028021d 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/test-version.pom
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-version.pom
+@@ -42,5 +42,6 @@
+   </dependencies>
+   <properties>
+   	<test-yet-other-version>5.76</test-yet-other-version>
++        <test-version-version>1.0</test-version-version>
+   </properties>
+ </project>

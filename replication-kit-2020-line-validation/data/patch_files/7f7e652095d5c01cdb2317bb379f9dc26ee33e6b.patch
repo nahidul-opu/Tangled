@@ -1,0 +1,190 @@
+From 7f7e652095d5c01cdb2317bb379f9dc26ee33e6b Mon Sep 17 00:00:00 2001
+From: Henning Schmiedehausen <henning@apache.org>
+Date: Mon, 21 Oct 2013 21:07:12 +0000
+Subject: [PATCH] Backport CONFIGURATION-555 from r1527396.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/CONFIGURATION_1_X_MAINTENANCE@1534371 13f79535-47bb-0310-9956-ffa450edef68
+---
+ RELEASE-NOTES.txt                             |  6 ++
+ src/changes/changes.xml                       |  5 ++
+ .../configuration/XMLConfiguration.java       | 56 ++++++++++++-------
+ .../configuration/TestXMLConfiguration.java   | 10 ++++
+ src/test/resources/test.xml                   |  1 +
+ 5 files changed, 59 insertions(+), 19 deletions(-)
+
+diff --git a/RELEASE-NOTES.txt b/RELEASE-NOTES.txt
+index 1c59c8238e..4f76ab5b74 100644
+--- a/RELEASE-NOTES.txt
++++ b/RELEASE-NOTES.txt
+@@ -36,6 +36,12 @@ BUG FIXES IN 1.10
+   XMLConfiguration now adds attributes of elements defining a list to
+   all list nodes.
+ 
++* [CONFIGURATION-555] XMLConfiguration doesn't seem to be preserving whitespace 
++                      for the current node where xml:space="preserve" is set.
++
++  Fixed a bug in the handling of the xml:space attribute in XMLConfiguration. 
++  The attribute is now also applied to the current element, not only to sub elements.
++
+ * [CONFIGURATION-556] Regression with SystemProperties in 1.8 and 1.9
+ 
+   In 1.7 and before, any change to the system properties was immediately reflected in a 
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index f8c0d6bc29..a11801cc38 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -31,6 +31,11 @@
+         XMLConfiguration now adds attributes of elements defining a list to
+         all list nodes.
+       </action>
++       <action dev="oheger" type="update" issue="CONFIGURATION-555">
++         Fixed a bug in the handling of the xml:space attribute in
++         XMLConfiguration. The attribute is now also applied to the current
++         element, not only to sub elements.
++       </action>
+       <action dev="henning" type="fix" issue="CONFIGURATION-556">
+         In 1.7 and before, any change to the system properties was
+         immediately reflected in a SystemConfiguration object. This
+diff --git a/src/main/java/org/apache/commons/configuration/XMLConfiguration.java b/src/main/java/org/apache/commons/configuration/XMLConfiguration.java
+index 491c6aae6a..5da9463441 100644
+--- a/src/main/java/org/apache/commons/configuration/XMLConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration/XMLConfiguration.java
+@@ -46,9 +46,11 @@
+ import javax.xml.transform.dom.DOMSource;
+ import javax.xml.transform.stream.StreamResult;
+ 
++import org.apache.commons.collections.CollectionUtils;
+ import org.apache.commons.configuration.resolver.DefaultEntityResolver;
+ import org.apache.commons.configuration.resolver.EntityRegistry;
+ import org.apache.commons.configuration.tree.ConfigurationNode;
++import org.apache.commons.lang.StringUtils;
+ import org.apache.commons.logging.LogFactory;
+ import org.w3c.dom.Attr;
+ import org.w3c.dom.CDATASection;
+@@ -605,10 +607,13 @@ public void initProperties(Document document, boolean elemRefs)
+      *
+      * @param node the actual node
+      * @param element the actual XML element
+-     * @param elemRefs a flag whether references to the XML elements should be set
+-     * @param trim a flag whether the text content of elements should be trimmed;
+-     * this controls the whitespace handling
+-     * @return a map with all attribute values extracted for the current node
++     * @param elemRefs a flag whether references to the XML elements should be
++     *        set
++     * @param trim a flag whether the text content of elements should be
++     *        trimmed; this controls the whitespace handling
++     * @return a map with all attribute values extracted for the current node;
++     *         this map also contains the value of the trim flag for this node
++     *         under the key {@value #ATTR_SPACE}
+      */
+     private Map<String, Collection<String>> constructHierarchy(Node node,
+             Element element, boolean elemRefs, boolean trim)
+@@ -616,6 +621,7 @@ private Map<String, Collection<String>> constructHierarchy(Node node,
+         boolean trimFlag = shouldTrim(element, trim);
+         Map<String, Collection<String>> attributes =
+                 processAttributes(node, element, elemRefs);
++        attributes.put(ATTR_SPACE, Collections.singleton(String.valueOf(trimFlag)));
+         StringBuilder buffer = new StringBuilder();
+         NodeList list = element.getChildNodes();
+         for (int i = 0; i < list.getLength(); i++)
+@@ -629,7 +635,9 @@ private Map<String, Collection<String>> constructHierarchy(Node node,
+                 Map<String, Collection<String>> attrmap =
+                         constructHierarchy(childNode, child, elemRefs, trimFlag);
+                 node.addChild(childNode);
+-                handleDelimiters(node, childNode, trimFlag, attrmap);
++                Collection<String> attrSpace = attrmap.remove(ATTR_SPACE);
++                Boolean childTrim = CollectionUtils.isEmpty(attrSpace) ? Boolean.FALSE : Boolean.valueOf(attrSpace.iterator().next());
++                handleDelimiters(node, childNode, childTrim.booleanValue(), attrmap);
+             }
+             else if (w3cNode instanceof Text)
+             {
+@@ -638,11 +646,7 @@ else if (w3cNode instanceof Text)
+             }
+         }
+ 
+-        String text = buffer.toString();
+-        if (trimFlag)
+-        {
+-            text = text.trim();
+-        }
++        String text = determineValue(node, buffer.toString(), trimFlag);
+         if (text.length() > 0 || (!node.hasChildren() && node != getRoot()))
+         {
+             node.setValue(text);
+@@ -650,6 +654,28 @@ else if (w3cNode instanceof Text)
+         return attributes;
+     }
+ 
++    /**
++     * Determines the value of a configuration node. This method mainly checks
++     * whether the text value is to be trimmed or not. This is normally defined
++     * by the trim flag. However, if the node has children and its content is
++     * only whitespace, then it makes no sense to store any value; this would
++     * only scramble layout when the configuration is saved again.
++     *
++     * @param node the current {@code ConfigurationNode}
++     * @param content the text content of this node
++     * @param trimFlag the trim flag
++     * @return the value to be stored for this node
++     */
++    private static String determineValue(ConfigurationNode node,
++            String content, boolean trimFlag)
++    {
++        boolean shouldTrim =
++                trimFlag
++                        || (StringUtils.isBlank(content) && node
++                                .getChildrenCount() > 0);
++        return shouldTrim ? content.trim() : content;
++    }
++
+     /**
+      * Helper method for constructing node objects for the attributes of the
+      * given XML element.
+@@ -663,15 +689,7 @@ private Map<String, Collection<String>> processAttributes(Node node,
+             Element element, boolean elemRefs)
+     {
+         NamedNodeMap attributes = element.getAttributes();
+-        Map<String, Collection<String>> attrmap;
+-        if (attributes.getLength() > 0)
+-        {
+-            attrmap = new HashMap<String, Collection<String>>();
+-        }
+-        else
+-        {
+-            attrmap = Collections.emptyMap();
+-        }
++        Map<String, Collection<String>> attrmap = new HashMap<String, Collection<String>>();
+ 
+         for (int i = 0; i < attributes.getLength(); ++i)
+         {
+diff --git a/src/test/java/org/apache/commons/configuration/TestXMLConfiguration.java b/src/test/java/org/apache/commons/configuration/TestXMLConfiguration.java
+index 02c0b0843c..0e19d9dfe5 100644
+--- a/src/test/java/org/apache/commons/configuration/TestXMLConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration/TestXMLConfiguration.java
+@@ -1647,6 +1647,16 @@ public void testPreserveSpace()
+                 .getString("space.stars"));
+     }
+ 
++    /**
++     * Tests whether the xml:space attribute works directly on the current
++     * element. This test is related to CONFIGURATION-555.
++     */
++    @Test
++    public void testPreserveSpaceOnElement()
++    {
++        assertEquals("Wrong value", " preserved ", conf.getString("spaceElement"));
++    }
++
+     /**
+      * Tests whether the xml:space attribute can be overridden in nested
+      * elements.
+diff --git a/src/test/resources/test.xml b/src/test/resources/test.xml
+index 8d6cd43d73..4f84463fee 100644
+--- a/src/test/resources/test.xml
++++ b/src/test/resources/test.xml
+@@ -115,4 +115,5 @@ And even longer.
+       <description xml:space="default">     Some text      </description>
+       <testInvalid xml:space="invalid">     Some other text </testInvalid>
+     </space>
++    <spaceElement xml:space="preserve"> preserved </spaceElement>
+ </testconfig>

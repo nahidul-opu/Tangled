@@ -1,0 +1,228 @@
+From f36652ed2d215164537b9652ad7c2d57143bd307 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 24 Jan 2006 14:17:16 +0000
+Subject: [PATCH] FIX: problem with inheritance between public and private conf
+ (IVY-149)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484157 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                  |  1 +
+ src/java/fr/jayasoft/ivy/Ivy.java            | 14 +++++++-------
+ src/java/fr/jayasoft/ivy/IvyNode.java        | 12 ++++++------
+ test/java/fr/jayasoft/ivy/ResolveTest.java   |  8 ++++++++
+ test/repositories/2/mod8.1/a-1.1.txt         |  1 +
+ test/repositories/2/mod8.1/a-private-1.1.txt |  1 +
+ test/repositories/2/mod8.1/ivy-1.1.xml       | 17 +++++++++++++++++
+ test/repositories/2/mod8.4/ivy-1.1.xml       | 14 ++++++++++++++
+ 8 files changed, 55 insertions(+), 13 deletions(-)
+ create mode 100644 test/repositories/2/mod8.1/a-1.1.txt
+ create mode 100644 test/repositories/2/mod8.1/a-private-1.1.txt
+ create mode 100644 test/repositories/2/mod8.1/ivy-1.1.xml
+ create mode 100644 test/repositories/2/mod8.4/ivy-1.1.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2b53bef01..e6decbdfe 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -37,6 +37,7 @@
+ - IMPROVE: better error message when publish fails due to readonly destination (IVY-83)
+ - IMPROVE: some javadoc improvements (IVY-136 IVY-129) (thanks to Stephen Nesbitt)
+ 
++- FIX: problem with inheritance between public and private conf (IVY-149)
+ - FIX: no variable replacement during the deliver step (IVY-133)
+ - FIX: conflict badly solved in some complex cases (IVY-130)
+ - FIX: mapping on conf * now only takes public configurations (IVY-126)
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index de9f64065..3e6598490 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -906,7 +906,7 @@ public IvyNode[] getDependencies(ModuleDescriptor md, String[] confs, File cache
+                 ResolveData data = new ResolveData(this, cache, date, confReport, validate, dependenciesMap);
+                 IvyNode node = new IvyNode(data, md, confs[i], true);
+                 node.setRootModuleConf(confs[i]);
+-                fetchDependencies(node, confs[i]);
++                fetchDependencies(node, confs[i], false);
+             }
+         }
+         
+@@ -960,12 +960,12 @@ public IvyNode[] getDependencies(ModuleDescriptor md, String[] confs, File cache
+ 
+     
+     
+-    private void fetchDependencies(IvyNode node, String conf) {
++    private void fetchDependencies(IvyNode node, String conf, boolean shouldBePublic) {
+         long start = System.currentTimeMillis();
+         Message.debug(node.getId()+" => resolving dependencies in "+conf);
+         resolveConflict(node, node.getParent());
+         
+-        if (node.loadData(conf)) {
++        if (node.loadData(conf, shouldBePublic)) {
+             node = node.getRealNode(); // if data loading discarded the node, get the real one
+             resolveConflict(node, node.getParent());
+             if (!node.isEvicted(node.getRootModuleConf())) {
+@@ -980,7 +980,7 @@ private void fetchDependencies(IvyNode node, String conf) {
+             IvyNode.EvictionData ed = node.getEvictedData(node.getRootModuleConf());
+             for (Iterator iter = ed.getSelected().iterator(); iter.hasNext();) {
+                 IvyNode selected = (IvyNode)iter.next();
+-                fetchDependencies(selected, conf);
++                fetchDependencies(selected, conf, true);
+             }
+         }
+         Message.debug(node.getId()+" => dependencies resolved in "+conf+" ("+(System.currentTimeMillis()-start)+"ms)");
+@@ -1002,7 +1002,7 @@ private void doFetchDependencies(IvyNode node, String conf) {
+             node.updateConfsToFetch(Arrays.asList(extendedConfs));
+         }
+         for (int i = 0; i < extendedConfs.length; i++) {
+-            fetchDependencies(node, extendedConfs[i]);
++            fetchDependencies(node, extendedConfs[i], false);
+         }
+         
+         if (node.getDependencyDescriptor() == null || node.getDependencyDescriptor().isTransitive()) {
+@@ -1015,13 +1015,13 @@ private void doFetchDependencies(IvyNode node, String conf) {
+                 }
+                 String[] confs = dep.getRequiredConfigurations(node, conf);
+                 for (int i = 0; i < confs.length; i++) {
+-                    fetchDependencies(dep, confs[i]);
++                    fetchDependencies(dep, confs[i], true);
+                 }
+                 // if there are still confs to fetch (usually because they have
+                 // been updated when evicting another module), we fetch them now
+                 confs = dep.getConfsToFetch();
+                 for (int i = 0; i < confs.length; i++) {
+-                    fetchDependencies(dep, confs[i]);
++                    fetchDependencies(dep, confs[i], true);
+                 }
+             }
+         }
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 75968f466..53872a788 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -491,7 +491,7 @@ public boolean hasConfigurationsToLoad() {
+      * node = node.getRealNode();
+      * ...
+      */
+-    public boolean loadData(String conf) {
++    public boolean loadData(String conf, boolean shouldBePublic) {
+         boolean loaded = false;
+         if (!isEvicted(_rootModuleConf) && (hasConfigurationsToLoad() || !isRootModuleConfLoaded()) && !hasProblem()) {
+             markRootModuleConfLoaded();
+@@ -530,7 +530,7 @@ public boolean loadData(String conf) {
+                                 resolved._searched |= _module.isSearched();
+                                 resolved.markSelected(_rootModuleConf);
+                                 resolved.updateDataFrom(this, _rootModuleConf);
+-                                resolved.loadData(conf);
++                                resolved.loadData(conf, shouldBePublic);
+                                 if (_dd != null) {
+                                     resolved.addDependencyArtifactsIncludes(_rootModuleConf, _dd.getDependencyArtifactsIncludes(getParentConf()));
+                                 }
+@@ -577,9 +577,9 @@ public boolean loadData(String conf) {
+         }
+         if (hasProblem()) {
+             _data.getReport().addDependency(this);
+-            return handleConfiguration(loaded, conf) && loaded;
++            return handleConfiguration(loaded, conf, shouldBePublic) && loaded;
+         }
+-        if (!handleConfiguration(loaded, conf)) {
++        if (!handleConfiguration(loaded, conf, shouldBePublic)) {
+             return false;
+         }
+         if (_dd != null) {
+@@ -597,7 +597,7 @@ private boolean isRootModuleConfLoaded() {
+         return _loadedRootModuleConfs.contains(_rootModuleConf);
+     }
+ 
+-    private boolean handleConfiguration(boolean loaded, String conf) {
++    private boolean handleConfiguration(boolean loaded, String conf, boolean shouldBePublic) {
+         String[] confs = getRealConfs(conf);
+         if (_md != null) {
+             for (int i = 0; i < confs.length; i++) {
+@@ -607,7 +607,7 @@ private boolean handleConfiguration(boolean loaded, String conf) {
+                     _problem = new RuntimeException("configuration(s) not found in "+this+": "+confs[i]+". It was required from "+getParent()+" "+getParentConf());
+                     _data.getReport().addDependency(this);
+                     return false;
+-                } else if (!isRoot() && c.getVisibility() != Configuration.Visibility.PUBLIC) {
++                } else if (shouldBePublic && !isRoot() && c.getVisibility() != Configuration.Visibility.PUBLIC) {
+                     _confsToFetch.remove(conf);
+                     _problem = new RuntimeException("configuration not public in "+this+": "+c+". It was required from "+getParent()+" "+getParentConf());
+                     _data.getReport().addDependency(this);
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 4799a382f..9fc71fc88 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -925,6 +925,14 @@ public void testVisibility3() throws Exception {
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org8", "mod8.1", "1.0", "a", "txt", "txt").exists());
+     }
+     
++    public void testVisibility4() throws Exception {
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod8.4/ivy-1.1.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org8", "mod8.1", "1.1", "a-private", "txt", "txt").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org8", "mod8.1", "1.1", "a", "txt", "txt").exists());
++    }
++    
+     ///////////////////////////////////////////////////////////
+     // here comes a series of test provided by Chris Rudd
+     // about configuration mapping and eviction
+diff --git a/test/repositories/2/mod8.1/a-1.1.txt b/test/repositories/2/mod8.1/a-1.1.txt
+new file mode 100644
+index 000000000..3cf20d57b
+--- /dev/null
++++ b/test/repositories/2/mod8.1/a-1.1.txt
+@@ -0,0 +1 @@
++-
+\ No newline at end of file
+diff --git a/test/repositories/2/mod8.1/a-private-1.1.txt b/test/repositories/2/mod8.1/a-private-1.1.txt
+new file mode 100644
+index 000000000..3cf20d57b
+--- /dev/null
++++ b/test/repositories/2/mod8.1/a-private-1.1.txt
+@@ -0,0 +1 @@
++-
+\ No newline at end of file
+diff --git a/test/repositories/2/mod8.1/ivy-1.1.xml b/test/repositories/2/mod8.1/ivy-1.1.xml
+new file mode 100644
+index 000000000..27ad133e3
+--- /dev/null
++++ b/test/repositories/2/mod8.1/ivy-1.1.xml
+@@ -0,0 +1,17 @@
++<ivy-module version="1.0">
++	<info organisation="org8"
++	       module="mod8.1"
++	       revision="1.1"
++	       status="integration"
++	       publication="20050930110000"
++	/>
++    <configurations>
++		<conf name="default"/>
++		<conf name="private" extends="default" visibility="private"/>
++		<conf name="public" extends="private" visibility="public"/>
++    </configurations>    
++    <publications>
++		<artifact name="a" type="txt" conf="default"/>
++		<artifact name="a-private" type="txt" conf="private"/>
++    </publications>
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/repositories/2/mod8.4/ivy-1.1.xml b/test/repositories/2/mod8.4/ivy-1.1.xml
+new file mode 100644
+index 000000000..0f941ac90
+--- /dev/null
++++ b/test/repositories/2/mod8.4/ivy-1.1.xml
+@@ -0,0 +1,14 @@
++<ivy-module version="1.0">
++	<info organisation="org8"
++	       module="mod8.4"
++	       revision="1.1"
++	       status="integration"
++	       publication="20050930110000"
++	/>
++    <configurations>
++		<conf name="default"/>
++    </configurations>    
++    <dependencies>
++		<dependency name="mod8.1" rev="1.1" conf="default->public"/>
++    </dependencies>
++</ivy-module>
+\ No newline at end of file

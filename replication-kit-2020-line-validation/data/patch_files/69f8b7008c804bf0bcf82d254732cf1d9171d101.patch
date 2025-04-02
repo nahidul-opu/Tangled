@@ -1,0 +1,102 @@
+From 69f8b7008c804bf0bcf82d254732cf1d9171d101 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 27 Dec 2005 09:46:27 +0000
+Subject: [PATCH] FIX: stack overflow error in contradictory conflict cases
+ (IVY-117)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484079 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                |  1 +
+ src/java/fr/jayasoft/ivy/Ivy.java          |  9 ++++++++
+ test/java/fr/jayasoft/ivy/ResolveTest.java | 25 ++++++++++++++++++++++
+ test/repositories/2/mod10.1/ivy-1.0.xml    | 12 +++++++++++
+ 4 files changed, 47 insertions(+)
+ create mode 100644 test/repositories/2/mod10.1/ivy-1.0.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 3f7ac84c7..9b58bb0a0 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -13,6 +13,7 @@
+ - IMPROVE: import system properties as ivy variables in standalone mode
+ - IMPROVE: string identifying a module is now clearly different from a path
+ - IMPROVE: better error message when publish fails due to readonly destination (IVY-83)
++- FIX: stack overflow error in contradictory conflict cases (IVY-117)
+ - FIX: publish now doesn't call deliver when not necessary (IVY-119)
+ - FIX: cachefileset was returning all artifacts for empty configuration (IVY-108)
+ - FIX: transitive and changing attribute were not copied in ivy files in cache (IVY-94)
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index bbbd8bd2d..b33aef2f0 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -954,6 +954,15 @@ private void resolveConflict(IvyNode node, IvyNode parent, Collection toevict) {
+         } else {
+             // node has been evicted for the current parent
+             
++            // first we mark the selected nodes as selected if it isn't already the case
++            for (Iterator iter = resolved.iterator(); iter.hasNext();) {
++                IvyNode selected = (IvyNode)iter.next();
++                if (selected.isEvicted(node.getRootModuleConf())) {
++                    selected.markSelected(node.getRootModuleConf());
++                    Message.debug("selecting "+selected+" in "+parent);
++                }
++            }
++            
+             // it's time to update parent resolved with found resolved...
+             // if they have not been recomputed, it does not change anything
+             parent.setResolvedNodes(node.getModuleId(), node.getRootModuleConf(), resolved); 
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 0d0da3b0f..ed9aa3abe 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -607,6 +607,31 @@ public void testResolveForce() throws Exception {
+         assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
+     }
+     
++    public void testResolveContradictoryConflictResolution() throws Exception {
++        // mod9.1 v 1.0 depends on 
++        //   - mod1.2 v 2.0 and forces it 
++        //   - mod4.1 v 4.1 (which selects mod1.2 v 2.1 and evicts mod1.2 v 2.0)
++        // mod4.1 v 4.1 depends on 
++        //   - mod1.1 v 1.0 which depends on mod1.2 v 2.0
++        //   - mod3.1 v 1.1 which depends on mod1.2 v 2.1
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod10.1/ivy-1.0.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org10", "mod10.1", "1.0");
++        assertEquals(mrid, md.getModuleRevisionId());
++        
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
++        
++        // conflicting dependencies
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++
++        assertFalse(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.1")).exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++    
+     public void testExtends() throws Exception {
+         // mod 5.2 depends on mod5.1 conf B
+         // mod5.1 conf B publishes art51B
+diff --git a/test/repositories/2/mod10.1/ivy-1.0.xml b/test/repositories/2/mod10.1/ivy-1.0.xml
+new file mode 100644
+index 000000000..6b35aeaf3
+--- /dev/null
++++ b/test/repositories/2/mod10.1/ivy-1.0.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org10"
++	       module="mod10.1"
++	       revision="1.0"
++	       status="integration"
++	       publication="20050930110000"
++	/>
++    <dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0" force="true"/>
++		<dependency org="org4" name="mod4.1" rev="4.1"/>
++    </dependencies>
++</ivy-module>
+\ No newline at end of file

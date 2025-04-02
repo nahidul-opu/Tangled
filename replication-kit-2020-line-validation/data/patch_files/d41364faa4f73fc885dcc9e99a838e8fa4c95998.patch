@@ -1,0 +1,95 @@
+From d41364faa4f73fc885dcc9e99a838e8fa4c95998 Mon Sep 17 00:00:00 2001
+From: Phil Steitz <phil.steitz@gmail.com>
+Date: Sun, 8 Mar 2015 17:46:05 -0700
+Subject: [PATCH] Fixed EmpiricalDistrubiton#cumulativeProbability to correctly
+ handle constant bin kernels. JIRA: MATH-1208.
+
+---
+ src/changes/changes.xml                              |  3 +++
+ .../commons/math3/random/EmpiricalDistribution.java  |  9 +++++++--
+ .../math3/random/EmpiricalDistributionTest.java      | 12 ++++++++----
+ 3 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 03d6fa97c0..d976897980 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -54,6 +54,9 @@ If the output is not quite correct, check for invisible trailing spaces!
+     </release>
+ 
+     <release version="3.5" date="2015-01-11" description="">
++      <action dev="psteitz" type="fix" issue="MATH-1208">
++        EmpiricalDistribution cumulativeProbability can return NaN when evaluated within a constant bin.
++      </action>
+       <action dev="psteitz" type="fix" issue="MATH-1203">
+         EmpiricalDistribution getKernel fails for buckets with only multiple instances of the same value.
+       </action>
+diff --git a/src/main/java/org/apache/commons/math3/random/EmpiricalDistribution.java b/src/main/java/org/apache/commons/math3/random/EmpiricalDistribution.java
+index fc273003c0..c2323fc483 100644
+--- a/src/main/java/org/apache/commons/math3/random/EmpiricalDistribution.java
++++ b/src/main/java/org/apache/commons/math3/random/EmpiricalDistribution.java
+@@ -620,7 +620,9 @@ public double density(double x) {
+      * <li>Compute K(B) = the probability mass of B with respect to the within-bin kernel
+      * and K(B-) = the kernel distribution evaluated at the lower endpoint of B</li>
+      * <li>Return P(B-) + P(B) * [K(x) - K(B-)] / K(B) where
+-     * K(x) is the within-bin kernel distribution function evaluated at x.</li></ol></p>
++     * K(x) is the within-bin kernel distribution function evaluated at x.</li></ol>
++     * If K is a constant distribution, we return P(B-) + P(B) (counting the full
++     * mass of B).</p>
+      *
+      * @since 3.1
+      */
+@@ -633,10 +635,13 @@ public double cumulativeProbability(double x) {
+         final int binIndex = findBin(x);
+         final double pBminus = pBminus(binIndex);
+         final double pB = pB(binIndex);
++        final RealDistribution kernel = k(x);
++        if (kernel instanceof ConstantRealDistribution) {
++            return pBminus + pB;
++        }
+         final double[] binBounds = getUpperBounds();
+         final double kB = kB(binIndex);
+         final double lower = binIndex == 0 ? min : binBounds[binIndex - 1];
+-        final RealDistribution kernel = k(x);
+         final double withinBinCum =
+             (kernel.cumulativeProbability(x) -  kernel.cumulativeProbability(lower)) / kB;
+         return pBminus + pB * withinBinCum;
+diff --git a/src/test/java/org/apache/commons/math3/random/EmpiricalDistributionTest.java b/src/test/java/org/apache/commons/math3/random/EmpiricalDistributionTest.java
+index 580be9ece6..abc96f2639 100644
+--- a/src/test/java/org/apache/commons/math3/random/EmpiricalDistributionTest.java
++++ b/src/test/java/org/apache/commons/math3/random/EmpiricalDistributionTest.java
+@@ -433,7 +433,7 @@ public void testSampleValuesRange() {
+     }
+     
+     /**
+-     * MATH-1203
++     * MATH-1203, MATH-1208
+      */
+     @Test
+     public void testNoBinVariance() {
+@@ -445,6 +445,10 @@ public void testNoBinVariance() {
+             final double dev = dist.sample();
+             Assert.assertTrue(dev == 0 || dev == 1);
+         }
++        Assert.assertEquals(0.5, dist.cumulativeProbability(0), Double.MIN_VALUE);
++        Assert.assertEquals(1.0, dist.cumulativeProbability(1), Double.MIN_VALUE);
++        Assert.assertEquals(0.5, dist.cumulativeProbability(0.5), Double.MIN_VALUE);
++        Assert.assertEquals(1.0, dist.cumulativeProbability(0.7), Double.MIN_VALUE);
+     }   
+     
+     /**
+@@ -484,11 +488,11 @@ public void testKernelOverrideConstant() {
+             Assert.assertTrue(Arrays.binarySearch(values, dist.sample()) >= 0);
+         }
+         final double tol = 10E-12;
+-        Assert.assertEquals(0.0, dist.cumulativeProbability(1), tol);
++        Assert.assertEquals(0.2, dist.cumulativeProbability(1), tol);
+         Assert.assertEquals(0.2, dist.cumulativeProbability(2), tol);
+-        Assert.assertEquals(0.6, dist.cumulativeProbability(10), tol);
++        Assert.assertEquals(0.8, dist.cumulativeProbability(10), tol);
+         Assert.assertEquals(0.8, dist.cumulativeProbability(12), tol);
+-        Assert.assertEquals(0.8, dist.cumulativeProbability(13), tol);
++        Assert.assertEquals(1.0, dist.cumulativeProbability(13), tol);
+         Assert.assertEquals(1.0, dist.cumulativeProbability(15), tol);
+ 
+         Assert.assertEquals(2.0, dist.inverseCumulativeProbability(0.1), tol);

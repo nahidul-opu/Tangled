@@ -1,0 +1,328 @@
+From 2d5b2326b24fc18ac3fbde0bc01ca1def85e1b29 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 18 Jun 2009 21:54:09 +0000
+Subject: [PATCH] FIX: [originalname] not expanded during retrieve when module
+ descriptor contains extra attributes (IVY-1096)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@786304 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/org/apache/ivy/ant/IvyReport.java    |  2 +-
+ .../org/apache/ivy/core/IvyPatternHelper.java | 75 ++++++++++---------
+ .../resolver/packager/PackagerCacheEntry.java |  2 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 34 +++++++++
+ test/repositories/2/mod15.2/ivy-1.1.xml       |  6 +-
+ test/repositories/2/mod15.3/ivy-1.1.xml       | 30 ++++++++
+ test/repositories/2/mod15.3/library.jar       |  0
+ 8 files changed, 110 insertions(+), 40 deletions(-)
+ create mode 100644 test/repositories/2/mod15.3/ivy-1.1.xml
+ create mode 100644 test/repositories/2/mod15.3/library.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 97f8c1452..7d5839f74 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -94,6 +94,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Standalone runner should accept all the same parameters as ant tasks (IVY-1090)
+ - IMPROVEMENT: Pre and post retrieve artifact events (IVY-1084)
+ 
++- FIX: [originalname] not expanded during retrieve when module descriptor contains extra attributes (IVY-1096)
+ - FIX: The Ant output wasn't always prefixed by the name of the task
+ - FIX: Ivy buildnumber task does not find artifact in Sonatype Nexus repo (IVY-1069)
+ - FIX: Publish with SSH (sftp or ssh) prevents enclosing java process to terminate (IVY-1075)
+diff --git a/src/java/org/apache/ivy/ant/IvyReport.java b/src/java/org/apache/ivy/ant/IvyReport.java
+index 0fb80d254..8baeeab0f 100644
+--- a/src/java/org/apache/ivy/ant/IvyReport.java
++++ b/src/java/org/apache/ivy/ant/IvyReport.java
+@@ -297,7 +297,7 @@ private String getOutputPattern(String conf, String ext) {
+         
+         return IvyPatternHelper.substitute(
+             outputpattern, mRevId.getOrganisation(), mRevId.getName(),
+-            mRevId.getRevision(), "", "", ext, conf, mRevId.getAttributes());
++            mRevId.getRevision(), "", "", ext, conf, mRevId.getAttributes(), null);
+     }
+ 
+     private void genStyled(String[] confs, File style, String ext) throws IOException {
+diff --git a/src/java/org/apache/ivy/core/IvyPatternHelper.java b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+index c8a364c12..31c4ea6e8 100644
+--- a/src/java/org/apache/ivy/core/IvyPatternHelper.java
++++ b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+@@ -70,13 +70,13 @@ private IvyPatternHelper() {
+     public static String substitute(String pattern, ModuleRevisionId moduleRevision) {
+         return substitute(pattern, moduleRevision.getOrganisation(), moduleRevision.getName(),
+             moduleRevision.getBranch(), moduleRevision.getRevision(), "ivy", "ivy", "xml", null,
+-            null, moduleRevision.getAttributes());
++            null, moduleRevision.getAttributes(), null);
+     }
+ 
+     public static String substitute(String pattern, ModuleRevisionId moduleRevision,
+             String artifact, String type, String ext) {
+         return substitute(pattern, moduleRevision, new DefaultArtifact(moduleRevision, null,
+-                artifact, type, ext), null);
++                artifact, type, ext));
+     }
+ 
+     public static String substitute(String pattern, Artifact artifact) {
+@@ -84,60 +84,54 @@ public static String substitute(String pattern, Artifact artifact) {
+     }
+ 
+     public static String substitute(String pattern, Artifact artifact, ArtifactOrigin origin) {
+-        return substitute(pattern, artifact.getModuleRevisionId(), artifact, null, origin);
++        return substitute(pattern, artifact.getModuleRevisionId(), artifact, (String) null, origin);
+     }
+ 
+     public static String substitute(String pattern, Artifact artifact, String conf) {
+-        return substitute(pattern, artifact.getModuleRevisionId(), artifact, conf);
++        return substitute(pattern, artifact.getModuleRevisionId(), artifact, conf, (ArtifactOrigin) null);
+     }
+ 
+     public static String substitute(String pattern, ModuleRevisionId mrid, Artifact artifact) {
+-        return substitute(pattern, mrid, artifact, null);
+-    }
+-
+-    public static String substitute(String pattern, ModuleRevisionId mrid, Artifact artifact,
+-            String conf) {
+-        return substitute(pattern, mrid, artifact, conf, null);
++        return substitute(pattern, mrid, artifact, (String) null, (ArtifactOrigin) null);
+     }
+ 
+     public static String substitute(String pattern, ModuleRevisionId mrid, Artifact artifact,
+             String conf, ArtifactOrigin origin) {
+-        Map attributes = new HashMap();
+-        attributes.putAll(mrid.getAttributes());
+-        attributes.putAll(artifact.getAttributes());
+         return substitute(pattern, mrid.getOrganisation(), mrid.getName(), mrid.getBranch(), mrid
+                 .getRevision(), artifact.getName(), artifact.getType(), artifact.getExt(), conf,
+-            origin, attributes);
++            origin, mrid.getExtraAttributes(), artifact.getExtraAttributes());
+     }
+ 
+     public static String substitute(String pattern, String org, String module, String revision,
+             String artifact, String type, String ext) {
+-        return substitute(pattern, org, module, revision, artifact, type, ext, null);
++        return substitute(pattern, org, module, (String) null, revision, artifact, type, ext, (String) null, 
++                (ArtifactOrigin) null, (Map) null, (Map) null);
+     }
+ 
+     // CheckStyle:ParameterNumber OFF
+     public static String substitute(String pattern, String org, String module, String revision,
+             String artifact, String type, String ext, String conf) {
+-        return substitute(pattern, org, module, revision, artifact, type, ext, conf, null);
++        return substitute(pattern, org, module, (String) null, revision, artifact, type, ext, conf, 
++                (ArtifactOrigin) null, (Map) null, (Map) null);
+     }
+ 
+     public static String substitute(String pattern, String org, String module, String revision,
+-            String artifact, String type, String ext, String conf, Map extraAttributes) {
+-        return substitute(pattern, org, module, revision, artifact, type, ext, conf, null,
+-            extraAttributes);
+-    }
+-
+-    public static String substitute(String pattern, String org, String module, String revision,
+-            String artifact, String type, String ext, String conf, ArtifactOrigin origin,
+-            Map extraAttributes) {
+-        return substitute(pattern, org, module, null, revision, artifact, type, ext, conf, origin,
+-            extraAttributes);
++            String artifact, String type, String ext, String conf, Map extraModuleAttributes, 
++            Map extraArtifactAttributes) {
++        return substitute(pattern, org, module, (String) null, revision, artifact, type, ext, conf, 
++                (ArtifactOrigin) null, extraModuleAttributes, extraArtifactAttributes);
+     }
+ 
+     public static String substitute(String pattern, String org, String module, String branch,
+             String revision, String artifact, String type, String ext, String conf,
+-            ArtifactOrigin origin, Map extraAttributes) {
+-        Map tokens = new HashMap(extraAttributes == null ? Collections.EMPTY_MAP : extraAttributes);
++            ArtifactOrigin origin, Map extraModuleAttributes, Map extraArtifactAttributes) {
++        Map tokens = new HashMap();
++        if (extraModuleAttributes != null) {
++            tokens.putAll(extraModuleAttributes);
++        }
++        if (extraArtifactAttributes != null) {
++            tokens.putAll(extraArtifactAttributes);
++        }
+         tokens.put(ORGANISATION_KEY, org == null ? "" : org);
+         tokens.put(ORGANISATION_KEY2, org == null ? "" : org);
+         tokens.put(MODULE_KEY, module == null ? "" : module);
+@@ -147,9 +141,13 @@ public static String substitute(String pattern, String org, String module, Strin
+         tokens.put(TYPE_KEY, type == null ? "jar" : type);
+         tokens.put(EXT_KEY, ext == null ? "jar" : ext);
+         tokens.put(CONF_KEY, conf == null ? "default" : conf);
+-        tokens.put(ORIGINAL_ARTIFACTNAME_KEY, origin == null ? new OriginalArtifactNameValue(org,
+-                module, branch, revision, artifact, type, ext) : new OriginalArtifactNameValue(
+-                origin));
++        if (origin == null) {
++            tokens.put(ORIGINAL_ARTIFACTNAME_KEY, new OriginalArtifactNameValue(org,
++                module, branch, revision, artifact, type, ext, extraModuleAttributes, extraArtifactAttributes));
++        } else { 
++            tokens.put(ORIGINAL_ARTIFACTNAME_KEY, new OriginalArtifactNameValue(origin));
++        }
++                
+         return substituteTokens(pattern, tokens);
+     }
+     // CheckStyle:ParameterNumber ON
+@@ -400,18 +398,23 @@ private static class OriginalArtifactNameValue {
+ 
+         private String revision;
+ 
++        private Map extraModuleAttributes;
++        
+         // artifact properties
+         private String artifactName;
+ 
+         private String artifactType;
+ 
+         private String artifactExt;
++        
++        private Map extraArtifactAttributes;
+ 
+         // cached origin;
+         private ArtifactOrigin origin;
+-
++        
+         public OriginalArtifactNameValue(String org, String moduleName, String branch,
+-                String revision, String artifactName, String artifactType, String artifactExt) {
++                String revision, String artifactName, String artifactType, String artifactExt, 
++                Map extraModuleAttributes, Map extraArtifactAttributes) {
+             this.org = org;
+             this.moduleName = moduleName;
+             this.branch = branch;
+@@ -419,6 +422,8 @@ public OriginalArtifactNameValue(String org, String moduleName, String branch,
+             this.artifactName = artifactName;
+             this.artifactType = artifactType;
+             this.artifactExt = artifactExt;
++            this.extraModuleAttributes = extraModuleAttributes;
++            this.extraArtifactAttributes = extraArtifactAttributes;
+         }
+ 
+         /**
+@@ -432,9 +437,9 @@ public OriginalArtifactNameValue(ArtifactOrigin origin) {
+         public String toString() {
+             if (origin == null) {
+                 ModuleRevisionId revId = ModuleRevisionId.newInstance(org, moduleName, branch,
+-                    revision);
++                    revision, extraModuleAttributes);
+                 Artifact artifact = new DefaultArtifact(revId, null, artifactName, artifactType,
+-                        artifactExt);
++                        artifactExt, extraArtifactAttributes);
+ 
+                 // TODO cache: see how we could know which actual cache manager to use, since this 
+                 // will fail when using a resolver in a chain with a specific cache manager
+diff --git a/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java b/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java
+index 129afab8b..4e458c05c 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java
++++ b/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java
+@@ -218,7 +218,7 @@ protected void finalize() throws Throwable {
+     private String getResourceURL() {
+         String baseURL = IvyPatternHelper.substitute(this.resourceURL, this.mr.getOrganisation(),
+           this.mr.getName(), this.mr.getRevision(), null, null, null, null,
+-          this.mr.getAttributes());
++          this.mr.getAttributes(), null);
+         int slash = baseURL.lastIndexOf('/');
+         if (slash != -1) {
+             baseURL = baseURL.substring(0, slash + 1);
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index a94a8bb2c..5e3612956 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -129,6 +129,40 @@ public void testResolveWithRetainingArtifactName() throws Exception {
+                 .endsWith("mod14.1-1.1.jar"));
+     }
+ 
++    public void testResolveWithRetainingArtifactNameAndExtraAttributes() throws Exception {
++        ((DefaultRepositoryCacheManager) settings.getDefaultRepositoryCacheManager())
++                .setArtifactPattern(ivy.substitute("[module]/[originalname].[ext]"));
++        ResolveReport report = ivy.resolve(new File("test/repositories/2/mod15.4/ivy-1.1.xml")
++                .toURL(), getResolveOptions(new String[] {"default"}).setValidate(false));
++        assertNotNull(report);
++
++        Map extra = new HashMap();
++        extra.put("extra", "foo");
++        ArtifactDownloadReport[] dReports = report.getConfigurationReport("default")
++                .getDownloadReports(ModuleRevisionId.newInstance("org15", "mod15.3", "1.1", extra));
++        assertNotNull(dReports);
++        assertEquals("number of downloaded artifacts not correct", 1, dReports.length);
++
++        Artifact artifact = dReports[0].getArtifact();
++        assertNotNull(artifact);
++
++        String cachePath = getArchivePathInCache(artifact);
++        assertTrue("artifact name has not been retained: " + cachePath, cachePath
++                .endsWith("library.jar"));
++
++        dReports = report.getConfigurationReport("default").getDownloadReports(
++                ModuleRevisionId.newInstance("org14", "mod14.1", "1.1"));
++        assertNotNull(dReports);
++        assertEquals("number of downloaded artifacts not correct", 1, dReports.length);
++
++        artifact = dReports[0].getArtifact();
++        assertNotNull(artifact);
++
++        cachePath = getArchivePathInCache(artifact);
++        assertTrue("artifact name has not been retained: " + cachePath, cachePath
++                .endsWith("mod14.1-1.1.jar"));
++    }
++
+     public void testArtifactOrigin() throws Exception {
+         ResolveReport report = ivy.resolve(new File(
+                 "test/repositories/1/org1/mod1.1/ivys/ivy-1.0.xml").toURL(),
+diff --git a/test/repositories/2/mod15.2/ivy-1.1.xml b/test/repositories/2/mod15.2/ivy-1.1.xml
+index 934103d57..b38f57b59 100644
+--- a/test/repositories/2/mod15.2/ivy-1.1.xml
++++ b/test/repositories/2/mod15.2/ivy-1.1.xml
+@@ -18,13 +18,13 @@
+ -->
+ <ivy-module version="1.0">
+ 	<info organisation="org15"
+-	       module="mod15.2"
++	       module="mod15.4"
+ 	       revision="1.1"
+ 	       status="integration"
+ 	       publication="20050930110000"
+ 	/>
+     <dependencies>
+-		<dependency org="org15" name="mod15.1" rev="1.1" conf="default->default"/>
+-		<dependency org="org14" name="mod14.1" rev="1.1" conf="default->default" transitive="false" />
++		<dependency org="org15" name="mod15.3" rev="1.1" conf="default->default"/>
++        <dependency org="org14" name="mod14.1" rev="1.1" conf="default->default" transitive="false" />
+     </dependencies>
+ </ivy-module>
+diff --git a/test/repositories/2/mod15.3/ivy-1.1.xml b/test/repositories/2/mod15.3/ivy-1.1.xml
+new file mode 100644
+index 000000000..4180fbffb
+--- /dev/null
++++ b/test/repositories/2/mod15.3/ivy-1.1.xml
+@@ -0,0 +1,30 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org15"
++	       module="mod15.3"
++	       revision="1.1"
++	       status="integration"
++	       publication="20050930110000"
++	       extra="foo"
++	/>
++    <publications>
++        <artifact name="library" type="jar" conf="default" />
++    </publications>
++</ivy-module>
+diff --git a/test/repositories/2/mod15.3/library.jar b/test/repositories/2/mod15.3/library.jar
+new file mode 100644
+index 000000000..e69de29bb

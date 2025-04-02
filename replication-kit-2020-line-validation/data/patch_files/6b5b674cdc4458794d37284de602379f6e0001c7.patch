@@ -1,0 +1,144 @@
+From d19212c03ec7eb82e37e11746bac7a064738b686 Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran.pai@gmail.com>
+Date: Wed, 7 Dec 2016 22:13:38 +0530
+Subject: [PATCH] IVY-1531 Fix translation of * for groupid and artifactid, in
+ pom.xml exclusion, for implying transitive=false in ivy
+
+---
+ .../parser/m2/PomModuleDescriptorBuilder.java | 46 +++++++++++++------
+ .../m2/PomModuleDescriptorParserTest.java     | 13 +++++-
+ .../ivy/plugins/parser/m2/test-exclusion.pom  | 11 +++++
+ 3 files changed, 56 insertions(+), 14 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index 5445f0c62..5171e7f8f 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -290,9 +290,18 @@ public void addDependency(Resource res, PomDependencyData dep) {
+         if ((mRevId != null) && mRevId.getModuleId().equals(moduleRevId.getModuleId())) {
+             return;
+         }
+-
++        // experimentation shows the following, excluded modules are
++        // inherited from parent POMs if either of the following is true:
++        // the <exclusions> element is missing or the <exclusions> element
++        // is present, but empty.
++        List<ModuleId> excluded = dep.getExcludedModules();
++        if (excluded.isEmpty()) {
++            excluded = getDependencyMgtExclusions(ivyModuleDescriptor, dep.getGroupId(),
++                    dep.getArtifactId());
++        }
++        final boolean excludeAllTransitiveDeps = shouldExcludeAllTransitiveDeps(excluded);
+         DefaultDependencyDescriptor dd = new PomDependencyDescriptor(dep, ivyModuleDescriptor,
+-                moduleRevId);
++                moduleRevId, !excludeAllTransitiveDeps);
+         scope = (scope == null || scope.length() == 0) ? getDefaultScope(dep) : scope;
+         ConfMapper mapping = MAVEN2_CONF_MAPPING.get(scope);
+         mapping.addMappingConfs(dd, dep.isOptional());
+@@ -327,16 +336,12 @@ public void addDependency(Resource res, PomDependencyData dep) {
+             dd.addDependencyArtifact(optionalizedScope, depArtifact);
+         }
+ 
+-        // experimentation shows the following, excluded modules are
+-        // inherited from parent POMs if either of the following is true:
+-        // the <exclusions> element is missing or the <exclusions> element
+-        // is present, but empty.
+-        List<ModuleId> excluded = dep.getExcludedModules();
+-        if (excluded.isEmpty()) {
+-            excluded = getDependencyMgtExclusions(ivyModuleDescriptor, dep.getGroupId(),
+-                dep.getArtifactId());
+-        }
+         for (ModuleId excludedModule : excluded) {
++            // This represents exclude all transitive dependencies, which we have already taken
++            // in account while defining the DefaultDependencyDescriptor itself
++            if ("*".equals(excludedModule.getOrganisation()) && "*".equals(excludedModule.getName())) {
++                continue;
++            }
+             String[] confs = dd.getModuleConfigurations();
+             for (int k = 0; k < confs.length; k++) {
+                 dd.addExcludeRule(confs[k], new DefaultExcludeRule(new ArtifactId(excludedModule,
+@@ -348,6 +353,21 @@ public void addDependency(Resource res, PomDependencyData dep) {
+         ivyModuleDescriptor.addDependency(dd);
+     }
+ 
++    private static boolean shouldExcludeAllTransitiveDeps(final List<ModuleId> exclusions) {
++        if (exclusions == null || exclusions.isEmpty()) {
++            return false;
++        }
++        for (final ModuleId exclusion : exclusions) {
++            if (exclusion == null) {
++                continue;
++            }
++            if ("*".equals(exclusion.getOrganisation()) && "*".equals(exclusion.getName())) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     public void addDependency(DependencyDescriptor descriptor) {
+         // Some POMs depend on themselves through their parent pom, don't add this dependency
+         // since Ivy doesn't allow this!
+@@ -690,8 +710,8 @@ public static class PomDependencyDescriptor extends DefaultDependencyDescriptor
+         private final PomDependencyData pomDependencyData;
+ 
+         private PomDependencyDescriptor(PomDependencyData pomDependencyData,
+-                ModuleDescriptor moduleDescriptor, ModuleRevisionId revisionId) {
+-            super(moduleDescriptor, revisionId, true, false, true);
++                ModuleDescriptor moduleDescriptor, ModuleRevisionId revisionId, final boolean transitive) {
++            super(moduleDescriptor, revisionId, true, false, transitive);
+             this.pomDependencyData = pomDependencyData;
+         }
+ 
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index 6f60ace3a..b7c8662dd 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -536,7 +536,7 @@ public void testExclusion() throws Exception {
+ 
+         DependencyDescriptor[] dds = md.getDependencies();
+         assertNotNull(dds);
+-        assertEquals(3, dds.length);
++        assertEquals(4, dds.length);
+         assertEquals(ModuleRevisionId.newInstance("commons-logging", "commons-logging", "1.0.4"),
+             dds[0].getDependencyRevisionId());
+         assertEquals(new HashSet(Arrays.asList(new String[] {"compile", "runtime"})), new HashSet(
+@@ -569,6 +569,17 @@ public void testExclusion() throws Exception {
+         assertEquals(new HashSet(Arrays.asList(new String[] {"runtime(*)"})),
+             new HashSet(Arrays.asList(dds[2].getDependencyConfigurations("runtime"))));
+         assertEquals(0, dds[2].getAllExcludeRules().length);
++
++        // test for IVY-1531 (where the pom.xml can have a exclusion for groupid=* and artifactid=*, implying transitive=false, in ivy land)
++        final DependencyDescriptor excludeAllTransitiveDepsDescriptor = dds[3];
++        assertEquals(ModuleRevisionId.newInstance("org.owasp.esapi", "esapi", "2.1.0"), excludeAllTransitiveDepsDescriptor.getDependencyRevisionId());
++        assertEquals(new HashSet(Arrays.asList(new String[] {"compile", "runtime"})), new HashSet(Arrays.asList(excludeAllTransitiveDepsDescriptor.getModuleConfigurations())));
++        assertEquals(new HashSet(Arrays.asList(new String[] {"master(*)", "compile(*)"})),
++                new HashSet(Arrays.asList(excludeAllTransitiveDepsDescriptor.getDependencyConfigurations("compile"))));
++        assertEquals(new HashSet(Arrays.asList(new String[] {"runtime(*)"})),
++                new HashSet(Arrays.asList(excludeAllTransitiveDepsDescriptor.getDependencyConfigurations("runtime"))));
++        assertEquals("No exclusion elements were expected to be present for " + excludeAllTransitiveDepsDescriptor, 0, excludeAllTransitiveDepsDescriptor.getAllExcludeRules().length);
++        assertFalse("Dependency  " + excludeAllTransitiveDepsDescriptor + " was expected to have transitive=false", excludeAllTransitiveDepsDescriptor.isTransitive());
+     }
+ 
+     public void testWithPlugins() throws Exception {
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-exclusion.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-exclusion.pom
+index 3ec4752bc..a524ab5b0 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/test-exclusion.pom
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-exclusion.pom
+@@ -57,5 +57,16 @@
+         <exclusion />
+       </exclusions>
+     </dependency>
++    <dependency>
++      <groupId>org.owasp.esapi</groupId>
++      <artifactId>esapi</artifactId>
++      <version>2.1.0</version>
++      <exclusions>
++        <exclusion>
++          <groupId>*</groupId>
++          <artifactId>*</artifactId>
++        </exclusion>
++      </exclusions>
++    </dependency>
+   </dependencies>
+ </project>

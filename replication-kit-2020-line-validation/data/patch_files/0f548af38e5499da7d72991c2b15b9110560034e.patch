@@ -1,0 +1,182 @@
+From 0f548af38e5499da7d72991c2b15b9110560034e Mon Sep 17 00:00:00 2001
+From: Mark Thomas <markt@apache.org>
+Date: Mon, 3 Feb 2014 23:17:59 +0000
+Subject: [PATCH] Fix DBCP-372 Using batchUpdate() should not invalidate the
+ PreparedStatement when it is returned to the pool.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/trunk@1564124 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 +++
+ .../dbcp2/PoolablePreparedStatement.java      |  8 ++++--
+ .../commons/dbcp2/TestPStmtPooling.java       | 28 +++++++++++++++++++
+ .../apache/commons/dbcp2/TesterStatement.java | 18 ++++++------
+ 4 files changed, 46 insertions(+), 12 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index be178a1e31..b5f457bd91 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -157,6 +157,10 @@ The <action> type attribute can be add,update,fix,remove.
+         made to commit the current transaction for a connection when no
+         transaction has been started.
+       </action>
++      <action dev="markt" issue="DBCP-372" type="fix">
++        Using batchUpdate() should not invalidate the PreparedStatement when it
++        is returned to the pool.
++      </action>
+     </release>
+     <release version="1.4.1" date="TBD" description="TBD">
+       <action dev="psteitz" issue="DBCP-334" type="update" due-to="Alberto Mozzone">
+diff --git a/src/main/java/org/apache/commons/dbcp2/PoolablePreparedStatement.java b/src/main/java/org/apache/commons/dbcp2/PoolablePreparedStatement.java
+index 9891face41..b1e448360a 100644
+--- a/src/main/java/org/apache/commons/dbcp2/PoolablePreparedStatement.java
++++ b/src/main/java/org/apache/commons/dbcp2/PoolablePreparedStatement.java
+@@ -121,6 +121,11 @@ public void activate() throws SQLException{
+ 
+     @Override
+     public void passivate() throws SQLException {
++        // DBCP-372. clearBatch with throw an exception if called when the
++        // connection is marked as closed.
++        if (batchAdded) {
++            clearBatch();
++        }
+         setClosedInternal(true);
+         if(getConnectionInternal() != null) {
+             getConnectionInternal().removeTrace(this);
+@@ -138,9 +143,6 @@ public void passivate() throws SQLException {
+             }
+             clearTrace();
+         }
+-        if (batchAdded) {
+-            clearBatch();
+-        }
+ 
+         super.passivate();
+     }
+diff --git a/src/test/java/org/apache/commons/dbcp2/TestPStmtPooling.java b/src/test/java/org/apache/commons/dbcp2/TestPStmtPooling.java
+index cf7bc4fe26..f905406e0f 100644
+--- a/src/test/java/org/apache/commons/dbcp2/TestPStmtPooling.java
++++ b/src/test/java/org/apache/commons/dbcp2/TestPStmtPooling.java
+@@ -19,6 +19,7 @@
+ 
+ import java.sql.Connection;
+ import java.sql.Driver;
++import java.sql.PreparedStatement;
+ import java.sql.Statement;
+ import java.sql.SQLException;
+ 
+@@ -30,6 +31,7 @@
+ 
+ import org.apache.commons.pool2.ObjectPool;
+ import org.apache.commons.pool2.impl.GenericObjectPool;
++import org.junit.Assert;
+ 
+ /**
+  * TestSuite for BasicDataSource with prepared statement pooling enabled
+@@ -141,4 +143,30 @@ public void testClosePool() throws Exception {
+             assertTrue(ex.getMessage().endsWith("invalid PoolingConnection."));
+         }
+     }
++
++    public void testBatchUpdate() throws Exception {
++        @SuppressWarnings("unused") // Ensure TesterDriver is registered
++        Driver d = new TesterDriver();
++        ConnectionFactory connFactory = new DriverManagerConnectionFactory(
++                "jdbc:apache:commons:testdriver","u1","p1");
++
++        PoolableConnectionFactory pcf =
++            new PoolableConnectionFactory(connFactory, null);
++        pcf.setPoolStatements(true);
++        pcf.setDefaultReadOnly(false);
++        pcf.setDefaultAutoCommit(true);
++        ObjectPool<PoolableConnection> connPool = new GenericObjectPool<>(pcf);
++        pcf.setPool(connPool);
++
++        DataSource ds = new PoolingDataSource<>(connPool);
++
++        Connection conn = ds.getConnection();
++        PreparedStatement ps = conn.prepareStatement("select 1 from dual");
++        Statement inner = ((DelegatingPreparedStatement) ps).getInnermostDelegate();
++        // Check DBCP-372
++        ps.addBatch();
++        ps.close();
++        conn.close();
++        Assert.assertFalse(inner.isClosed());
++    }
+ }
+diff --git a/src/test/java/org/apache/commons/dbcp2/TesterStatement.java b/src/test/java/org/apache/commons/dbcp2/TesterStatement.java
+index 75466b884f..b65448f9ae 100644
+--- a/src/test/java/org/apache/commons/dbcp2/TesterStatement.java
++++ b/src/test/java/org/apache/commons/dbcp2/TesterStatement.java
+@@ -5,9 +5,9 @@
+  * The ASF licenses this file to You under the Apache License, Version 2.0
+  * (the "License"); you may not use this file except in compliance with
+  * the License.  You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -25,7 +25,7 @@
+ 
+ /**
+  * A dummy {@link Statement}, for testing purposes.
+- * 
++ *
+  * @author Rodney Waldhoff
+  * @author Dirk Verbeeck
+  * @version $Revision$ $Date$
+@@ -40,7 +40,7 @@ public TesterStatement(Connection conn, int resultSetType, int resultSetConcurre
+         _resultSetType = resultSetType;
+         _resultSetConcurrency = resultSetConcurrency;
+     }
+-    
++
+     protected Connection _connection = null;
+     protected boolean _open = true;
+     protected int _rowsUpdated = 1;
+@@ -61,20 +61,20 @@ public ResultSet executeQuery(String sql) throws SQLException {
+         checkOpen();
+         if("null".equals(sql)) {
+             return null;
+-        } 
++        }
+         if("invalid".equals(sql)) {
+             throw new SQLException("invalid query");
+         }
+         if ("broken".equals(sql)) {
+             throw new SQLException("broken connection");
+-        }  
++        }
+         if("select username".equals(sql)) {
+             String username = ((TesterConnection) _connection).getUsername();
+             Object[][] data = {{username}};
+             return new TesterResultSet(this, data);
+         } else {
+             // Simulate timeout if queryTimout is set to less than 5 seconds
+-            if (_queryTimeout > 0 && _queryTimeout < 5) { 
++            if (_queryTimeout > 0 && _queryTimeout < 5) {
+                 throw new SQLException("query timeout");
+             }
+             return new TesterResultSet(this);
+@@ -178,7 +178,7 @@ public boolean execute(String sql) throws SQLException {
+     public ResultSet getResultSet() throws SQLException {
+         checkOpen();
+         if (_resultSet == null) {
+-            _resultSet = new TesterResultSet(this); 
++            _resultSet = new TesterResultSet(this);
+         }
+         return _resultSet;
+     }
+@@ -325,7 +325,7 @@ public <T> T unwrap(Class<T> iface) throws SQLException {
+ 
+     @Override
+     public boolean isClosed() throws SQLException {
+-        throw new SQLException("Not implemented.");
++        return !_open;
+     }
+ 
+     @Override

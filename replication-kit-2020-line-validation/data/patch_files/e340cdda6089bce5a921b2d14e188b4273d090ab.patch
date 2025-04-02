@@ -1,0 +1,165 @@
+From e340cdda6089bce5a921b2d14e188b4273d090ab Mon Sep 17 00:00:00 2001
+From: Niall Pemberton <niallp@apache.org>
+Date: Thu, 28 Jan 2010 14:02:25 +0000
+Subject: [PATCH] Port LANG-535 to 2.x branch - adding support to
+ getShortClassName and getPackageName for arrays, including primitive arrays
+ and multi-dimensional arrays. Also stopped getPackageName relying on the
+ underlying class.getPackage as it's sometimes null
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/lang/branches/LANG_2_X@904093 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../org/apache/commons/lang/ClassUtils.java   | 36 ++++++++++++--
+ .../apache/commons/lang/ClassUtilsTest.java   | 49 ++++++++++++++++++-
+ 2 files changed, 80 insertions(+), 5 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/lang/ClassUtils.java b/src/main/java/org/apache/commons/lang/ClassUtils.java
+index 2df8474c69d..29916b7aba4 100644
+--- a/src/main/java/org/apache/commons/lang/ClassUtils.java
++++ b/src/main/java/org/apache/commons/lang/ClassUtils.java
+@@ -156,7 +156,7 @@ public static String getShortClassName(Object object, String valueIfNull) {
+         if (object == null) {
+             return valueIfNull;
+         }
+-        return getShortClassName(object.getClass().getName());
++        return getShortClassName(object.getClass());
+     }
+ 
+     /**
+@@ -188,6 +188,24 @@ public static String getShortClassName(String className) {
+             return StringUtils.EMPTY;
+         }
+ 
++        StringBuffer arrayPrefix = new StringBuffer();
++
++        // Handle array encoding
++        if (className.startsWith("[")) {
++            while (className.charAt(0) == '[') {
++                className = className.substring(1);
++                arrayPrefix.append("[]");
++            }
++            // Strip Object type encoding
++            if (className.charAt(0) == 'L' && className.charAt(className.length() - 1) == ';') {
++                className = className.substring(1, className.length() - 1);
++            }
++        }
++
++        if (reverseAbbreviationMap.containsKey(className)) {
++            className = (String)reverseAbbreviationMap.get(className);
++        }
++
+         int lastDotIdx = className.lastIndexOf(PACKAGE_SEPARATOR_CHAR);
+         int innerIdx = className.indexOf(
+                 INNER_CLASS_SEPARATOR_CHAR, lastDotIdx == -1 ? 0 : lastDotIdx + 1);
+@@ -195,7 +213,7 @@ public static String getShortClassName(String className) {
+         if (innerIdx != -1) {
+             out = out.replace(INNER_CLASS_SEPARATOR_CHAR, PACKAGE_SEPARATOR_CHAR);
+         }
+-        return out;
++        return out + arrayPrefix;
+     }
+ 
+     // Package name
+@@ -211,7 +229,7 @@ public static String getPackageName(Object object, String valueIfNull) {
+         if (object == null) {
+             return valueIfNull;
+         }
+-        return getPackageName(object.getClass().getName());
++        return getPackageName(object.getClass());
+     }
+ 
+     /**
+@@ -237,9 +255,19 @@ public static String getPackageName(Class cls) {
+      * @return the package name or an empty string
+      */
+     public static String getPackageName(String className) {
+-        if (className == null) {
++        if (className == null || className.length() == 0) {
+             return StringUtils.EMPTY;
+         }
++
++        // Strip array encoding
++        while (className.charAt(0) == '[') {
++            className = className.substring(1);
++        }
++        // Strip Object type encoding
++        if (className.charAt(0) == 'L' && className.charAt(className.length() - 1) == ';') {
++            className = className.substring(1);
++        }
++
+         int i = className.lastIndexOf(PACKAGE_SEPARATOR_CHAR);
+         if (i == -1) {
+             return StringUtils.EMPTY;
+diff --git a/src/test/java/org/apache/commons/lang/ClassUtilsTest.java b/src/test/java/org/apache/commons/lang/ClassUtilsTest.java
+index 6592395a322..5a387e739c3 100644
+--- a/src/test/java/org/apache/commons/lang/ClassUtilsTest.java
++++ b/src/test/java/org/apache/commons/lang/ClassUtilsTest.java
+@@ -90,6 +90,35 @@ public void test_getShortClassName_Class() {
+         assertEquals("ClassUtils", ClassUtils.getShortClassName(ClassUtils.class));
+         assertEquals("Map.Entry", ClassUtils.getShortClassName(Map.Entry.class));
+         assertEquals("", ClassUtils.getShortClassName((Class) null));
++
++        // LANG-535
++        assertEquals("String[]", ClassUtils.getShortClassName(String[].class));
++        assertEquals("Map.Entry[]", ClassUtils.getShortClassName(Map.Entry[].class));
++
++        // Primitives
++        assertEquals("boolean", ClassUtils.getShortClassName(boolean.class));
++        assertEquals("byte", ClassUtils.getShortClassName(byte.class));
++        assertEquals("char", ClassUtils.getShortClassName(char.class));
++        assertEquals("short", ClassUtils.getShortClassName(short.class));
++        assertEquals("int", ClassUtils.getShortClassName(int.class));
++        assertEquals("long", ClassUtils.getShortClassName(long.class));
++        assertEquals("float", ClassUtils.getShortClassName(float.class));
++        assertEquals("double", ClassUtils.getShortClassName(double.class));
++
++        // Primitive Arrays
++        assertEquals("boolean[]", ClassUtils.getShortClassName(boolean[].class));
++        assertEquals("byte[]", ClassUtils.getShortClassName(byte[].class));
++        assertEquals("char[]", ClassUtils.getShortClassName(char[].class));
++        assertEquals("short[]", ClassUtils.getShortClassName(short[].class));
++        assertEquals("int[]", ClassUtils.getShortClassName(int[].class));
++        assertEquals("long[]", ClassUtils.getShortClassName(long[].class));
++        assertEquals("float[]", ClassUtils.getShortClassName(float[].class));
++        assertEquals("double[]", ClassUtils.getShortClassName(double[].class));
++
++        // Arrays of arrays of ...
++        assertEquals("String[][]", ClassUtils.getShortClassName(String[][].class));
++        assertEquals("String[][][]", ClassUtils.getShortClassName(String[][][].class));
++        assertEquals("String[][][][]", ClassUtils.getShortClassName(String[][][][].class));
+     }
+     
+     public void test_getShortClassName_String() {
+@@ -98,7 +127,7 @@ public void test_getShortClassName_String() {
+         assertEquals("", ClassUtils.getShortClassName((String) null));
+         assertEquals("", ClassUtils.getShortClassName(""));
+     }
+-    
++
+     // -------------------------------------------------------------------------
+     public void test_getPackageName_Object() {
+         assertEquals("org.apache.commons.lang", ClassUtils.getPackageName(new ClassUtils(), "<null>"));
+@@ -110,6 +139,24 @@ public void test_getPackageName_Class() {
+         assertEquals("java.lang", ClassUtils.getPackageName(String.class));
+         assertEquals("java.util", ClassUtils.getPackageName(Map.Entry.class));
+         assertEquals("", ClassUtils.getPackageName((Class)null));
++
++        // LANG-535
++        assertEquals("java.lang", ClassUtils.getPackageName(String[].class));
++
++        // Primitive Arrays
++        assertEquals("", ClassUtils.getPackageName(boolean[].class));
++        assertEquals("", ClassUtils.getPackageName(byte[].class));
++        assertEquals("", ClassUtils.getPackageName(char[].class));
++        assertEquals("", ClassUtils.getPackageName(short[].class));
++        assertEquals("", ClassUtils.getPackageName(int[].class));
++        assertEquals("", ClassUtils.getPackageName(long[].class));
++        assertEquals("", ClassUtils.getPackageName(float[].class));
++        assertEquals("", ClassUtils.getPackageName(double[].class));
++
++        // Arrays of arrays of ...
++        assertEquals("java.lang", ClassUtils.getPackageName(String[][].class));
++        assertEquals("java.lang", ClassUtils.getPackageName(String[][][].class));
++        assertEquals("java.lang", ClassUtils.getPackageName(String[][][][].class));
+     }
+     
+     public void test_getPackageName_String() {

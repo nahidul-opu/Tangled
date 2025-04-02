@@ -1,0 +1,427 @@
+From 75a7cd821efb8ca2db7020878580bcb0e4f575c3 Mon Sep 17 00:00:00 2001
+From: Mark Thomas <markt@apache.org>
+Date: Mon, 3 Feb 2014 13:50:41 +0000
+Subject: [PATCH] Fix DBCP-355. Ensure that the XAConnection is closed when the
+ associated Connection is closed. Based on a patch by Florent Guillaume.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/branches/DBCP_1_5_x_BRANCH@1563895 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |   4 +
+ .../DataSourceXAConnectionFactory.java        |  27 +++
+ .../TestDataSourceXAConnectionFactory.java    | 116 ++++++++++
+ .../dbcp/managed/TesterBasicXAConnection.java | 217 ++++++++++++++++++
+ 4 files changed, 364 insertions(+)
+ create mode 100644 src/test/java/org/apache/commons/dbcp/managed/TestDataSourceXAConnectionFactory.java
+ create mode 100644 src/test/java/org/apache/commons/dbcp/managed/TesterBasicXAConnection.java
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 3f03728cfe..3d575d4924 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -87,6 +87,10 @@ The <action> type attribute can be add,update,fix,remove.
+         LocalXAConnectionFactory does not properly check if Xid is equal to
+         currentXid when resuming which may result in an XAException.
+       </action>
++      <action dev="markt" issue="DBCP-355" type="fix" due-to="Florent Guillaume">
++        Ensure that the XAConnection is closed when the associated Connection is
++        closed.
++      </action>
+     </release>
+     <release version="1.4.1" date="TBD" description="TBD">
+       <action dev="psteitz" issue="DBCP-367" type="fix" due-to="Ken Tatsushita">
+diff --git a/src/main/java/org/apache/commons/dbcp/managed/DataSourceXAConnectionFactory.java b/src/main/java/org/apache/commons/dbcp/managed/DataSourceXAConnectionFactory.java
+index db5b4de7c4..08e1ff718d 100644
+--- a/src/main/java/org/apache/commons/dbcp/managed/DataSourceXAConnectionFactory.java
++++ b/src/main/java/org/apache/commons/dbcp/managed/DataSourceXAConnectionFactory.java
+@@ -17,10 +17,14 @@
+  */
+ package org.apache.commons.dbcp.managed;
+ 
++import javax.sql.ConnectionEvent;
++import javax.sql.ConnectionEventListener;
++import javax.sql.PooledConnection;
+ import javax.sql.XAConnection;
+ import javax.sql.XADataSource;
+ import javax.transaction.TransactionManager;
+ import javax.transaction.xa.XAResource;
++
+ import java.sql.Connection;
+ import java.sql.SQLException;
+ 
+@@ -110,6 +114,29 @@ public Connection createConnection() throws SQLException {
+         // register the xa resource for the connection
+         transactionRegistry.registerConnection(connection, xaResource);
+ 
++        // The Connection we're returning is a handle on the XAConnection.
++        // When the pool calling us closes the Connection, we need to
++        // also close the XAConnection that holds the physical connection.
++        xaConnection.addConnectionEventListener(new ConnectionEventListener() {
++
++            @Override
++            public void connectionClosed(ConnectionEvent event) {
++                PooledConnection pc = (PooledConnection) event.getSource();
++                pc.removeConnectionEventListener(this);
++                try {
++                    pc.close();
++                } catch (SQLException e) {
++                    System.err.println("Failed to close XAConnection");
++                    e.printStackTrace();
++                }
++            }
++
++            @Override
++            public void connectionErrorOccurred(ConnectionEvent event) {
++                connectionClosed(event);
++            }
++        });
++
+         return connection;
+     }
+ }
+diff --git a/src/test/java/org/apache/commons/dbcp/managed/TestDataSourceXAConnectionFactory.java b/src/test/java/org/apache/commons/dbcp/managed/TestDataSourceXAConnectionFactory.java
+new file mode 100644
+index 0000000000..a300eaf126
+--- /dev/null
++++ b/src/test/java/org/apache/commons/dbcp/managed/TestDataSourceXAConnectionFactory.java
+@@ -0,0 +1,116 @@
++/**
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ */
++package org.apache.commons.dbcp.managed;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import javax.sql.XAConnection;
++import javax.sql.XADataSource;
++
++import junit.framework.Test;
++import junit.framework.TestSuite;
++
++import org.apache.commons.dbcp.TestBasicDataSource;
++import org.apache.geronimo.transaction.manager.TransactionManagerImpl;
++
++/**
++ * TestSuite for BasicManagedDataSource when using a
++ * DataSourceXAConnectionFactory (configured from a XADataSource)
++ */
++public class TestDataSourceXAConnectionFactory extends TestBasicDataSource {
++
++    public TestDataSourceXAConnectionFactory(String testName) {
++        super(testName);
++    }
++
++    public static Test suite() {
++        return new TestSuite(TestDataSourceXAConnectionFactory.class);
++    }
++
++    protected BasicManagedDataSource bmds;
++
++    public AtomicInteger closeCounter = new AtomicInteger();
++
++    @Override
++    public void setUp() throws Exception {
++        super.setUp();
++        bmds = new BasicManagedDataSource();
++        bmds.setTransactionManager(new TransactionManagerImpl());
++        bmds.setXADataSource("notnull");
++        XADataSourceHandle handle = new XADataSourceHandle();
++        XADataSource xads = (XADataSource) Proxy.newProxyInstance(
++                XADataSourceHandle.class.getClassLoader(),
++                new Class[] { XADataSource.class }, handle);
++        bmds.setXaDataSourceInstance(xads);
++    }
++
++    /**
++     * Delegates everything to the BasicDataSource (ds field), except for
++     * getXAConnection which creates a BasicXAConnection.
++     */
++    public class XADataSourceHandle implements InvocationHandler {
++
++        @Override
++        public Object invoke(Object proxy, Method method, Object[] args)
++                throws Throwable {
++            String methodName = method.getName();
++            if (methodName.equals("hashCode")) {
++                return Integer.valueOf(System.identityHashCode(proxy));
++            }
++            if (methodName.equals("equals")) {
++                return Boolean.valueOf(proxy == args[0]);
++            }
++            if (methodName.equals("getXAConnection")) {
++                // both zero and 2-arg signatures
++                return getXAConnection();
++            }
++            try {
++                return method.invoke(ds, args);
++            } catch (InvocationTargetException e) {
++                throw e.getTargetException();
++            }
++        }
++
++        protected XAConnection getXAConnection() throws SQLException {
++            return new TesterBasicXAConnection(ds.getConnection(), closeCounter);
++        }
++    }
++
++    /**
++     * JIRA: DBCP-355
++     */
++    public void testPhysicalClose() throws Exception {
++        bmds.setMaxIdle(1);
++        Connection conn1 = bmds.getConnection();
++        Connection conn2 = bmds.getConnection();
++        closeCounter.set(0);
++        conn1.close();
++        assertEquals(0, closeCounter.get()); // stays idle in the pool
++        conn2.close();
++        assertEquals(1, closeCounter.get()); // can't have 2 idle ones
++        bmds.close();
++        assertEquals(2, closeCounter.get());
++    }
++
++}
+\ No newline at end of file
+diff --git a/src/test/java/org/apache/commons/dbcp/managed/TesterBasicXAConnection.java b/src/test/java/org/apache/commons/dbcp/managed/TesterBasicXAConnection.java
+new file mode 100644
+index 0000000000..734de671fa
+--- /dev/null
++++ b/src/test/java/org/apache/commons/dbcp/managed/TesterBasicXAConnection.java
+@@ -0,0 +1,217 @@
++/**
++ *
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ */
++package org.apache.commons.dbcp.managed;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++import java.sql.Connection;
++import java.sql.SQLException;
++import java.util.ArrayList;
++import java.util.LinkedList;
++import java.util.List;
++import java.util.concurrent.atomic.AtomicInteger;
++
++import javax.sql.ConnectionEvent;
++import javax.sql.ConnectionEventListener;
++import javax.sql.StatementEventListener;
++import javax.sql.XAConnection;
++import javax.transaction.xa.XAResource;
++
++/**
++ * Basic XAConnection. getConnection() returns a handle on a physical
++ * Connection. Closing the handle does not close the physical connection, you
++ * have to close the XAConnection for that (PooledConnection behavior).
++ * XA behavior is implemented through a LocalXAResource.
++ */
++public class TesterBasicXAConnection implements XAConnection {
++
++    public Connection conn;
++
++    public ConnectionHandle handle;
++
++    public List<ConnectionEventListener> listeners = new LinkedList<ConnectionEventListener>();
++
++    public AtomicInteger closeCounter;
++
++    public TesterBasicXAConnection(Connection conn, AtomicInteger closeCounter) {
++        this.conn = conn;
++        this.closeCounter = closeCounter;
++    }
++
++    public TesterBasicXAConnection(Connection conn) {
++        this(conn, null);
++    }
++
++    @Override
++    public Connection getConnection() throws SQLException {
++        if (conn == null) {
++            SQLException e = new SQLException("XAConnection closed");
++            notifyConnectionErrorOccurred(e);
++            throw e;
++        }
++        try {
++            if (handle != null) {
++                // only one handle at a time on the XAConnection
++                closeHandle();
++                conn.clearWarnings();
++            }
++        } catch (SQLException e) {
++            notifyConnectionErrorOccurred(e);
++            throw e;
++        }
++        handle = new ConnectionHandle(conn, this);
++        Connection proxy = (Connection) Proxy.newProxyInstance(
++                getClass().getClassLoader(), new Class[] { Connection.class },
++                handle);
++        return proxy;
++    }
++
++    protected void closeHandle() throws SQLException {
++        handle.closeHandle();
++        if (!conn.getAutoCommit()) {
++            try {
++                conn.rollback();
++            } catch (SQLException e) {
++                e.printStackTrace();
++            }
++        }
++        handle = null;
++    }
++
++    @Override
++    public void close() throws SQLException {
++        if (handle != null) {
++            closeHandle();
++        }
++        try {
++            conn.close();
++            if (closeCounter != null) {
++                closeCounter.incrementAndGet();
++            }
++        } finally {
++            conn = null;
++        }
++    }
++
++    @Override
++    public XAResource getXAResource() throws SQLException {
++        return new LocalXAConnectionFactory.LocalXAResource(conn);
++    }
++
++    @Override
++    public void addConnectionEventListener(
++            ConnectionEventListener connectionEventListener) {
++        listeners.add(connectionEventListener);
++    }
++
++    @Override
++    public void removeConnectionEventListener(
++            ConnectionEventListener connectionEventListener) {
++        listeners.remove(connectionEventListener);
++    }
++
++    @Override
++    public void addStatementEventListener(StatementEventListener listener) {
++        throw new UnsupportedOperationException();
++    }
++
++    @Override
++    public void removeStatementEventListener(StatementEventListener listener) {
++        throw new UnsupportedOperationException();
++    }
++
++    protected void notifyConnectionClosed() {
++        ConnectionEvent event = new ConnectionEvent(this);
++        List<ConnectionEventListener> copy = new ArrayList<ConnectionEventListener>(
++                listeners);
++        for (ConnectionEventListener listener : copy) {
++            listener.connectionClosed(event);
++        }
++    }
++
++    protected void notifyConnectionErrorOccurred(SQLException e) {
++        ConnectionEvent event = new ConnectionEvent(this, e);
++        List<ConnectionEventListener> copy = new ArrayList<ConnectionEventListener>(
++                listeners);
++        for (ConnectionEventListener listener : copy) {
++            listener.connectionErrorOccurred(event);
++        }
++    }
++
++    /**
++     * Delegates everything to a Connection, except for close() which just
++     * notifies the parent XAConnection.
++     */
++    public static class ConnectionHandle implements InvocationHandler {
++
++        public Connection conn;
++
++        public TesterBasicXAConnection xaconn;
++
++        public ConnectionHandle(Connection conn, TesterBasicXAConnection xaconn) {
++            this.conn = conn;
++            this.xaconn = xaconn;
++        }
++
++        @Override
++        public Object invoke(Object proxy, Method method, Object[] args)
++                throws Throwable {
++            String methodName = method.getName();
++            if (methodName.equals("hashCode")) {
++                return Integer.valueOf(System.identityHashCode(proxy));
++            }
++            if (methodName.equals("equals")) {
++                return Boolean.valueOf(proxy == args[0]);
++            }
++            if (methodName.equals("isClosed")) {
++                return Boolean.valueOf(conn == null);
++            }
++            if (methodName.equals("close")) {
++                return close();
++            }
++            if (conn == null) {
++                throw new SQLException("Connection closed");
++            }
++            try {
++                return method.invoke(conn, args);
++            } catch (InvocationTargetException e) {
++                Throwable te = e.getTargetException();
++                if (te instanceof SQLException) {
++                    xaconn.notifyConnectionErrorOccurred((SQLException) te);
++                }
++                throw te;
++            }
++        }
++
++        protected Object close() throws SQLException {
++            if (conn != null) {
++                conn.clearWarnings();
++                conn = null;
++                xaconn.handle = null;
++                xaconn.notifyConnectionClosed();
++            }
++            return null;
++        }
++
++        public void closeHandle() {
++            conn = null;
++        }
++    }
++}
+\ No newline at end of file

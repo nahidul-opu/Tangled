@@ -1,0 +1,259 @@
+From 85ae11989e321aeb47b9fbda1e46e9d960e2633f Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 28 Aug 2008 12:48:19 +0000
+Subject: [PATCH] improve source and javadoc artifacts detection in poms, to
+ avoid considering the main artifact as being also javadoc and source
+ artifact, when the pattern used for artifacts doesn't use neither type nor
+ classifier token (related to IVY-325 and IVYDE-117)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@689804 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../parser/m2/PomModuleDescriptorBuilder.java | 11 +++++++---
+ .../parser/m2/PomModuleDescriptorParser.java  | 12 ++++++-----
+ .../plugins/resolver/AbstractResolver.java    |  9 +++++++--
+ .../ivy/plugins/resolver/BasicResolver.java   |  8 ++++++++
+ .../ivy/plugins/resolver/CacheResolver.java   |  5 +++++
+ .../ivy/plugins/resolver/ChainResolver.java   |  2 +-
+ .../plugins/resolver/DependencyResolver.java  | 20 +++++++++++++++++++
+ .../ivy/plugins/resolver/DualResolver.java    |  4 ++++
+ .../ivy/plugins/resolver/IBiblioResolver.java |  5 +++++
+ .../ivy/plugins/resolver/IvyRepResolver.java  |  5 +++++
+ 10 files changed, 70 insertions(+), 11 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index bdd5bf866..1d6232a9d 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -181,6 +181,8 @@ public void addMappingConfs(DefaultDependencyDescriptor dd, boolean isOptional)
+ 
+     private ModuleRevisionId mrid;
+ 
++    private DefaultArtifact mainArtifact;
++
+     
+     public PomModuleDescriptorBuilder(ModuleDescriptorParser parser, Resource res) {
+         ivyModuleDescriptor = new DefaultModuleDescriptor(parser, res);
+@@ -212,7 +214,7 @@ public void setDescription(String description) {
+     }
+ 
+ 
+-    public void addArtifact(String artifactId, String packaging) {
++    public void addMainArtifact(String artifactId, String packaging) {
+         String ext;
+         if ("pom".equals(packaging)) {
+             // no artifact defined!
+@@ -238,8 +240,8 @@ public void addArtifact(String artifactId, String packaging) {
+             }
+         }
+ 
+-        ivyModuleDescriptor.addArtifact("master", 
+-                new DefaultArtifact(mrid, new Date(), artifactId, packaging, ext));
++        mainArtifact = new DefaultArtifact(mrid, new Date(), artifactId, packaging, ext);
++        ivyModuleDescriptor.addArtifact("master", mainArtifact);
+     }
+ 
+ 
+@@ -487,6 +489,9 @@ public void addProperty(String propertyName, String value) {
+         addExtraInfo(getPropertyExtraInfoKey(propertyName), value);
+     }
+ 
++    public Artifact getMainArtifact() {
++        return mainArtifact;
++    }
+ 
+     public Artifact getSourceArtifact() {
+         return new MDArtifact(
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 2fbb28bf3..637d14d4b 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -241,7 +241,7 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                     mdBuilder.addPlugin(plugin);
+                 }
+                 
+-                mdBuilder.addArtifact(artifactId , domReader.getPackaging());
++                mdBuilder.addMainArtifact(artifactId , domReader.getPackaging());
+                 
+                 addSourcesAndJavadocArtifactsIfPresent(mdBuilder, ivySettings);
+             }            
+@@ -263,15 +263,17 @@ private void addSourcesAndJavadocArtifactsIfPresent(
+             Message.debug("no resolver found for " + mrid 
+                              + ": no source or javadoc artifact lookup");
+         } else {
+-            Artifact sourceArtifact = mdBuilder.getSourceArtifact();
+-            if (resolver.exists(sourceArtifact)) {
++            String mainArtifact = resolver.locate(mdBuilder.getMainArtifact());
++            
++            String sourceArtifact = resolver.locate(mdBuilder.getSourceArtifact());
++            if (sourceArtifact != null && !sourceArtifact.equals(mainArtifact)) {
+                 Message.debug("source artifact found for " + mrid);
+                 mdBuilder.addSourceArtifact();
+             } else {
+                 Message.debug("no source artifact found for " + mrid);
+             }
+-            Artifact javadocArtifact = mdBuilder.getJavadocArtifact();
+-            if (resolver.exists(javadocArtifact)) {
++            String javadocArtifact = resolver.locate(mdBuilder.getJavadocArtifact());
++            if (javadocArtifact != null && !javadocArtifact.equals(mainArtifact)) {
+                 Message.debug("javadoc artifact found for " + mrid);
+                 mdBuilder.addJavadocArtifact();
+             } else {
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+index 74b7ced2c..3d964abad 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+@@ -191,11 +191,15 @@ public String getTypeName() {
+         return getClass().getName();
+     }
+ 
++    public boolean exists(Artifact artifact) {
++        return locate(artifact) != null;
++    }
++
+     /**
+      * Default implementation actually download the artifact Subclasses should overwrite this to
+      * avoid the download
+      */
+-    public boolean exists(Artifact artifact) {
++    public String locate(Artifact artifact) {
+         DownloadReport dr = download(new Artifact[] {artifact}, new DownloadOptions());
+         if (dr == null) {
+             /*
+@@ -207,7 +211,8 @@ public boolean exists(Artifact artifact) {
+                 + " when trying to download " + artifact);
+         }
+         ArtifactDownloadReport adr = dr.getArtifactReport(artifact);
+-        return adr.getDownloadStatus() != DownloadStatus.FAILED;
++        return adr.getDownloadStatus() == DownloadStatus.FAILED  || adr.getArtifactOrigin() == null
++                    ? null : adr.getArtifactOrigin().getLocation();
+     }
+ 
+     public LatestStrategy getLatestStrategy() {
+diff --git a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+index 25eb9d0cf..3a7809055 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+@@ -739,6 +739,14 @@ public boolean exists(Artifact artifact) {
+         }
+         return false;
+     }
++    
++    public String locate(Artifact artifact) {
++        ResolvedResource artifactRef = getArtifactRef(artifact, null);
++        if (artifactRef != null && artifactRef.getResource().exists()) {
++            return artifactRef.getResource().getName();
++        }
++        return null;
++    }
+ 
+     protected long getPublicationDate(ModuleDescriptor md, DependencyDescriptor dd, 
+             ResolveData data) {
+diff --git a/src/java/org/apache/ivy/plugins/resolver/CacheResolver.java b/src/java/org/apache/ivy/plugins/resolver/CacheResolver.java
+index b4b94ab34..9b7c5902a 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/CacheResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/CacheResolver.java
+@@ -129,6 +129,11 @@ public boolean exists(Artifact artifact) {
+         ensureConfigured();
+         return super.exists(artifact);
+     }
++    
++    public String locate(Artifact artifact) {
++        ensureConfigured();
++        return super.locate(artifact);
++    }
+ 
+     public void publish(Artifact artifact, File src, boolean overwrite) throws IOException {
+         ensureConfigured();
+diff --git a/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java b/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
+index 67cc16dbc..8ae233859 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
+@@ -301,7 +301,7 @@ public boolean exists(Artifact artifact) {
+         }
+         return false;
+     }
+-
++    
+     private static void setLatest(DependencyResolver resolver, LatestStrategy latest) {
+         if (resolver instanceof HasLatestStrategy) {
+             HasLatestStrategy r = (HasLatestStrategy) resolver;
+diff --git a/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java b/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
+index 9fbc4e285..f1bae2c70 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
+@@ -91,8 +91,28 @@ ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+      */
+     DownloadReport download(Artifact[] artifacts, DownloadOptions options);
+ 
++    /**
++     * Returns <code>true</code> if the given artifact can be located by this resolver and
++     * actually exist.
++     * 
++     * @param artifact
++     *            the artifact which should be tested.
++     * @return <code>true</code> if the given artifact can be located by this resolver and
++     *         actually exist.
++     */
+     boolean exists(Artifact artifact);
+ 
++    /**
++     * Locates the given artifact and returns a String identifying its location if it can be located
++     * by this resolver and if it actually exists, or <code>null</code> in other cases.
++     * 
++     * @param artifact
++     *            the artifact which should be located
++     * @return a String identifying the artifact location, or <code>null</code> if it can't be
++     *         located or doesn't exist.
++     */
++    String locate(Artifact artifact);
++
+     void publish(Artifact artifact, File src, boolean overwrite) throws IOException;
+     
+     void beginPublishTransaction(ModuleRevisionId module, boolean overwrite) throws IOException;
+diff --git a/src/java/org/apache/ivy/plugins/resolver/DualResolver.java b/src/java/org/apache/ivy/plugins/resolver/DualResolver.java
+index 08a208dc7..6c426aa96 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/DualResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/DualResolver.java
+@@ -160,6 +160,10 @@ public void dumpSettings() {
+     public boolean exists(Artifact artifact) {
+         return artifactResolver.exists(artifact);
+     }
++    
++    public String locate(Artifact artifact) {
++        return artifactResolver.locate(artifact);
++    }
+ 
+     public boolean isAllownomd() {
+         return allownomd;
+diff --git a/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java b/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
+index 48d664db7..346a1e71b 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
+@@ -507,6 +507,11 @@ public boolean exists(Artifact artifact) {
+         ensureConfigured(getSettings());
+         return super.exists(artifact);
+     }
++    
++    public String locate(Artifact artifact) {
++        ensureConfigured(getSettings());
++        return super.locate(artifact);
++    }
+ 
+     public List getArtifactPatterns() {
+         ensureConfigured(getSettings());
+diff --git a/src/java/org/apache/ivy/plugins/resolver/IvyRepResolver.java b/src/java/org/apache/ivy/plugins/resolver/IvyRepResolver.java
+index e6e92fbac..8130be702 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/IvyRepResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/IvyRepResolver.java
+@@ -290,6 +290,11 @@ public boolean exists(Artifact artifact) {
+         ensureArtifactConfigured(getSettings());
+         return super.exists(artifact);
+     }
++    
++    public String locate(Artifact artifact) {
++        ensureArtifactConfigured(getSettings());
++        return super.locate(artifact);
++    }
+ 
+     public List getIvyPatterns() {
+         ensureIvyConfigured(getSettings());

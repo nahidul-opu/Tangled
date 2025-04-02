@@ -1,0 +1,423 @@
+From 2b720c7df037fc7d9b1b83d3fb6cb12edc6e8ed2 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 30 Aug 2011 21:15:03 +0000
+Subject: [PATCH] FIX: Infinite loop in latest-compatible conflict manager
+ (IVY-1233) (thanks to Payam Hekmat)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1163390 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../LatestCompatibleConflictManager.java      | 57 ++++++++++++-------
+ .../apache/ivy/core/resolve/ResolveTest.java  | 15 +++++
+ test/repositories/IVY-1233/ivy.xml            | 27 +++++++++
+ test/repositories/IVY-1233/ivysettings.xml    | 27 +++++++++
+ test/repositories/IVY-1233/test/a/1.0/ivy.xml | 23 ++++++++
+ test/repositories/IVY-1233/test/a/1.1/ivy.xml | 23 ++++++++
+ test/repositories/IVY-1233/test/b/2.0/ivy.xml | 25 ++++++++
+ test/repositories/IVY-1233/test/b/2.1/ivy.xml | 25 ++++++++
+ test/repositories/IVY-1233/test/c/3.0/ivy.xml | 26 +++++++++
+ test/repositories/IVY-1233/test/c/3.1/ivy.xml | 26 +++++++++
+ 11 files changed, 255 insertions(+), 21 deletions(-)
+ create mode 100644 test/repositories/IVY-1233/ivy.xml
+ create mode 100644 test/repositories/IVY-1233/ivysettings.xml
+ create mode 100644 test/repositories/IVY-1233/test/a/1.0/ivy.xml
+ create mode 100644 test/repositories/IVY-1233/test/a/1.1/ivy.xml
+ create mode 100644 test/repositories/IVY-1233/test/b/2.0/ivy.xml
+ create mode 100644 test/repositories/IVY-1233/test/b/2.1/ivy.xml
+ create mode 100644 test/repositories/IVY-1233/test/c/3.0/ivy.xml
+ create mode 100644 test/repositories/IVY-1233/test/c/3.1/ivy.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d4985875e..db7356bc5 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -52,6 +52,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Ben Hale
+ 	Peter Hayes
+ 	Scott Hebert
++	Payam Hekmat
+ 	Achim Huegen
+ 	Matt Inger
+ 	Anders Jacobsson
+@@ -136,6 +137,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: Infinite loop in latest-compatible conflict manager (IVY-1233) (thanks to Payam Hekmat)
+ - FIX: extends section of ivy.xml info does not replace variable in location tag (IVY-1287) (thanks to Jean-Louis Boudart)
+ - FIX: Valid Path does not work for Filesystem Resolver (IVY-1268)
+ - FIX: quiet="true" does not surpress download 'dots' on packager resolver (IVY-1269)
+diff --git a/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java
+index 773110d34..363a4e095 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java
+@@ -188,7 +188,7 @@ private void blackListIncompatibleCallerAndRestartResolveIfPossible(IvySettings
+         Stack callerStack = new Stack();
+         callerStack.push(evicted);
+         final Collection toBlacklist = blackListIncompatibleCaller(
+-            settings.getVersionMatcher(), parent, selected, evicted, callerStack); 
++            settings.getVersionMatcher(), parent, selected, evicted, callerStack, false); 
+         if (toBlacklist != null) {
+             final StringBuffer blacklisted = new StringBuffer();
+             for (Iterator iterator = toBlacklist.iterator(); iterator.hasNext();) {
+@@ -215,6 +215,29 @@ private void blackListIncompatibleCallerAndRestartResolveIfPossible(IvySettings
+         }
+     }
+ 
++    private boolean handleIncompatibleCaller(Stack callerStack, IvyNode node, IvyNode callerNode,
++            IvyNode conflictParent, IvyNode selectedNode, IvyNode evictedNode,
++            Collection blacklisted, VersionMatcher versionMatcher, boolean dynamicCaller) {
++        if (callerStack.subList(0, callerStack.size() - 1).contains(node)) {
++            // circular dependency found and handled: the current top of the stack (node)
++            // was already contained in the rest of the stack, the circle is closed, nothing
++            // else to do
++            return true;
++        } else {
++            callerStack.push(callerNode);
++            Collection sub = blackListIncompatibleCaller(versionMatcher, conflictParent,
++                selectedNode, evictedNode, callerStack, dynamicCaller);
++            callerStack.pop();
++            if (sub == null) {
++                // propagate the fact that a path with unblacklistable caller has been found
++                return false;
++            } else {
++                blacklisted.addAll(sub);
++                return true;
++            }
++        }
++    }
++
+     /**
+      * Tries to blacklist exactly one version for all callers paths.
+      * 
+@@ -234,7 +257,8 @@ private void blackListIncompatibleCallerAndRestartResolveIfPossible(IvySettings
+     private Collection/*<IvyNodeBlacklist>*/ blackListIncompatibleCaller(
+             VersionMatcher versionMatcher,
+             IvyNode conflictParent, IvyNode selectedNode, IvyNode evictedNode, 
+-            Stack/*<IvyNode>*/ callerStack) {
++            Stack/*<IvyNode>*/ callerStack,
++            boolean dynamicCaller) {
+         Collection/*<IvyNodeBlacklist>*/ blacklisted = new ArrayList/*<IvyNodeBlacklist>*/();
+         IvyNode node = (IvyNode) callerStack.peek();
+         String rootModuleConf = conflictParent.getData().getReport().getConfiguration();
+@@ -245,28 +269,19 @@ private void blackListIncompatibleCallerAndRestartResolveIfPossible(IvySettings
+                 continue;
+             }
+             if (versionMatcher.isDynamic(callers[i].getAskedDependencyId(node.getData()))) {
+-                blacklisted.add(new IvyNodeBlacklist(
+-                    conflictParent, selectedNode, evictedNode, node, rootModuleConf));
+-            } else {
+-                if (callerStack.subList(0, callerStack.size() - 1).contains(node)) {
+-                    // circular dependency found and handled: the current top of the stack (node)
+-                    // was already contained in the rest of the stack, the circle is closed, nothing
+-                    // else to do
+-                } else {
+-                    callerStack.push(callerNode);
+-                    Collection sub = blackListIncompatibleCaller(
+-                        versionMatcher, conflictParent, selectedNode, evictedNode, callerStack);
+-                    callerStack.pop();
+-                    if (sub == null) {
+-                        // propagate the fact that a path with unblacklistable caller has been found
+-                        return null;
+-                    } else {
+-                        blacklisted.addAll(sub);
+-                    }
++                blacklisted.add(new IvyNodeBlacklist(conflictParent, selectedNode, evictedNode,
++                        node, rootModuleConf));
++                if (node.isEvicted(rootModuleConf)
++                        && !handleIncompatibleCaller(callerStack, node, callerNode, conflictParent,
++                            selectedNode, evictedNode, blacklisted, versionMatcher, true)) {
++                    return null;
+                 }
++            } else if(!handleIncompatibleCaller(callerStack, node, callerNode, conflictParent,
++                    selectedNode, evictedNode, blacklisted, versionMatcher, false)) {
++                return null;
+             }
+         }
+-        if (blacklisted.isEmpty() 
++        if (!dynamicCaller && blacklisted.isEmpty() 
+                 && !callerStack.subList(0, callerStack.size() - 1).contains(node)) {
+             return null;
+         }
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 1db50f025..024d9bedd 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3365,6 +3365,21 @@ public void testIVY1236() throws Exception {
+         assertTrue(getArchiveFileInCache("myorg", "modB", "1.0", "modB-A", "jar", "jar").exists());
+     }
+ 
++    public void testIVY1233() throws Exception {
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/IVY-1233/ivysettings.xml"));
++        ivy.getSettings().setDefaultCache(cache);
++
++        ResolveReport rr = ivy.resolve(new File("test/repositories/IVY-1233/ivy.xml").toURI().toURL(),
++            getResolveOptions(new String[] {"*"}));
++        ConfigurationResolveReport crr = rr.getConfigurationReport("default");
++        Set modRevIds = crr.getModuleRevisionIds();
++        assertEquals(3, modRevIds.size());
++        assertTrue(modRevIds.contains(ModuleRevisionId.newInstance("test", "a", "1.0")));
++        assertTrue(modRevIds.contains(ModuleRevisionId.newInstance("test", "b", "2.0")));
++        assertTrue(modRevIds.contains(ModuleRevisionId.newInstance("test", "c", "3.0")));
++    }
++
+     public void testIVY999() throws Exception {
+         Ivy ivy = new Ivy();
+         ivy.configure(new File("test/repositories/IVY-999/ivysettings.xml"));
+diff --git a/test/repositories/IVY-1233/ivy.xml b/test/repositories/IVY-1233/ivy.xml
+new file mode 100644
+index 000000000..be5dc21c3
+--- /dev/null
++++ b/test/repositories/IVY-1233/ivy.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="test" module="test" />
++	<dependencies>
++		<dependency org="test" name="a" rev="1.+" />
++		<dependency org="test" name="b" rev="2.+" />
++		<dependency org="test" name="c" rev="3.+" />
++	</dependencies>
++</ivy-module>
++
+diff --git a/test/repositories/IVY-1233/ivysettings.xml b/test/repositories/IVY-1233/ivysettings.xml
+new file mode 100644
+index 000000000..f06480bfd
+--- /dev/null
++++ b/test/repositories/IVY-1233/ivysettings.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivysettings>
++    <settings defaultResolver="test" defaultConflictManager="latest-compatible"/>
++    <resolvers>
++        <filesystem name="test">
++            <ivy pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/ivy.xml" />
++            <artifact pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/[artifact]-[revision].[ext]" />
++        </filesystem>
++    </resolvers>
++</ivysettings>
+diff --git a/test/repositories/IVY-1233/test/a/1.0/ivy.xml b/test/repositories/IVY-1233/test/a/1.0/ivy.xml
+new file mode 100644
+index 000000000..b6f96a3a2
+--- /dev/null
++++ b/test/repositories/IVY-1233/test/a/1.0/ivy.xml
+@@ -0,0 +1,23 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="test" module="a" revision="1.0" publication="20100702134716" />
++	<publications />
++	<dependencies />
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1233/test/a/1.1/ivy.xml b/test/repositories/IVY-1233/test/a/1.1/ivy.xml
+new file mode 100644
+index 000000000..8d132dab5
+--- /dev/null
++++ b/test/repositories/IVY-1233/test/a/1.1/ivy.xml
+@@ -0,0 +1,23 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="test" module="a" revision="1.1" publication="20100702134716" />
++	<publications />
++	<dependencies />
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1233/test/b/2.0/ivy.xml b/test/repositories/IVY-1233/test/b/2.0/ivy.xml
+new file mode 100644
+index 000000000..000f5cadd
+--- /dev/null
++++ b/test/repositories/IVY-1233/test/b/2.0/ivy.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="test" module="b" revision="2.0" publication="20100702134716" />
++	<publications />
++	<dependencies>
++		<dependency org="test" name="a" rev="1.0" />
++	</dependencies>
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1233/test/b/2.1/ivy.xml b/test/repositories/IVY-1233/test/b/2.1/ivy.xml
+new file mode 100644
+index 000000000..c3625fa11
+--- /dev/null
++++ b/test/repositories/IVY-1233/test/b/2.1/ivy.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="test" module="b" revision="2.1" publication="20100702134716" />
++	<publications />
++	<dependencies>
++		<dependency org="test" name="a" rev="1.0" />
++	</dependencies>
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1233/test/c/3.0/ivy.xml b/test/repositories/IVY-1233/test/c/3.0/ivy.xml
+new file mode 100644
+index 000000000..e3dadad63
+--- /dev/null
++++ b/test/repositories/IVY-1233/test/c/3.0/ivy.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="test" module="c" revision="3.0" publication="20100702134716" />
++	<publications />
++	<dependencies>
++		<dependency org="test" name="a" rev="1.0" />
++		<dependency org="test" name="b" rev="2.0" />
++	</dependencies>
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1233/test/c/3.1/ivy.xml b/test/repositories/IVY-1233/test/c/3.1/ivy.xml
+new file mode 100644
+index 000000000..7aff866c1
+--- /dev/null
++++ b/test/repositories/IVY-1233/test/c/3.1/ivy.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="test" module="c" revision="3.1" publication="20100702134716" />
++	<publications />
++	<dependencies>
++		<dependency org="test" name="a" rev="[1.1,1.2]" />
++		<dependency org="test" name="b" rev="2.1" />
++	</dependencies>
++</ivy-module>
+\ No newline at end of file

@@ -1,0 +1,182 @@
+From 425c28f75c8a7b7b81cd635ce8a95df4f99cb163 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 14 Feb 2012 22:40:53 +0000
+Subject: [PATCH] FIX: [originalname] not expanded for source and javadoc types
+ during publish in ivy:install (IVY-1324)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1244251 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +-
+ src/java/org/apache/ivy/ant/IvyReport.java    |  2 +-
+ .../org/apache/ivy/core/IvyPatternHelper.java | 23 +++++++++++++++----
+ .../ivy/core/retrieve/RetrieveEngine.java     |  2 +-
+ .../resolver/packager/PackagerCacheEntry.java |  6 ++---
+ .../org/apache/ivy/ant/IvyInstallTest.java    | 18 +++++++++++++++
+ test/repositories/m2/ivysettings.xml          |  6 ++++-
+ 7 files changed, 48 insertions(+), 11 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 8241c0cd9..a396cd6e7 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -65,7 +65,6 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Gregory Kisling
+ 	Stepan Koltsov
+ 	Heschi Kreinick
+-	Sebastian Krueger
+ 	Tat Leung
+ 	Costin Leau
+ 	Antoine Levy-Lambert
+@@ -139,6 +138,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: [originalname] not expanded for source and javadoc types during publish in ivy:install (IVY-1324)
+ - FIX: cannot resolve from repositories that return HTTP 204 in response to an HTTP HEAD request (IVY-1328)
+ - FIX: extra attributes lost from info when ivy file is merged with parent (IVY-1206)
+ - FIX: ivy:report ant task intermittently "cannot compile stylesheet" (IVY-1325)
+diff --git a/src/java/org/apache/ivy/ant/IvyReport.java b/src/java/org/apache/ivy/ant/IvyReport.java
+index 2be1ad8b3..4fddf2b2c 100644
+--- a/src/java/org/apache/ivy/ant/IvyReport.java
++++ b/src/java/org/apache/ivy/ant/IvyReport.java
+@@ -300,7 +300,7 @@ private String getOutputPattern(String conf, String ext) {
+         
+         return IvyPatternHelper.substitute(
+             outputpattern, mRevId.getOrganisation(), mRevId.getName(),
+-            mRevId.getRevision(), "", "", ext, conf, mRevId.getAttributes(), null);
++            mRevId.getRevision(), "", "", ext, conf, mRevId.getQualifiedExtraAttributes(), null);
+     }
+ 
+     private void genStyled(String[] confs, File style, String ext) throws IOException {
+diff --git a/src/java/org/apache/ivy/core/IvyPatternHelper.java b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+index a4f96ef19..abe0125e4 100644
+--- a/src/java/org/apache/ivy/core/IvyPatternHelper.java
++++ b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+@@ -19,6 +19,7 @@
+ 
+ import java.util.ArrayList;
+ import java.util.HashMap;
++import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Stack;
+@@ -69,7 +70,7 @@ private IvyPatternHelper() {
+     public static String substitute(String pattern, ModuleRevisionId moduleRevision) {
+         return substitute(pattern, moduleRevision.getOrganisation(), moduleRevision.getName(),
+             moduleRevision.getBranch(), moduleRevision.getRevision(), "ivy", "ivy", "xml", null,
+-            null, moduleRevision.getAttributes(), null);
++            null, moduleRevision.getQualifiedExtraAttributes(), null);
+     }
+ 
+     public static String substitute(String pattern, ModuleRevisionId moduleRevision,
+@@ -98,7 +99,7 @@ public static String substitute(String pattern, ModuleRevisionId mrid, Artifact
+             String conf, ArtifactOrigin origin) {
+         return substitute(pattern, mrid.getOrganisation(), mrid.getName(), mrid.getBranch(), mrid
+                 .getRevision(), artifact.getName(), artifact.getType(), artifact.getExt(), conf,
+-            origin, mrid.getExtraAttributes(), artifact.getExtraAttributes());
++            origin, mrid.getQualifiedExtraAttributes(), artifact.getQualifiedExtraAttributes());
+     }
+ 
+     public static String substitute(String pattern, String org, String module, String revision,
+@@ -126,10 +127,24 @@ public static String substitute(String pattern, String org, String module, Strin
+             ArtifactOrigin origin, Map extraModuleAttributes, Map extraArtifactAttributes) {
+         Map tokens = new HashMap();
+         if (extraModuleAttributes != null) {
+-            tokens.putAll(extraModuleAttributes);
++            for (Iterator entries = extraModuleAttributes.entrySet().iterator(); entries.hasNext(); ) {
++                Map.Entry entry = (Map.Entry) entries.next();
++                String token = (String) entry.getKey();
++                if (token.indexOf(':') > 0) {
++                    token = token.substring(token.indexOf(':') + 1);
++                }
++                tokens.put(token, entry.getValue());
++            }
+         }
+         if (extraArtifactAttributes != null) {
+-            tokens.putAll(extraArtifactAttributes);
++            for (Iterator entries = extraArtifactAttributes.entrySet().iterator(); entries.hasNext(); ) {
++                Map.Entry entry = (Map.Entry) entries.next();
++                String token = (String) entry.getKey();
++                if (token.indexOf(':') > 0) {
++                    token = token.substring(token.indexOf(':') + 1);
++                }
++                tokens.put(token, entry.getValue());
++            }
+         }
+         tokens.put(ORGANISATION_KEY, org == null ? "" : org);
+         tokens.put(ORGANISATION_KEY2, org == null ? "" : org);
+diff --git a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+index af3908dff..e90aac0fb 100644
+--- a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
++++ b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+@@ -323,7 +323,7 @@ public Map determineArtifactsToCopy(ModuleRevisionId mrid, String destFilePatter
+                     String org = mRevId.getOrganisation() == null ? null : mRevId.getOrganisation().replace('.', '/');
+                     destFileName = IvyPatternHelper.substitute(destPattern, org, mRevId.getName(), mRevId.getBranch(),
+                             mRevId.getRevision(), artifact.getName(), artifact.getType(), artifact.getExt(), conf,
+-                            artifact.getArtifactOrigin(), mrid.getExtraAttributes(), artifact.getArtifact().getExtraAttributes());
++                            artifact.getArtifactOrigin(), mrid.getQualifiedExtraAttributes(), artifact.getArtifact().getQualifiedExtraAttributes());
+                 } else {
+                     throw new IllegalArgumentException("Unsupported dirMode: " + options.getDirMode());
+                 }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java b/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java
+index e5591be7f..1502c8abc 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java
++++ b/src/java/org/apache/ivy/plugins/resolver/packager/PackagerCacheEntry.java
+@@ -217,9 +217,9 @@ protected void finalize() throws Throwable {
+     }
+ 
+     private String getResourceURL() {
+-        String baseURL = IvyPatternHelper.substitute(this.resourceURL, this.mr.getOrganisation(),
+-          this.mr.getName(), this.mr.getRevision(), null, null, null, null,
+-          this.mr.getAttributes(), null);
++        String baseURL = IvyPatternHelper.substitute(resourceURL, mr.getOrganisation(),
++                mr.getName(), mr.getRevision(), null, null, null, null,
++                mr.getQualifiedExtraAttributes(), null);
+         int slash = baseURL.lastIndexOf('/');
+         if (slash != -1) {
+             baseURL = baseURL.substring(0, slash + 1);
+diff --git a/test/java/org/apache/ivy/ant/IvyInstallTest.java b/test/java/org/apache/ivy/ant/IvyInstallTest.java
+index 0ce54e401..a6df7b4c6 100644
+--- a/test/java/org/apache/ivy/ant/IvyInstallTest.java
++++ b/test/java/org/apache/ivy/ant/IvyInstallTest.java
+@@ -112,6 +112,24 @@ public void testInstallWithMultipleType() {
+         assertTrue(new File("build/test/install/org8/mod8.1/a-1.1.txt").exists());        
+     }
+ 
++    public void testInstallWithClassifiers() {
++        // IVY-1324
++        project.setProperty("ivy.settings.file", "test/repositories/m2/ivysettings.xml");
++        install.setOrganisation("org.apache");
++        install.setModule("test-sources");
++        install.setRevision("1.0");
++        install.setType("*");
++        install.setFrom("m2");
++        install.setTo("IVY-1324");
++
++        install.execute();
++        
++        assertTrue(new File("build/test/install/org.apache/test-sources/test-sources-1.0-javadoc.jar").exists());        
++        assertTrue(new File("build/test/install/org.apache/test-sources/test-sources-1.0-sources.jar").exists());        
++        assertTrue(new File("build/test/install/org.apache/test-sources/test-sources-1.0.jar").exists());        
++        assertTrue(new File("build/test/install/org.apache/test-sources/ivy-1.0.xml").exists());        
++    }
++
+     public void testInstallWithUnusedType() {
+         project.setProperty("ivy.settings.file", "test/repositories/ivysettings-dummydefaultresolver.xml");
+         install.setOrganisation("org8");
+diff --git a/test/repositories/m2/ivysettings.xml b/test/repositories/m2/ivysettings.xml
+index b02c6d914..61781a440 100644
+--- a/test/repositories/m2/ivysettings.xml
++++ b/test/repositories/m2/ivysettings.xml
+@@ -20,6 +20,10 @@
+ 	<settings defaultCache="${ivy.basedir}/build/cache" defaultResolver="m2"/>
+ 	<resolvers>
+ 		<ibiblio name="m2" m2compatible="true" useMavenMetadata="true" 
+-		         root="${ivy.settings.dir}" />
++		         root="${ivy.settings.url}/.." />
++        <filesystem name="IVY-1324">
++            <ivy pattern="${ivy.basedir}/build/test/install/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++            <artifact pattern="${ivy.basedir}/build/test/install/[organisation]/[module]/[originalname].[ext]"/>
++        </filesystem>
+ 	</resolvers>
+ </ivysettings>

@@ -1,0 +1,189 @@
+From a8b75c0a430f3b7870f7f0eb2934b10926001446 Mon Sep 17 00:00:00 2001
+From: William Colen <colen@apache.org>
+Date: Fri, 23 Mar 2012 02:51:40 +0000
+Subject: [PATCH] OPENNLP-481: ADTokenSampleStream now uses a customized
+ DictionaryDetokenizer that handles hyphens
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1304169 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../ad/ADTokenSampleStreamFactory.java        | 50 +++++++++++++
+ .../formats/ad/ADTokenSampleStreamTest.java   | 71 +++++++++++++++++++
+ .../resources/opennlp/tools/formats/ad.sample |  9 ++-
+ 3 files changed, 128 insertions(+), 2 deletions(-)
+ create mode 100644 opennlp-tools/src/test/java/opennlp/tools/formats/ad/ADTokenSampleStreamTest.java
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java
+index 34b0be1ec..2a3e89c83 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java
+@@ -17,12 +17,21 @@
+ 
+ package opennlp.tools.formats.ad;
+ 
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.IOException;
++import java.util.regex.Pattern;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
++import opennlp.tools.cmdline.TerminateToolException;
+ import opennlp.tools.cmdline.params.DetokenizerParameter;
+ import opennlp.tools.formats.DetokenizerSampleStreamFactory;
+ import opennlp.tools.formats.NameToTokenSampleStream;
+ import opennlp.tools.namefind.NameSample;
++import opennlp.tools.tokenize.DetokenizationDictionary;
++import opennlp.tools.tokenize.Detokenizer;
++import opennlp.tools.tokenize.DictionaryDetokenizer;
+ import opennlp.tools.tokenize.TokenSample;
+ import opennlp.tools.util.ObjectStream;
+ 
+@@ -56,4 +65,45 @@ public ObjectStream<TokenSample> create(String[] args) {
+                 ADNameSampleStreamFactory.Parameters.class));
+     return new NameToTokenSampleStream(createDetokenizer(params), samples);
+   }
++
++  protected Detokenizer createDetokenizer(DetokenizerParameter p) {
++    try {
++      return new ADDictionaryDetokenizer(new DetokenizationDictionary(
++          new FileInputStream(new File(p.getDetokenizer()))));
++    } catch (IOException e) {
++      throw new TerminateToolException(-1,
++          "IO error while loading detokenizer dict: " + e.getMessage());
++    }
++  }
++
++  static class ADDictionaryDetokenizer extends DictionaryDetokenizer {
++
++    public ADDictionaryDetokenizer(DetokenizationDictionary dict) {
++      super(dict);
++    }
++
++    @Override
++    public DetokenizationOperation[] detokenize(String[] tokens) {
++      DetokenizationOperation[] operations = super.detokenize(tokens);
++      for (int i = 0; i < tokens.length; i++) {
++        if (operations[i].equals(DetokenizationOperation.NO_OPERATION)
++            && isMergeToRight(tokens[i])) {
++          operations[i] = DetokenizationOperation.MERGE_TO_RIGHT;
++        }
++      }
++      return operations;
++    }
++
++    private static final Pattern hyphenPattern = Pattern
++        .compile(".*?[\\p{L}]-$");
++
++    private boolean isMergeToRight(String token) {
++      if (token != null) {
++        if (hyphenPattern.matcher(token).matches()) {
++          return true;
++        }
++      }
++      return false;
++    }
++  }
+ }
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/formats/ad/ADTokenSampleStreamTest.java b/opennlp-tools/src/test/java/opennlp/tools/formats/ad/ADTokenSampleStreamTest.java
+new file mode 100644
+index 000000000..33dc6216c
+--- /dev/null
++++ b/opennlp-tools/src/test/java/opennlp/tools/formats/ad/ADTokenSampleStreamTest.java
+@@ -0,0 +1,71 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.formats.ad;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++
++import java.io.File;
++import java.io.IOException;
++import java.net.URISyntaxException;
++import java.util.ArrayList;
++import java.util.List;
++
++import opennlp.tools.tokenize.TokenSample;
++import opennlp.tools.util.ObjectStream;
++
++import org.junit.Before;
++import org.junit.Test;
++
++public class ADTokenSampleStreamTest {
++
++  List<TokenSample> samples = new ArrayList<TokenSample>();
++
++  @Test
++  public void testSimpleCount() throws IOException {
++    assertEquals(6, samples.size()); // means that there are 3 documents
++  }
++
++  @Test
++  public void testSentences() throws IOException {
++    assertTrue(samples.get(5).getText().contains("ofereceu-me"));
++  }
++
++  @Before
++  public void setup() throws IOException, URISyntaxException {
++    ADTokenSampleStreamFactory factory = new ADTokenSampleStreamFactory(
++        ADTokenSampleStreamFactory.Parameters.class);
++
++    File dict = new File(getClass().getClassLoader()
++        .getResource("opennlp/tools/tokenize/latin-detokenizer.xml").toURI());
++    File data = new File(getClass().getClassLoader()
++        .getResource("opennlp/tools/formats/ad.sample").toURI());
++    String[] args = { "-data", data.getCanonicalPath(), "-encoding", "UTF-8",
++        "-lang", "pt", "-detokenizer", dict.getCanonicalPath() };
++    ObjectStream<TokenSample> tokenSampleStream = factory.create(args);
++
++    TokenSample sample = tokenSampleStream.read();
++
++    while (sample != null) {
++      samples.add(sample);
++      sample = tokenSampleStream.read();
++    }
++
++  }
++
++}
+diff --git a/opennlp-tools/src/test/resources/opennlp/tools/formats/ad.sample b/opennlp-tools/src/test/resources/opennlp/tools/formats/ad.sample
+index 951eb8aa5..5cdff43c0 100644
+--- a/opennlp-tools/src/test/resources/opennlp/tools/formats/ad.sample
++++ b/opennlp-tools/src/test/resources/opennlp/tools/formats/ad.sample
+@@ -220,7 +220,7 @@ STA:fcl
+ 
+ <s id="63955" ref="Ivan do Maxixe">
+ SOURCE: ref="1001.porto-poesia=removeme=-2 a poesia toma porto-alegre=removeme=-2" source="SELVA 1001.porto-poesia=removeme=-2 a poesia toma porto-alegre=removeme="
+-1001 Ivan do Maxixe
++1001 Ivan do Maxixe ofereceu-me um café.
+ A1
+ STA:fcl
+ ===H:prop("Ivan" <cjt-sc> <hum> <right> M S)    Ivan
+@@ -229,5 +229,10 @@ STA:fcl
+ ====P<:np
+ =====>N:art("o" <NER2> <artd> <-sam> DET M S)   o
+ =====H:n("maxixe" <np-def> <prop> <NER2> <fruit> M S)   Maxixe
+-
++===P:v-fin("oferecer" <fmc> PS 3S IND VFIN)	ofereceu-
++===DAT:pron-pers("eu" M/F 1S DAT)	me
++===ACC:np
++====>N:pron-det("um" <arti> DET M S)	um
++====H:n("café" M S)	café
++.
+ </s>
+\ No newline at end of file

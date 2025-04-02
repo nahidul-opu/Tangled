@@ -1,0 +1,283 @@
+From a08090fced6c930a3b532b5440b14ec8602a8f98 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 25 Jun 2008 13:26:03 +0000
+Subject: [PATCH] FIX: Transitive dependencies resolves incorrectly when
+ different modules uses the same dependency with different configurations in
+ the same build (IVY-541)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@671546 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/resolve/IvyNode.java  |  8 +-
+ .../apache/ivy/core/resolve/IvyNodeUsage.java | 80 ++++++++++++++-----
+ .../apache/ivy/core/resolve/ResolveTest.java  | 15 ++++
+ .../1/org2/mod2.3/jars/mod2.3-0.5.jar         |  1 +
+ .../1/org2/mod2.6/ivys/ivy-0.5.xml            | 29 +++++++
+ test/repositories/IVY-283/ivy-d.xml           | 12 +--
+ 7 files changed, 113 insertions(+), 33 deletions(-)
+ create mode 100644 test/repositories/1/org2/mod2.3/jars/mod2.3-0.5.jar
+ create mode 100644 test/repositories/1/org2/mod2.6/ivys/ivy-0.5.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 1c459e1cf..d431cc876 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -90,6 +90,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: Transitive dependencies resolves incorrectly when different modules uses the same dependency with different configurations in the same build (IVY-541)
+ - FIX: transitive attribute set to false because of dependency (IVY-105)
+ - FIX: Wrong check for defaultCacheArtifactPattern (IVY-840)
+ - FIX: NPE in ivy:install if ivy.settings.xml contains custom attribute for a module (IVY-838)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index c86e1a709..1e3544251 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -254,8 +254,7 @@ public boolean loadData(String rootModuleConf, IvyNode parent, String parentConf
+         } else {
+             DependencyDescriptor dd = getDependencyDescriptor(parent);
+             if (dd != null) {
+-                usage.addDependencyArtifacts(rootModuleConf, dd.getDependencyArtifacts(parentConf));
+-                usage.addDependencyIncludes(rootModuleConf, dd.getIncludeRules(parentConf));
++                usage.addUsage(rootModuleConf, dd, parentConf);
+             }
+             return loaded;
+         }
+@@ -276,10 +275,7 @@ private void moveToRealNode(String rootModuleConf, IvyNode parent, String parent
+         resolved.loadData(rootModuleConf, parent, parentConf, conf, shouldBePublic);
+         DependencyDescriptor dd = getDependencyDescriptor(parent);
+         if (dd != null) {
+-            resolved.usage.addDependencyArtifacts(rootModuleConf, dd
+-                    .getDependencyArtifacts(parentConf));
+-            resolved.usage.addDependencyIncludes(rootModuleConf, dd
+-                    .getIncludeRules(parentConf));
++            resolved.usage.addUsage(rootModuleConf, dd, parentConf);
+         }
+         
+         data.replaceNode(getId(), resolved, rootModuleConf); // this actually discards the node
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+index 5bcab3e97..35633e69e 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+@@ -26,6 +26,7 @@
+ import java.util.Set;
+ 
+ import org.apache.ivy.core.module.descriptor.DependencyArtifactDescriptor;
++import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.IncludeRule;
+ 
+ /**
+@@ -85,6 +86,16 @@ public String toString() {
+         }
+     }
+     
++    private static final class Depender {
++        private DependencyDescriptor dd;
++        private String dependerConf;
++        
++        public Depender(DependencyDescriptor dd, String dependerConf) {
++            this.dd = dd;
++            this.dependerConf = dependerConf;
++        }
++    }
++    
+     private IvyNode node;
+ 
+     // Map (String rootConfName -> Set(String confName))
+@@ -94,12 +105,8 @@ public String toString() {
+ 
+     // Map (NodeConf in -> Set(String conf))
+     private Map requiredConfs = new HashMap();
+-
+-    // Map (String rootModuleConf -> Set(DependencyArtifactDescriptor))
+-    private Map dependencyArtifacts = new HashMap();
+-
+-    // Map (String rootModuleConf -> Set(IncludeRule))
+-    private Map dependencyIncludes = new HashMap();
++    
++    private Map /*<String, Set<Depender>>*/ dependers = new HashMap();
+     
+     // Map (String rootModuleConf -> IvyNodeBlacklist)
+     private Map blacklisted = new HashMap();
+@@ -147,7 +154,7 @@ public void updateDataFrom(IvyNodeUsage usage, String rootModuleConf) {
+         updateMapOfSetForKey(usage.rootModuleConfs, rootModuleConfs, rootModuleConf);
+ 
+         // update dependencyArtifacts
+-        updateMapOfSetForKey(usage.dependencyArtifacts, dependencyArtifacts, rootModuleConf);
++        updateMapOfSetForKey(usage.dependers, dependers, rootModuleConf);
+     }
+ 
+     private void updateMapOfSet(Map from, Map to) {
+@@ -169,31 +176,62 @@ private void updateMapOfSetForKey(Map from, Map to, Object key) {
+         }
+     }
+ 
+-    protected void addDependencyArtifacts(String rootModuleConf,
+-            DependencyArtifactDescriptor[] dependencyArtifacts) {
+-        addObjectsForConf(rootModuleConf, Arrays.asList(dependencyArtifacts),
+-            this.dependencyArtifacts);
+-    }
+-
+-    protected void addDependencyIncludes(String rootModuleConf, IncludeRule[] rules) {
+-        addObjectsForConf(rootModuleConf, Arrays.asList(rules), dependencyIncludes);
+-    }
+-
+-    private void addObjectsForConf(String rootModuleConf, Collection objectsToAdd, Map map) {
++//    protected void addDependencyArtifacts(String rootModuleConf,
++//            DependencyArtifactDescriptor[] dependencyArtifacts) {
++//        addObjectsForConf(rootModuleConf, Arrays.asList(dependencyArtifacts),
++//            this.dependencyArtifacts);
++//    }
++//
++//    protected void addDependencyIncludes(String rootModuleConf, IncludeRule[] rules) {
++//        addObjectsForConf(rootModuleConf, Arrays.asList(rules), dependencyIncludes);
++//    }
++//
++    private void addObjectsForConf(String rootModuleConf, Object objectToAdd, Map map) {
+         Set set = (Set) map.get(rootModuleConf);
+         if (set == null) {
+             set = new HashSet();
+             map.put(rootModuleConf, set);
+         }
+-        set.addAll(objectsToAdd);
++        set.add(objectToAdd);
++    }
++
++    public void addUsage(String rootModuleConf, DependencyDescriptor dd, String parentConf) {
++        addObjectsForConf(rootModuleConf, new Depender(dd, parentConf), dependers);
+     }
+ 
+     protected Set getDependencyArtifactsSet(String rootModuleConf) {
+-        return (Set) dependencyArtifacts.get(rootModuleConf);
++        Collection dependersInConf = (Collection) dependers.get(rootModuleConf);
++        if (dependersInConf == null) {
++            return null;
++        }
++        Set dependencyArtifacts = new HashSet();
++        for (Iterator iterator = dependersInConf.iterator(); iterator.hasNext();) {
++            Depender depender = (Depender) iterator.next();
++            DependencyArtifactDescriptor[] dads = 
++                depender.dd.getDependencyArtifacts(depender.dependerConf);
++            dependencyArtifacts.addAll(Arrays.asList(dads));
++        }
++        return dependencyArtifacts;
+     }
+ 
+     protected Set getDependencyIncludesSet(String rootModuleConf) {
+-        return (Set) dependencyIncludes.get(rootModuleConf);
++        Collection dependersInConf = (Collection) dependers.get(rootModuleConf);
++        if (dependersInConf == null) {
++            return null;
++        }
++        Set dependencyIncludes = new HashSet();
++        for (Iterator iterator = dependersInConf.iterator(); iterator.hasNext();) {
++            Depender depender = (Depender) iterator.next();
++            IncludeRule[] rules = 
++                depender.dd.getIncludeRules(depender.dependerConf);
++            if (rules == null || rules.length == 0) {
++                // no include rule in at least one depender -> we must include everything, 
++                // and so return no include rule at all
++                return null;
++            }
++            dependencyIncludes.addAll(Arrays.asList(rules));
++        }
++        return dependencyIncludes;
+     }
+ 
+     protected void removeRootModuleConf(String rootModuleConf) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 51f146d32..b78158e68 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -1281,6 +1281,21 @@ public void testResolveWithIncludeArtifactsWithoutConf() throws Exception {
+         assertTrue(!getArchiveFileInCache("org2", "mod2.1", "0.3", "mod2.1", "jar", "jar").exists());
+     }
+ 
++    public void testResolveWithIncludeArtifactsTransitive() throws Exception {
++        // test case for IVY-541
++        // mod2.6 depends on mod2.3 and mod2.1
++        // mod2.3 depends on mod2.1 and selects its artifacts
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/1/org2/mod2.6/ivys/ivy-0.5.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org2", "mod2.1", "0.3")).exists());
++        assertTrue(getArchiveFileInCache("org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache("org2", "mod2.1", "0.3", "art21B", "jar", "jar").exists());
++    }
++
+     public void testResolveWithExcludesArtifacts() throws Exception {
+         // mod2.3 depends on mod2.1 and selects its artifacts
+         ResolveReport report = ivy.resolve(new File(
+diff --git a/test/repositories/1/org2/mod2.3/jars/mod2.3-0.5.jar b/test/repositories/1/org2/mod2.3/jars/mod2.3-0.5.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.3/jars/mod2.3-0.5.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.5.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.5.xml
+new file mode 100644
+index 000000000..d70aa9e1e
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.5.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.6"
++	       revision="0.5"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.3" rev="0.5"/>
++		<dependency name="mod2.1" rev="0.3"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-283/ivy-d.xml b/test/repositories/IVY-283/ivy-d.xml
+index 0c3ed013a..91ee59b34 100644
+--- a/test/repositories/IVY-283/ivy-d.xml
++++ b/test/repositories/IVY-283/ivy-d.xml
+@@ -28,16 +28,16 @@
+   </publications>
+   <dependencies>
+     <dependency name="module_b" rev="latest.integration" conf="build">
+-      <artifact name="lib_b_a" type="jar" />
++      <include name="lib_b_a" type="jar" />
+     </dependency>
+     <dependency name="module_c" rev="latest.integration" conf="build">
+-      <artifact name="lib_c_a" type="jar" />
++      <include name="lib_c_a" type="jar" />
+     </dependency>
+     <dependency name="module_a" rev="latest.integration" conf="build">
+-      <artifact name="lib_a_a" type="jar" />
+-      <artifact name="lib_a_c" type="jar" />
+-      <artifact name="lib_a_d" type="jar" />
+-      <artifact name="lib_a_e" type="jar" />
++      <include name="lib_a_a" type="jar" />
++      <include name="lib_a_c" type="jar" />
++      <include name="lib_a_d" type="jar" />
++      <include name="lib_a_e" type="jar" />
+     </dependency>
+   </dependencies>
+ </ivy-module>

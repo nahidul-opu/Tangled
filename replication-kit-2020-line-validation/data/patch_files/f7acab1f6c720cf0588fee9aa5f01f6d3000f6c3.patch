@@ -1,0 +1,150 @@
+From f7acab1f6c720cf0588fee9aa5f01f6d3000f6c3 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 3 Aug 2009 06:59:10 +0000
+Subject: [PATCH] FIX: ivy parse exception when using <publications
+ defaultconf> (IVY-1102)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@800224 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../xml/XmlModuleDescriptorUpdater.java       | 64 +++++++++++++++----
+ .../parser/xml/XmlModuleUpdaterTest.java      |  2 +
+ .../parser/xml/test-update-excludedconfs4.xml |  2 +-
+ 4 files changed, 56 insertions(+), 13 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d0d69b670..9a077050f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -93,6 +93,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - FIX: URLResource does not properly support authentication (IVY-1106) (thanks to Heschi Kreinick)
+ - FIX: Excessive hits to missing URLs uses up all ports on Windows (IVY-1105)
++- FIX: ivy parse exception when using <publications defaultconf> (IVY-1102)
+ 
+    2.1.0-rc2
+ =====================================
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index aaca20d67..469afcc1b 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -203,18 +203,19 @@ public UpdaterHandler(URL relativePathCtx, PrintWriter out, final UpdateOptions
+ 
+         private String organisation = null;
+ 
+-        private String defaultConfMapping = null; // defaultConfMapping of imported
++        // defaultConfMapping of imported configurations, if any
++        private String defaultConfMapping = null; 
+ 
+-        // configurations, if any
+-
+-        private Boolean confMappingOverride = null; // confMappingOverride of imported
+-
+-        // configurations, if any
+-
+-        private String justOpen = null; // used to know if the last open tag was empty, to
+-
+-        // adjust termination with /> instead of ></qName>
++        // confMappingOverride of imported configurations, if any
++        private Boolean confMappingOverride = null; 
+ 
++        // used to know if the last open tag was empty, to adjust termination 
++        // with /> instead of ></qName>
++        private String justOpen = null;
++        
++        // the new value of the defaultconf attribute on the publications tag
++        private String newDefaultConf = null;
++        
+         private Stack context = new Stack();
+ 
+         private Stack buffers = new Stack();
+@@ -256,8 +257,28 @@ public void startElement(String uri, String localName, String qName, Attributes
+                                 + substitute(settings, attributes.getValue(i)) + "\"");
+                     }
+                 }
+-            } else if ("ivy-module/publications/artifact".equals(getContext())
+-                    || "ivy-module/dependencies/dependency/artifact".equals(getContext())) {
++            } else if ("ivy-module/publications/artifact".equals(getContext())) {
++                ExtendedBuffer buffer = new ExtendedBuffer(getContext());
++                buffers.push(buffer);
++                confAttributeBuffers.push(buffer);
++                write("<" + qName);
++                buffer.setDefaultPrint(attributes.getValue("conf") == null
++                        && ((newDefaultConf == null) || (newDefaultConf.length() > 0)));
++                for (int i = 0; i < attributes.getLength(); i++) {
++                    String attName = attributes.getQName(i);
++                    if ("conf".equals(attName)) {
++                        String confName = substitute(settings, attributes.getValue("conf"));
++                        String newConf = removeConfigurationsFromList(confName, confs);
++                        if (newConf.length() > 0) {
++                            write(" " + attributes.getQName(i) + "=\"" + newConf + "\"");
++                            ((ExtendedBuffer) buffers.peek()).setPrint(true);
++                        }
++                    } else {
++                        write(" " + attributes.getQName(i) + "=\""
++                                + substitute(settings, attributes.getValue(i)) + "\"");
++                    }
++                }
++            } else if ("ivy-module/dependencies/dependency/artifact".equals(getContext())) {
+                 ExtendedBuffer buffer = new ExtendedBuffer(getContext());
+                 buffers.push(buffer);
+                 confAttributeBuffers.push(buffer);
+@@ -277,6 +298,8 @@ public void startElement(String uri, String localName, String qName, Attributes
+                                 + substitute(settings, attributes.getValue(i)) + "\"");
+                     }
+                 }
++            } else if ("ivy-module/publications".equals(getContext())) {
++                startPublications(attributes);
+             } else {
+                 // copy
+                 write("<" + qName);
+@@ -344,6 +367,23 @@ private void startDependencies(Attributes attributes) {
+                 write(" confmappingoverride=\"" + confMappingOverride.toString() + "\"");
+             }
+         }
++        
++        private void startPublications(Attributes attributes) {
++            write("<publications");
++            for (int i = 0; i < attributes.getLength(); i++) {
++                String attName = attributes.getQName(i);
++                if ("defaultconf".equals(attName)) {
++                    newDefaultConf = removeConfigurationsFromList(substitute(settings,
++                        attributes.getValue("defaultconf")), confs);
++                    if (newDefaultConf.length() > 0) {
++                        write(" " + attributes.getQName(i) + "=\"" + newDefaultConf + "\"");
++                    }
++                } else {
++                    write(" " + attributes.getQName(i) + "=\""
++                            + substitute(settings, attributes.getValue(i)) + "\"");
++                }
++            }
++        }
+ 
+         private void startElementInDependency(Attributes attributes) {
+             ExtendedBuffer buffer = new ExtendedBuffer(getContext());
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+index 26fd88afa..bed85f1d9 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+@@ -261,6 +261,8 @@ public void testUpdateWithExcludeConfigurations4() throws Exception {
+             + "test-update-excludedconfs4.xml").toURL();
+         XmlModuleDescriptorUpdater.update(settingsUrl, buffer, 
+             getUpdateOptions("release", "mynewrev").setConfsToExclude(new String[] {"myconf2"}));
++        
++        System.out.println(new String(buffer.toByteArray()));
+ 
+         XmlModuleDescriptorParser parser = XmlModuleDescriptorParser.getInstance();
+         ModuleDescriptor updatedMd = parser.parseDescriptor(new IvySettings(),
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-update-excludedconfs4.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-update-excludedconfs4.xml
+index 68ad68825..b93cb6a64 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-update-excludedconfs4.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-update-excludedconfs4.xml
+@@ -30,7 +30,7 @@
+ 		<conf name="myconf3" description="desc 3" visibility="private"/>
+ 		<conf name="myconf4" description="desc 4" />
+ 	</configurations>
+-	<publications>
++	<publications defaultconf="myconf1,myconf2,myconf3">
+ 		<artifact name="myartifact1" type="jar"/>
+ 		<artifact name="myartifact2" type="jar" conf="myconf1"/>
+ 		<artifact name="myartifact3" type="jar" conf="myconf1, myconf2, myconf3"/>

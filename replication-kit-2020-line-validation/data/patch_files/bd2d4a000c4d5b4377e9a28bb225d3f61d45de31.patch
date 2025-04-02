@@ -1,0 +1,271 @@
+From bd2d4a000c4d5b4377e9a28bb225d3f61d45de31 Mon Sep 17 00:00:00 2001
+From: Bernd Eckenfels <ecki@apache.org>
+Date: Wed, 19 Nov 2014 03:56:29 +0000
+Subject: [PATCH] [VFS-544] Allow virtual file system to be closed. Renamed map
+ to typeMap. Javadoc fixes.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/vfs/trunk@1640477 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../vfs2/impl/DefaultFileSystemManager.java   | 81 ++++++++++++-------
+ .../vfs2/impl/VirtualFileProvider.java        | 18 +++++
+ .../commons/vfs2/impl/VirtualFileSystem.java  |  7 ++
+ src/changes/changes.xml                       |  4 +
+ 4 files changed, 79 insertions(+), 31 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/commons/vfs2/impl/DefaultFileSystemManager.java b/core/src/main/java/org/apache/commons/vfs2/impl/DefaultFileSystemManager.java
+index 67d9a050fd..f90e85bcde 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/impl/DefaultFileSystemManager.java
++++ b/core/src/main/java/org/apache/commons/vfs2/impl/DefaultFileSystemManager.java
+@@ -86,12 +86,7 @@ public class DefaultFileSystemManager implements FileSystemManager
+     /**
+      * Mappings of file types.
+      */
+-    private final FileTypeMap map = new FileTypeMap();
+-
+-    /**
+-     * The virtual file provider.
+-     */
+-    private final VirtualFileProvider vfsProvider = new VirtualFileProvider();
++    private final FileTypeMap typeMap = new FileTypeMap();
+ 
+ 
+     /**
+@@ -148,6 +143,11 @@ public class DefaultFileSystemManager implements FileSystemManager
+      */
+     private TemporaryFileStore tempFileStore;
+ 
++    /**
++     * The virtual file provider.
++     */
++    private VirtualFileProvider vfsProvider;
++
+     /**
+      * Flag, if manager is initialized (after init() and before close()).
+      */
+@@ -245,7 +245,7 @@ public boolean hasProvider(final String scheme)
+      */
+     public void addExtensionMap(final String extension, final String scheme)
+     {
+-        map.addExtension(extension, scheme);
++        typeMap.addExtension(extension, scheme);
+     }
+ 
+     /**
+@@ -256,7 +256,7 @@ public void addExtensionMap(final String extension, final String scheme)
+      */
+     public void addMimeTypeMap(final String mimeType, final String scheme)
+     {
+-        map.addMimeType(mimeType, scheme);
++        typeMap.addMimeType(mimeType, scheme);
+     }
+ 
+     /**
+@@ -536,28 +536,36 @@ public TemporaryFileStore getTemporaryFileStore()
+ 
+     /**
+      * Initializes this manager.
++     * <p>
++     * If no value for the following properties was specified, it will
++     * use the following defaults:
++     * <ul>
++     * <li>fileContentInfoFactory = new FileContentInfoFilenameFactory()</li>
++     * <li>filesCache = new SoftRefFilesCache()</li>
++     * <li>fileCacheStrategy = CacheStrategy.ON_RESOLVE</li>
++     * </ul>
+      *
+      * @throws FileSystemException if an error occurs during initialization.
+      */
+     public void init() throws FileSystemException
+     {
+-        if (filesCache == null)
+-        {
+-            // filesCache = new DefaultFilesCache();
+-            filesCache = new SoftRefFilesCache();
+-        }
+-
+         if (fileContentInfoFactory == null)
+         {
+             fileContentInfoFactory = new FileContentInfoFilenameFactory();
+         }
+ 
++        if (filesCache == null)
++        {
++            // filesCache = new DefaultFilesCache();
++            filesCache = new SoftRefFilesCache();
++        }
+         if (fileCacheStrategy == null)
+         {
+             fileCacheStrategy = CacheStrategy.ON_RESOLVE;
+         }
+-
+         setupComponent(filesCache);
++
++        vfsProvider = new VirtualFileProvider();
+         setupComponent(vfsProvider);
+ 
+         init = true;
+@@ -567,7 +575,7 @@ public void init() throws FileSystemException
+      * Closes the manager.
+      * <p>
+      * This will close all providers (all files), it will also close
+-     * all maanged componnets including temporary files, replicators
++     * all managed components including temporary files, replicators
+      * and cache.
+      * <p>
+      * The manager is in uninitialized state after this method.
+@@ -588,31 +596,36 @@ public void close()
+         providers.clear();
+ 
+         // Close the other components
+-        closeComponent(filesCache);
+-
+-        // managed lifecycle
+-        closeComponent(defaultProvider);
++        closeComponent(vfsProvider);
+         closeComponent(fileReplicator);
+         closeComponent(tempFileStore);
++        closeComponent(filesCache);
++        closeComponent(defaultProvider);
+ 
+-        components.clear();
++        // collections with add()
++        typeMap.clear();
++        operationProviders.clear();
+ 
+-        defaultProvider = null;
+-        fileReplicator = null;
+-        tempFileStore = null;
+-        filesCache = null;
++        // should not happen, but make debugging easier:
++        if (!components.isEmpty())
++        {
++        	log.warn("DefaultFilesystemManager.close: not all components are closed: " + components.toString());
++        }
++        components.clear();
+ 
+-        // reset manager state
++        // managed components
++        vfsProvider = null;
+ 
+-        // collections with add()
+-        map.clear();
+-        operationProviders.clear();
+         // setters and derived state
++        defaultProvider = null;
+         baseFile = null;
+         fileObjectDecorator = null;
+         fileObjectDecoratorConst = null;
+         localFileProvider = null;
++        fileReplicator = null;
++        tempFileStore = null;
+         // setters with init() defaults
++        filesCache = null;
+         fileCacheStrategy = null;
+         fileContentInfoFactory = null;
+ 
+@@ -635,6 +648,7 @@ public void freeUnusedResources()
+             final AbstractFileProvider provider = (AbstractFileProvider) fileProvider;
+             provider.freeUnusedResources();
+         }
++        // vfsProvider does not need to free resources
+     }
+ 
+     /**
+@@ -1007,7 +1021,7 @@ public FileObject createFileSystem(final String scheme,
+     public FileObject createFileSystem(final FileObject file)
+             throws FileSystemException
+     {
+-        final String scheme = map.getScheme(file);
++        final String scheme = typeMap.getScheme(file);
+         if (scheme == null)
+         {
+             throw new FileSystemException(
+@@ -1028,7 +1042,7 @@ public FileObject createFileSystem(final FileObject file)
+     public boolean canCreateFileSystem(final FileObject file)
+             throws FileSystemException
+     {
+-        return map.getScheme(file) != null;
++        return typeMap.getScheme(file) != null;
+     }
+ 
+     /**
+@@ -1119,6 +1133,11 @@ public void _closeFileSystem(final FileSystem filesystem)
+         {
+             ((AbstractFileProvider) provider).closeFileSystem(filesystem);
+         }
++        else if (filesystem instanceof VirtualFileSystem)
++        {
++            // vfsProvider does not implement AbstractFileProvider
++            vfsProvider.closeFileSystem(filesystem);
++        }
+     }
+ 
+     /**
+diff --git a/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileProvider.java b/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileProvider.java
+index 84a8601216..3556b63f99 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileProvider.java
++++ b/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileProvider.java
+@@ -18,9 +18,11 @@
+ 
+ import org.apache.commons.vfs2.FileName;
+ import org.apache.commons.vfs2.FileObject;
++import org.apache.commons.vfs2.FileSystem;
+ import org.apache.commons.vfs2.FileSystemException;
+ import org.apache.commons.vfs2.FileType;
+ import org.apache.commons.vfs2.provider.AbstractFileName;
++import org.apache.commons.vfs2.provider.AbstractFileSystem;
+ import org.apache.commons.vfs2.provider.AbstractVfsContainer;
+ 
+ 
+@@ -61,4 +63,20 @@ public FileObject createFileSystem(final String rootUri) throws FileSystemExcept
+         addComponent(fs);
+         return fs.getRoot();
+     }
++
++    /**
++     * Close a VirtualFileSystem by removing it from the
++     * {@code #components} list of this provider.
++     * <p>
++     * This gets called from DefaultFileManager#_closeFileSystem.
++     *
++     * @param filesystem the file system remembered by this provider.
++     */
++    void closeFileSystem(final FileSystem filesystem)
++    {
++        final AbstractFileSystem fs = (AbstractFileSystem) filesystem;
++
++        removeComponent(fs);
++        fs.close();
++    }
+ }
+diff --git a/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileSystem.java b/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileSystem.java
+index 06844640b5..22cc39aac1 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileSystem.java
++++ b/core/src/main/java/org/apache/commons/vfs2/impl/VirtualFileSystem.java
+@@ -196,4 +196,11 @@ private FileName getJunctionForFile(final FileName name)
+         // None
+         return null;
+     }
++
++    @Override
++    public void close()
++    {
++        super.close();
++        junctions.clear();
++    }
+ }
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 7d6c817650..0f2d353ea5 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -26,6 +26,10 @@
+ <!--       <action issue="VFS-443" dev="ggregory" type="update" due-to="nickallen"> -->
+ <!--        [Local] Need an easy way to convert from a FileObject to a File. -->
+ <!--       </action> -->
++      <action issue="VFS-544" dev="ecki" type="fix">
++       [Virtual] Allow virtual file systems and virtual file system provider
++       to be closed, to avoid memory leak.
++      </action>
+       <action issue="VFS-142" dev="ecki" type="fix" due-to="Ryan Boettcher">
+        Use ThreadLocal.remove() to clean out FileContentThreadData objects.
+       </action>

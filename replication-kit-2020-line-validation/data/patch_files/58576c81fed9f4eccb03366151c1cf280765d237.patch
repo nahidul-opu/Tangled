@@ -1,0 +1,201 @@
+From 58576c81fed9f4eccb03366151c1cf280765d237 Mon Sep 17 00:00:00 2001
+From: Pavan Kumar <pavanka@fb.com>
+Date: Wed, 18 Jun 2014 15:38:30 -0700
+Subject: [PATCH] GIRAPH-915: With BigDataIO some messages can get ignored
+ (majakabiljo via pavanka)
+
+---
+ CHANGELOG                                     |  2 ++
+ .../SendWorkerOneToAllMessagesRequest.java    |  2 +-
+ .../apache/giraph/edge/ByteArrayEdges.java    |  2 +-
+ .../giraph/utils/ByteStructIterator.java      |  2 +-
+ .../utils/ByteStructVertexIdIterator.java     |  2 +-
+ .../utils/ExtendedByteArrayDataInput.java     |  5 +++
+ .../giraph/utils/ExtendedDataInput.java       |  7 +++++
+ .../apache/giraph/utils/UnsafeArrayReads.java |  5 +++
+ .../apache/giraph/utils/VertexIterator.java   |  2 +-
+ .../apache/giraph/utils/io/BigDataInput.java  | 31 ++++++++++++-------
+ 10 files changed, 44 insertions(+), 16 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index f35d4ba0a..659edfdb9 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-915: With BigDataIO some messages can get ignored (majakabiljo via pavanka)
++
+   GIRAPH-918: GIRAPH-908 has a small bug reg counting entries (pavanka)
+ 
+   GIRAPH-842: option to dump histogram of memory usage when heap is low on memory (pavanka)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/requests/SendWorkerOneToAllMessagesRequest.java b/giraph-core/src/main/java/org/apache/giraph/comm/requests/SendWorkerOneToAllMessagesRequest.java
+index 8745adbf2..5f1ed5397 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/requests/SendWorkerOneToAllMessagesRequest.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/requests/SendWorkerOneToAllMessagesRequest.java
+@@ -116,7 +116,7 @@ public void doRequest(ServerData serverData) {
+     int idCount = 0;
+     int partitionId = 0;
+     try {
+-      while (reader.available() != 0) {
++      while (!reader.endOfInput()) {
+         msg.readFields(reader);
+         idCount = reader.readInt();
+         for (int i = 0; i < idCount; i++) {
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java
+index 271e9c511..509546c3f 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java
+@@ -159,7 +159,7 @@ private class ByteArrayEdgeIterator
+ 
+     @Override
+     public boolean hasNext() {
+-      return serializedEdges != null && extendedDataInput.available() > 0;
++      return serializedEdges != null && !extendedDataInput.endOfInput();
+     }
+ 
+     @Override
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructIterator.java b/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructIterator.java
+index 322365c19..1f1b90e62 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructIterator.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructIterator.java
+@@ -44,7 +44,7 @@ public ByteStructIterator(ExtendedDataInput extendedDataInput) {
+ 
+   @Override
+   public boolean hasNext() {
+-    return extendedDataInput.available() > 0;
++    return !extendedDataInput.endOfInput();
+   }
+ 
+   @Override
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructVertexIdIterator.java b/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructVertexIdIterator.java
+index 3d564cdf9..3b880a009 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructVertexIdIterator.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/ByteStructVertexIdIterator.java
+@@ -54,7 +54,7 @@ public ByteStructVertexIdIterator(
+ 
+   @Override
+   public boolean hasNext() {
+-    return extendedDataInput.available() > 0;
++    return !extendedDataInput.endOfInput();
+   }
+ 
+   @Override
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedByteArrayDataInput.java b/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedByteArrayDataInput.java
+index 3eae25bf2..56c79c48b 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedByteArrayDataInput.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedByteArrayDataInput.java
+@@ -56,6 +56,11 @@ public int getPos() {
+     return pos;
+   }
+ 
++  @Override
++  public boolean endOfInput() {
++    return available() == 0;
++  }
++
+   @Override
+   public void readFully(byte[] b) throws IOException {
+     dataInput.readFully(b);
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedDataInput.java b/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedDataInput.java
+index f1c6809e4..96096ed6e 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedDataInput.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/ExtendedDataInput.java
+@@ -36,4 +36,11 @@ public interface ExtendedDataInput extends DataInput {
+    * @return Bytes available
+    */
+   int available();
++
++  /**
++   * Check if we read everything from the input
++   *
++   * @return True iff we read everything from the input
++   */
++  boolean endOfInput();
+ }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeArrayReads.java b/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeArrayReads.java
+index db19fda3f..1ab8de6a4 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeArrayReads.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/UnsafeArrayReads.java
+@@ -84,6 +84,11 @@ public int available() {
+     return (int) (bufLength - pos);
+   }
+ 
++  @Override
++  public boolean endOfInput() {
++    return available() == 0;
++  }
++
+ 
+   @Override
+   public int getPos() {
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/VertexIterator.java b/giraph-core/src/main/java/org/apache/giraph/utils/VertexIterator.java
+index dced9bdb4..dd73b1f25 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/VertexIterator.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/VertexIterator.java
+@@ -77,7 +77,7 @@ private void resetEmptyVertex() {
+    * @return True if the iteration has more elements.
+    */
+   public boolean hasNext() {
+-    return extendedDataInput.available() > 0;
++    return !extendedDataInput.endOfInput();
+   }
+ 
+   /**
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/io/BigDataInput.java b/giraph-core/src/main/java/org/apache/giraph/utils/io/BigDataInput.java
+index f73819a29..2454a3754 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/io/BigDataInput.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/io/BigDataInput.java
+@@ -76,7 +76,7 @@ private void moveToNextDataInput() {
+    * next one if needed.
+    */
+   private void checkIfShouldMoveToNextDataInput() {
+-    if (currentInput.available() == 0) {
++    if (currentInput.endOfInput()) {
+       moveToNextDataInput();
+     }
+   }
+@@ -168,12 +168,17 @@ public String readUTF() throws IOException {
+   @Override
+   public int skipBytes(int n) throws IOException {
+     int bytesLeftToSkip = n;
+-    while (bytesLeftToSkip >= currentInput.available()) {
+-      bytesLeftToSkip -= currentInput.available();
+-      moveToNextDataInput();
++    while (bytesLeftToSkip > 0) {
++      int bytesSkipped = currentInput.skipBytes(bytesLeftToSkip);
++      bytesLeftToSkip -= bytesSkipped;
++      if (bytesLeftToSkip > 0) {
++        moveToNextDataInput();
++        if (endOfInput()) {
++          break;
++        }
++      }
+     }
+-    int bytesSkipped = currentInput.skipBytes(bytesLeftToSkip);
+-    return n - bytesLeftToSkip + bytesSkipped;
++    return n - bytesLeftToSkip;
+   }
+ 
+   @Override
+@@ -187,10 +192,14 @@ public int getPos() {
+ 
+   @Override
+   public int available() {
+-    int available = 0;
+-    for (int i = currentPositionInInputs; i < dataInputs.size(); i++) {
+-      available += dataInputs.get(i).available();
+-    }
+-    return available;
++    throw new UnsupportedOperationException("available: " +
++        "Not supported with BigDataIO because overflow can happen");
++  }
++
++  @Override
++  public boolean endOfInput() {
++    return currentInput == EMPTY_INPUT ||
++        (dataInputs.get(currentPositionInInputs).endOfInput() &&
++            currentPositionInInputs == dataInputs.size() - 1);
+   }
+ }

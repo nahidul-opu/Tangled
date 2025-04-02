@@ -1,0 +1,128 @@
+From 5057a8affbea2a970419bdc24bcf556f5cfa16c7 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 28 Feb 2006 14:36:34 +0000
+Subject: [PATCH] FIX: problem reading 'invalid' POMs (IVY-153)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484230 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../m2/PomModuleDescriptorParser.java         | 31 ++++++++++++++-----
+ .../m2/PomModuleDescriptorParserTest.java     | 13 ++++++++
+ .../ivy/external/m2/test-without-version.pom  | 19 ++++++++++++
+ 4 files changed, 56 insertions(+), 8 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/external/m2/test-without-version.pom
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 6dd52a84d..33356e655 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,5 +1,6 @@
+ - IMPROVE: Retrieve task now also optionally do ivy file downloads (IVY-167) (with the contribution of Costin Leau)
+ 
++- FIX: problem reading 'invalid' POMs (IVY-153)
+ - FIX: cryptic NPE due to spelling error in ivy.xml (IVY-177)
+ - FIX: conflicts with dynamic revisions not resolved properly (IVY-181)
+ - FIX: incorrect configuration definition gives misleading NullPointerException (IVY-175)
+diff --git a/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java
+index af4af3a74..20fd78a61 100644
+--- a/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java
+@@ -96,18 +96,33 @@ public void startElement(String uri, String localName, String qName, Attributes
+                     _module = null;
+                     _revision = null;
+                 }
++            } else if (_md.getModuleRevisionId() == null  && ("project/dependencies/dependency".equals(getContext()))) {
++                fillMrid();
+             }
+         }
++
++        private void fillMrid() throws SAXException {
++            if (_organisation == null) {
++                throw new SAXException("no groupId found in pom");
++            }
++            if (_module == null) {
++                throw new SAXException("no artifactId found in pom");
++            }
++            if (_revision == null) {
++                _revision = "SNAPSHOT";
++            }
++            ModuleRevisionId mrid = ModuleRevisionId.newInstance(_organisation, _module, _revision);
++            _properties.put("pom.version", _revision);
++            _md.setModuleRevisionId(mrid);
++            _md.addArtifact("master", new DefaultArtifact(mrid, getDefaultPubDate(),_module, "jar", "jar"));
++            _organisation = null;
++            _module = null;
++            _revision = null;
++        }
+         
+         public void endElement(String uri, String localName, String qName) throws SAXException {
+-            if ((_organisation != null && _module != null && _revision != null) && _md.getModuleRevisionId() == null) {
+-                ModuleRevisionId mrid = ModuleRevisionId.newInstance(_organisation, _module, _revision);
+-                _properties.put("pom.version", _revision);
+-                _md.setModuleRevisionId(mrid);
+-                _md.addArtifact("master", new DefaultArtifact(mrid, getDefaultPubDate(),_module, "jar", "jar"));
+-                _organisation = null;
+-                _module = null;
+-                _revision = null;
++            if (_md.getModuleRevisionId() == null  && ("project".equals(getContext()))) {
++                fillMrid();                
+             } else if (((_organisation != null && _module != null && _revision != null) || _dd != null) && "project/dependencies/dependency".equals(getContext())) {
+                 if (_dd == null) {
+                     _dd = new DefaultDependencyDescriptor(_md, ModuleRevisionId.newInstance(_organisation, _module, _revision), true, false, true);
+diff --git a/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java b/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java
+index 464f58df0..faf2bcc2a 100644
+--- a/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java
+@@ -13,6 +13,7 @@
+ import fr.jayasoft.ivy.DependencyDescriptor;
+ import fr.jayasoft.ivy.Ivy;
+ import fr.jayasoft.ivy.ModuleDescriptor;
++import fr.jayasoft.ivy.ModuleId;
+ import fr.jayasoft.ivy.ModuleRevisionId;
+ import fr.jayasoft.ivy.parser.AbstractModuleDescriptorParserTester;
+ import fr.jayasoft.ivy.repository.url.URLResource;
+@@ -57,6 +58,18 @@ public void testDependencies() throws Exception {
+         assertEquals(ModuleRevisionId.newInstance("commons-logging", "commons-logging", "1.0.4"), dds[0].getDependencyRevisionId());
+     }
+     
++    public void testWithoutVersion() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(new Ivy(), getClass().getResource("test-without-version.pom"), false);
++        assertNotNull(md);
++        
++        assertEquals(new ModuleId("fr.jayasoft", "test"), md.getModuleRevisionId().getModuleId());
++        
++        DependencyDescriptor[] dds = md.getDependencies();
++        assertNotNull(dds);
++        assertEquals(1, dds.length);
++        assertEquals(ModuleRevisionId.newInstance("commons-logging", "commons-logging", "1.0.4"), dds[0].getDependencyRevisionId());
++    }
++    
+     public void testProperties() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(new Ivy(), getClass().getResource("test-properties.pom"), false);
+         assertNotNull(md);
+diff --git a/test/java/fr/jayasoft/ivy/external/m2/test-without-version.pom b/test/java/fr/jayasoft/ivy/external/m2/test-without-version.pom
+new file mode 100644
+index 000000000..31ced4560
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/external/m2/test-without-version.pom
+@@ -0,0 +1,19 @@
++<?xml version="1.0"?>
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>fr.jayasoft</groupId>
++  <artifactId>test</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>commons-logging</groupId>
++      <artifactId>commons-logging</artifactId>
++      <version>1.0.4</version>
++    </dependency>
++  </dependencies>
++</project>
+\ No newline at end of file

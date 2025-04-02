@@ -1,0 +1,88 @@
+From 13d84663bc4eedb2e9e4035af75622b0a3cb480e Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <majakabiljo@fb.com>
+Date: Thu, 30 Jan 2014 08:47:30 -0800
+Subject: [PATCH] GIRAPH-832: Test don't finish after GIRAPH-792 (majakabiljo)
+
+---
+ CHANGELOG                                     |  2 ++
+ .../apache/giraph/graph/GraphTaskManager.java | 24 +++++++++++++++----
+ .../giraph/worker/WorkerProgressWriter.java   |  3 ++-
+ 3 files changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 971ab4632..1c1be0b7c 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-832: Test don't finish after GIRAPH-792 (majakabiljo)
++
+   GIRAPH-792: Print job progress to command line (majakabiljo)
+ 
+   GIRAPH-831: waitUntilAllTasksDone waits forever (without debug information) (aching)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+index a84ac6672..064c71f4b 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
++++ b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+@@ -172,6 +172,19 @@ private void checkInput() {
+     }
+   }
+ 
++  /**
++   * In order for job client to know which ZooKeeper the job is using,
++   * we create a counter with server:port as its name inside of
++   * ZOOKEEPER_SERVER_PORT_COUNTER_GROUP.
++   *
++   * @param serverPortList Server:port list for ZooKeeper used
++   */
++  private void createZooKeeperCounter(String serverPortList) {
++    // Getting the counter will actually create it.
++    context.getCounter(GiraphConstants.ZOOKEEPER_SERVER_PORT_COUNTER_GROUP,
++        serverPortList);
++  }
++
+   /**
+    * Called by owner of this GraphTaskManager on each compute node
+    *
+@@ -200,8 +213,12 @@ public void setup(Path[] zkPathList)
+     context.setStatus("setup: Initializing Zookeeper services.");
+     locateZookeeperClasspath(zkPathList);
+     String serverPortList = conf.getZookeeperList();
+-    if (serverPortList.isEmpty() && startZooKeeperManager()) {
+-      return; // ZK connect/startup failed
++    if (serverPortList.isEmpty()) {
++      if (startZooKeeperManager()) {
++        return; // ZK connect/startup failed
++      }
++    } else {
++      createZooKeeperCounter(serverPortList);
+     }
+     if (zkManager != null && zkManager.runsZooKeeper()) {
+       if (LOG.isInfoEnabled()) {
+@@ -369,8 +386,7 @@ private boolean startZooKeeperManager()
+     zkManager.onlineZooKeeperServers();
+     String serverPortList = zkManager.getZooKeeperServerPortString();
+     conf.setZookeeperList(serverPortList);
+-    context.getCounter(GiraphConstants.ZOOKEEPER_SERVER_PORT_COUNTER_GROUP,
+-        serverPortList);
++    createZooKeeperCounter(serverPortList);
+     return false;
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java b/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java
+index f8c757186..81acc1379 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java
++++ b/giraph-core/src/main/java/org/apache/giraph/worker/WorkerProgressWriter.java
+@@ -55,8 +55,9 @@ public void run() {
+             Thread.sleep((long) (WRITE_UPDATE_PERIOD_MILLISECONDS * factor));
+           }
+         } catch (InterruptedException e) {
++          // Thread is interrupted when stop is called, we can just log this
+           if (LOG.isInfoEnabled()) {
+-            LOG.info("run: WorkerProgressWriter interrupted", e);
++            LOG.info("run: WorkerProgressWriter interrupted");
+           }
+         }
+       }

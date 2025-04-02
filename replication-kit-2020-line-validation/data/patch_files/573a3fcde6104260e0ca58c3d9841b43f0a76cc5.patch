@@ -1,0 +1,558 @@
+From 573a3fcde6104260e0ca58c3d9841b43f0a76cc5 Mon Sep 17 00:00:00 2001
+From: Avery Ching <aching@apache.org>
+Date: Wed, 3 Oct 2012 01:37:11 +0000
+Subject: [PATCH] GIRAPH-355: Partition.readFields crashes
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1393251 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                     |  3 ++
+ .../org/apache/giraph/comm/ServerData.java    | 11 +++++--
+ .../comm/netty/NettyWorkerClientServer.java   |  3 +-
+ .../giraph/comm/netty/NettyWorkerServer.java  |  9 ++++--
+ .../apache/giraph/graph/BspServiceWorker.java | 11 ++++---
+ .../partition/DiskBackedPartitionStore.java   | 13 ++++++--
+ .../giraph/graph/partition/Partition.java     | 12 ++++++--
+ .../graph/partition/SimplePartitionStore.java | 10 +++++--
+ .../apache/giraph/comm/ConnectionTest.java    | 30 +++++++++----------
+ .../giraph/comm/RequestFailureTest.java       | 17 +++++------
+ .../org/apache/giraph/comm/RequestTest.java   | 12 ++++----
+ .../graph/partition/TestPartitionStores.java  | 16 +++++-----
+ 12 files changed, 88 insertions(+), 59 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index a0e348f47..1082e048d 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++
++  GIRAPH-355: Partition.readFields crashes. (maja via aching)
++
+   GIRAPH-354: Giraph Formats should use hcatalog-core. (nitayj via
+   aching)
+ 
+diff --git a/src/main/java/org/apache/giraph/comm/ServerData.java b/src/main/java/org/apache/giraph/comm/ServerData.java
+index 7d4503a79..5714ad55b 100644
+--- a/src/main/java/org/apache/giraph/comm/ServerData.java
++++ b/src/main/java/org/apache/giraph/comm/ServerData.java
+@@ -28,6 +28,7 @@
+ import org.apache.giraph.graph.partition.SimplePartitionStore;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
++import org.apache.hadoop.mapreduce.Mapper;
+ 
+ import java.io.IOException;
+ import java.util.concurrent.ConcurrentHashMap;
+@@ -70,20 +71,24 @@ public class ServerData<I extends WritableComparable,
+    *
+    * @param configuration Configuration
+    * @param messageStoreFactory Factory for message stores
++   * @param context Mapper context
+    */
+   public ServerData(
+       ImmutableClassesGiraphConfiguration<I, V, E, M> configuration,
+       MessageStoreFactory<I, M, MessageStoreByPartition<I, M>>
+-          messageStoreFactory) {
++          messageStoreFactory,
++      Mapper<?, ?, ?, ?>.Context context) {
+ 
+     this.messageStoreFactory = messageStoreFactory;
+     currentMessageStore = messageStoreFactory.newStore();
+     incomingMessageStore = messageStoreFactory.newStore();
+     if (configuration.getBoolean(GiraphConfiguration.USE_OUT_OF_CORE_GRAPH,
+         GiraphConfiguration.USE_OUT_OF_CORE_GRAPH_DEFAULT)) {
+-      partitionStore = new DiskBackedPartitionStore<I, V, E, M>(configuration);
++      partitionStore =
++          new DiskBackedPartitionStore<I, V, E, M>(configuration, context);
+     } else {
+-      partitionStore = new SimplePartitionStore<I, V, E, M>(configuration);
++      partitionStore =
++          new SimplePartitionStore<I, V, E, M>(configuration, context);
+     }
+   }
+ 
+diff --git a/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientServer.java b/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientServer.java
+index 23e23b69a..4710f3a1d 100644
+--- a/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientServer.java
++++ b/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientServer.java
+@@ -63,8 +63,7 @@ public NettyWorkerClientServer(
+       ImmutableClassesGiraphConfiguration<I, V, E, M> configuration,
+       CentralizedServiceWorker<I, V, E, M> service) {
+     server = new NettyWorkerServer<I, V, E, M>(
+-        configuration,
+-        service);
++        configuration, service, context);
+     client = new NettyWorkerClient<I, V, E, M>(context,
+         configuration, service,
+        ((NettyWorkerServer<I, V, E, M>) server).getServerData());
+diff --git a/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java b/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
+index 001740181..5da3ade57 100644
+--- a/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
++++ b/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
+@@ -38,6 +38,7 @@
+ import org.apache.giraph.graph.partition.Partition;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
++import org.apache.hadoop.mapreduce.Mapper;
+ import org.apache.log4j.Logger;
+ 
+ import com.google.common.collect.Sets;
+@@ -74,9 +75,11 @@ public class NettyWorkerServer<I extends WritableComparable,
+    *
+    * @param conf Configuration
+    * @param service Service to get partition mappings
++   * @param context Mapper context
+    */
+   public NettyWorkerServer(ImmutableClassesGiraphConfiguration conf,
+-      CentralizedServiceWorker<I, V, E, M> service) {
++      CentralizedServiceWorker<I, V, E, M> service,
++      Mapper<?, ?, ?, ?>.Context context) {
+     this.conf = conf;
+     this.service = service;
+ 
+@@ -85,7 +88,7 @@ public NettyWorkerServer(ImmutableClassesGiraphConfiguration conf,
+         GiraphConfiguration.USE_OUT_OF_CORE_MESSAGES_DEFAULT);
+     if (!useOutOfCoreMessaging) {
+       serverData = new ServerData<I, V, E, M>(
+-          conf, SimpleMessageStore.newFactory(service, conf));
++          conf, SimpleMessageStore.newFactory(service, conf), context);
+     } else {
+       int maxMessagesInMemory = conf.getInt(
+           GiraphConfiguration.MAX_MESSAGES_IN_MEMORY,
+@@ -98,7 +101,7 @@ public NettyWorkerServer(ImmutableClassesGiraphConfiguration conf,
+       MessageStoreFactory<I, M, MessageStoreByPartition<I, M>>
+           storeFactory = DiskBackedMessageStoreByPartition.newFactory(service,
+               maxMessagesInMemory, partitionStoreFactory);
+-      serverData = new ServerData<I, V, E, M>(conf, storeFactory);
++      serverData = new ServerData<I, V, E, M>(conf, storeFactory, context);
+     }
+ 
+     nettyServer = new NettyServer(conf,
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+index e29851ebf..65f38d786 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+@@ -182,7 +182,8 @@ public BspServiceWorker(
+       workerPartitionStore = null;
+     } else {
+       workerPartitionStore =
+-          new SimplePartitionStore<I, V, E, M>(getConfiguration());
++          new SimplePartitionStore<I, V, E, M>(getConfiguration(),
++              getContext());
+     }
+   }
+ 
+@@ -474,7 +475,8 @@ private VertexEdgeCount readVerticesFromInputSplit(
+       if (partition == null) {
+         partition = new Partition<I, V, E, M>(
+             getConfiguration(),
+-            partitionOwner.getPartitionId());
++            partitionOwner.getPartitionId(),
++            getContext());
+         inputSplitCache.put(partitionOwner, partition);
+       }
+       Vertex<I, V, E, M> oldVertex =
+@@ -674,7 +676,7 @@ public void setup() {
+               partitionOwner.getPartitionId())) {
+         Partition<I, V, E, M> partition =
+             new Partition<I, V, E, M>(getConfiguration(),
+-                partitionOwner.getPartitionId());
++                partitionOwner.getPartitionId(), getContext());
+         getPartitionStore().addPartition(partition);
+       }
+     }
+@@ -1324,7 +1326,8 @@ public void loadCheckpoint(long superstep) {
+           Partition<I, V, E, M> partition =
+               new Partition<I, V, E, M>(
+                   getConfiguration(),
+-                  partitionId);
++                  partitionId,
++                  getContext());
+           DataInputStream partitionsStream =
+               getFs().open(new Path(partitionsFile));
+           if (partitionsStream.skip(startPos) != startPos) {
+diff --git a/src/main/java/org/apache/giraph/graph/partition/DiskBackedPartitionStore.java b/src/main/java/org/apache/giraph/graph/partition/DiskBackedPartitionStore.java
+index 06c8c6b7b..99d212de1 100644
+--- a/src/main/java/org/apache/giraph/graph/partition/DiskBackedPartitionStore.java
++++ b/src/main/java/org/apache/giraph/graph/partition/DiskBackedPartitionStore.java
+@@ -23,6 +23,7 @@
+ import org.apache.giraph.graph.Vertex;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
++import org.apache.hadoop.mapreduce.Mapper;
+ import org.apache.log4j.Logger;
+ 
+ import com.google.common.collect.Iterables;
+@@ -73,15 +74,20 @@ public class DiskBackedPartitionStore<I extends WritableComparable,
+   /** Locks for accessing and modifying partitions. */
+   private final ConcurrentMap<Integer, Lock> partitionLocks =
+       Maps.newConcurrentMap();
++  /** Context used to report progress */
++  private final Mapper<?, ?, ?, ?>.Context context;
+ 
+   /**
+    * Constructor.
+    *
+    * @param conf Configuration
++   * @param context Mapper context
+    */
+   public DiskBackedPartitionStore(
+-      ImmutableClassesGiraphConfiguration<I, V, E, M> conf) {
++      ImmutableClassesGiraphConfiguration<I, V, E, M> conf,
++      Mapper<?, ?, ?, ?>.Context context) {
+     this.conf = conf;
++    this.context = context;
+     // We must be able to hold at least one partition in memory
+     maxInMemoryPartitions = Math.max(1,
+         conf.getInt(GiraphConfiguration.MAX_PARTITIONS_IN_MEMORY,
+@@ -156,7 +162,7 @@ private void writePartition(Partition<I, V, E, M> partition)
+   private Partition<I, V, E, M> readPartition(Integer partitionId)
+     throws IOException {
+     Partition<I, V, E, M> partition = new Partition<I, V, E, M>(conf,
+-        partitionId);
++        partitionId, context);
+     File file = new File(getPartitionPath(partitionId));
+     DataInputStream inputStream = new DataInputStream(
+         new BufferedInputStream(new FileInputStream(file)));
+@@ -284,7 +290,8 @@ public void addPartitionVertices(Integer partitionId,
+     } else {
+       Lock lock = createLock(partitionId);
+       if (lock != null) {
+-        addPartitionNoLock(new Partition<I, V, E, M>(conf, partitionId));
++        addPartitionNoLock(
++            new Partition<I, V, E, M>(conf, partitionId, context));
+         lock.unlock();
+       } else {
+         // Another thread is already creating the partition,
+diff --git a/src/main/java/org/apache/giraph/graph/partition/Partition.java b/src/main/java/org/apache/giraph/graph/partition/Partition.java
+index e24bc0597..1fa079e28 100644
+--- a/src/main/java/org/apache/giraph/graph/partition/Partition.java
++++ b/src/main/java/org/apache/giraph/graph/partition/Partition.java
+@@ -23,6 +23,7 @@
+ import org.apache.giraph.graph.Vertex;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
++import org.apache.hadoop.mapreduce.Mapper;
+ 
+ import com.google.common.collect.Maps;
+ 
+@@ -52,17 +53,22 @@ public class Partition<I extends WritableComparable,
+   private final int id;
+   /** Vertex map for this range (keyed by index) */
+   private final ConcurrentMap<I, Vertex<I, V, E, M>> vertexMap;
++  /** Context used to report progress */
++  private final Mapper<?, ?, ?, ?>.Context context;
+ 
+   /**
+    * Constructor.
+    *
+    * @param conf Configuration.
+    * @param id Partition id.
++   * @param context Mapper context
+    */
+   public Partition(ImmutableClassesGiraphConfiguration<I, V, E, M> conf,
+-                   int id) {
++                   int id,
++                   Mapper<?, ?, ?, ?>.Context context) {
+     this.conf = conf;
+     this.id = id;
++    this.context = context;
+     if (conf.getBoolean(GiraphConfiguration.USE_OUT_OF_CORE_MESSAGES,
+         GiraphConfiguration.USE_OUT_OF_CORE_MESSAGES_DEFAULT)) {
+       vertexMap = new ConcurrentSkipListMap<I, Vertex<I, V, E, M>>();
+@@ -154,7 +160,7 @@ public void readFields(DataInput input) throws IOException {
+     int vertices = input.readInt();
+     for (int i = 0; i < vertices; ++i) {
+       Vertex<I, V, E, M> vertex = conf.createVertex();
+-      vertex.getContext().progress();
++      context.progress();
+       vertex.readFields(input);
+       if (vertexMap.put(vertex.getId(), vertex) != null) {
+         throw new IllegalStateException(
+@@ -168,7 +174,7 @@ public void readFields(DataInput input) throws IOException {
+   public void write(DataOutput output) throws IOException {
+     output.writeInt(vertexMap.size());
+     for (Vertex vertex : vertexMap.values()) {
+-      vertex.getContext().progress();
++      context.progress();
+       vertex.write(output);
+     }
+   }
+diff --git a/src/main/java/org/apache/giraph/graph/partition/SimplePartitionStore.java b/src/main/java/org/apache/giraph/graph/partition/SimplePartitionStore.java
+index 15135fb6d..40a71f6e1 100644
+--- a/src/main/java/org/apache/giraph/graph/partition/SimplePartitionStore.java
++++ b/src/main/java/org/apache/giraph/graph/partition/SimplePartitionStore.java
+@@ -22,6 +22,7 @@
+ import org.apache.giraph.graph.Vertex;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
++import org.apache.hadoop.mapreduce.Mapper;
+ 
+ import com.google.common.collect.Maps;
+ 
+@@ -44,15 +45,20 @@ public class SimplePartitionStore<I extends WritableComparable,
+       Maps.newConcurrentMap();
+   /** Configuration. */
+   private final ImmutableClassesGiraphConfiguration<I, V, E, M> conf;
++  /** Context used to report progress */
++  private final Mapper<?, ?, ?, ?>.Context context;
+ 
+   /**
+    * Constructor.
+    *
+    * @param conf Configuration
++   * @param context Mapper context
+    */
+   public SimplePartitionStore(
+-      ImmutableClassesGiraphConfiguration<I, V, E, M> conf) {
++      ImmutableClassesGiraphConfiguration<I, V, E, M> conf,
++      Mapper<?, ?, ?, ?>.Context context) {
+     this.conf = conf;
++    this.context = context;
+   }
+ 
+   @Override
+@@ -69,7 +75,7 @@ public void addPartitionVertices(Integer partitionId,
+     Partition<I, V, E, M> partition = partitions.get(partitionId);
+     if (partition == null) {
+       Partition<I, V, E, M> newPartition = new Partition<I, V, E, M>(conf,
+-          partitionId);
++          partitionId, context);
+       partition = partitions.putIfAbsent(partitionId, newPartition);
+       if (partition == null) {
+         partition = newPartition;
+diff --git a/src/test/java/org/apache/giraph/comm/ConnectionTest.java b/src/test/java/org/apache/giraph/comm/ConnectionTest.java
+index 5e8c887f1..44ca732ee 100644
+--- a/src/test/java/org/apache/giraph/comm/ConnectionTest.java
++++ b/src/test/java/org/apache/giraph/comm/ConnectionTest.java
+@@ -19,22 +19,16 @@
+ package org.apache.giraph.comm;
+ 
+ import com.google.common.collect.Sets;
+-import java.util.Iterator;
+ import java.util.Set;
+ import org.apache.giraph.GiraphConfiguration;
+ import org.apache.giraph.ImmutableClassesGiraphConfiguration;
+-import org.apache.giraph.benchmark.EdgeListVertexPageRankBenchmark;
+-import org.apache.giraph.benchmark.PageRankBenchmark;
+ import org.apache.giraph.comm.messages.SimpleMessageStore;
+ import org.apache.giraph.comm.netty.handler.RequestServerHandler;
+ import org.apache.giraph.comm.netty.NettyClient;
+ import org.apache.giraph.comm.netty.NettyServer;
+ import org.apache.giraph.comm.netty.handler.WorkerRequestServerHandler;
+ import org.apache.giraph.graph.EdgeListVertex;
+-import org.apache.giraph.graph.MutableVertex;
+-import org.apache.giraph.graph.Vertex;
+ import org.apache.giraph.utils.MockUtils;
+-import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.io.IntWritable;
+ import org.apache.hadoop.mapreduce.Mapper.Context;
+ import org.junit.Before;
+@@ -80,9 +74,11 @@ public void connectSingleClientServer() throws IOException {
+     when(context.getConfiguration()).thenReturn(conf);
+ 
+     ServerData<IntWritable, IntWritable, IntWritable, IntWritable> serverData =
+-        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>
+-            (conf, SimpleMessageStore.newFactory(
+-                MockUtils.mockServiceGetVertexPartitionOwner(1), conf));
++        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>(
++            conf,
++            SimpleMessageStore.newFactory(
++                MockUtils.mockServiceGetVertexPartitionOwner(1), conf),
++            context);
+     NettyServer server =
+         new NettyServer(conf,
+             new WorkerRequestServerHandler.Factory(serverData));
+@@ -107,9 +103,11 @@ public void connectOneClientToThreeServers() throws IOException {
+     when(context.getConfiguration()).thenReturn(conf);
+ 
+     ServerData<IntWritable, IntWritable, IntWritable, IntWritable> serverData =
+-        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>
+-            (conf, SimpleMessageStore.newFactory(
+-                MockUtils.mockServiceGetVertexPartitionOwner(1), conf));
++        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>(
++            conf,
++            SimpleMessageStore.newFactory(
++                MockUtils.mockServiceGetVertexPartitionOwner(1), conf),
++            context);
+    RequestServerHandler.Factory requestServerHandlerFactory =
+        new WorkerRequestServerHandler.Factory(serverData);
+ 
+@@ -145,9 +143,11 @@ public void connectThreeClientsToOneServer() throws IOException {
+     when(context.getConfiguration()).thenReturn(conf);
+ 
+     ServerData<IntWritable, IntWritable, IntWritable, IntWritable> serverData =
+-        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>
+-            (conf, SimpleMessageStore.newFactory(
+-                MockUtils.mockServiceGetVertexPartitionOwner(1), conf));
++        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>(
++            conf,
++            SimpleMessageStore.newFactory(
++                MockUtils.mockServiceGetVertexPartitionOwner(1), conf),
++            context);
+     NettyServer server = new NettyServer(conf,
+         new WorkerRequestServerHandler.Factory(serverData));
+     server.start();
+diff --git a/src/test/java/org/apache/giraph/comm/RequestFailureTest.java b/src/test/java/org/apache/giraph/comm/RequestFailureTest.java
+index 02f699f22..c3a824e8e 100644
+--- a/src/test/java/org/apache/giraph/comm/RequestFailureTest.java
++++ b/src/test/java/org/apache/giraph/comm/RequestFailureTest.java
+@@ -27,12 +27,8 @@
+ import org.apache.giraph.comm.requests.SendPartitionMessagesRequest;
+ import org.apache.giraph.comm.requests.WritableRequest;
+ import org.apache.giraph.graph.EdgeListVertex;
+-import org.apache.giraph.graph.Vertex;
+ import org.apache.giraph.utils.MockUtils;
+-import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.io.IntWritable;
+-import org.apache.hadoop.io.Writable;
+-import org.apache.hadoop.io.WritableComparable;
+ import org.apache.hadoop.mapreduce.Mapper.Context;
+ import org.junit.Before;
+ import org.junit.Test;
+@@ -132,9 +128,11 @@ private void checkResult(int numRequests) throws IOException {
+   public void send2Requests() throws IOException {
+     // Start the service
+     serverData =
+-        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>
+-            (conf, SimpleMessageStore.newFactory(
+-                MockUtils.mockServiceGetVertexPartitionOwner(1), conf));
++        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>(
++            conf,
++            SimpleMessageStore.newFactory(
++                MockUtils.mockServiceGetVertexPartitionOwner(1), conf),
++            context);
+     server = new NettyServer(conf,
+         new WorkerRequestServerHandler.Factory(serverData));
+     server.start();
+@@ -169,7 +167,8 @@ public void alreadyProcessedRequest() throws IOException {
+     serverData =
+         new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>
+             (conf, SimpleMessageStore.newFactory(
+-                MockUtils.mockServiceGetVertexPartitionOwner(1), conf));
++                MockUtils.mockServiceGetVertexPartitionOwner(1), conf),
++                context);
+     server = new NettyServer(conf,
+         new WorkerRequestServerHandler.Factory(serverData));
+     server.start();
+@@ -204,7 +203,7 @@ public void resendRequest() throws IOException {
+     serverData =
+         new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>
+             (conf, SimpleMessageStore.newFactory(
+-                MockUtils.mockServiceGetVertexPartitionOwner(1), conf));
++                MockUtils.mockServiceGetVertexPartitionOwner(1), conf), context);
+     server = new NettyServer(conf,
+         new WorkerRequestServerHandler.Factory(serverData));
+     server.start();
+diff --git a/src/test/java/org/apache/giraph/comm/RequestTest.java b/src/test/java/org/apache/giraph/comm/RequestTest.java
+index aa0ddd23e..9795df87a 100644
+--- a/src/test/java/org/apache/giraph/comm/RequestTest.java
++++ b/src/test/java/org/apache/giraph/comm/RequestTest.java
+@@ -29,15 +29,11 @@
+ import org.apache.giraph.comm.requests.SendVertexRequest;
+ import org.apache.giraph.graph.Edge;
+ import org.apache.giraph.graph.EdgeListVertex;
+-import org.apache.giraph.graph.GiraphJob;
+ import org.apache.giraph.graph.Vertex;
+ import org.apache.giraph.graph.VertexMutations;
+ import org.apache.giraph.graph.partition.PartitionStore;
+ import org.apache.giraph.utils.MockUtils;
+-import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.io.IntWritable;
+-import org.apache.hadoop.io.Writable;
+-import org.apache.hadoop.io.WritableComparable;
+ import org.apache.hadoop.mapreduce.Mapper.Context;
+ import org.junit.Before;
+ import org.junit.Test;
+@@ -96,9 +92,11 @@ public void setUp() throws IOException {
+ 
+     // Start the service
+     serverData =
+-        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>
+-            (conf, SimpleMessageStore.newFactory(
+-                MockUtils.mockServiceGetVertexPartitionOwner(1), conf));
++        new ServerData<IntWritable, IntWritable, IntWritable, IntWritable>(
++            conf,
++            SimpleMessageStore.newFactory(
++                MockUtils.mockServiceGetVertexPartitionOwner(1), conf),
++            context);
+     server = new NettyServer(conf,
+         new WorkerRequestServerHandler.Factory(serverData));
+     server.start();
+diff --git a/src/test/java/org/apache/giraph/graph/partition/TestPartitionStores.java b/src/test/java/org/apache/giraph/graph/partition/TestPartitionStores.java
+index 4f7704496..66cc59d56 100644
+--- a/src/test/java/org/apache/giraph/graph/partition/TestPartitionStores.java
++++ b/src/test/java/org/apache/giraph/graph/partition/TestPartitionStores.java
+@@ -20,20 +20,18 @@
+ 
+ import org.apache.giraph.GiraphConfiguration;
+ import org.apache.giraph.ImmutableClassesGiraphConfiguration;
+-import org.apache.giraph.graph.GiraphJob;
+ import org.apache.giraph.graph.IntIntNullIntVertex;
+ import org.apache.giraph.graph.Vertex;
+-import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.io.IntWritable;
+ import org.apache.hadoop.io.NullWritable;
+-import org.apache.hadoop.io.Writable;
+-import org.apache.hadoop.io.WritableComparable;
++import org.apache.hadoop.mapreduce.Mapper;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertTrue;
++import static org.mockito.Mockito.mock;
+ 
+ import com.google.common.collect.Iterables;
+ import com.google.common.collect.Lists;
+@@ -45,6 +43,7 @@
+  */
+ public class TestPartitionStores {
+   private ImmutableClassesGiraphConfiguration conf;
++  private Mapper<?, ?, ?, ?>.Context context;
+ 
+   public static class MyVertex extends IntIntNullIntVertex {
+     @Override
+@@ -58,7 +57,7 @@ IntWritable> createPartition(ImmutableClassesGiraphConfiguration conf,
+                                        NullWritable, IntWritable>... vertices) {
+     Partition<IntWritable, IntWritable, NullWritable, IntWritable> partition =
+         new Partition<IntWritable, IntWritable, NullWritable,
+-            IntWritable>(conf, id);
++            IntWritable>(conf, id, context);
+     for (Vertex<IntWritable, IntWritable, NullWritable, IntWritable> v :
+         vertices) {
+       partition.putVertex(v);
+@@ -71,13 +70,14 @@ public void setUp() {
+     GiraphConfiguration configuration = new GiraphConfiguration();
+     configuration.setVertexClass(MyVertex.class);
+     conf = new ImmutableClassesGiraphConfiguration(configuration);
++    context = mock(Mapper.Context.class);
+   }
+ 
+   @Test
+   public void testSimplePartitionStore() {
+     PartitionStore<IntWritable, IntWritable, NullWritable, IntWritable>
+         partitionStore = new SimplePartitionStore<IntWritable, IntWritable,
+-        NullWritable, IntWritable>(conf);
++        NullWritable, IntWritable>(conf, context);
+     testReadWrite(partitionStore, conf);
+   }
+ 
+@@ -88,12 +88,12 @@ public void testDiskBackedPartitionStore() {
+ 
+     PartitionStore<IntWritable, IntWritable, NullWritable, IntWritable>
+         partitionStore = new DiskBackedPartitionStore<IntWritable,
+-                IntWritable, NullWritable, IntWritable>(conf);
++                IntWritable, NullWritable, IntWritable>(conf, context);
+     testReadWrite(partitionStore, conf);
+ 
+     conf.setInt(GiraphConfiguration.MAX_PARTITIONS_IN_MEMORY, 2);
+     partitionStore = new DiskBackedPartitionStore<IntWritable,
+-            IntWritable, NullWritable, IntWritable>(conf);
++            IntWritable, NullWritable, IntWritable>(conf, context);
+     testReadWrite(partitionStore, conf);
+   }
+ 

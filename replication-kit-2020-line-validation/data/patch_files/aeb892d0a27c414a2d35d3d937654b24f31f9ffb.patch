@@ -1,0 +1,125 @@
+From aeb892d0a27c414a2d35d3d937654b24f31f9ffb Mon Sep 17 00:00:00 2001
+From: Phil Steitz <psteitz@apache.org>
+Date: Fri, 2 May 2014 23:32:43 +0000
+Subject: [PATCH] Added check in PoolingDataSource constructor to make sure
+ connection factory and pool are linked.  JIRA: DBCP-412.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/trunk@1592119 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 +++
+ .../commons/dbcp2/PoolingDataSource.java      | 19 +++++++++++++-
+ .../commons/dbcp2/LocalStrings.properties     |  2 ++
+ .../commons/dbcp2/TestPoolingDataSource.java  | 25 +++++++++++++++++++
+ 4 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 214eb4794c..37767486be 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -64,6 +64,10 @@ The <action> type attribute can be add,update,fix,remove.
+       <action dev="markt" type="fix">
+         Small performance improvements when returning connections to the pool.
+       </action>
++      <action issue="DBCP-412" dev="psteitz" type="update">
++        Added check in PoolingDataSource constructor to ensure that the connection factory
++        and pool are properly linked.
++      </action>
+     </release>
+     <release version="2.0" date="3 March 2014" description=
+ "This release includes new features as well as bug fixes and enhancements.
+diff --git a/src/main/java/org/apache/commons/dbcp2/PoolingDataSource.java b/src/main/java/org/apache/commons/dbcp2/PoolingDataSource.java
+index a4c011814b..173ce3d3c6 100644
+--- a/src/main/java/org/apache/commons/dbcp2/PoolingDataSource.java
++++ b/src/main/java/org/apache/commons/dbcp2/PoolingDataSource.java
+@@ -17,7 +17,6 @@
+ package org.apache.commons.dbcp2;
+ 
+ import java.io.PrintWriter;
+-
+ import java.sql.Connection;
+ import java.sql.SQLException;
+ import java.sql.SQLFeatureNotSupportedException;
+@@ -26,7 +25,10 @@
+ 
+ import javax.sql.DataSource;
+ 
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
+ import org.apache.commons.pool2.ObjectPool;
++import org.apache.commons.pool2.impl.GenericObjectPool;
+ 
+ /**
+  * A simple {@link DataSource} implementation that obtains
+@@ -43,6 +45,8 @@
+  */
+ public class PoolingDataSource<C extends Connection> implements DataSource {
+ 
++    private static final Log log = LogFactory.getLog(PoolingDataSource.class);
++    
+     /** Controls access to the underlying connection */
+     private boolean accessToUnderlyingConnectionAllowed = false;
+ 
+@@ -51,6 +55,19 @@ public PoolingDataSource(ObjectPool<C> pool) {
+             throw new NullPointerException("Pool must not be null.");
+         }
+         _pool = pool;
++        // Verify that _pool's factory refers back to it.  If not, log a warning and try to fix.
++        if (_pool instanceof GenericObjectPool<?>) {
++            PoolableConnectionFactory pcf = (PoolableConnectionFactory) ((GenericObjectPool<?>) _pool).getFactory();
++            if (pcf == null) {
++                throw new NullPointerException("PoolableConnectionFactory must not be null.");
++            }
++            if (pcf.getPool() != _pool) {
++                log.warn(Utils.getMessage("poolingDataSource.factoryConfig"));
++                @SuppressWarnings("unchecked") // PCF must have a pool of PCs
++                ObjectPool<PoolableConnection> p = (ObjectPool<PoolableConnection>) _pool;
++                pcf.setPool(p);
++            }
++        }
+     }
+ 
+     /**
+diff --git a/src/main/resources/org/apache/commons/dbcp2/LocalStrings.properties b/src/main/resources/org/apache/commons/dbcp2/LocalStrings.properties
+index 1dd86f3ba0..fd1674faa4 100644
+--- a/src/main/resources/org/apache/commons/dbcp2/LocalStrings.properties
++++ b/src/main/resources/org/apache/commons/dbcp2/LocalStrings.properties
+@@ -18,3 +18,5 @@ connectionFactory.lifetimeExceeded=The lifetime of the connection [{0}] millisec
+ poolableConnectionFactory.validateObject.fail=Failed to validate a poolable connection
+ 
+ swallowedExceptionLogger.onSwallowedException=An internal object pool swallowed an Exception
++
++poolingDataSource.factoryConfig="PoolableConnectionFactory not linked to pool. Calling setPool() to fix the configuration."
+diff --git a/src/test/java/org/apache/commons/dbcp2/TestPoolingDataSource.java b/src/test/java/org/apache/commons/dbcp2/TestPoolingDataSource.java
+index 75b816c96b..ee715b0e80 100644
+--- a/src/test/java/org/apache/commons/dbcp2/TestPoolingDataSource.java
++++ b/src/test/java/org/apache/commons/dbcp2/TestPoolingDataSource.java
+@@ -135,4 +135,29 @@ public void testestPoolGuardConnectionWrapperEqualInnermost() throws Exception {
+         assertTrue(con2.innermostDelegateEquals(inner));
+         assertFalse(con.equals(con2));
+     }
++    
++    /**
++     * DBCP-412
++     * Verify that omitting factory.setPool(pool) when setting up PDS does not
++     * result in NPE.
++     */
++    public void testFixFactoryConfig() throws Exception {
++        Properties props = new Properties();
++        props.setProperty("user", "username");
++        props.setProperty("password", "password");
++        PoolableConnectionFactory f =
++            new PoolableConnectionFactory(
++                    new DriverConnectionFactory(new TesterDriver(),
++                            "jdbc:apache:commons:testdriver", props),
++                    null);
++        f.setValidationQuery("SELECT DUMMY FROM DUAL");
++        f.setDefaultReadOnly(Boolean.TRUE);
++        f.setDefaultAutoCommit(Boolean.TRUE);
++        GenericObjectPool<PoolableConnection> p = new GenericObjectPool<>(f);
++        p.setMaxTotal(getMaxTotal());
++        p.setMaxWaitMillis(getMaxWaitMillis());
++        ds = new PoolingDataSource<>(p);
++        assertTrue(f.getPool().equals(p));
++        ds.getConnection();
++    }
+ }

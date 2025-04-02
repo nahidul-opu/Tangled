@@ -1,0 +1,158 @@
+From e8d59b7f1fdd2d8ac19779afa7b1c42807a6c701 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Thu, 16 Oct 2008 20:19:59 +0000
+Subject: [PATCH] CONFIGURATION-339: CompositeConfiguration.getList() now takes
+ the order of child configurations into account when performing interpolation.
+ Ported patch to configuration2 branch.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@705348 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../CompositeConfiguration.java               | 39 +++++++++++++++---
+ .../TestCompositeConfiguration.java           | 40 +++++++++++++++++++
+ xdocs/changes.xml                             |  7 ++++
+ 3 files changed, 80 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/CompositeConfiguration.java b/src/main/java/org/apache/commons/configuration2/CompositeConfiguration.java
+index 8ec6445908..603259f549 100644
+--- a/src/main/java/org/apache/commons/configuration2/CompositeConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/CompositeConfiguration.java
+@@ -278,9 +278,9 @@ public boolean containsKey(String key)
+     }
+ 
+     @Override
+-    public <T> List<T> getList(String key, List<T> defaultValue)
++    public <E> List<E> getList(String key, List<E> defaultValue)
+     {
+-        List list = new ArrayList();
++        List<E> list = new ArrayList<E>();
+ 
+         // add all elements from the first configuration containing the requested key
+         Iterator<Configuration> it = configList.iterator();
+@@ -289,22 +289,22 @@ public <T> List<T> getList(String key, List<T> defaultValue)
+             Configuration config = it.next();
+             if (config != inMemoryConfiguration && config.containsKey(key))
+             {
+-                list.addAll(config.getList(key));
++                appendListProperty(list, config, key);
+             }
+         }
+ 
+         // add all elements from the in memory configuration
+-        list.addAll(inMemoryConfiguration.getList(key));
++        appendListProperty(list, inMemoryConfiguration, key);
+ 
+         if (list.isEmpty())
+         {
+             return defaultValue;
+         }
+ 
+-        ListIterator lit = list.listIterator();
++        ListIterator<E> lit = list.listIterator();
+         while (lit.hasNext())
+         {
+-            lit.set(interpolate(lit.next()));
++            lit.set((E) interpolate(lit.next()));
+         }
+ 
+         return list;
+@@ -467,4 +467,31 @@ public Configuration getSource(String key)
+ 
+         return source;
+     }
++
++    /**
++     * Adds the value of a property to the given list. This method is used by
++     * <code>getList()</code> for gathering property values from the child
++     * configurations.
++     *
++     * @param dest the list for collecting the data
++     * @param config the configuration to query
++     * @param key the key of the property
++     * @param <E> the type of the elements in the list
++     */
++    private static <E> void appendListProperty(List<E> dest, Configuration config,
++            String key)
++    {
++        Object value = config.getProperty(key);
++        if (value != null)
++        {
++            if (value instanceof Collection)
++            {
++                dest.addAll((Collection<E>) value);
++            }
++            else
++            {
++                dest.add((E) value);
++            }
++        }
++    }
+ }
+diff --git a/src/test/java/org/apache/commons/configuration2/TestCompositeConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestCompositeConfiguration.java
+index 7a213296bc..bff685e84f 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestCompositeConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestCompositeConfiguration.java
+@@ -767,6 +767,46 @@ public void testGetSourceNull()
+         }
+     }
+ 
++    /**
++     * Prepares a test for interpolation with multiple configurations and
++     * similar properties.
++     */
++    private void prepareInterpolationTest()
++    {
++        PropertiesConfiguration p = new PropertiesConfiguration();
++        p.addProperty("foo", "initial");
++        p.addProperty("bar", "${foo}");
++        p.addProperty("prefix.foo", "override");
++
++        cc.addConfiguration(p.subset("prefix"));
++        cc.addConfiguration(p);
++        assertEquals("Wrong value on direct access", "override", cc
++                .getString("bar"));
++    }
++
++    /**
++     * Tests querying a list when a tricky interpolation is involved. This is
++     * related to CONFIGURATION-339.
++     */
++    public void testGetListWithInterpolation()
++    {
++        prepareInterpolationTest();
++        List<?> lst = cc.getList("bar");
++        assertEquals("Wrong number of values", 1, lst.size());
++        assertEquals("Wrong value in list", "override", lst.get(0));
++    }
++
++    /**
++     * Tests querying a string array when a tricky interpolation is involved.
++     */
++    public void testGetStringArrayWithInterpolation()
++    {
++        prepareInterpolationTest();
++        String[] values = cc.getStringArray("bar");
++        assertEquals("Wrong number of values", 1, values.length);
++        assertEquals("Wrong value in array", "override", values[0]);
++    }
++
+     /**
+      * A test configuration event listener that counts the number of received
+      * events. Used for testing the event facilities.
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index ab4d501eed..24cb7f194e 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -85,6 +85,13 @@
+     </release>
+ 
+     <release version="1.6" date="in SVN" description="">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-339">
++        When performing interpolation the methods getList() and getStringArray()
++        of CompositeConfiguration did not take the order of child configurations
++        into account. This could lead to wrong interpolated values when the key
++        was contained in multiple child configuration. Interpolation is now
++        always done in the correct order.
++      </action>
+       <action dev="oheger" type="add" issue="CONFIGURATION-338" due-to="David Donn">
+         PropertiesConfiguration now also performs interpolation when searching
+         for include files. This means that the name of a file to include can be

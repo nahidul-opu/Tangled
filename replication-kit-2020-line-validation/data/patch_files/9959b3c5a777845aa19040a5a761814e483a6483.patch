@@ -1,0 +1,103 @@
+From 9959b3c5a777845aa19040a5a761814e483a6483 Mon Sep 17 00:00:00 2001
+From: thygesen <thygesen@apache.org>
+Date: Thu, 14 Sep 2017 15:53:58 +0200
+Subject: [PATCH] OPENNLP-1132: Fail with exception if not enough lines in
+ leipzig parser
+
+---
+ .../leipzig/LeipzigLanguageSampleStream.java  | 10 +++++--
+ .../LeipzigLanguageSampleStreamTest.java      | 27 +++++++++++++------
+ 2 files changed, 27 insertions(+), 10 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStream.java
+index eff293537..28b2f64c4 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStream.java
+@@ -36,6 +36,7 @@
+ 
+ import opennlp.tools.langdetect.Language;
+ import opennlp.tools.langdetect.LanguageSample;
++import opennlp.tools.util.InvalidFormatException;
+ import opennlp.tools.util.MarkableFileInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+@@ -56,14 +57,19 @@ private class LeipzigSentencesStream implements ObjectStream<LanguageSample> {
+       // The file name contains the number of lines, but to make this more stable
+       // the file is once scanned for the count even tough this is slower
+       int totalLineCount = (int) Files.lines(sentencesFile.toPath()).count();
++      int requiredLines = sentencesPerSample * numberOfSamples;
++
++      if (totalLineCount < requiredLines)
++        throw new InvalidFormatException(
++                String.format("%s does not contain enough lines (%d lines < %d required lines).",
++                        sentencesFile.getPath(), totalLineCount, requiredLines));
+ 
+       List<Integer> indexes = IntStream.range(0, totalLineCount)
+           .boxed().collect(Collectors.toList());
+ 
+       Collections.shuffle(indexes, random);
+ 
+-      Set<Integer> selectedLines = new HashSet<>(
+-          indexes.subList(0, sentencesPerSample * numberOfSamples));
++      Set<Integer> selectedLines = new HashSet<>(indexes.subList(0, requiredLines));
+ 
+       List<String> sentences = new ArrayList<>();
+ 
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStreamTest.java b/opennlp-tools/src/test/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStreamTest.java
+index b03291f56..b6efab46e 100644
+--- a/opennlp-tools/src/test/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStreamTest.java
++++ b/opennlp-tools/src/test/java/opennlp/tools/formats/leipzig/LeipzigLanguageSampleStreamTest.java
+@@ -23,29 +23,28 @@
+ import org.junit.Assert;
+ import org.junit.Test;
+ 
+-import opennlp.tools.langdetect.LanguageSample;
++import opennlp.tools.util.InvalidFormatException;
+ 
+ /**
+  * Tests for the {@link LeipzigLanguageSampleStream} class.
+  */
+ public class LeipzigLanguageSampleStreamTest {
+ 
++  private static String testDataPath = LeipzigLanguageSampleStreamTest.class
++          .getClassLoader().getResource("opennlp/tools/formats/leipzig/samples").getPath();
++
+   @Test
+   public void testReadSentenceFiles() {
+-    String testDataPath = LeipzigLanguageSampleStreamTest.class
+-            .getClassLoader().getResource("opennlp/tools/formats/leipzig/samples").getPath();
++
+     int samplesPerLanguage = 2;
+     int sentencesPerSample = 1;
+     try {
+-
+       LeipzigLanguageSampleStream stream = new LeipzigLanguageSampleStream(new File(testDataPath),
+               sentencesPerSample, samplesPerLanguage);
+       int count = 0;
+-      LanguageSample sample = null;
+-      while ((sample = stream.read()) != null) {
++      while (stream.read() != null)
+         count++;
+-        System.out.println(sample.getContext());
+-      }
++
+       Assert.assertEquals(4, count);
+ 
+     } catch (IOException e) {
+@@ -53,4 +52,16 @@ public void testReadSentenceFiles() {
+     }
+   }
+ 
++  @Test(expected = InvalidFormatException.class)
++  public void testNotEnoughSentences() throws IOException {
++    int samplesPerLanguage = 2;
++    int sentencesPerSample = 2;
++
++    LeipzigLanguageSampleStream stream =
++            new LeipzigLanguageSampleStream(new File(testDataPath),
++              sentencesPerSample, samplesPerLanguage);
++    while (stream.read() != null);
++
++  }
++
+ }

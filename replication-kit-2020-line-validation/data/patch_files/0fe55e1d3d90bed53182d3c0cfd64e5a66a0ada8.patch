@@ -1,0 +1,751 @@
+From 0fe55e1d3d90bed53182d3c0cfd64e5a66a0ada8 Mon Sep 17 00:00:00 2001
+From: Gabor Szadovszky <gabor.szadovszky@cloudera.com>
+Date: Tue, 27 Feb 2018 14:19:14 +0100
+Subject: [PATCH] PARQUET-1217: Incorrect handling of missing values in
+ Statistics
+
+In parquet-format every value in Statistics is optional while parquet-mr does not properly handle these scenarios:
+- null_count is set but min/max or min_value/max_value are not: filtering may fail with NPE or incorrect filtering occurs
+  fix: check if min/max is set before comparing to the related values
+- null_count is not set: filtering handles null_count as if it would be 0 -> incorrect filtering may occur
+  fix: introduce new method in Statistics object to check if num_nulls is set; check if num_nulls is set by the new method before using its value for filtering
+
+Author: Gabor Szadovszky <gabor.szadovszky@cloudera.com>
+
+Closes #458 from gszadovszky/PARQUET-1217 and squashes the following commits:
+
+9d14090 [Gabor Szadovszky] Updates according to rdblue's comments
+116d1d3 [Gabor Szadovszky] PARQUET-1217: Updates according to zi's comments
+c264b50 [Gabor Szadovszky] PARQUET-1217: fix handling of unset nullCount
+2ec2fb1 [Gabor Szadovszky] PARQUET-1217: Incorrect handling of missing values in Statistics
+
+This change is based on b82d96218bfd37f6df95a2e8d7675d091ab61970 but is not a clean cherry-pick.
+---
+ .../parquet/column/statistics/Statistics.java | 68 ++++++++++++++++++-
+ .../column/statistics/TestStatistics.java     |  1 +
+ .../statisticslevel/StatisticsFilter.java     | 42 +++++++++++-
+ .../converter/ParquetMetadataConverter.java   | 12 ++--
+ .../statisticslevel/TestStatisticsFilter.java | 64 +++++++++++++++--
+ .../TestParquetMetadataConverter.java         | 35 ++++++++++
+ .../hadoop/TestColumnChunkPageWriteStore.java |  6 +-
+ .../parquet/hadoop/TestParquetFileWriter.java | 54 ++++++++-------
+ 8 files changed, 240 insertions(+), 42 deletions(-)
+
+diff --git a/parquet-column/src/main/java/org/apache/parquet/column/statistics/Statistics.java b/parquet-column/src/main/java/org/apache/parquet/column/statistics/Statistics.java
+index 30153c0743..26c14c1357 100644
+--- a/parquet-column/src/main/java/org/apache/parquet/column/statistics/Statistics.java
++++ b/parquet-column/src/main/java/org/apache/parquet/column/statistics/Statistics.java
+@@ -31,6 +31,44 @@
+  */
+ public abstract class Statistics<T extends Comparable<T>> {
+ 
++  /**
++   * Builder class to build Statistics objects. Used to read the statistics from the Parquet file.
++   */
++  public static class Builder {
++    private final PrimitiveTypeName type;
++    private byte[] min;
++    private byte[] max;
++    private long numNulls = -1;
++
++    private Builder(PrimitiveTypeName type) {
++      this.type = type;
++    }
++
++    public Builder withMin(byte[] min) {
++      this.min = min;
++      return this;
++    }
++
++    public Builder withMax(byte[] max) {
++      this.max = max;
++      return this;
++    }
++
++    public Builder withNumNulls(long numNulls) {
++      this.numNulls = numNulls;
++      return this;
++    }
++
++    public Statistics<?> build() {
++      Statistics<?> stats = getStatsBasedOnType(type);
++      if (min != null && max != null) {
++        stats.setMinMaxFromBytes(min, max);
++      }
++      stats.num_nulls = this.numNulls;
++      return stats;
++    }
++  }
++
+   private boolean hasNonNullValue;
+   private long num_nulls;
+ 
+@@ -67,6 +105,17 @@ public static Statistics getStatsBasedOnType(PrimitiveTypeName type) {
+     }
+   }
+ 
++  /**
++   * Returns a builder to create new statistics object. Used to read the statistics from the parquet file.
++   *
++   * @param type
++   *          type of the column
++   * @return builder to create new statistics object
++   */
++  public static Builder getBuilder(PrimitiveTypeName type) {
++    return new Builder(type);
++  }
++
+   /**
+    * updates statistics min and max using the passed value
+    * @param value value to use to update min and max
+@@ -172,7 +221,9 @@ public void mergeStatistics(Statistics stats) {
+    * Abstract method to set min and max values from byte arrays.
+    * @param minBytes byte array to set the min value to
+    * @param maxBytes byte array to set the max value to
++   * @deprecated will be removed in 2.0.0. Use {@link #getBuilder(PrimitiveType)} instead.
+    */
++  @Deprecated
+   abstract public void setMinMaxFromBytes(byte[] minBytes, byte[] maxBytes);
+ 
+   abstract public T genericGetMin();
+@@ -221,7 +272,7 @@ public void incrementNumNulls(long increment) {
+ 
+   /**
+    * Returns the null count
+-   * @return null count
++   * @return null count or {@code -1} if the null count is not set
+    */
+   public long getNumNulls() {
+     return num_nulls;
+@@ -229,8 +280,12 @@ public long getNumNulls() {
+ 
+   /**
+    * Sets the number of nulls to the parameter value
+-   * @param nulls null count to set the count to
++   *
++   * @param nulls
++   *          null count to set the count to
++   * @deprecated will be removed in 2.0.0. Use {@link #getBuilder(PrimitiveType)} instead.
+    */
++  @Deprecated
+   public void setNumNulls(long nulls) {
+     num_nulls = nulls;
+   }
+@@ -241,7 +296,7 @@ public void setNumNulls(long nulls) {
+    * @return true if object is empty, false otherwise
+    */
+   public boolean isEmpty() {
+-    return !hasNonNullValue && num_nulls == 0;
++    return !hasNonNullValue && !isNumNullsSet();
+   }
+ 
+   /**
+@@ -251,6 +306,13 @@ public boolean hasNonNullValue() {
+     return hasNonNullValue;
+   }
+  
++  /**
++   * @return whether numNulls is set and can be used
++   */
++  public boolean isNumNullsSet() {
++    return num_nulls >= 0;
++  }
++
+   /**
+    * Sets the page/column as having a valid non-null value
+    * kind of misnomer here
+diff --git a/parquet-column/src/test/java/org/apache/parquet/column/statistics/TestStatistics.java b/parquet-column/src/test/java/org/apache/parquet/column/statistics/TestStatistics.java
+index 128acb49f6..cf4bf59af2 100644
+--- a/parquet-column/src/test/java/org/apache/parquet/column/statistics/TestStatistics.java
++++ b/parquet-column/src/test/java/org/apache/parquet/column/statistics/TestStatistics.java
+@@ -37,6 +37,7 @@ public class TestStatistics {
+   @Test
+   public void testNumNulls() {
+     IntStatistics stats = new IntStatistics();
++    assertTrue(stats.isNumNullsSet());
+     assertEquals(stats.getNumNulls(), 0);
+ 
+     stats.incrementNumNulls();
+diff --git a/parquet-hadoop/src/main/java/org/apache/parquet/filter2/statisticslevel/StatisticsFilter.java b/parquet-hadoop/src/main/java/org/apache/parquet/filter2/statisticslevel/StatisticsFilter.java
+index ac7132e74e..531c091169 100644
+--- a/parquet-hadoop/src/main/java/org/apache/parquet/filter2/statisticslevel/StatisticsFilter.java
++++ b/parquet-hadoop/src/main/java/org/apache/parquet/filter2/statisticslevel/StatisticsFilter.java
+@@ -40,7 +40,6 @@
+ import org.apache.parquet.filter2.predicate.UserDefinedPredicate;
+ import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+ 
+-import static org.apache.parquet.Preconditions.checkArgument;
+ import static org.apache.parquet.Preconditions.checkNotNull;
+ 
+ /**
+@@ -122,6 +121,10 @@ public <T extends Comparable<T>> Boolean visit(Eq<T> eq) {
+     }
+ 
+     if (value == null) {
++      // We don't know anything about the nulls in this chunk
++      if (!stats.isNumNullsSet()) {
++        return BLOCK_MIGHT_MATCH;
++      }
+       // we are looking for records where v eq(null)
+       // so drop if there are no nulls in this chunk
+       return !hasNulls(meta);
+@@ -133,6 +136,11 @@ public <T extends Comparable<T>> Boolean visit(Eq<T> eq) {
+       return BLOCK_CANNOT_MATCH;
+     }
+ 
++    if (!stats.hasNonNullValue()) {
++      // stats does not contain min/max values, we cannot drop any chunks
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     // drop if value < min || value > max
+     return value.compareTo(stats.genericGetMin()) < 0 || value.compareTo(stats.genericGetMax()) > 0;
+   }
+@@ -166,12 +174,17 @@ public <T extends Comparable<T>> Boolean visit(NotEq<T> notEq) {
+       return isAllNulls(meta);
+     }
+ 
+-    if (hasNulls(meta)) {
++    if (stats.isNumNullsSet() && hasNulls(meta)) {
+       // we are looking for records where v notEq(someNonNull)
+       // but this chunk contains nulls, we cannot drop it
+       return BLOCK_MIGHT_MATCH;
+     }
+ 
++    if (!stats.hasNonNullValue()) {
++      // stats does not contain min/max values, we cannot drop any chunks
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     // drop if this is a column where min = max = value
+     return value.compareTo(stats.genericGetMin()) == 0 && value.compareTo(stats.genericGetMax()) == 0;
+   }
+@@ -201,6 +214,11 @@ public <T extends Comparable<T>> Boolean visit(Lt<T> lt) {
+       return BLOCK_CANNOT_MATCH;
+     }
+ 
++    if (!stats.hasNonNullValue()) {
++      // stats does not contain min/max values, we cannot drop any chunks
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     T value = lt.getValue();
+ 
+     // drop if value <= min
+@@ -232,6 +250,11 @@ public <T extends Comparable<T>> Boolean visit(LtEq<T> ltEq) {
+       return BLOCK_CANNOT_MATCH;
+     }
+ 
++    if (!stats.hasNonNullValue()) {
++      // stats does not contain min/max values, we cannot drop any chunks
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     T value = ltEq.getValue();
+ 
+     // drop if value < min
+@@ -263,6 +286,11 @@ public <T extends Comparable<T>> Boolean visit(Gt<T> gt) {
+       return BLOCK_CANNOT_MATCH;
+     }
+ 
++    if (!stats.hasNonNullValue()) {
++      // stats does not contain min/max values, we cannot drop any chunks
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     T value = gt.getValue();
+ 
+     // drop if value >= max
+@@ -294,6 +322,11 @@ public <T extends Comparable<T>> Boolean visit(GtEq<T> gtEq) {
+       return BLOCK_CANNOT_MATCH;
+     }
+ 
++    if (!stats.hasNonNullValue()) {
++      // stats does not contain min/max values, we cannot drop any chunks
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     T value = gtEq.getValue();
+ 
+     // drop if value >= max
+@@ -355,6 +388,11 @@ private <T extends Comparable<T>, U extends UserDefinedPredicate<T>> Boolean vis
+       }
+     }
+ 
++    if (!stats.hasNonNullValue()) {
++      // stats does not contain min/max values, we cannot drop any chunks
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     org.apache.parquet.filter2.predicate.Statistics<T> udpStats =
+         new org.apache.parquet.filter2.predicate.Statistics<T>(stats.genericGetMin(), stats.genericGetMax());
+ 
+diff --git a/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java b/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java
+index cc430082a3..9df5660460 100644
+--- a/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java
++++ b/parquet-hadoop/src/main/java/org/apache/parquet/format/converter/ParquetMetadataConverter.java
+@@ -337,7 +337,8 @@ public static org.apache.parquet.column.statistics.Statistics fromParquetStatist
+   static org.apache.parquet.column.statistics.Statistics fromParquetStatisticsInternal
+       (String createdBy, Statistics statistics, PrimitiveTypeName type, SortOrder typeSortOrder) {
+     // create stats object based on the column type
+-    org.apache.parquet.column.statistics.Statistics stats = org.apache.parquet.column.statistics.Statistics.getStatsBasedOnType(type);
++    org.apache.parquet.column.statistics.Statistics.Builder statsBuilder =
++        org.apache.parquet.column.statistics.Statistics.getBuilder(type);
+     // If there was no statistics written to the footer, create an empty Statistics object and return
+ 
+     // NOTE: See docs in CorruptStatistics for explanation of why this check is needed
+@@ -347,11 +348,14 @@ public static org.apache.parquet.column.statistics.Statistics fromParquetStatist
+     if (statistics != null && !CorruptStatistics.shouldIgnoreStatistics(createdBy, type) &&
+         SortOrder.SIGNED == typeSortOrder) {
+       if (statistics.isSetMax() && statistics.isSetMin()) {
+-        stats.setMinMaxFromBytes(statistics.min.array(), statistics.max.array());
++        statsBuilder.withMin(statistics.min.array());
++        statsBuilder.withMax(statistics.max.array());
++      }
++      if (statistics.isSetNull_count()) {
++        statsBuilder.withNumNulls(statistics.null_count);
+       }
+-      stats.setNumNulls(statistics.null_count);
+     }
+-    return stats;
++    return statsBuilder.build();
+   }
+ 
+   public org.apache.parquet.column.statistics.Statistics fromParquetStatistics(
+diff --git a/parquet-hadoop/src/test/java/org/apache/parquet/filter2/statisticslevel/TestStatisticsFilter.java b/parquet-hadoop/src/test/java/org/apache/parquet/filter2/statisticslevel/TestStatisticsFilter.java
+index d8b4407914..a0551a452d 100644
+--- a/parquet-hadoop/src/test/java/org/apache/parquet/filter2/statisticslevel/TestStatisticsFilter.java
++++ b/parquet-hadoop/src/test/java/org/apache/parquet/filter2/statisticslevel/TestStatisticsFilter.java
+@@ -22,7 +22,6 @@
+ import java.util.HashSet;
+ import java.util.List;
+ 
+-import org.apache.parquet.io.api.Binary;
+ import org.junit.Test;
+ 
+ import org.apache.parquet.column.Encoding;
+@@ -39,6 +38,7 @@
+ import org.apache.parquet.hadoop.metadata.ColumnChunkMetaData;
+ import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+ import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
++import org.apache.parquet.schema.Types;
+ 
+ import static org.apache.parquet.filter2.predicate.FilterApi.binaryColumn;
+ import static org.apache.parquet.io.api.Binary.fromString;
+@@ -62,7 +62,8 @@
+ 
+ public class TestStatisticsFilter {
+ 
+-  private static ColumnChunkMetaData getIntColumnMeta(IntStatistics stats, long valueCount) {
++  private static ColumnChunkMetaData getIntColumnMeta(org.apache.parquet.column.statistics.Statistics<?> stats,
++      long valueCount) {
+     return ColumnChunkMetaData.get(ColumnPath.get("int", "column"),
+         PrimitiveTypeName.INT32,
+         CompressionCodecName.GZIP,
+@@ -71,7 +72,8 @@ private static ColumnChunkMetaData getIntColumnMeta(IntStatistics stats, long va
+         0L, 0L, valueCount, 0L, 0L);
+   }
+ 
+-  private static ColumnChunkMetaData getDoubleColumnMeta(DoubleStatistics stats, long valueCount) {
++  private static ColumnChunkMetaData getDoubleColumnMeta(org.apache.parquet.column.statistics.Statistics<?> stats,
++      long valueCount) {
+     return ColumnChunkMetaData.get(ColumnPath.get("double", "column"),
+         PrimitiveTypeName.DOUBLE,
+         CompressionCodecName.GZIP,
+@@ -87,13 +89,16 @@ private static ColumnChunkMetaData getDoubleColumnMeta(DoubleStatistics stats, l
+ 
+   private static final IntStatistics intStats = new IntStatistics();
+   private static final IntStatistics nullIntStats = new IntStatistics();
++  private static final org.apache.parquet.column.statistics.Statistics<?> emptyIntStats = org.apache.parquet.column.statistics.Statistics
++      .getBuilder(PrimitiveTypeName.INT32).build();
+   private static final DoubleStatistics doubleStats = new DoubleStatistics();
++  private static final org.apache.parquet.column.statistics.Statistics<?> missingMinMaxDoubleStats = org.apache.parquet.column.statistics.Statistics
++      .getBuilder(PrimitiveTypeName.DOUBLE).withNumNulls(100).build();
+ 
+   static {
+     intStats.setMinMax(10, 100);
+     doubleStats.setMinMax(10, 100);
+ 
+-    nullIntStats.setMinMax(0, 0);
+     nullIntStats.setNumNulls(177);
+   }
+ 
+@@ -105,6 +110,9 @@ private static ColumnChunkMetaData getDoubleColumnMeta(DoubleStatistics stats, l
+       getIntColumnMeta(nullIntStats, 177L), // column of all nulls
+       getDoubleColumnMeta(doubleStats, 177L));
+ 
++  private static final List<ColumnChunkMetaData> missingMinMaxColumnMetas = Arrays.asList(
++      getIntColumnMeta(emptyIntStats, 177L),                // missing min/max values and numNulls => stats is empty
++      getDoubleColumnMeta(missingMinMaxDoubleStats, 177L)); // missing min/max, some null values
+ 
+   @Test
+   public void testEqNonNull() {
+@@ -116,6 +124,9 @@ public void testEqNonNull() {
+     // drop columns of all nulls when looking for non-null value
+     assertTrue(canDrop(eq(intColumn, 0), nullColumnMetas));
+     assertTrue(canDrop(eq(missingColumn, fromString("any")), columnMetas));
++
++    assertFalse(canDrop(eq(intColumn, 50), missingMinMaxColumnMetas));
++    assertFalse(canDrop(eq(doubleColumn, 50.0), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -137,6 +148,9 @@ public void testEqNull() {
+         getDoubleColumnMeta(doubleStats, 177L))));
+ 
+     assertFalse(canDrop(eq(missingColumn, null), columnMetas));
++
++    assertFalse(canDrop(eq(intColumn, null), missingMinMaxColumnMetas));
++    assertFalse(canDrop(eq(doubleColumn, null), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -163,6 +177,9 @@ public void testNotEqNonNull() {
+         getDoubleColumnMeta(doubleStats, 177L))));
+ 
+     assertFalse(canDrop(notEq(missingColumn, fromString("any")), columnMetas));
++
++    assertFalse(canDrop(notEq(intColumn, 50), missingMinMaxColumnMetas));
++    assertFalse(canDrop(notEq(doubleColumn, 50.0), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -192,6 +209,9 @@ public void testNotEqNull() {
+         getDoubleColumnMeta(doubleStats, 177L))));
+ 
+     assertTrue(canDrop(notEq(missingColumn, null), columnMetas));
++
++    assertFalse(canDrop(notEq(intColumn, null), missingMinMaxColumnMetas));
++    assertFalse(canDrop(notEq(doubleColumn, null), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -205,6 +225,9 @@ public void testLt() {
+     assertTrue(canDrop(lt(intColumn, 7), nullColumnMetas));
+ 
+     assertTrue(canDrop(lt(missingColumn, fromString("any")), columnMetas));
++
++    assertFalse(canDrop(lt(intColumn, 0), missingMinMaxColumnMetas));
++    assertFalse(canDrop(lt(doubleColumn, 0.0), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -218,6 +241,9 @@ public void testLtEq() {
+     assertTrue(canDrop(ltEq(intColumn, 7), nullColumnMetas));
+ 
+     assertTrue(canDrop(ltEq(missingColumn, fromString("any")), columnMetas));
++
++    assertFalse(canDrop(ltEq(intColumn, -1), missingMinMaxColumnMetas));
++    assertFalse(canDrop(ltEq(doubleColumn, -0.1), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -231,6 +257,9 @@ public void testGt() {
+     assertTrue(canDrop(gt(intColumn, 7), nullColumnMetas));
+ 
+     assertTrue(canDrop(gt(missingColumn, fromString("any")), columnMetas));
++
++    assertFalse(canDrop(gt(intColumn, 0), missingMinMaxColumnMetas));
++    assertFalse(canDrop(gt(doubleColumn, 0.0), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -244,6 +273,9 @@ public void testGtEq() {
+     assertTrue(canDrop(gtEq(intColumn, 7), nullColumnMetas));
+ 
+     assertTrue(canDrop(gtEq(missingColumn, fromString("any")), columnMetas));
++
++    assertFalse(canDrop(gtEq(intColumn, 1), missingMinMaxColumnMetas));
++    assertFalse(canDrop(gtEq(doubleColumn, 0.1), missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+@@ -297,6 +329,26 @@ public boolean keep(Integer value) {
+     }
+   }
+ 
++  public static class AllPositiveUdp extends UserDefinedPredicate<Double> {
++    @Override
++    public boolean keep(Double value) {
++      if (value == null) {
++        return true;
++      }
++      throw new RuntimeException("this method should not be called with value != null");
++    }
++
++    @Override
++    public boolean canDrop(Statistics<Double> statistics) {
++      return statistics.getMin() <= 0.0;
++    }
++
++    @Override
++    public boolean inverseCanDrop(Statistics<Double> statistics) {
++      return statistics.getMin() > 0.0;
++    }
++  }
++
+   @Test
+   public void testUdp() {
+     FilterPredicate pred = userDefined(intColumn, SevensAndEightsUdp.class);
+@@ -308,6 +360,8 @@ public void testUdp() {
+     FilterPredicate udpKeepMissingColumn = userDefined(missingColumn2, SevensAndEightsUdp.class);
+     FilterPredicate invUdpKeepMissingColumn = LogicalInverseRewriter.rewrite(not(userDefined(missingColumn2, SevensAndEightsUdp.class)));
+ 
++    FilterPredicate allPositivePred = userDefined(doubleColumn, AllPositiveUdp.class);
++
+     IntStatistics seven = new IntStatistics();
+     seven.setMinMax(7, 7);
+ 
+@@ -392,6 +446,8 @@ public void testUdp() {
+     assertTrue(canDrop(invUdpKeepMissingColumn, Arrays.asList(
+         getIntColumnMeta(neither, 177L),
+         getDoubleColumnMeta(doubleStats, 177L))));
++
++    assertFalse(canDrop(allPositivePred, missingMinMaxColumnMetas));
+   }
+ 
+   @Test
+diff --git a/parquet-hadoop/src/test/java/org/apache/parquet/format/converter/TestParquetMetadataConverter.java b/parquet-hadoop/src/test/java/org/apache/parquet/format/converter/TestParquetMetadataConverter.java
+index 35c35c19c6..f009e7f9f7 100644
+--- a/parquet-hadoop/src/test/java/org/apache/parquet/format/converter/TestParquetMetadataConverter.java
++++ b/parquet-hadoop/src/test/java/org/apache/parquet/format/converter/TestParquetMetadataConverter.java
+@@ -22,7 +22,9 @@
+ import static org.apache.parquet.format.converter.ParquetMetadataConverter.filterFileMetaDataByStart;
+ import static org.apache.parquet.schema.MessageTypeParser.parseMessageType;
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertSame;
++import static org.junit.Assert.assertTrue;
+ import static org.junit.Assert.fail;
+ import static org.apache.parquet.format.CompressionCodec.UNCOMPRESSED;
+ import static org.apache.parquet.format.Type.INT32;
+@@ -558,10 +560,43 @@ public void testUseStatsWithSignedSortOrder() {
+             .as(OriginalType.UTF8).named("b"));
+ 
+     Assert.assertFalse("Stats should not be empty", convertedStats.isEmpty());
++    Assert.assertTrue(convertedStats.isNumNullsSet());
+     Assert.assertEquals("Should have 3 nulls", 3, convertedStats.getNumNulls());
+     Assert.assertEquals("Should have correct min (unsigned sort)",
+         Binary.fromString("A"), convertedStats.genericGetMin());
+     Assert.assertEquals("Should have correct max (unsigned sort)",
+         Binary.fromString("z"), convertedStats.genericGetMax());
+   }
++
++  @Test
++  public void testMissingValuesFromStats() {
++    ParquetMetadataConverter converter = new ParquetMetadataConverter();
++    PrimitiveTypeName type = PrimitiveTypeName.INT32;
++
++    org.apache.parquet.format.Statistics formatStats = new org.apache.parquet.format.Statistics();
++    Statistics<?> stats = converter.fromParquetStatistics(Version.FULL_VERSION, formatStats, type);
++    assertFalse(stats.isNumNullsSet());
++    assertFalse(stats.hasNonNullValue());
++    assertTrue(stats.isEmpty());
++    assertEquals(-1, stats.getNumNulls());
++
++    formatStats.clear();
++    formatStats.setMin(BytesUtils.intToBytes(-100));
++    formatStats.setMax(BytesUtils.intToBytes(100));
++    stats = converter.fromParquetStatistics(Version.FULL_VERSION, formatStats, type);
++    assertFalse(stats.isNumNullsSet());
++    assertTrue(stats.hasNonNullValue());
++    assertFalse(stats.isEmpty());
++    assertEquals(-1, stats.getNumNulls());
++    assertEquals(-100, stats.genericGetMin());
++    assertEquals(100, stats.genericGetMax());
++
++    formatStats.clear();
++    formatStats.setNull_count(2000);
++    stats = converter.fromParquetStatistics(Version.FULL_VERSION, formatStats, type);
++    assertTrue(stats.isNumNullsSet());
++    assertFalse(stats.hasNonNullValue());
++    assertFalse(stats.isEmpty());
++    assertEquals(2000, stats.getNumNulls());
++  }
+ }
+diff --git a/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestColumnChunkPageWriteStore.java b/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestColumnChunkPageWriteStore.java
+index bb805219cd..a83247f03b 100644
+--- a/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestColumnChunkPageWriteStore.java
++++ b/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestColumnChunkPageWriteStore.java
+@@ -54,12 +54,12 @@
+ import org.apache.parquet.column.page.PageReadStore;
+ import org.apache.parquet.column.page.PageReader;
+ import org.apache.parquet.column.page.PageWriter;
+-import org.apache.parquet.column.statistics.BinaryStatistics;
+ import org.apache.parquet.column.statistics.Statistics;
+ import org.apache.parquet.hadoop.metadata.CompressionCodecName;
+ import org.apache.parquet.hadoop.metadata.ParquetMetadata;
+ import org.apache.parquet.schema.MessageType;
+ import org.apache.parquet.schema.MessageTypeParser;
++import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+ import org.apache.parquet.schema.Types;
+ 
+ public class TestColumnChunkPageWriteStore {
+@@ -90,7 +90,7 @@ public void test() throws Exception {
+     int v = 3;
+     BytesInput definitionLevels = BytesInput.fromInt(d);
+     BytesInput repetitionLevels = BytesInput.fromInt(r);
+-    Statistics<?> statistics = new BinaryStatistics();
++    Statistics<?> statistics = Statistics.getBuilder(PrimitiveTypeName.BINARY).build();
+     BytesInput data = BytesInput.fromInt(v);
+     int rowCount = 5;
+     int nullCount = 1;
+@@ -155,13 +155,13 @@ public void testColumnOrderV1() throws IOException {
+ 
+     BytesInput fakeData = BytesInput.fromInt(34);
+     int fakeCount = 3;
+-    BinaryStatistics fakeStats = new BinaryStatistics();
+ 
+     ColumnChunkPageWriteStore store = new ColumnChunkPageWriteStore(
+         compressor(UNCOMPRESSED), schema);
+ 
+     for (ColumnDescriptor col : schema.getColumns()) {
+       PageWriter pageWriter = store.getPageWriter(col);
++      Statistics<?> fakeStats = Statistics.getStatsBasedOnType(col.getType());
+       pageWriter.writePage(fakeData, fakeCount, fakeStats, RLE, RLE, PLAIN);
+     }
+ 
+diff --git a/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java b/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java
+index ff3b01711a..24307b6f37 100644
+--- a/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java
++++ b/parquet-hadoop/src/test/java/org/apache/parquet/hadoop/TestParquetFileWriter.java
+@@ -46,7 +46,6 @@
+ import org.apache.parquet.schema.MessageTypeParser;
+ import org.apache.parquet.schema.PrimitiveType;
+ import org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName;
+-
+ import java.io.File;
+ import java.io.IOException;
+ import java.util.*;
+@@ -57,6 +56,7 @@
+ import static org.apache.parquet.column.Encoding.BIT_PACKED;
+ import static org.apache.parquet.column.Encoding.PLAIN;
+ import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.BINARY;
++import static org.apache.parquet.schema.PrimitiveType.PrimitiveTypeName.INT64;
+ import static org.apache.parquet.schema.Type.Repetition.*;
+ import static org.apache.parquet.hadoop.TestUtils.enforceEmptyDir;
+ 
+@@ -93,8 +93,8 @@ public class TestParquetFileWriter {
+   private static final byte[] BYTES4 = { 3, 4, 5, 6 };
+   private static final CompressionCodecName CODEC = CompressionCodecName.UNCOMPRESSED;
+ 
+-  private static final BinaryStatistics STATS1 = new BinaryStatistics();
+-  private static final BinaryStatistics STATS2 = new BinaryStatistics();
++  private static final org.apache.parquet.column.statistics.Statistics<?> EMPTY_STATS = org.apache.parquet.column.statistics.Statistics
++      .getBuilder(PrimitiveTypeName.BINARY).build();
+ 
+   private String writeSchema;
+ 
+@@ -143,24 +143,24 @@ public void testWriteRead() throws Exception {
+     w.startBlock(3);
+     w.startColumn(C1, 5, CODEC);
+     long c1Starts = w.getPos();
+-    w.writeDataPage(2, 4, BytesInput.from(BYTES1), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(3, 4, BytesInput.from(BYTES1), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(2, 4, BytesInput.from(BYTES1), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(3, 4, BytesInput.from(BYTES1), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     long c1Ends = w.getPos();
+     w.startColumn(C2, 6, CODEC);
+     long c2Starts = w.getPos();
+-    w.writeDataPage(2, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(3, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(1, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(2, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(3, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(1, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     long c2Ends = w.getPos();
+     w.endBlock();
+     w.startBlock(4);
+     w.startColumn(C1, 7, CODEC);
+-    w.writeDataPage(7, 4, BytesInput.from(BYTES3), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(7, 4, BytesInput.from(BYTES3), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     w.startColumn(C2, 8, CODEC);
+-    w.writeDataPage(8, 4, BytesInput.from(BYTES4), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(8, 4, BytesInput.from(BYTES4), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     w.endBlock();
+     w.end(new HashMap<String, String>());
+@@ -223,15 +223,15 @@ public void testAlignmentWithPadding() throws Exception {
+     w.startBlock(3);
+     w.startColumn(C1, 5, CODEC);
+     long c1Starts = w.getPos();
+-    w.writeDataPage(2, 4, BytesInput.from(BYTES1), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(3, 4, BytesInput.from(BYTES1), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(2, 4, BytesInput.from(BYTES1), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(3, 4, BytesInput.from(BYTES1), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     long c1Ends = w.getPos();
+     w.startColumn(C2, 6, CODEC);
+     long c2Starts = w.getPos();
+-    w.writeDataPage(2, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(3, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(1, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(2, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(3, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(1, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     long c2Ends = w.getPos();
+     w.endBlock();
+@@ -240,10 +240,10 @@ public void testAlignmentWithPadding() throws Exception {
+ 
+     w.startBlock(4);
+     w.startColumn(C1, 7, CODEC);
+-    w.writeDataPage(7, 4, BytesInput.from(BYTES3), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(7, 4, BytesInput.from(BYTES3), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     w.startColumn(C2, 8, CODEC);
+-    w.writeDataPage(8, 4, BytesInput.from(BYTES4), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(8, 4, BytesInput.from(BYTES4), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     w.endBlock();
+ 
+@@ -328,15 +328,15 @@ public void testAlignmentWithNoPaddingNeeded() throws Exception {
+     w.startBlock(3);
+     w.startColumn(C1, 5, CODEC);
+     long c1Starts = w.getPos();
+-    w.writeDataPage(2, 4, BytesInput.from(BYTES1), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(3, 4, BytesInput.from(BYTES1), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(2, 4, BytesInput.from(BYTES1), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(3, 4, BytesInput.from(BYTES1), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     long c1Ends = w.getPos();
+     w.startColumn(C2, 6, CODEC);
+     long c2Starts = w.getPos();
+-    w.writeDataPage(2, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(3, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
+-    w.writeDataPage(1, 4, BytesInput.from(BYTES2), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(2, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(3, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(1, 4, BytesInput.from(BYTES2), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     long c2Ends = w.getPos();
+     w.endBlock();
+@@ -345,10 +345,10 @@ public void testAlignmentWithNoPaddingNeeded() throws Exception {
+ 
+     w.startBlock(4);
+     w.startColumn(C1, 7, CODEC);
+-    w.writeDataPage(7, 4, BytesInput.from(BYTES3), STATS1, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(7, 4, BytesInput.from(BYTES3), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     w.startColumn(C2, 8, CODEC);
+-    w.writeDataPage(8, 4, BytesInput.from(BYTES4), STATS2, BIT_PACKED, BIT_PACKED, PLAIN);
++    w.writeDataPage(8, 4, BytesInput.from(BYTES4), EMPTY_STATS, BIT_PACKED, BIT_PACKED, PLAIN);
+     w.endColumn();
+     w.endBlock();
+ 
+@@ -635,8 +635,10 @@ private void createFile(Configuration configuration, Path path, MessageType sche
+     byte[] bytes4 = { 3, 4, 5, 6};
+     CompressionCodecName codec = CompressionCodecName.UNCOMPRESSED;
+ 
+-    BinaryStatistics stats1 = new BinaryStatistics();
+-    BinaryStatistics stats2 = new BinaryStatistics();
++    org.apache.parquet.column.statistics.Statistics<?> stats1 = org.apache.parquet.column.statistics.Statistics
++        .getStatsBasedOnType(BINARY);
++    org.apache.parquet.column.statistics.Statistics<?> stats2 = org.apache.parquet.column.statistics.Statistics
++        .getStatsBasedOnType(INT64);
+ 
+     ParquetFileWriter w = new ParquetFileWriter(configuration, schema, path);
+     w.start();

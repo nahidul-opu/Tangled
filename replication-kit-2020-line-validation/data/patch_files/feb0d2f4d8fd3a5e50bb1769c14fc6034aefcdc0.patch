@@ -1,0 +1,86 @@
+From feb0d2f4d8fd3a5e50bb1769c14fc6034aefcdc0 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 22 Mar 2007 22:22:07 +0000
+Subject: [PATCH] Ivy should fail where dependency uses undefined configuration
+ (IVY-442)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@521503 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                       |  1 +
+ .../descriptor/DefaultDependencyDescriptor.java   |  8 ++++++++
+ .../parser/xml/XmlModuleDescriptorParserTest.java | 10 ++++++++++
+ .../plugins/parser/xml/test-incorrectconf1.xml    | 15 +++++++++++++++
+ 4 files changed, 34 insertions(+)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf1.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index af474487d..48c8db5a4 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -18,6 +18,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ - IMPROVE: Generated XML reports now contains more information about the resolved module (IVY-408)
+ 
++- FIX: Ivy should fail where dependency uses undefined configuration (IVY-442)
+ - FIX: Dynamic revision not calculated properly when using multiple directories (IVY-427)
+ - FIX: LatestRevisionStrategy.sort() doesn't sort as specified (IVY-435)
+ - FIX: setting m2compatible on ibiblio resolver overwrite root and pattern settings (IVY-437)
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java
+index e083ed4aa..bbce3561c 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java
+@@ -342,6 +342,14 @@ private DependencyArtifactDescriptor[] getAllDependencyArtifacts(Map artifactsMa
+     }
+     
+     public void addDependencyConfiguration(String masterConf, String depConf) {
++    	if ((_md != null) && !"*".equals(masterConf) && !"%".equals(masterConf)) {
++    		Configuration config = _md.getConfiguration(masterConf);
++    		if (config == null) {
++    			throw new IllegalArgumentException("Configuration '" + masterConf 
++    					+ "' does not exist in module " + _md);
++    		}
++    	}
++    	
+         List confs = (List)_confs.get(masterConf);
+         if (confs == null) {
+             confs = new ArrayList();
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+index 6d560de38..f2d5e1bee 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+@@ -684,4 +684,14 @@ public void testDefaultConfMappingWithSelectors() throws Exception {
+         assertEquals(Arrays.asList(new String[] {"*"}), Arrays.asList(dd.getModuleConfigurations()));
+         assertEquals(Arrays.asList(new String[] {"default4"}), Arrays.asList(dd.getDependencyConfigurations("bla")));  
+     }
++    
++    public void testWithNonExistingConfigInDependency() throws Exception {
++    	// IVY-442
++    	try {
++    		XmlModuleDescriptorParser.getInstance().parseDescriptor(_settings, getClass().getResource("test-incorrectconf1.xml"), true);
++    		fail("ParseException hasn't been thrown");
++    	} catch (ParseException e) {
++    		// expected
++    	}
++    }
+ }
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf1.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf1.xml
+new file mode 100644
+index 000000000..94238bf3b
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf1.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++	<info organisation="myorg"
++	       module="mymodule"
++	       revision="1.0"
++	       publication="20050913185628"
++	/>
++	<dependencies>
++		<dependency name="mod1" rev="1.0"/>
++		<dependency org="test" name="mod2" rev="2.0" conf="*"/>
++		<dependency org="test" name="mod3" rev="2.0" conf="default->*"/>
++		<dependency org="test" name="mod4" rev="2.0" conf="%->*"/>
++		<dependency org="test" name="mod5" rev="2.0" conf="bad->*"/>
++	</dependencies>
++</ivy-module>

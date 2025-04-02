@@ -1,0 +1,1029 @@
+From 340b7b69145a03a9702019627cad3071d5d67ef5 Mon Sep 17 00:00:00 2001
+From: Aaron Smuts <asmuts@apache.org>
+Date: Fri, 29 Aug 2008 16:49:46 +0000
+Subject: [PATCH] https://issues.apache.org/jira/browse/JCS-41
+
+Added socket connect timeout to rmi socket factory.
+
+Made jdk1.4 compliant.  We can't support 1.3 any longer.
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/jcs/trunk@690325 13f79535-47bb-0310-9956-ffa450edef68
+---
+ maven14.bat                                   |  19 ++++
+ .../lateral/LateralElementDescriptor.java     |   1 +
+ .../jcs/auxiliary/remote/RemoteCache.java     |  50 +--------
+ .../remote/RemoteCacheAttributes.java         |   5 +-
+ .../jcs/auxiliary/remote/RemoteUtils.java     |  56 ++++++++++
+ .../behavior/IRemoteCacheConstants.java       |   3 +
+ .../remote/server/RemoteCacheServer.java      |  26 ++---
+ .../server/RemoteCacheServerAttributes.java   |  72 +++++++------
+ .../server/RemoteCacheServerFactory.java      | 102 +++++++++---------
+ src/test-conf/TestRemoteCacheClientServer.ccf |   9 +-
+ .../AuxiliaryCacheConfiguratorUnitTest.java   |   4 +-
+ .../BasicRemoteCacheClientServerUnitTest.java |  12 ++-
+ .../RemoteCacheServerFactoryUnitTest.java     |  40 +++++++
+ .../server/RemoteCacheServerStartupUtil.java  |   4 +-
+ .../CompositeCacheConfiguratorUnitTest.java   |   6 +-
+ xdocs/changes.xml                             |   7 +-
+ 16 files changed, 251 insertions(+), 165 deletions(-)
+ create mode 100644 maven14.bat
+ create mode 100644 src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactoryUnitTest.java
+
+diff --git a/maven14.bat b/maven14.bat
+new file mode 100644
+index 000000000..d27b87b42
+--- /dev/null
++++ b/maven14.bat
+@@ -0,0 +1,19 @@
++rem Licensed to the Apache Software Foundation (ASF) under one
++rem or more contributor license agreements.  See the NOTICE file
++rem distributed with this work for additional information
++rem regarding copyright ownership.  The ASF licenses this file
++rem to you under the Apache License, Version 2.0 (the
++rem "License"); you may not use this file except in compliance
++rem with the License.  You may obtain a copy of the License at
++rem
++rem   http://www.apache.org/licenses/LICENSE-2.0
++rem
++rem Unless required by applicable law or agreed to in writing,
++rem software distributed under the License is distributed on an
++rem "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++rem KIND, either express or implied.  See the License for the
++rem specific language governing permissions and limitations
++rem under the License.
++set JAVA_HOME=C:\java\j2sdk1.4.2_18
++
++maven %1 %2
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/LateralElementDescriptor.java b/src/java/org/apache/jcs/auxiliary/lateral/LateralElementDescriptor.java
+index 4dca66e28..a3821b0b5 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/LateralElementDescriptor.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/LateralElementDescriptor.java
+@@ -31,6 +31,7 @@
+ public class LateralElementDescriptor
+     implements Serializable
+ {
++    /** Don't change */
+     private static final long serialVersionUID = 5268222498076063575L;
+ 
+     /** The int for updates */
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java
+index 2e6aa995a..ee5d6cfb5 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java
+@@ -22,9 +22,6 @@
+ import java.io.IOException;
+ import java.io.Serializable;
+ import java.lang.reflect.InvocationTargetException;
+-import java.net.ServerSocket;
+-import java.net.Socket;
+-import java.rmi.server.RMISocketFactory;
+ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.Iterator;
+@@ -137,50 +134,7 @@ public RemoteCache( IRemoteCacheAttributes cattr, IRemoteCacheService remote, IR
+             }
+         }
+ 
+-        configureCustomSocketFactory();
+-    }
+-
+-    /** Configure a custom socket factory to set the timeout value. */
+-    private void configureCustomSocketFactory()
+-    {
+-        try
+-        {
+-            // Don't set a socket factory if the setting is -1
+-            if ( irca.getRmiSocketFactoryTimeoutMillis() > 0 )
+-            {
+-                if ( log.isInfoEnabled() )
+-                {
+-                    log.info( "RmiSocketFactoryTimeoutMillis [" + irca.getRmiSocketFactoryTimeoutMillis() + "]. "
+-                        + " Configuring a custom socket factory." );
+-                }
+-
+-                // use this socket factory to add a timeout.
+-                RMISocketFactory.setSocketFactory( new RMISocketFactory()
+-                {
+-                    public Socket createSocket( String host, int port )
+-                        throws IOException
+-                    {
+-                        Socket socket = new Socket( host, port );
+-                        socket.setSoTimeout( irca.getRmiSocketFactoryTimeoutMillis() );
+-                        socket.setSoLinger( false, 0 );
+-                        return socket;
+-                    }
+-
+-                    public ServerSocket createServerSocket( int port )
+-                        throws IOException
+-                    {
+-                        return new ServerSocket( port );
+-                    }
+-                } );
+-            }
+-        }
+-        catch ( Exception e )
+-        {
+-            // TODO change this so that we only try to do it once. Otherwise we
+-            // Generate errors for each region on construction.
+-            log.info( "Could not create new custom socket factory. " + e.getMessage() + " Factory in use = "
+-                + RMISocketFactory.getSocketFactory() );
+-        }
++        RemoteUtils.configureCustomSocketFactory( irca.getRmiSocketFactoryTimeoutMillis() );
+     }
+ 
+     /**
+@@ -304,7 +258,7 @@ protected ICacheElement processGet( Serializable key )
+      * @param keys
+      * @return a map of Serializable key to ICacheElement element, or an empty map if there is no
+      *         data in cache for any of these keys
+-     * @throws IOException 
++     * @throws IOException
+      */
+     protected Map processGetMultiple( Set keys )
+         throws IOException
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheAttributes.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheAttributes.java
+index bb62f03a1..1382afb62 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheAttributes.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheAttributes.java
+@@ -67,12 +67,13 @@ public class RemoteCacheAttributes
+ 
+     private boolean localClusterConsistency = false;
+ 
+-    // default name is remote_cache_client
++    /** default name is remote_cache_client */
+     private String threadPoolName = "remote_cache_client";
+ 
+-    // must be greater than 0 for a pool to be used.
++    /** must be greater than 0 for a pool to be used. */
+     private int getTimeoutMillis = -1;
+ 
++    /** read and connect timeout */
+     private int rmiSocketFactoryTimeoutMillis = DEFAULT_RMI_SOCKET_FACTORY_TIMEOUT_MILLIS;
+ 
+     private boolean receive = DEFAULT_RECEIVE;
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteUtils.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteUtils.java
+index 52e4c052c..a1ff4d857 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteUtils.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteUtils.java
+@@ -21,10 +21,14 @@
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.net.InetSocketAddress;
++import java.net.ServerSocket;
++import java.net.Socket;
+ import java.rmi.RMISecurityManager;
+ import java.rmi.RemoteException;
+ import java.rmi.registry.LocateRegistry;
+ import java.rmi.registry.Registry;
++import java.rmi.server.RMISocketFactory;
+ import java.util.Enumeration;
+ import java.util.Properties;
+ 
+@@ -132,4 +136,56 @@ public static Properties loadProps( String propFile )
+         }
+         return props;
+     }
++    
++    /**
++     * Configure a custom socket factory to set the timeout value.
++     * <p>
++     * @param timeoutMillis
++     */
++    public static void configureCustomSocketFactory( final int timeoutMillis )
++    {
++        try
++        {
++            // Don't set a socket factory if the setting is -1
++            if ( timeoutMillis > 0 )
++            {
++                if ( log.isInfoEnabled() )
++                {
++                    log.info( "RmiSocketFactoryTimeoutMillis [" + timeoutMillis + "]. "
++                        + " Configuring a custom socket factory." );
++                }
++
++                // use this socket factory to add a timeout.
++                RMISocketFactory.setSocketFactory( new RMISocketFactory()
++                {
++                    public Socket createSocket( String host, int port )
++                        throws IOException
++                    {
++                        Socket socket = new Socket();
++                        socket.setSoTimeout( timeoutMillis );
++                        socket.setSoLinger( false, 0 );
++                        socket.connect( new InetSocketAddress( host, port ), timeoutMillis );
++                        return socket;
++                    }
++
++                    public ServerSocket createServerSocket( int port )
++                        throws IOException
++                    {
++                        return new ServerSocket( port );
++                    }
++                } );
++            }
++        }
++        catch ( Exception e )
++        {
++            // Only try to do it once. Otherwise we
++            // Generate errors for each region on construction.
++            RMISocketFactory factoryInUse = RMISocketFactory.getSocketFactory();
++            if ( factoryInUse != null && !factoryInUse.getClass().getName().startsWith( "org.apache.jcs" ) )
++            {
++                log.info( "Could not create new custom socket factory. " + e.getMessage() + " Factory in use = "
++                    + RMISocketFactory.getSocketFactory() );
++            }
++        }
++    }
+ }
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheConstants.java b/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheConstants.java
+index 56bfdda0d..f0ec0809b 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheConstants.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheConstants.java
+@@ -30,6 +30,9 @@ public interface IRemoteCacheConstants
+     /** Property prefix, should be jcs.remote but this would break existing config. */
+     public final static String PROPERTY_PREFIX = "remote";
+     
++    /** Mapping to props file value */
++    public final static String SOCKET_TIMEOUT_MILLIS = PROPERTY_PREFIX + ".cache.rmiSocketFactoryTimeoutMillis";
++    
+     /** Mapping to props file value */
+     public final static String REMOTE_CACHE_SERVICE_NAME = PROPERTY_PREFIX + ".cache.service.name";
+ 
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
+index 9865e466e..644bdcd30 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
+@@ -97,7 +97,7 @@ class RemoteCacheServer
+     private int[] listenerId = new int[1];
+ 
+     /** Configuration settings. */
+-    protected IRemoteCacheServerAttributes rcsa;
++    protected IRemoteCacheServerAttributes remoteCacheServerAttributes;
+ 
+     /** The interval at which we will log updates. */
+     private int logInterval = 100;
+@@ -119,7 +119,7 @@ class RemoteCacheServer
+         throws RemoteException
+     {
+         super( rcsa.getServicePort() );
+-        this.rcsa = rcsa;
++        this.remoteCacheServerAttributes = rcsa;
+         init( rcsa.getConfigFileName() );
+     }
+ 
+@@ -311,7 +311,7 @@ private void processUpdate( ICacheElement item, long requesterId )
+ 
+                 // UPDATE LOCALS IF A REQUEST COMES FROM A CLUSTER
+                 // IF LOCAL CLUSTER CONSISTENCY IS CONFIGURED
+-                if ( !fromCluster || ( fromCluster && rcsa.getLocalClusterConsistency() ) )
++                if ( !fromCluster || ( fromCluster && remoteCacheServerAttributes.getLocalClusterConsistency() ) )
+                 {
+                     ICacheEventQueue[] qlist = getEventQList( cacheDesc, requesterId );
+ 
+@@ -508,12 +508,12 @@ private ICacheElement getFromCacheListeners( Serializable key, boolean fromClust
+             // data from those that were up when the failed server comes back o
+             // line.
+ 
+-            if ( !fromCluster && this.rcsa.getAllowClusterGet() )
++            if ( !fromCluster && this.remoteCacheServerAttributes.getAllowClusterGet() )
+             {
+                 if ( log.isDebugEnabled() )
+                 {
+                     log.debug( "NonLocalGet. fromCluster [" + fromCluster + "] AllowClusterGet ["
+-                        + this.rcsa.getAllowClusterGet() + "]" );
++                        + this.remoteCacheServerAttributes.getAllowClusterGet() + "]" );
+                 }
+                 element = c.get( key );
+             }
+@@ -526,7 +526,7 @@ private ICacheElement getFromCacheListeners( Serializable key, boolean fromClust
+                 if ( log.isDebugEnabled() )
+                 {
+                     log.debug( "LocalGet.  fromCluster [" + fromCluster + "] AllowClusterGet ["
+-                        + this.rcsa.getAllowClusterGet() + "]" );
++                        + this.remoteCacheServerAttributes.getAllowClusterGet() + "]" );
+                 }
+                 element = c.localGet( key );
+             }
+@@ -650,12 +650,12 @@ private Map getMultipleFromCacheListeners( Set keys, Map elements, boolean fromC
+             // data from those that were up when the failed server comes back o
+             // line.
+ 
+-            if ( !fromCluster && this.rcsa.getAllowClusterGet() )
++            if ( !fromCluster && this.remoteCacheServerAttributes.getAllowClusterGet() )
+             {
+                 if ( log.isDebugEnabled() )
+                 {
+                     log.debug( "NonLocalGetMultiple. fromCluster [" + fromCluster + "] AllowClusterGet ["
+-                        + this.rcsa.getAllowClusterGet() + "]" );
++                        + this.remoteCacheServerAttributes.getAllowClusterGet() + "]" );
+                 }
+ 
+                 elements = c.getMultiple( keys );
+@@ -669,7 +669,7 @@ private Map getMultipleFromCacheListeners( Set keys, Map elements, boolean fromC
+                 if ( log.isDebugEnabled() )
+                 {
+                     log.debug( "LocalGetMultiple.  fromCluster [" + fromCluster + "] AllowClusterGet ["
+-                        + this.rcsa.getAllowClusterGet() + "]" );
++                        + this.remoteCacheServerAttributes.getAllowClusterGet() + "]" );
+                 }
+ 
+                 elements = c.localGetMultiple( keys );
+@@ -806,7 +806,7 @@ private void processRemove( String cacheName, Serializable key, long requesterId
+ 
+                 // UPDATE LOCALS IF A REQUEST COMES FROM A CLUSTER
+                 // IF LOCAL CLUSTER CONSISTENCY IS CONFIGURED
+-                if ( !fromCluster || ( fromCluster && rcsa.getLocalClusterConsistency() ) )
++                if ( !fromCluster || ( fromCluster && remoteCacheServerAttributes.getLocalClusterConsistency() ) )
+                 {
+                     ICacheEventQueue[] qlist = getEventQList( cacheDesc, requesterId );
+ 
+@@ -901,7 +901,7 @@ private void processRemoveAll( String cacheName, long requesterId )
+                 }
+ 
+                 // update registered listeners
+-                if ( !fromCluster || ( fromCluster && rcsa.getLocalClusterConsistency() ) )
++                if ( !fromCluster || ( fromCluster && remoteCacheServerAttributes.getLocalClusterConsistency() ) )
+                 {
+                     ICacheEventQueue[] qlist = getEventQList( cacheDesc, requesterId );
+ 
+@@ -1229,8 +1229,8 @@ public void addCacheListener( String cacheName, ICacheListener listener )
+             }
+ 
+             CacheEventQueueFactory fact = new CacheEventQueueFactory();
+-            ICacheEventQueue q = fact.createCacheEventQueue( listener, id, cacheName, rcsa.getEventQueuePoolName(),
+-                                                             rcsa.getEventQueueTypeFactoryCode() );
++            ICacheEventQueue q = fact.createCacheEventQueue( listener, id, cacheName, remoteCacheServerAttributes.getEventQueuePoolName(),
++                                                             remoteCacheServerAttributes.getEventQueueTypeFactoryCode() );
+ 
+             eventQMap.put( new Long( listener.getListenerId() ), q );
+ 
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerAttributes.java b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerAttributes.java
+index a2c901c32..8528d5459 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerAttributes.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerAttributes.java
+@@ -46,20 +46,33 @@ public class RemoteCacheServerAttributes
+      */
+     private String clusterServers = "";
+ 
++    /** port the rmi server will listen to */
+     private int servicePort = 0;
+ 
++    /** Cluster or local */
+     private int remoteType = LOCAL;
+ 
++    /** Remove item when put */
+     private boolean removeUponRemotePut = true;
+ 
++    /** Ony get, don't put */
+     private boolean getOnly = false;
+ 
++    /** Can a cluster remote put to other remotes */
+     private boolean localClusterConsistency = false;
+ 
++    /** Can a cluster remote get from other remotes */
+     private boolean allowClusterGet = true;
+ 
++    /** The config file, the initializationis multistage. Remote cache then composite cache. */
+     private String configFileName = "";
+ 
++    /** Factory socket time out. */
++    public static final int DEFAULT_RMI_SOCKET_FACTORY_TIMEOUT_MS = 10000;
++
++    /** Connect and read timeout. */
++    private int rmiSocketFactoryTimeoutMillis = DEFAULT_RMI_SOCKET_FACTORY_TIMEOUT_MS;
++
+     /** Default constructor for the RemoteCacheAttributes object */
+     public RemoteCacheServerAttributes()
+     {
+@@ -69,7 +82,6 @@ public RemoteCacheServerAttributes()
+     /**
+      * Gets the remoteTypeName attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The remoteTypeName value
+      */
+     public String getRemoteTypeName()
+@@ -88,7 +100,6 @@ else if ( remoteType == CLUSTER )
+     /**
+      * Sets the remoteTypeName attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param s The new remoteTypeName value
+      */
+     public void setRemoteTypeName( String s )
+@@ -106,7 +117,6 @@ else if ( s.equals( "CLUSTER" ) )
+     /**
+      * Gets the remoteType attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The remoteType value
+      */
+     public int getRemoteType()
+@@ -117,7 +127,6 @@ public int getRemoteType()
+     /**
+      * Sets the remoteType attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param p The new remoteType value
+      */
+     public void setRemoteType( int p )
+@@ -128,7 +137,6 @@ public void setRemoteType( int p )
+     /**
+      * clones
+      * <p>
+-     * 
+      * @return AuxiliaryCacheAttributes clone
+      */
+     public AuxiliaryCacheAttributes copy()
+@@ -147,7 +155,6 @@ public AuxiliaryCacheAttributes copy()
+     /**
+      * Gets the remoteServiceName attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The remoteServiceName value
+      */
+     public String getRemoteServiceName()
+@@ -158,7 +165,6 @@ public String getRemoteServiceName()
+     /**
+      * Sets the remoteServiceName attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param s The new remoteServiceName value
+      */
+     public void setRemoteServiceName( String s )
+@@ -169,7 +175,6 @@ public void setRemoteServiceName( String s )
+     /**
+      * Gets the remoteHost attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The remoteHost value
+      */
+     public String getRemoteHost()
+@@ -180,7 +185,6 @@ public String getRemoteHost()
+     /**
+      * Sets the remoteHost attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param s The new remoteHost value
+      */
+     public void setRemoteHost( String s )
+@@ -191,7 +195,6 @@ public void setRemoteHost( String s )
+     /**
+      * Gets the remotePort attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The remotePort value
+      */
+     public int getRemotePort()
+@@ -202,7 +205,6 @@ public int getRemotePort()
+     /**
+      * Sets the remotePort attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param p The new remotePort value
+      */
+     public void setRemotePort( int p )
+@@ -213,7 +215,6 @@ public void setRemotePort( int p )
+     /**
+      * Gets the clusterServers attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The clusterServers value
+      */
+     public String getClusterServers()
+@@ -224,7 +225,6 @@ public String getClusterServers()
+     /**
+      * Sets the clusterServers attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param s The new clusterServers value
+      */
+     public void setClusterServers( String s )
+@@ -235,7 +235,6 @@ public void setClusterServers( String s )
+     /**
+      * Gets the localPort attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The localPort value
+      */
+     public int getServicePort()
+@@ -246,7 +245,6 @@ public int getServicePort()
+     /**
+      * Sets the localPort attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param p The new localPort value
+      */
+     public void setServicePort( int p )
+@@ -257,7 +255,6 @@ public void setServicePort( int p )
+     /**
+      * Gets the removeUponRemotePut attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The removeUponRemotePut value
+      */
+     public boolean getRemoveUponRemotePut()
+@@ -268,7 +265,6 @@ public boolean getRemoveUponRemotePut()
+     /**
+      * Sets the removeUponRemotePut attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param r The new removeUponRemotePut value
+      */
+     public void setRemoveUponRemotePut( boolean r )
+@@ -279,7 +275,6 @@ public void setRemoveUponRemotePut( boolean r )
+     /**
+      * Gets the getOnly attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The getOnly value
+      */
+     public boolean getGetOnly()
+@@ -290,7 +285,6 @@ public boolean getGetOnly()
+     /**
+      * Sets the getOnly attribute of the RemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param r The new getOnly value
+      */
+     public void setGetOnly( boolean r )
+@@ -301,7 +295,6 @@ public void setGetOnly( boolean r )
+     /**
+      * Should cluster updates be propagated to the locals
+      * <p>
+-     * 
+      * @return The localClusterConsistency value
+      */
+     public boolean getLocalClusterConsistency()
+@@ -312,7 +305,6 @@ public boolean getLocalClusterConsistency()
+     /**
+      * Should cluster updates be propagated to the locals
+      * <p>
+-     * 
+      * @param r The new localClusterConsistency value
+      */
+     public void setLocalClusterConsistency( boolean r )
+@@ -323,7 +315,6 @@ public void setLocalClusterConsistency( boolean r )
+     /**
+      * Should gets from non-cluster clients be allowed to get from other remote auxiliaries.
+      * <p>
+-     * 
+      * @return The localClusterConsistency value
+      */
+     public boolean getAllowClusterGet()
+@@ -334,7 +325,6 @@ public boolean getAllowClusterGet()
+     /**
+      * Should we try to get from other cluster servers if we don't find the items locally.
+      * <p>
+-     * 
+      * @param r The new localClusterConsistency value
+      */
+     public void setAllowClusterGet( boolean r )
+@@ -345,7 +335,6 @@ public void setAllowClusterGet( boolean r )
+     /**
+      * Gets the ConfigFileName attribute of the IRemoteCacheAttributes object
+      * <p>
+-     * 
+      * @return The clusterServers value
+      */
+     public String getConfigFileName()
+@@ -356,7 +345,6 @@ public String getConfigFileName()
+     /**
+      * Sets the ConfigFileName attribute of the IRemoteCacheAttributes object
+      * <p>
+-     * 
+      * @param s The new clusterServers value
+      */
+     public void setConfigFileName( String s )
+@@ -364,20 +352,38 @@ public void setConfigFileName( String s )
+         configFileName = s;
+     }
+ 
++    /**
++     * @param rmiSocketFactoryTimeoutMillis The rmiSocketFactoryTimeoutMillis to set.
++     */
++    public void setRmiSocketFactoryTimeoutMillis( int rmiSocketFactoryTimeoutMillis )
++    {
++        this.rmiSocketFactoryTimeoutMillis = rmiSocketFactoryTimeoutMillis;
++    }
++
++    /**
++     * @return Returns the rmiSocketFactoryTimeoutMillis.
++     */
++    public int getRmiSocketFactoryTimeoutMillis()
++    {
++        return rmiSocketFactoryTimeoutMillis;
++    }
++
+     /**
+      * @return String details
+      */
+     public String toString()
+     {
+         StringBuffer buf = new StringBuffer();
+-        buf.append( "\n remoteHost = " + this.getRemoteHost() );
+-        buf.append( "\n remotePort = " + this.getRemotePort() );
+-        buf.append( "\n cacheName = " + this.getCacheName() );
+-        buf.append( "\n removeUponRemotePut = " + this.getRemoveUponRemotePut() );
+-        buf.append( "\n getOnly = " + this.getGetOnly() );
+-        buf.append( "\n allowClusterGet = " + this.getAllowClusterGet() );
+-        buf.append( "\n localClusterConsistency = " + this.getLocalClusterConsistency() );
+-        buf.append( "\n getConfigFileName = " + this.getConfigFileName() );
++        buf.append( "\n remoteHost = [" + this.getRemoteHost() + "]" );
++        buf.append( "\n remotePort = [" + this.getRemotePort() + "]" );
++        buf.append( "\n servicePort = [" + this.getServicePort() + "]" );
++        buf.append( "\n cacheName = [" + this.getCacheName() + "]" );
++        buf.append( "\n removeUponRemotePut = [" + this.getRemoveUponRemotePut() + "]" );
++        buf.append( "\n getOnly = [" + this.getGetOnly() + "]" );
++        buf.append( "\n allowClusterGet = [" + this.getAllowClusterGet() + "]" );
++        buf.append( "\n localClusterConsistency = [" + this.getLocalClusterConsistency() + "]" );
++        buf.append( "\n configFileName = [" + this.getConfigFileName() + "]" );
++        buf.append( "\n rmiSocketFactoryTimeoutMillis = [" + this.getRmiSocketFactoryTimeoutMillis() + "]" );
+         return buf.toString();
+     }
+ }
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java
+index 2ede54ee9..95998f830 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java
+@@ -21,12 +21,9 @@
+ 
+ import java.io.IOException;
+ import java.net.MalformedURLException;
+-import java.net.ServerSocket;
+-import java.net.Socket;
+ import java.rmi.Naming;
+ import java.rmi.NotBoundException;
+ import java.rmi.registry.Registry;
+-import java.rmi.server.RMISocketFactory;
+ import java.util.Properties;
+ 
+ import org.apache.commons.logging.Log;
+@@ -53,9 +50,6 @@ public class RemoteCacheServerFactory
+     /** The name of the service. */
+     private static String serviceName;
+ 
+-    /** Factory socket time out. */
+-    private static int DEFAULT_RMI_SOCKET_FACTORY_TIMEOUT_MS = 10000;
+-
+     /** Constructor for the RemoteCacheServerFactory object. */
+     private RemoteCacheServerFactory()
+     {
+@@ -100,50 +94,28 @@ public static void startup( String host, int port, String propFile )
+             {
+                 return;
+             }
+-
+-            if ( log.isInfoEnabled() )
+-            {
+-                log.info( "ConfigFileName = [" + propFile + "]" );
+-            }
+-
+-            try
+-            {
+-                // TODO make configurable.
+-                // use this socket factory to add a timeout.
+-                RMISocketFactory.setSocketFactory( new RMISocketFactory()
+-                {
+-                    public Socket createSocket( String host, int port )
+-                        throws IOException
+-                    {
+-                        Socket socket = new Socket( host, port );
+-                        socket.setSoTimeout( DEFAULT_RMI_SOCKET_FACTORY_TIMEOUT_MS );
+-                        socket.setSoLinger( false, 0 );
+-                        return socket;
+-                    }
+-
+-                    public ServerSocket createServerSocket( int port )
+-                        throws IOException
+-                    {
+-                        return new ServerSocket( port );
+-                    }
+-                } );
+-            }
+-            catch ( Exception e )
+-            {
+-                log.error( "Problem setting custom RMI Socket Factory.", e );
+-            }
+-
+             if ( host == null )
+             {
+                 host = "";
+             }
+-
++            if ( log.isInfoEnabled() )
++            {
++                log.info( "ConfigFileName = [" + propFile + "]" );
++            }
+             Properties props = RemoteUtils.loadProps( propFile );
+-
+             RemoteCacheServerAttributes rcsa = configureServerAttributes( propFile );
++            // These should come from the file!
++            rcsa.setRemotePort( port );
++            rcsa.setRemoteHost( host );
++            if ( log.isInfoEnabled() )
++            {
++                log.info( "Creating server with these attributes: " + rcsa );
++            }
+ 
+             serviceName = rcsa.getRemoteServiceName();
+ 
++            RemoteUtils.configureCustomSocketFactory( rcsa.getRmiSocketFactoryTimeoutMillis() );
++
+             // CONFIGURE THE EVENT LOGGER
+             ICacheEventLogger cacheEventLogger = AuxiliaryCacheConfigurator
+                 .parseCacheEventLogger( props, IRemoteCacheConstants.PROPERTY_PREFIX );
+@@ -168,21 +140,36 @@ public ServerSocket createServerSocket( int port )
+         }
+     }
+ 
+-    /** Configures the RemoteCacheServerAttributes from the props file. 
++    /**
++     * Configures the RemoteCacheServerAttributes from the props file.
+      * <p>
+-     * @param propFile 
++     * @param propFile
+      * @return RemoteCacheServerAttributes
+-     * @throws IOException */
++     * @throws IOException
++     */
+     protected static RemoteCacheServerAttributes configureServerAttributes( String propFile )
+         throws IOException
+     {
+-        // TODO: make automatic
+-        RemoteCacheServerAttributes rcsa = new RemoteCacheServerAttributes();
+-        rcsa.setConfigFileName( propFile );
+-
+         Properties prop = RemoteUtils.loadProps( propFile );
+         // Properties prop = PropertyLoader.loadProperties( propFile );
+ 
++        RemoteCacheServerAttributes rcsa = configureRemoteCacheServerAttributes( prop );
++        rcsa.setConfigFileName( propFile );
++
++        return rcsa;
++    }
++
++    /**
++     * Configure.
++     * <p>
++     * @param prop
++     * @return RemoteCacheServerAttributesconfigureRemoteCacheServerAttributes
++     */
++    protected static RemoteCacheServerAttributes configureRemoteCacheServerAttributes( Properties prop )
++    {
++        // TODO: make automatic
++        RemoteCacheServerAttributes rcsa = new RemoteCacheServerAttributes();
++
+         String servicePortStr = prop.getProperty( REMOTE_CACHE_SERVICE_PORT );
+         try
+         {
+@@ -196,6 +183,19 @@ protected static RemoteCacheServerAttributes configureServerAttributes( String p
+                 + " not specified.  An anonymous port will be used." );
+         }
+ 
++        String socketTimeoutMillisStr = prop.getProperty( SOCKET_TIMEOUT_MILLIS );
++        try
++        {
++            int rmiSocketFactoryTimeoutMillis = Integer.parseInt( socketTimeoutMillisStr );
++            rcsa.setRmiSocketFactoryTimeoutMillis( rmiSocketFactoryTimeoutMillis );
++            log.debug( "Remote cache socket timeout " + rmiSocketFactoryTimeoutMillis + "ms." );
++        }
++        catch ( NumberFormatException ignore )
++        {
++            log.debug( "Remote cache socket timeout property " + SOCKET_TIMEOUT_MILLIS
++                + " not specified.  The default will be used." );
++        }
++
+         String lccStr = prop.getProperty( REMOTE_LOCAL_CLUSTER_CONSISTENCY );
+         if ( lccStr == null )
+         {
+@@ -212,14 +212,8 @@ protected static RemoteCacheServerAttributes configureServerAttributes( String p
+         boolean acg = Boolean.valueOf( acgStr ).booleanValue();
+         rcsa.setAllowClusterGet( acg );
+ 
+-        if ( log.isInfoEnabled() )
+-        {
+-            log.info( "Creating server with these attributes " + rcsa );
+-        }
+-
+         // Register the RemoteCacheServer remote object in the registry.
+         rcsa.setRemoteServiceName( prop.getProperty( REMOTE_CACHE_SERVICE_NAME, REMOTE_CACHE_SERVICE_VAL ).trim() );
+-
+         return rcsa;
+     }
+ 
+diff --git a/src/test-conf/TestRemoteCacheClientServer.ccf b/src/test-conf/TestRemoteCacheClientServer.ccf
+index b083be467..33629bb9a 100644
+--- a/src/test-conf/TestRemoteCacheClientServer.ccf
++++ b/src/test-conf/TestRemoteCacheClientServer.ccf
+@@ -18,9 +18,12 @@
+ # ################# REMOTE SERVER CONFIG  #####################
+ # Registry used to register and provide the IRmiCacheService service.
+ registry.host=localhost
+-registry.port=1101
+-# call back port to local caches.
+-remote.cache.service.port=1101
++registry.port=1102
++
++# client callback port.
++remote.cache.service.port=1103
++remote.cache.rmiSocketFactoryTimeoutMillis=12345
++
+ # cluster setting
+ remote.cluster.LocalClusterConsistency=true
+ 
+diff --git a/src/test/org/apache/jcs/auxiliary/AuxiliaryCacheConfiguratorUnitTest.java b/src/test/org/apache/jcs/auxiliary/AuxiliaryCacheConfiguratorUnitTest.java
+index 51ac618bb..b3296821f 100644
+--- a/src/test/org/apache/jcs/auxiliary/AuxiliaryCacheConfiguratorUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/AuxiliaryCacheConfiguratorUnitTest.java
+@@ -51,7 +51,7 @@ public void testParseCacheEventLogger_Normal()
+         // SETUP
+         String auxPrefix = "jcs.auxiliary." + "MYAux";
+         String testPropertyValue = "This is the value";
+-        String className = MockCacheEventLogger.class.getCanonicalName();
++        String className = MockCacheEventLogger.class.getName();
+ 
+         Properties props = new Properties();
+         props.put( auxPrefix + AuxiliaryCacheConfigurator.CACHE_EVENT_LOGGER_PREFIX, className );
+@@ -75,7 +75,7 @@ public void testParseElementSerializer_Normal()
+         // SETUP
+         String auxPrefix = "jcs.auxiliary." + "MYAux";
+         String testPropertyValue = "This is the value";
+-        String className = MockElementSerializer.class.getCanonicalName();
++        String className = MockElementSerializer.class.getName();
+ 
+         Properties props = new Properties();
+         props.put( auxPrefix + AuxiliaryCacheConfigurator.SERIALIZER_PREFIX, className );
+diff --git a/src/test/org/apache/jcs/auxiliary/remote/server/BasicRemoteCacheClientServerUnitTest.java b/src/test/org/apache/jcs/auxiliary/remote/server/BasicRemoteCacheClientServerUnitTest.java
+index fd24d1c6f..c9d68ef1d 100644
+--- a/src/test/org/apache/jcs/auxiliary/remote/server/BasicRemoteCacheClientServerUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/remote/server/BasicRemoteCacheClientServerUnitTest.java
+@@ -42,6 +42,9 @@ public class BasicRemoteCacheClientServerUnitTest
+ {
+     /** Server instance to use in the tests. */
+     private RemoteCacheServer server = null;
++    
++    /** the remote server port */
++    private int remotePort;
+ 
+     /**
+      * Starts the server. This is not in a setup, since the server is slow to kill right now.
+@@ -50,6 +53,7 @@ public BasicRemoteCacheClientServerUnitTest()
+     {
+         String configFile = "TestRemoteCacheClientServer.ccf";
+         server = RemoteCacheServerStartupUtil.startServerUsingProperties( configFile );
++        remotePort = server.remoteCacheServerAttributes.getRemotePort();
+     }
+ 
+     /**
+@@ -73,7 +77,7 @@ public void testSinglePut()
+         RemoteCacheAttributes attributes = new RemoteCacheAttributes();
+         attributes.setRemoteHost( "localhost" );
+         attributes.setLocalPort( 1202 );
+-        attributes.setRemotePort( 1101 );
++        attributes.setRemotePort( remotePort );
+ 
+         RemoteCacheManager remoteCacheManager = RemoteCacheManager.getInstance( attributes, compositeCacheManager, new MockCacheEventLogger(), new MockElementSerializer() );
+         String regionName = "testSinglePut";
+@@ -110,7 +114,7 @@ public void testPutRemove()
+         RemoteCacheAttributes attributes = new RemoteCacheAttributes();
+         attributes.setRemoteHost( "localhost" );
+         attributes.setLocalPort( 1202 );
+-        attributes.setRemotePort( 1101 );
++        attributes.setRemotePort( remotePort );
+ 
+         RemoteCacheManager remoteCacheManager = RemoteCacheManager.getInstance( attributes, compositeCacheManager, new MockCacheEventLogger(), null );
+         String regionName = "testPutRemove";
+@@ -154,7 +158,7 @@ public void testPutAndListen()
+         RemoteCacheAttributes attributes = new RemoteCacheAttributes();
+         attributes.setRemoteHost( "localhost" );
+         attributes.setLocalPort( 1202 );
+-        attributes.setRemotePort( 1101 );
++        attributes.setRemotePort( remotePort );
+ 
+         RemoteCacheManager remoteCacheManager = RemoteCacheManager.getInstance( attributes, compositeCacheManager, new MockCacheEventLogger(), new MockElementSerializer() );
+         String regionName = "testPutAndListen";
+@@ -196,7 +200,7 @@ public void testPutaMultipleAndListen()
+         RemoteCacheAttributes attributes = new RemoteCacheAttributes();
+         attributes.setRemoteHost( "localhost" );
+         attributes.setLocalPort( 1202 );
+-        attributes.setRemotePort( 1101 );
++        attributes.setRemotePort( remotePort );
+ 
+         RemoteCacheManager remoteCacheManager = RemoteCacheManager.getInstance( attributes, compositeCacheManager, new MockCacheEventLogger(), new MockElementSerializer() );
+         String regionName = "testPutAndListen";
+diff --git a/src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactoryUnitTest.java b/src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactoryUnitTest.java
+new file mode 100644
+index 000000000..ec502bd4f
+--- /dev/null
++++ b/src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerFactoryUnitTest.java
+@@ -0,0 +1,40 @@
++package org.apache.jcs.auxiliary.remote.server;
++
++import java.util.Properties;
++
++import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheConstants;
++
++import junit.framework.TestCase;
++
++/** Unit tests for the factory */
++public class RemoteCacheServerFactoryUnitTest
++    extends TestCase
++{
++    /** verify that we get the timeout value */
++    public void testConfigureRemoteCacheServerAttributes_timeoutPresent()
++    {
++        // SETUP
++        int timeout = 123245;
++        Properties props = new Properties();
++        props.put( IRemoteCacheConstants.SOCKET_TIMEOUT_MILLIS, String.valueOf( timeout ) );        
++                
++        // DO WORK
++        RemoteCacheServerAttributes result = RemoteCacheServerFactory.configureRemoteCacheServerAttributes( props );
++        
++        // VERIFY
++        assertEquals( "Wrong timeout", timeout, result.getRmiSocketFactoryTimeoutMillis() );
++    }
++    
++    /** verify that we get the timeout value */
++    public void testConfigureRemoteCacheServerAttributes_timeoutNotPresent()
++    {
++        // SETUP
++        Properties props = new Properties();      
++                
++        // DO WORK
++        RemoteCacheServerAttributes result = RemoteCacheServerFactory.configureRemoteCacheServerAttributes( props );
++        
++        // VERIFY
++        assertEquals( "Wrong timeout", RemoteCacheServerAttributes.DEFAULT_RMI_SOCKET_FACTORY_TIMEOUT_MS, result.getRmiSocketFactoryTimeoutMillis() );
++    }
++}
+diff --git a/src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java b/src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java
+index 159756d42..94790a63e 100644
+--- a/src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java
++++ b/src/test/org/apache/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java
+@@ -34,15 +34,15 @@
+  *Starts the registry and runs the server via the factory.
+  *<p>
+  * @author Aaron Smuts
+- *
+  */
+ public class RemoteCacheServerStartupUtil
+ {
++    /** The logger */
+     private final static Log log = LogFactory.getLog( RemoteCacheServerStartupUtil.class );
+ 
++    /** Registry to use in the test. */
+     private static final int DEFAULT_REGISTRY_PORT = 1101;
+ 
+-
+     /**
+      * Starts the registry on port "registry.port"
+      * <p>
+diff --git a/src/test/org/apache/jcs/engine/control/CompositeCacheConfiguratorUnitTest.java b/src/test/org/apache/jcs/engine/control/CompositeCacheConfiguratorUnitTest.java
+index 8f3c0c946..a98e30ebf 100644
+--- a/src/test/org/apache/jcs/engine/control/CompositeCacheConfiguratorUnitTest.java
++++ b/src/test/org/apache/jcs/engine/control/CompositeCacheConfiguratorUnitTest.java
+@@ -26,9 +26,9 @@ public void testParseAuxiliary_CacheEventLogger_Normal()
+ 
+         String auxName = "MockAux";
+         String auxPrefix = "jcs.auxiliary." + auxName;
+-        String auxiliaryClassName = MockAuxiliaryCacheFactory.class.getCanonicalName();
+-        String eventLoggerClassName = MockCacheEventLogger.class.getCanonicalName();
+-        String auxiliaryAttributeClassName = MockAuxiliaryCacheAttributes.class.getCanonicalName();
++        String auxiliaryClassName = MockAuxiliaryCacheFactory.class.getName();
++        String eventLoggerClassName = MockCacheEventLogger.class.getName();
++        String auxiliaryAttributeClassName = MockAuxiliaryCacheAttributes.class.getName();
+ 
+         Properties props = new Properties();
+         props.put( auxPrefix, auxiliaryClassName );
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index c68eedc2e..6863ed454 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -21,10 +21,12 @@
+ 	<body>
+ 		<release version="1.4-dev" date="in SVN">
+ 		</release>
+-		<release version="1.3.2.0" date="in SVN">
++		<release version="1.3.2.0" date="2008-08-29" description="tempbuild">
+ 			<action dev="asmuts" type="update"> Added eventLogging to major
+ 				auxiliaries and to the auxiliary factory interface. This allows you
+ 				to time and monitor the internal working of the cache.</action>
++			<action dev="asmuts" type="update">Moving to JDK 1.4 compliance.
++				1.3 not supported.</action>
+ 			<action dev="asmuts" type="update"> Added the ability to inject custom
+ 				serializers into auxiliary caches.</action>
+ 			<action dev="asmuts" type="fix" issue="JCS-40" due-to="Niall Gallagher"> Added a
+@@ -34,6 +36,9 @@
+ 				getSource to IElementEvent interface.</action>
+ 			<action dev="asmuts" type="update" issue="JCS-44" due-to="Maxim Gordienko"> Made
+ 				spool chunk size configurable.</action>
++			<action dev="asmuts" type="fix" issue="JCS-41" due-to="Niall Gallagher">Added
++				RMI socket connect timeout. Made this configurable on the server and client.
++			</action>
+ 		</release>
+ 		<release version="1.3.1.0" date="in SVN">
+ 			<action dev="asmuts" type="update"> Added getMultiple() method to

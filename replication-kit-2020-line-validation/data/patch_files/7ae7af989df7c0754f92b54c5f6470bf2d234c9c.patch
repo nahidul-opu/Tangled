@@ -1,0 +1,102 @@
+From 7ae7af989df7c0754f92b54c5f6470bf2d234c9c Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Wed, 10 Jul 2013 11:48:37 +0000
+Subject: [PATCH] IO-390 FileUtils.sizeOfDirectoryAsBigInteger can overflow.
+ Ensure that recursive calls all use BigInteger
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/io/trunk@1501735 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 ++++
+ .../java/org/apache/commons/io/FileUtils.java | 19 ++++++++++++++++---
+ .../apache/commons/io/FileUtilsTestCase.java  | 10 ++++++++++
+ 3 files changed, 30 insertions(+), 3 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 53e881c4fba..b24db9f6bba 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -47,6 +47,10 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+     <!-- The release date is the date RC is cut -->
+     <release version="2.5" date="2013-??-??" description="New features and bug fixes.">    
++      <action issue="IO-390" dev="sebb" type="fix">
++         FileUtils.sizeOfDirectoryAsBigInteger can overflow.
++         Ensure that recursive calls all use BigInteger
++      </action>
+       <action issue="IO-382" dev="sebb" type="add">
+          Chunked IO for large arrays.
+          Added writeChunked(byte[], OutputStream) and writeChunked(char[] Writer)
+diff --git a/src/main/java/org/apache/commons/io/FileUtils.java b/src/main/java/org/apache/commons/io/FileUtils.java
+index 9c29bcc9381..ec2f994e4d7 100644
+--- a/src/main/java/org/apache/commons/io/FileUtils.java
++++ b/src/main/java/org/apache/commons/io/FileUtils.java
+@@ -2552,7 +2552,7 @@ public static BigInteger sizeOfAsBigInteger(final File file) {
+         }
+ 
+         if (file.isDirectory()) {
+-            return sizeOfDirectoryAsBigInteger(file);
++            return sizeOfDirectoryBig0(file); // internal method
+         } else {
+             return BigInteger.valueOf(file.length());
+         }
+@@ -2611,17 +2611,21 @@ public static long sizeOfDirectory(final File directory) {
+      */
+     public static BigInteger sizeOfDirectoryAsBigInteger(final File directory) {
+         checkDirectory(directory);
++        return sizeOfDirectoryBig0(directory);
++    }
+ 
++    // Must be called with a directory
++    private static BigInteger sizeOfDirectoryBig0(final File directory) {
+         final File[] files = directory.listFiles();
+         if (files == null) {  // null if security restricted
+             return BigInteger.ZERO;
+         }
+-        BigInteger size = BigInteger.ZERO;
++        BigInteger size =  BigInteger.ZERO;
+ 
+         for (final File file : files) {
+             try {
+                 if (!isSymlink(file)) {
+-                    size = size.add(BigInteger.valueOf(sizeOf(file)));
++                    size = size.add(sizeOBig0(file));
+                 }
+             } catch (final IOException ioe) {
+                 // Ignore exceptions caught when asking if a File is a symlink.
+@@ -2631,6 +2635,15 @@ public static BigInteger sizeOfDirectoryAsBigInteger(final File directory) {
+         return size;
+     }
+ 
++    // internal method; if file does not exist will return 0
++    private static BigInteger sizeOBig0(final File fileOrDir) {
++        if (fileOrDir.isDirectory()) {
++            return sizeOfDirectoryBig0(fileOrDir);
++        } else {
++            return BigInteger.valueOf(fileOrDir.length());
++        }
++    }
++
+     /**
+      * Checks that the given {@code File} exists and is a directory.
+      *
+diff --git a/src/test/java/org/apache/commons/io/FileUtilsTestCase.java b/src/test/java/org/apache/commons/io/FileUtilsTestCase.java
+index fd4b116902b..68b18bf9f58 100644
+--- a/src/test/java/org/apache/commons/io/FileUtilsTestCase.java
++++ b/src/test/java/org/apache/commons/io/FileUtilsTestCase.java
+@@ -862,6 +862,16 @@ public void testSizeOfDirectoryAsBigInteger() throws Exception {
+         file.delete();
+     }
+ 
++    // Compare sizes of a directory tree using long and BigInteger methods
++    public void testCompareSizeOf() {
++        final File start = new File("src/test/java");
++        final long sizeLong1 = FileUtils.sizeOf(start);
++        final BigInteger sizeBig = FileUtils.sizeOfAsBigInteger(start);
++        final long sizeLong2 = FileUtils.sizeOf(start);
++        assertEquals("Size should not change",sizeLong1, sizeLong2);
++        assertEquals("longSize should equal BigSize",sizeLong1, sizeBig.longValue());
++    }
++
+     /**
+      * Tests the {@link FileUtils#sizeOf(File)} method.
+      * @throws Exception

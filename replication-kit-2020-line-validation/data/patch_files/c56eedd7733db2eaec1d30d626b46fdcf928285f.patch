@@ -1,0 +1,1847 @@
+From c56eedd7733db2eaec1d30d626b46fdcf928285f Mon Sep 17 00:00:00 2001
+From: Aaron Smuts <asmuts@apache.org>
+Date: Mon, 19 Mar 2007 13:18:22 +0000
+Subject: [PATCH] FIXED JCS-15
+
+The indexed disk cache was not removing items when called with a partial key or a group. The problem was that it was trying to remove from an iterator on a copy of the keys.
+I fixed the problem and added a couple unit tests.
+
+I also cleaned up the block disk cache and change the lock.
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/jcs/trunk@519940 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../jcs/auxiliary/disk/AbstractDiskCache.java | 147 ++++++-------
+ .../disk/AbstractDiskCacheAttributes.java     |   5 +-
+ .../apache/jcs/auxiliary/disk/LRUMapJCS.java  |  17 +-
+ .../jcs/auxiliary/disk/PurgatoryElement.java  |  40 ++--
+ .../disk/behavior/IDiskCacheAttributes.java   |   3 +-
+ .../jcs/auxiliary/disk/block/BlockDisk.java   |  22 +-
+ .../auxiliary/disk/block/BlockDiskCache.java  |  34 ++-
+ .../disk/block/BlockDiskCacheAttributes.java  |   7 +-
+ .../disk/block/BlockDiskCacheFactory.java     |   2 +
+ .../disk/block/BlockDiskCacheManager.java     |   6 +
+ .../block/BlockDiskElementDescriptor.java     |   5 +
+ .../disk/block/BlockDiskKeyStore.java         |  18 +-
+ .../disk/indexed/IndexedDiskCache.java        | 202 +++++++++++++-----
+ .../org/apache/jcs/utils/struct/LRUMap.java   |  76 +++----
+ src/test-conf/log4j.properties                |   4 +-
+ .../BlockDiskCacheConcurrentUnitTest.java     |  11 +-
+ .../block/BlockDiskCacheKeyStoreUnitTest.java |  13 +-
+ ...lockDiskCacheRandomConcurrentTestUtil.java |   5 +-
+ ...DiskCacheSameRegionConcurrentUnitTest.java |  11 +-
+ .../disk/indexed/IndexDiskCacheUnitTest.java  | 138 ++++++++++--
+ .../IndexedDiskCacheOptimizationUnitTest.java |  18 +-
+ .../jdbc/JDBCDiskCacheShrinkUnitTest.java     |   7 +-
+ xdocs/changes.xml                             |   8 +
+ 23 files changed, 542 insertions(+), 257 deletions(-)
+
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCache.java b/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCache.java
+index dd773aef5..d6de82459 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCache.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCache.java
+@@ -1,14 +1,12 @@
+ package org.apache.jcs.auxiliary.disk;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache
+- * License, Version 2.0 (the "License") you may not use this file except in
+- * compliance with the License. You may obtain a copy of the License at
+- * http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable law
+- * or agreed to in writing, software distributed under the License is
+- * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+- * KIND, either express or implied. See the License for the specific language
+- * governing permissions and limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.IOException;
+@@ -39,53 +37,50 @@
+ import EDU.oswego.cs.dl.util.concurrent.WriterPreferenceReadWriteLock;
+ 
+ /**
+- * Abstract class providing a base implementation of a disk cache, which can be
+- * easily extended to implement a disk cache for a specific perstistence
+- * mechanism.
++ * Abstract class providing a base implementation of a disk cache, which can be easily extended to
++ * implement a disk cache for a specific perstistence mechanism.
+  * <p>
+- * When implementing the abstract methods note that while this base class
+- * handles most things, it does not acquire or release any locks.
+- * Implementations should do so as neccesary. This is mainly done to minimize
+- * the time speant in critical sections.
++ * When implementing the abstract methods note that while this base class handles most things, it
++ * does not acquire or release any locks. Implementations should do so as neccesary. This is mainly
++ * done to minimize the time speant in critical sections.
+  * <p>
+- * Error handling in this class needs to be addressed. Currently if an exception
+- * is thrown by the persistence mechanism, this class destroys the event queue.
+- * Should it also destory purgatory? Should it dispose itself?
++ * Error handling in this class needs to be addressed. Currently if an exception is thrown by the
++ * persistence mechanism, this class destroys the event queue. Should it also destory purgatory?
++ * Should it dispose itself?
+  */
+ public abstract class AbstractDiskCache
+     implements AuxiliaryCache, Serializable
+ {
++    /** The logger */
+     private static final Log log = LogFactory.getLog( AbstractDiskCache.class );
+ 
+     /** Generic disk cache attributes */
+     private IDiskCacheAttributes dcattr = null;
+ 
+     /**
+-     * Map where elements are stored between being added to this cache and
+-     * actually spooled to disk. This allows puts to the disk cache to return
+-     * quickly, and the more expensive operation of serializing the elements to
+-     * persistent storage queued for later.
++     * Map where elements are stored between being added to this cache and actually spooled to disk.
++     * This allows puts to the disk cache to return quickly, and the more expensive operation of
++     * serializing the elements to persistent storage queued for later.
+      * <p>
+-     * If the elements are pulled into the memory cache while the are still in
+-     * purgatory, writing to disk can be cancelled.
++     * If the elements are pulled into the memory cache while the are still in purgatory, writing to
++     * disk can be cancelled.
+      */
+     protected Map purgatory = new HashMap();
+ 
+     /**
+-     * The CacheEventQueue where changes will be queued for asynchronous
+-     * updating of the persistent storage.
++     * The CacheEventQueue where changes will be queued for asynchronous updating of the persistent
++     * storage.
+      */
+     protected ICacheEventQueue cacheEventQueue;
+ 
+     /**
+-     * Indicates whether the cache is 'alive', defined as having been
+-     * initialized, but not yet disposed.
++     * Indicates whether the cache is 'alive', defined as having been initialized, but not yet
++     * disposed.
+      */
+     protected boolean alive = false;
+ 
+     /**
+-     * Every cache will have a name, subclasses must set this when they are
+-     * initialized.
++     * Every cache will have a name, subclasses must set this when they are initialized.
+      */
+     protected String cacheName;
+ 
+@@ -94,8 +89,10 @@ public abstract class AbstractDiskCache
+      */
+     protected int purgHits = 0;
+ 
+-    // we lock here, so that we cannot get an update after a remove all.
+-    // an individual removal locks the item.
++    /**
++     * We lock here, so that we cannot get an update after a remove all. an individual removal locks
++     * the item.
++     */
+     private WriterPreferenceReadWriteLock removeAllLock = new WriterPreferenceReadWriteLock();
+ 
+     // ----------------------------------------------------------- constructors
+@@ -122,13 +119,12 @@ public AbstractDiskCache( IDiskCacheAttributes attr )
+     }
+ 
+     /**
+-     * Purgatory size of -1 means to use a HashMap with no size limit. Anything
+-     * greater will use an LRU map of some sort.
++     * Purgatory size of -1 means to use a HashMap with no size limit. Anything greater will use an
++     * LRU map of some sort.
+      * <p>
+-     * @TODO Currently setting this to 0 will cause nothing to be put to disk,
+-     *       since it will assume that if an item is not in purgatory, then it
+-     *       must have been plucked. We should make 0 work, a way to not use
+-     *       purgatory.
++     * @TODO Currently setting this to 0 will cause nothing to be put to disk, since it will assume
++     *       that if an item is not in purgatory, then it must have been plucked. We should make 0
++     *       work, a way to not use purgatory.
+      */
+     private void initPurgatory()
+     {
+@@ -177,13 +173,11 @@ private void initPurgatory()
+     // ------------------------------------------------------- interface ICache
+ 
+     /**
+-     * Adds the provided element to the cache. Element will be added to
+-     * purgatory, and then queued for later writing to the serialized storage
+-     * mechanism.
++     * Adds the provided element to the cache. Element will be added to purgatory, and then queued
++     * for later writing to the serialized storage mechanism.
+      * <p>
+-     * An update results in a put event being created. The put event will call
+-     * the handlePut method defined here. The handlePut method calls the
+-     * implemented doPut on the child.
++     * An update results in a put event being created. The put event will call the handlePut method
++     * defined here. The handlePut method calls the implemented doPut on the child.
+      * <p>
+      * @param cacheElement
+      * @throws IOException
+@@ -225,8 +219,8 @@ public final void update( ICacheElement cacheElement )
+     }
+ 
+     /**
+-     * Check to see if the item is in purgatory. If so, return it. If not, check
+-     * to see if we have it on disk.
++     * Check to see if the item is in purgatory. If so, return it. If not, check to see if we have
++     * it on disk.
+      * <p>
+      * @param key
+      * @return ICacheElement or null
+@@ -297,6 +291,12 @@ public final ICacheElement get( Serializable key )
+         return null;
+     }
+ 
++    /**
++     * The keys in a group.
++     * <p>
++     * (non-Javadoc)
++     * @see org.apache.jcs.auxiliary.AuxiliaryCache#getGroupKeys(java.lang.String)
++     */
+     public abstract Set getGroupKeys( String groupName );
+ 
+     /**
+@@ -370,11 +370,10 @@ public final void removeAll()
+      * <p>
+      * Disposal proceeds in several steps.
+      * <ol>
+-     * <li> Prior to this call the Composite cache dumped the memory into the
+-     * disk cache. If it is large then we need to wait for the event queue to
+-     * finish.
+-     * <li> Wait until the event queue is empty of until the configured
+-     * ShutdownSpoolTimeLimit is reached.
++     * <li> Prior to this call the Composite cache dumped the memory into the disk cache. If it is
++     * large then we need to wait for the event queue to finish.
++     * <li> Wait until the event queue is empty of until the configured ShutdownSpoolTimeLimit is
++     * reached.
+      * <li> Call doDispose on the concrete impl.
+      * </ol>
+      */
+@@ -428,6 +427,7 @@ public void run()
+     }
+ 
+     /**
++     * @return the region name.
+      * @see ICache#getCacheName
+      */
+     public String getCacheName()
+@@ -445,8 +445,9 @@ public String getStats()
+         return getStatistics().toString();
+     }
+ 
+-    /*
+-     * (non-Javadoc)
++    /**
++     * Returns semi-structured data.
++     * <p>
+      * @see org.apache.jcs.auxiliary.AuxiliaryCache#getStatistics()
+      */
+     public IStats getStatistics()
+@@ -483,6 +484,7 @@ public IStats getStatistics()
+     }
+ 
+     /**
++     * @return the status -- alive or disposed from CacheConstants
+      * @see ICache#getStatus
+      */
+     public int getStatus()
+@@ -491,17 +493,17 @@ public int getStatus()
+     }
+ 
+     /**
+-     * Size cannot be determined without knowledge of the cache implementation,
+-     * so subclasses will need to implement this method.
++     * Size cannot be determined without knowledge of the cache implementation, so subclasses will
++     * need to implement this method.
+      * <p>
++     * @return the number of items.
+      * @see ICache#getSize
+      */
+     public abstract int getSize();
+ 
+     /**
+      * @see org.apache.jcs.engine.behavior.ICacheType#getCacheType
+-     * @return Always returns DISK_CACHE since subclasses should all be of that
+-     *         type.
++     * @return Always returns DISK_CACHE since subclasses should all be of that type.
+      */
+     public int getCacheType()
+     {
+@@ -509,15 +511,18 @@ public int getCacheType()
+     }
+ 
+     /**
+-     * Cache that implements the CacheListener interface, and calls appropriate
+-     * methods in its parent class.
++     * Cache that implements the CacheListener interface, and calls appropriate methods in its
++     * parent class.
+      */
+     private class MyCacheListener
+         implements ICacheListener
+     {
++        /** Id of the listener */
+         private long listenerId = 0;
+ 
+         /**
++         * @return cacheElement.getElementAttributes();
++         * @throws IOException
+          * @see ICacheListener#getListenerId
+          */
+         public long getListenerId()
+@@ -540,10 +545,9 @@ public void setListenerId( long id )
+         /**
+          * @param element
+          * @throws IOException
+-         * @see ICacheListener#handlePut NOTE: This checks if the element is a
+-         *      puratory element and behaves differently depending. However
+-         *      since we have control over how elements are added to the cache
+-         *      event queue, that may not be needed ( they are always
++         * @see ICacheListener#handlePut NOTE: This checks if the element is a puratory element and
++         *      behaves differently depending. However since we have control over how elements are
++         *      added to the cache event queue, that may not be needed ( they are always
+          *      PurgatoryElements ).
+          */
+         public void handlePut( ICacheElement element )
+@@ -616,10 +620,9 @@ public void handlePut( ICacheElement element )
+             else
+             {
+                 /*
+-                 * The cache is not alive, hence the element should be removed
+-                 * from purgatory. All elements should be removed eventually.
+-                 * Perhaps, the alive check should have been done before it went
+-                 * in the queue. This block handles the case where the disk
++                 * The cache is not alive, hence the element should be removed from purgatory. All
++                 * elements should be removed eventually. Perhaps, the alive check should have been
++                 * done before it went in the queue. This block handles the case where the disk
+                  * cache fails during normal opertations.
+                  */
+                 synchronized ( purgatory )
+@@ -680,8 +683,7 @@ public void handleDispose( String cacheName )
+ 
+     /**
+      * Get a value from the persistent store.
+-     * @param key
+-     *            Key to locate value for.
++     * @param key Key to locate value for.
+      * @return An object matching key, or null.
+      */
+     protected abstract ICacheElement doGet( Serializable key );
+@@ -694,8 +696,7 @@ public void handleDispose( String cacheName )
+ 
+     /**
+      * Remove an object from the persistent store if found.
+-     * @param key
+-     *            Key of object to remove.
++     * @param key Key of object to remove.
+      * @return whether or no the item was present when removed
+      */
+     protected abstract boolean doRemove( Serializable key );
+@@ -706,8 +707,8 @@ public void handleDispose( String cacheName )
+     protected abstract void doRemoveAll();
+ 
+     /**
+-     * Dispose of the persistent store. Note that disposal of purgatory and
+-     * setting alive to false does NOT need to be done by this method.
++     * Dispose of the persistent store. Note that disposal of purgatory and setting alive to false
++     * does NOT need to be done by this method.
+      */
+     protected abstract void doDispose();
+ 
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCacheAttributes.java b/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCacheAttributes.java
+index f2e23424b..5b6032b38 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCacheAttributes.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/AbstractDiskCacheAttributes.java
+@@ -24,16 +24,16 @@ public abstract class AbstractDiskCacheAttributes
+     extends AbstractAuxiliaryCacheAttributes
+     implements IDiskCacheAttributes
+ {
+-
+     /** path to disk */
+     protected String diskPath;
+ 
+-    // if this is false, we will not execute remove all
++    /** if this is false, we will not execute remove all */
+     private boolean allowRemoveAll = true;
+ 
+     /** default to 5000 */
+     protected int maxPurgatorySize = MAX_PURGATORY_SIZE_DEFUALT;
+ 
++    /** Default amount of time to allow for keypersistence on shutdown */
+     private static final int DEFAULT_shutdownSpoolTimeLimit = 60;
+ 
+     /**
+@@ -144,5 +144,4 @@ public String toString()
+         str.append( "\n allowRemoveAll   = " + allowRemoveAll );
+         return str.toString();
+     }
+-
+ }
+\ No newline at end of file
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/LRUMapJCS.java b/src/java/org/apache/jcs/auxiliary/disk/LRUMapJCS.java
+index 7e2b82435..57195ad8c 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/LRUMapJCS.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/LRUMapJCS.java
+@@ -5,14 +5,16 @@
+ import org.apache.jcs.utils.struct.LRUMap;
+ 
+ /**
+- * Extension of LRUMap for logging of removals. Can switch this back to a
+- * HashMap easily.
++ * Extension of LRUMap for logging of removals. Can switch this back to a HashMap easily. This
++ * provides some abstraction. It also makes it easy to log overflow.
+  */
+ public class LRUMapJCS
+     extends LRUMap
+ {
++    /** Don't change */
+     private static final long serialVersionUID = 776964015449842672L;
+ 
++    /** The logger */
+     private static final Log log = LogFactory.getLog( LRUMapJCS.class );
+ 
+     /**
+@@ -24,11 +26,11 @@ public LRUMapJCS()
+     }
+ 
+     /**
+-     * This creates a list bounded by the max key size argument. The Boundary is
+-     * enforces by an LRU eviction policy.
++     * This creates a list bounded by the max key size argument. The Boundary is enforces by an LRU
++     * eviction policy.
+      * <p>
+-     * This is used in the Disk cache to store keys and purgatory elements if a
+-     * boundary is requested.
++     * This is used in the Disk cache to store keys and purgatory elements if a boundary is
++     * requested.
+      * <p>
+      * The LRU memory cache uses its own LRU implementation.
+      * <p>
+@@ -40,8 +42,7 @@ public LRUMapJCS( int maxKeySize )
+     }
+ 
+     /**
+-     * This is called when an item is removed from the LRU. We just log some
+-     * information.
++     * This is called when an item is removed from the LRU. We just log some information.
+      * <p>
+      * @param key
+      * @param value
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/PurgatoryElement.java b/src/java/org/apache/jcs/auxiliary/disk/PurgatoryElement.java
+index 5e70ea68e..049a2b46c 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/PurgatoryElement.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/PurgatoryElement.java
+@@ -1,14 +1,12 @@
+ package org.apache.jcs.auxiliary.disk;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache
+- * License, Version 2.0 (the "License") you may not use this file except in
+- * compliance with the License. You may obtain a copy of the License at
+- * http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable law
+- * or agreed to in writing, software distributed under the License is
+- * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+- * KIND, either express or implied. See the License for the specific language
+- * governing permissions and limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.Serializable;
+@@ -17,30 +15,27 @@
+ import org.apache.jcs.engine.behavior.IElementAttributes;
+ 
+ /**
+- * Wrapper for cache elements in purgatory. Elements are stored in purgatory
+- * when they are spooled to the auxilliary cache, but have not yet been written
+- * to disk.
++ * Wrapper for cache elements in purgatory.
++ * <p>
++ * Elements are stored in purgatory when they are spooled to the auxilliary cache, but have not yet
++ * been written to disk.
+  */
+ public class PurgatoryElement
+     implements ICacheElement, Serializable
+ {
++    /** Don't change */
+     private static final long serialVersionUID = -8152034342684135628L;
+ 
+-    /**
+-     * Is the element ready to be spooled?
+-     */
++    /** Is the element ready to be spooled? */
+     protected boolean spoolable = false;
+ 
+-    /**
+-     * Wrapped cache Element
+-     */
++    /** Wrapped cache Element */
+     protected ICacheElement cacheElement;
+ 
+     /**
+      * Constructor for the PurgatoryElement object
+      * <p>
+-     * @param cacheElement
+-     *            CacheElement to wrap.
++     * @param cacheElement CacheElement to wrap.
+      */
+     public PurgatoryElement( ICacheElement cacheElement )
+     {
+@@ -60,8 +55,7 @@ public boolean isSpoolable()
+     /**
+      * Sets the spoolable property.
+      * <p>
+-     * @param spoolable
+-     *            The new spoolable value
++     * @param spoolable The new spoolable value
+      */
+     public void setSpoolable( boolean spoolable )
+     {
+@@ -81,6 +75,7 @@ public ICacheElement getCacheElement()
+     // ------------------------------------------------ interface ICacheElement
+ 
+     /**
++     * @return cacheElement.getCacheName();
+      * @see ICacheElement#getCacheName
+      */
+     public String getCacheName()
+@@ -89,6 +84,7 @@ public String getCacheName()
+     }
+ 
+     /**
++     * @return cacheElement.getKey();
+      * @see ICacheElement#getKey
+      */
+     public Serializable getKey()
+@@ -97,6 +93,7 @@ public Serializable getKey()
+     }
+ 
+     /**
++     * @return cacheElement.getVal();
+      * @see ICacheElement#getVal
+      */
+     public Serializable getVal()
+@@ -105,6 +102,7 @@ public Serializable getVal()
+     }
+ 
+     /**
++     * @return cacheElement.getElementAttributes();
+      * @see ICacheElement#getElementAttributes
+      */
+     public IElementAttributes getElementAttributes()
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/behavior/IDiskCacheAttributes.java b/src/java/org/apache/jcs/auxiliary/disk/behavior/IDiskCacheAttributes.java
+index bd5779ac9..82a7bdace 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/behavior/IDiskCacheAttributes.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/behavior/IDiskCacheAttributes.java
+@@ -19,7 +19,6 @@
+ public interface IDiskCacheAttributes
+     extends AuxiliaryCacheAttributes
+ {
+-
+     /**
+      * This is the default purgatory size limit. Purgatory is the area where
+      * items to be spooled are temporarily stored. It basically provides access
+@@ -81,7 +80,7 @@ public interface IDiskCacheAttributes
+     /**
+      * If this is true then remove all is not prohibited.
+      * <p>
+-     * @return
++     * @return boolean
+      */
+     public boolean isAllowRemoveAll();
+ 
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDisk.java b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDisk.java
+index 8746c421f..f094869ea 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDisk.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDisk.java
+@@ -28,14 +28,16 @@
+  */
+ public class BlockDisk
+ {
++    /** The logger */
+     private static final Log log = LogFactory.getLog( BlockDisk.class );
+ 
+     /** The size of the header that indicates the amount of data stored in an occupied block. */
+     public static final byte HEADER_SIZE_BYTES = 4;
+ 
+-    // defaults to 4kb
++    /** defaults to 4kb */
+     private static final int DEFAULT_BLOCK_SIZE_BYTES = 4 * 1024;
+ 
++    /** Size of the blocks */
+     private int blockSizeBytes = DEFAULT_BLOCK_SIZE_BYTES;
+ 
+     /**
+@@ -44,16 +46,22 @@ public class BlockDisk
+      */
+     private int numberOfBlocks = 0;
+ 
++    /** Empty blocks that can be reused. */
+     private SingleLinkedList emptyBlocks = new SingleLinkedList();
+ 
++    /** Handles serializing the objects */
+     private static final StandardSerializer SERIALIZER = new StandardSerializer();
+ 
++    /** Location of the spot on disk */
+     private final String filepath;
+ 
++    /** The file handle. */
+     private RandomAccessFile raf;
+ 
++    /** How many bytes have we put to disk */
+     private long putBytes = 0;
+ 
++    /** How many items have we put to disk */
+     private long putCount = 0;
+ 
+     /**
+@@ -342,7 +350,7 @@ private synchronized int takeNextBlock()
+      * Calcuates the file offset for a particular block.
+      * <p>
+      * @param block
+-     * @return
++     * @return the offset for this block
+      */
+     protected int calculateByteOffsetForBlock( int block )
+     {
+@@ -353,7 +361,7 @@ protected int calculateByteOffsetForBlock( int block )
+      * The number of blocks needed.
+      * <p>
+      * @param data
+-     * @return
++     * @return the number of blocks needed to store the byte array
+      */
+     protected int calculateTheNumberOfBlocksNeeded( byte[] data )
+     {
+@@ -379,7 +387,7 @@ protected int calculateTheNumberOfBlocksNeeded( byte[] data )
+     /**
+      * Returns the raf length.
+      * <p>
+-     * @return
++     * @return the size of the file.
+      * @exception IOException
+      */
+     protected long length()
+@@ -438,6 +446,10 @@ protected int getBlockSizeBytes()
+      */
+     protected long getAveragePutSizeBytes()
+     {
++        if ( this.putCount == 0 )
++        {
++            return 0;
++        }
+         return this.putBytes / this.putCount;
+     }
+ 
+@@ -451,6 +463,8 @@ protected int getEmptyBlocks()
+ 
+     /**
+      * For debugging only.
++     * <p>
++     * @return String with details.
+      */
+     public String toString()
+     {
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCache.java b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCache.java
+index 2c2f3d7ad..c272480c8 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCache.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCache.java
+@@ -33,36 +33,47 @@
+ import org.apache.jcs.engine.stats.behavior.IStatElement;
+ import org.apache.jcs.engine.stats.behavior.IStats;
+ 
+-import EDU.oswego.cs.dl.util.concurrent.ReentrantWriterPreferenceReadWriteLock;
++import EDU.oswego.cs.dl.util.concurrent.WriterPreferenceReadWriteLock;
+ 
+ /**
++ * There is one BlockDiskCache per region. It manages the key and data store.
++ * <p>
+  * @author Aaron Smuts
+  */
+ public class BlockDiskCache
+     extends AbstractDiskCache
+ {
++    /** Don't change */
+     private static final long serialVersionUID = 1L;
+ 
++    /** The logger. */
+     private static final Log log = LogFactory.getLog( BlockDiskCache.class );
+ 
++    /** The name to prefix all log messages with. */
+     private final String logCacheName;
+ 
++    /** The name of the file to store data. */
+     private String fileName;
+ 
++    /** The data access object */
+     private BlockDisk dataFile;
+ 
++    /** Attributes governing the behavior of the block disk cache. */
+     private BlockDiskCacheAttributes blockDiskCacheAttributes;
+ 
++    /** The root directory for keys and data. */
+     private File rootDirectory;
+ 
+     /** Store, loads, and persists the keys */
+     private BlockDiskKeyStore keyStore;
+ 
+-    // public Object lock = new Object();
+     /**
+-     * Use this lock to synchronize reads and writes to the underlying storage mechansism.
++     * Use this lock to synchronize reads and writes to the underlying storage mechansism. We don't
++     * need a reentrant lock, since we only lock one level.
+      */
+-    protected ReentrantWriterPreferenceReadWriteLock storageLock = new ReentrantWriterPreferenceReadWriteLock();
++    // private ReentrantWriterPreferenceReadWriteLock storageLock = new
++    // ReentrantWriterPreferenceReadWriteLock();
++    private WriterPreferenceReadWriteLock storageLock = new WriterPreferenceReadWriteLock();
+ 
+     /**
+      * Constructs the BlockDisk after setting up the root directory.
+@@ -95,7 +106,8 @@ public BlockDiskCache( BlockDiskCacheAttributes cacheAttributes )
+         {
+             if ( this.blockDiskCacheAttributes.getBlockSizeBytes() > 0 )
+             {
+-                this.dataFile = new BlockDisk( new File( rootDirectory, fileName + ".data" ), this.blockDiskCacheAttributes.getBlockSizeBytes() );
++                this.dataFile = new BlockDisk( new File( rootDirectory, fileName + ".data" ),
++                                               this.blockDiskCacheAttributes.getBlockSizeBytes() );
+             }
+             else
+             {
+@@ -158,7 +170,7 @@ protected boolean verifyDisk()
+         }
+         catch ( Exception e )
+         {
+-            log.warn( "Problem verifying disk.  Message [" +  e.getMessage() + "]" );
++            log.warn( "Problem verifying disk.  Message [" + e.getMessage() + "]" );
+             alright = false;
+         }
+         return alright;
+@@ -532,7 +544,9 @@ private void disposeInternal()
+         }
+     }
+ 
+-    /*
++    /**
++     * Returns the attributes.
++     * <p>
+      * (non-Javadoc)
+      * @see org.apache.jcs.auxiliary.AuxiliaryCache#getAuxiliaryCacheAttributes()
+      */
+@@ -567,13 +581,14 @@ private void reset()
+ 
+             if ( this.blockDiskCacheAttributes.getBlockSizeBytes() > 0 )
+             {
+-                this.dataFile = new BlockDisk( new File( rootDirectory, fileName + ".data" ), this.blockDiskCacheAttributes.getBlockSizeBytes() );
++                this.dataFile = new BlockDisk( new File( rootDirectory, fileName + ".data" ),
++                                               this.blockDiskCacheAttributes.getBlockSizeBytes() );
+             }
+             else
+             {
+                 this.dataFile = new BlockDisk( new File( rootDirectory, fileName + ".data" ) );
+             }
+-            
++
+             this.keyStore.reset();
+         }
+         catch ( Exception e )
+@@ -603,6 +618,7 @@ protected void freeBlocks( int[] blocksToFree )
+     class ShutdownHook
+         extends Thread
+     {
++        /** Disposes of the cache. This will result force the keys to be persisted. */
+         public void run()
+         {
+             if ( alive )
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheAttributes.java b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheAttributes.java
+index 69a458a73..4f5b562f8 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheAttributes.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheAttributes.java
+@@ -10,21 +10,24 @@
+ public class BlockDiskCacheAttributes
+     extends AbstractDiskCacheAttributes
+ {
++    /** Don't change */
+     private static final long serialVersionUID = 6568840097657265989L;
+ 
++    /** The size per block in bytes. */
+     private int blockSizeBytes;
+ 
++    /** Maximum number of keys to be kept in memory */
+     private static final int DEFAULT_MAX_KEY_SIZE = 5000;
+ 
+     /** -1 means no limit. */
+     private int maxKeySize = DEFAULT_MAX_KEY_SIZE;
+     
++    /** How often should we persist the keys. */
+     private static final long DEFAULT_KEY_PERSISTENCE_INTERVAL_SECONDS = 5 * 60;
+     
+     /** The keys will be persisted at this interval.  -1 mean never. */
+     private long keyPersistenceIntervalSeconds = DEFAULT_KEY_PERSISTENCE_INTERVAL_SECONDS;
+-    
+-    
++        
+     /**
+      * The size of the blocks. All blocks are the same size.
+      * <p>
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheFactory.java b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheFactory.java
+index e2d653196..dee9e4b44 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheFactory.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheFactory.java
+@@ -22,8 +22,10 @@
+ public class BlockDiskCacheFactory
+     implements AuxiliaryCacheFactory
+ {
++    /** The logger */
+     private final static Log log = LogFactory.getLog( BlockDiskCacheFactory.class );
+ 
++    /** The auxiliary name */
+     private String name;
+ 
+     /**
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheManager.java b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheManager.java
+index 754c4e20f..16819bcbd 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheManager.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheManager.java
+@@ -27,16 +27,22 @@
+ public class BlockDiskCacheManager
+     implements AuxiliaryCacheManager
+ {
++    /** Don't change */
+     private static final long serialVersionUID = -4153287154512274626L;
+ 
++    /** The logger */
+     private final static Log log = LogFactory.getLog( BlockDiskCacheManager.class );
+ 
++    /** ? */
+     private static int clients;
+ 
++    /** The singleton instance */
+     private static BlockDiskCacheManager instance;
+ 
++    /** block disks for a region. */
+     private Hashtable caches = new Hashtable();
+ 
++    /** Attributes. */
+     private BlockDiskCacheAttributes defaultCacheAttributes;
+ 
+     /**
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskElementDescriptor.java b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskElementDescriptor.java
+index 75fb7dfa9..974555085 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskElementDescriptor.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskElementDescriptor.java
+@@ -25,10 +25,13 @@
+ public class BlockDiskElementDescriptor
+     implements Serializable, Externalizable
+ {
++    /** Don't change */
+     private static final long serialVersionUID = -1400659301208101411L;
+ 
++    /** The key */
+     private Serializable key;
+ 
++    /** The array of block numbers */
+     private int[] blocks;
+ 
+     /**
+@@ -67,6 +70,8 @@ public int[] getBlocks()
+ 
+     /**
+      * For debugging.
++     * <p>
++     * @return Info on the descriptor. 
+      */
+     public String toString()
+     {
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskKeyStore.java b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskKeyStore.java
+index 1e44c16fa..e0452a073 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskKeyStore.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/block/BlockDiskKeyStore.java
+@@ -38,23 +38,31 @@
+  */
+ public class BlockDiskKeyStore
+ {
++    /** The logger */
+     private static final Log log = LogFactory.getLog( BlockDiskKeyStore.class );
+ 
++    /** Attributes governing the behavior of the block disk cache. */
+     private BlockDiskCacheAttributes blockDiskCacheAttributes;
+ 
++    /** The key to block map */
+     private Map keyHash;
+ 
++    /** The file where we persist the keys */
+     private File keyFile;
+ 
++    /** The name to prefix log messages with. */
+     private final String logCacheName;
+ 
++    /** Name of the file where we persist the keys */
+     private String fileName;
+ 
++    /** The maximum number of keys to store in memory */
+     private int maxKeySize;
+ 
+-    // we need this so we can communicate free blocks to the data store when keys fall off the LRU
++    /** we need this so we can communicate free blocks to the data store when keys fall off the LRU */
+     private BlockDiskCache blockDiskCache;
+ 
++    /** The root directory in which the keyFile lives */
+     private File rootDirectory;
+ 
+     /**
+@@ -362,6 +370,7 @@ public int[] remove( Object key )
+     public class LRUMap
+         extends LRUMapJCS
+     {
++        /** Don't change */
+         private static final long serialVersionUID = 4955079991472142198L;
+ 
+         /**
+@@ -388,6 +397,9 @@ public LRUMap( int maxKeySize )
+         /**
+          * This is called when the may key size is reaced. The least recently used item will be
+          * passed here. We will store the position and size of the spot on disk in the recycle bin.
++         * <p>
++         * @param key 
++         * @param value 
+          */
+         protected void processRemovedLRU( Object key, Object value )
+         {
+@@ -408,7 +420,9 @@ class MyThreadFactory
+         implements ThreadFactory
+     {
+ 
+-        /*
++        /**
++         * Ensures that we create daemon threads.
++         * <p>
+          * (non-Javadoc)
+          * @see EDU.oswego.cs.dl.util.concurrent.ThreadFactory#newThread(java.lang.Runnable)
+          */
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+index ec375613b..d86b5deb5 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+@@ -50,8 +50,10 @@
+ public class IndexedDiskCache
+     extends AbstractDiskCache
+ {
++    /** Don't change */
+     private static final long serialVersionUID = -265035607729729629L;
+ 
++    /** The logger */
+     private static final Log log = LogFactory.getLog( IndexedDiskCache.class );
+ 
+     private final String logCacheName;
+@@ -74,22 +76,22 @@ public class IndexedDiskCache
+ 
+     boolean isShutdownOptimizationEnabled = true;
+ 
+-    // are we currenlty optimizing the files
++    /** are we currenlty optimizing the files */
+     boolean isOptimizing = false;
+ 
+     private int timesOptimized = 0;
+ 
+     private volatile Thread currentOptimizationThread;
+ 
+-    // used for counting the number of requests
++    /** used for counting the number of requests */
+     private int removeCount = 0;
+ 
+     private boolean queueInput = false;
+ 
+-    // list where puts made during optimization are made
++    /** list where puts made during optimization are made */
+     private LinkedList queuedPutList = new LinkedList();
+ 
+-    // RECYLCE BIN -- array of empty spots
++    /** RECYLCE BIN -- array of empty spots */
+     private SortedPreferentialArray recycle;
+ 
+     private IndexedDiskCacheAttributes cattr;
+@@ -98,11 +100,11 @@ public class IndexedDiskCache
+ 
+     private int startupSize = 0;
+ 
+-    // the number of bytes free on disk.
++    /** the number of bytes free on disk. */
+     private long bytesFree = 0;
+ 
+     private int hitCount = 0;
+-    
++
+     /**
+      * Use this lock to synchronize reads and writes to the underlying storage mechansism.
+      */
+@@ -522,13 +524,13 @@ protected ICacheElement doGet( Serializable key )
+             storageLock.readLock().acquire();
+             try
+             {
+-                object = readElement( key );               
++                object = readElement( key );
+             }
+             finally
+             {
+                 storageLock.readLock().release();
+             }
+-            
++
+             if ( object != null )
+             {
+                 incrementHitCount();
+@@ -626,7 +628,7 @@ public Set getGroupKeys( String groupName )
+      * Returns true if the removal was succesful; or false if there is nothing to remove. Current
+      * implementation always result in a disk orphan.
+      * <p>
+-     * @return
++     * @return true if at least one item was removed.
+      * @param key
+      */
+     public boolean doRemove( Serializable key )
+@@ -636,6 +638,11 @@ public boolean doRemove( Serializable key )
+             log.error( logCacheName + "No longer alive so returning false for key = " + key );
+             return false;
+         }
++        
++        if ( key == null )
++        {
++            return false;
++        }
+ 
+         boolean reset = false;
+         boolean removed = false;
+@@ -645,56 +652,15 @@ public boolean doRemove( Serializable key )
+ 
+             if ( key instanceof String && key.toString().endsWith( CacheConstants.NAME_COMPONENT_DELIMITER ) )
+             {
+-                // remove all keys of the same name group.
+-
+-                Iterator iter = keyHash.entrySet().iterator();
+-
+-                while ( iter.hasNext() )
+-                {
+-                    Map.Entry entry = (Map.Entry) iter.next();
+-
+-                    Object k = entry.getKey();
+-
+-                    if ( k instanceof String && k.toString().startsWith( key.toString() ) )
+-                    {
+-                        IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.get( key );
+-                        addToRecycleBin( ded );
+-                        iter.remove();
+-                        removed = true;
+-                        // TODO this needs to update the rmove count separately
+-                    }
+-                }
++                removed = performPartialKeyRemoval( (String) key );
+             }
+             else if ( key instanceof GroupId )
+             {
+-                // remove all keys of the same name hierarchy.
+-                Iterator iter = keyHash.entrySet().iterator();
+-                while ( iter.hasNext() )
+-                {
+-                    Map.Entry entry = (Map.Entry) iter.next();
+-                    Object k = entry.getKey();
+-
+-                    if ( k instanceof GroupAttrName && ( (GroupAttrName) k ).groupId.equals( key ) )
+-                    {
+-                        IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.get( key );
+-                        addToRecycleBin( ded );
+-                        iter.remove();
+-                        removed = true;
+-                    }
+-                }
++                removed = performGroupRemoval( (GroupId) key );
+             }
+             else
+             {
+-                // remove single item.
+-                IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.remove( key );
+-                removed = ( ded != null );
+-                addToRecycleBin( ded );
+-
+-                if ( log.isDebugEnabled() )
+-                {
+-                    log.debug( logCacheName + "Disk removal: Removed from key hash, key [" + key + "] removed = "
+-                        + removed );
+-                }
++                removed = performSingleKeyRemoval( key );
+             }
+         }
+         catch ( Exception e )
+@@ -722,6 +688,113 @@ else if ( key instanceof GroupId )
+         return removed;
+     }
+ 
++    /**
++     * Iterates over the keyset. Builds a list of matches. Removes all the keys in the list . Does
++     * not remove via the iterator, since the map impl may not support it.
++     * <p>
++     * This operates under a lock obtained in doRemove().
++     * <p>
++     * @param key
++     * @return true if there was a match
++     */
++    private boolean performPartialKeyRemoval( String key )
++    {
++        boolean removed = false;
++
++        // remove all keys of the same name hierarchy.
++        List itemsToRemove = new LinkedList();
++
++        Iterator iter = keyHash.entrySet().iterator();
++        while ( iter.hasNext() )
++        {
++            Map.Entry entry = (Map.Entry) iter.next();
++            Object k = entry.getKey();
++            if ( k instanceof String && k.toString().startsWith( key.toString() ) )
++            {
++                itemsToRemove.add( k );
++            }
++        }
++
++        // remove matches.
++        Iterator itToRemove = itemsToRemove.iterator();
++        while ( itToRemove.hasNext() )
++        {
++            String fullKey = (String) itToRemove.next();
++            IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.get( fullKey );
++            addToRecycleBin( ded );
++            performSingleKeyRemoval( fullKey );
++            removed = true;
++            // TODO this needs to update the remove count separately
++        }
++
++        return removed;
++    }
++
++    /**
++     * Remove all elements from the group. This does not use the iterator to remove. It builds a
++     * list of group elemetns and then removes them one by one.
++     * <p>
++     * This operates under a lock obtained in doRemove().
++     * <p>
++     * @param key
++     * @return true if an element was removed
++     */
++    private boolean performGroupRemoval( GroupId key )
++    {
++        boolean removed = false;
++
++        // remove all keys of the same name group.
++        List itemsToRemove = new LinkedList();
++
++        // remove all keys of the same name hierarchy.
++        Iterator iter = keyHash.entrySet().iterator();
++        while ( iter.hasNext() )
++        {
++            Map.Entry entry = (Map.Entry) iter.next();
++            Object k = entry.getKey();
++
++            if ( k instanceof GroupAttrName && ( (GroupAttrName) k ).groupId.equals( key ) )
++            {
++                itemsToRemove.add( k );
++            }
++        }
++
++        // remove matches.
++        Iterator itToRemove = itemsToRemove.iterator();
++        while ( itToRemove.hasNext() )
++        {
++            GroupAttrName keyToRemove = (GroupAttrName) itToRemove.next();
++            IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.get( keyToRemove );
++            addToRecycleBin( ded );
++            performSingleKeyRemoval( keyToRemove );
++            removed = true;
++        }
++        return removed;
++    }
++
++    /**
++     * Removes an individual key from the cache.
++     * <p>
++     * This operates under a lock obtained in doRemove().
++     * <p>
++     * @param key 
++     * @return true if an item was removed.
++     */
++    private boolean performSingleKeyRemoval( Serializable key )
++    {
++        boolean removed;
++        // remove single item.
++        IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.remove( key );
++        removed = ( ded != null );
++        addToRecycleBin( ded );
++
++        if ( log.isDebugEnabled() )
++        {
++            log.debug( logCacheName + "Disk removal: Removed from key hash, key [" + key + "] removed = " + removed );
++        }
++        return removed;
++    }
++
+     /**
+      * Remove all the items from the disk cache by reseting everything.
+      */
+@@ -1215,8 +1288,8 @@ protected synchronized long getBytesFree()
+     /**
+      * To subtract you can pass in false for add..
+      * <p>
+-     * @param ded 
+-     * @param add 
++     * @param ded
++     * @param add
+      */
+     private synchronized void adjustBytesFree( IndexedDiskElementDescriptor ded, boolean add )
+     {
+@@ -1305,16 +1378,15 @@ public AuxiliaryCacheAttributes getAuxiliaryCacheAttributes()
+     {
+         return this.cattr;
+     }
+-    
++
+     /**
+      * Increments the hit count in a thread safe manner.
+-     *
+      */
+     private synchronized void incrementHitCount()
+     {
+         hitCount++;
+     }
+-    
++
+     /**
+      * Gets basic stats for the disk cache.
+      * <p>
+@@ -1442,6 +1514,11 @@ protected int getTimesOptimized()
+     private static final class PositionComparator
+         implements Comparator
+     {
++        /**
++         * Compares two descriptors based on position.
++         * <p>
++         * @see java.util.Comparator#compare(java.lang.Object, java.lang.Object)
++         */
+         public int compare( Object o1, Object o2 )
+         {
+             IndexedDiskElementDescriptor ded1 = (IndexedDiskElementDescriptor) o1;
+@@ -1469,6 +1546,7 @@ else if ( ded1.pos == ded2.pos )
+     public class LRUMap
+         extends LRUMapJCS
+     {
++        /** Don't change */
+         private static final long serialVersionUID = 4955079991472142198L;
+ 
+         /**
+@@ -1495,6 +1573,9 @@ public LRUMap( int maxKeySize )
+         /**
+          * This is called when the may key size is reaced. The least recently used item will be
+          * passed here. We will store the position and size of the spot on disk in the recycle bin.
++         * <p>
++         * @param key
++         * @param value
+          */
+         protected void processRemovedLRU( Object key, Object value )
+         {
+@@ -1516,6 +1597,11 @@ protected void processRemovedLRU( Object key, Object value )
+     class ShutdownHook
+         extends Thread
+     {
++        /**
++         * This will persist the keys on shutdown.
++         * <p>
++         * @see java.lang.Thread#run()
++         */
+         public void run()
+         {
+             if ( alive )
+diff --git a/src/java/org/apache/jcs/utils/struct/LRUMap.java b/src/java/org/apache/jcs/utils/struct/LRUMap.java
+index 05e09aa24..3f69ccece 100644
+--- a/src/java/org/apache/jcs/utils/struct/LRUMap.java
++++ b/src/java/org/apache/jcs/utils/struct/LRUMap.java
+@@ -160,44 +160,6 @@ public void putAll( Map source )
+         }
+     }
+ 
+-    /**
+-     * This returns a set of entries. Our LRUMapEntry is used since the value stored in the
+-     * underlying map is a node in the double linked list. We wouldn't want to return this to the
+-     * client, so we construct a new entry with the payload of the node.
+-     * <p>
+-     * TODO we should return out own set wrapper, so we can avoid the extra object creation if it
+-     * isn't necessary.
+-     * <p>
+-     * @see java.util.Map#entrySet()
+-     */
+-    public synchronized Set entrySet()
+-    {
+-        // todo, we should return a defensive copy
+-        Set entries = map.entrySet();
+-
+-        Set unWrapped = new HashSet();
+-
+-        Iterator it = entries.iterator();
+-        while ( it.hasNext() )
+-        {
+-            Entry pre = (Entry) it.next();
+-            Entry post = new LRUMapEntry( pre.getKey(), ( (LRUElementDescriptor) pre.getValue() ).getPayload() );
+-            unWrapped.add( post );
+-        }
+-
+-        return unWrapped;
+-    }
+-
+-    /*
+-     * (non-Javadoc)
+-     * @see java.util.Map#keySet()
+-     */
+-    public Set keySet()
+-    {
+-        // TODO fix this, it needs to return the keys inside the wrappers.
+-        return map.keySet();
+-    }
+-
+     /*
+      * (non-Javadoc)
+      * @see java.util.Map#get(java.lang.Object)
+@@ -642,4 +604,42 @@ public IStats getStatistics()
+ 
+         return stats;
+     }
++
++    /**
++     * This returns a set of entries. Our LRUMapEntry is used since the value stored in the
++     * underlying map is a node in the double linked list. We wouldn't want to return this to the
++     * client, so we construct a new entry with the payload of the node.
++     * <p>
++     * TODO we should return out own set wrapper, so we can avoid the extra object creation if it
++     * isn't necessary.
++     * <p>
++     * @see java.util.Map#entrySet()
++     */
++    public synchronized Set entrySet()
++    {
++        // todo, we should return a defensive copy
++        Set entries = map.entrySet();
++
++        Set unWrapped = new HashSet();
++
++        Iterator it = entries.iterator();
++        while ( it.hasNext() )
++        {
++            Entry pre = (Entry) it.next();
++            Entry post = new LRUMapEntry( pre.getKey(), ( (LRUElementDescriptor) pre.getValue() ).getPayload() );
++            unWrapped.add( post );
++        }
++
++        return unWrapped;
++    }
++
++    /*
++     * (non-Javadoc)
++     * @see java.util.Map#keySet()
++     */
++    public Set keySet()
++    {
++        // TODO fix this, it needs to return the keys inside the wrappers.
++        return map.keySet();
++    }
+ }
+\ No newline at end of file
+diff --git a/src/test-conf/log4j.properties b/src/test-conf/log4j.properties
+index 6608140e3..22982951e 100644
+--- a/src/test-conf/log4j.properties
++++ b/src/test-conf/log4j.properties
+@@ -1,4 +1,4 @@
+-log4j.rootCategory=INFO, stdout, logfile
++log4j.rootCategory=INFO, logfile
+ 
+ log4j.category.org.apache.jcs=INFO
+ log4j.category.org.apache.jcs.config=INFO
+@@ -6,6 +6,7 @@ log4j.category.org.apache.jcs.engine=INFO
+ log4j.category.org.apache.jcs.engine.CacheEventQueueFactory=INFO
+ log4j.category.org.apache.jcs.auxiliary.disk.jdbc=INFO
+ log4j.category.org.apache.jcs.auxiliary.disk=INFO
++log4j.category.org.apache.jcs.auxiliary.disk.block=INFO
+ log4j.category.org.apache.jcs.auxiliary.remote=INFO
+ log4j.category.org.apache.jcs.auxiliary.lateral=INFO
+ log4j.category.org.apache.jcs.utils.struct=INFO
+@@ -18,6 +19,7 @@ log4j.appender.stdout.layout.ConversionPattern=%d %p [%c{1}] - <%m>%n
+ log4j.appender.logfile=org.apache.log4j.RollingFileAppender
+ log4j.appender.logfile.File=target/jcs.log
+ log4j.appender.logfile.MaxFileSize=5MB
++log4j.appender.logfile.Append=false
+ # Keep three backup files
+ log4j.appender.logfile.MaxBackupIndex=3
+ log4j.appender.logfile.layout=org.apache.log4j.PatternLayout
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheConcurrentUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheConcurrentUnitTest.java
+index e07f2d9f3..a30eb81e1 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheConcurrentUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheConcurrentUnitTest.java
+@@ -39,8 +39,9 @@ public class BlockDiskCacheConcurrentUnitTest
+      * Constructor for the TestDiskCache object.
+      * 
+      * @param testName
++     * @throws Exception 
+      */
+-    public BlockDiskCacheConcurrentUnitTest( String testName )
++    public BlockDiskCacheConcurrentUnitTest( String testName ) throws Exception
+     {
+         super( testName );
+     }
+@@ -60,11 +61,17 @@ public static void main( String args[] )
+      * A unit test suite for JUnit
+      * 
+      * @return The test suite
++     * @throws Exception 
+      */
+-    public static Test suite()
++    public static Test suite() throws Exception
+     {
+         ActiveTestSuite suite = new ActiveTestSuite();
+ 
++        JCS.setConfigFilename( "/TestBlockDiskCache.ccf" );
++        JCS.getInstance( "indexedRegion1" ).clear();
++        JCS.getInstance( "indexedRegion2" ).clear();
++        JCS.getInstance( "indexedRegion3" ).clear();
++        
+         suite.addTest( new BlockDiskCacheConcurrentUnitTest( "testBlockDiskCache1" )
+         {
+             public void runTest()
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheKeyStoreUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheKeyStoreUnitTest.java
+index 54e59a3f1..d2571c909 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheKeyStoreUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheKeyStoreUnitTest.java
+@@ -9,8 +9,6 @@
+  * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+-import java.util.Random;
+-
+ import junit.framework.TestCase;
+ 
+ /**
+@@ -21,6 +19,7 @@
+ public class BlockDiskCacheKeyStoreUnitTest
+     extends TestCase
+ {
++    /** Directory name */
+     private String rootDirName = "target/test-sandbox/block";
+ 
+     /**
+@@ -89,11 +88,12 @@ public void testSaveLoadKeys()
+ 
+         // DO WORK
+         int numElements = 1000;
+-        Random random = new Random( 89 );
++        //Random random = new Random( 89 );
+         for ( int i = 0; i < numElements; i++ )
+         {
+-            int blocks = random.nextInt( 10 );
++            int blocks = i;//random.nextInt( 10 );
+             keyStore.put( String.valueOf( i ), new int[blocks] );
++            keyStore.put( String.valueOf( i ), new int[i] );            
+         }
+         System.out.println( "testSaveLoadKeys " + keyStore );
+ 
+@@ -112,5 +112,10 @@ public void testSaveLoadKeys()
+ 
+         // VERIFY
+         assertEquals( "Wrong number of keys after loading", numElements, keyStore.size() );
++        for ( int i = 0; i < numElements; i++ )
++        {
++            int[] result = keyStore.get( String.valueOf( i ) );
++            assertEquals( "Wrong array returned.", i, result.length );
++        }        
+     }
+ }
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheRandomConcurrentTestUtil.java b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheRandomConcurrentTestUtil.java
+index 4d13710b0..52c93f7fa 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheRandomConcurrentTestUtil.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheRandomConcurrentTestUtil.java
+@@ -11,7 +11,6 @@
+ public class BlockDiskCacheRandomConcurrentTestUtil
+     extends TestCase
+ {
+-
+     /**
+      * Constructor for the TestDiskCache object.
+      * 
+@@ -26,7 +25,7 @@ public BlockDiskCacheRandomConcurrentTestUtil( String testName )
+      * Randomly adds items to cache, gets them, and removes them. The range
+      * count is more than the size of the memory cache, so items should spool to
+      * disk.
+-     * 
++     * <p>
+      * @param region
+      *            Name of the region to access
+      * @param range
+@@ -52,7 +51,6 @@ public void runTestForRegion( String region, int range, int numOps, int testNum
+         jcs.put( key, data );
+         String value = (String) jcs.get( key );
+         assertEquals( data, value );
+-
+     }
+ 
+     /**
+@@ -62,5 +60,4 @@ public void setUp()
+     {
+         JCS.setConfigFilename( "/TestBlockDiskCacheCon.ccf" );
+     }
+-
+ }
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheSameRegionConcurrentUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheSameRegionConcurrentUnitTest.java
+index cbbaadb38..ac7fbce36 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheSameRegionConcurrentUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/block/BlockDiskCacheSameRegionConcurrentUnitTest.java
+@@ -97,11 +97,14 @@ public void runTest()
+     }
+ 
+     /**
+-     * Test setup
++     * Test setup.  Sets the config name and clears the region.
++     * <p>
++     * @throws Exception 
+      */
+-    public void setUp()
++    public void setUp() throws Exception
+     {
+         JCS.setConfigFilename( "/TestBlockDiskCacheCon.ccf" );
++        JCS.getInstance( "blockRegion4" ).clear();
+     }
+ 
+     /**
+@@ -121,7 +124,7 @@ public void runTestForRegion( String region, int start, int end )
+ 
+         for ( int i = start; i <= end; i++ )
+         {
+-            jcs.put( i + ":key", region + " data " + i );
++            jcs.put( i + ":key", region + " data " + i + "-" + region );
+         }
+ 
+         // Test that all items are in cache
+@@ -131,7 +134,7 @@ public void runTestForRegion( String region, int start, int end )
+             String key = i + ":key";
+             String value = (String) jcs.get( key );
+ 
+-            assertEquals( "Wrong value for key [" + key + "]", region + " data " + i, value );
++            assertEquals( "Wrong value for key [" + key + "]", region + " data " + i + "-" + region, value );
+         }
+     }
+ }
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
+index e0c22ba20..706b362f5 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
+@@ -8,6 +8,8 @@
+ import org.apache.jcs.engine.ElementAttributes;
+ import org.apache.jcs.engine.behavior.ICacheElement;
+ import org.apache.jcs.engine.behavior.IElementAttributes;
++import org.apache.jcs.engine.control.group.GroupAttrName;
++import org.apache.jcs.engine.control.group.GroupId;
+ 
+ /**
+  * Tests for common functionality.
+@@ -343,20 +345,22 @@ public void testRecyleBinUsage()
+ 
+         // verify that the recyle bin has the correct amount.
+         assertEquals( "The recycle bin should have the number removed.", numberToRemove, disk.getRecyleBinSize() );
+-        
+-        // add half as many as we removed.  These should all use spots in the recycle bin.
++
++        // add half as many as we removed. These should all use spots in the recycle bin.
+         int numberToAdd = numberToRemove / 2;
+         for ( int i = 0; i < numberToAdd; i++ )
+         {
+             disk.doUpdate( elements[i] );
+         }
+-        
++
+         // verify that we used the correct number of spots
+-        assertEquals( "The recycle bin should have the number removed." + disk.getStats(), numberToAdd, disk.getRecyleCount() );
++        assertEquals( "The recycle bin should have the number removed." + disk.getStats(), numberToAdd, disk
++            .getRecyleCount() );
+     }
+-    
++
+     /**
+-     * Verify that the data size is as expected after a remove and after a put that should use the spots.
++     * Verify that the data size is as expected after a remove and after a put that should use the
++     * spots.
+      * <p>
+      * @throws IOException
+      * @throws InterruptedException
+@@ -390,23 +394,131 @@ public void testBytesFreeSize()
+         {
+             disk.doRemove( elements[i].getKey() );
+         }
+-        
++
+         long expectedSize = DiskTestObjectUtil.totalSize( elements, numberToRemove );
+         long resultSize = disk.getBytesFree();
+ 
+         System.out.println( "testBytesFreeSize stats " + disk.getStats() );
+ 
+         assertEquals( "Wrong bytes free size" + disk.getStats(), expectedSize, resultSize );
+-        
+-        // add half as many as we removed.  These should all use spots in the recycle bin.
++
++        // add half as many as we removed. These should all use spots in the recycle bin.
+         int numberToAdd = numberToRemove / 2;
+         for ( int i = 0; i < numberToAdd; i++ )
+         {
+             disk.doUpdate( elements[i] );
+-        }        
+-        
++        }
++
+         long expectedSize2 = DiskTestObjectUtil.totalSize( elements, numberToAdd );
+         long resultSize2 = disk.getBytesFree();
+-        assertEquals( "Wrong bytes free size" + disk.getStats(), expectedSize2, resultSize2 );        
+-    }    
++        assertEquals( "Wrong bytes free size" + disk.getStats(), expectedSize2, resultSize2 );
++    }
++
++    /**
++     * Add some items to the disk cache and then remove them one by one.
++     */
++    public void testRemove_PartialKey()
++    {
++        IndexedDiskCacheAttributes cattr = new IndexedDiskCacheAttributes();
++        cattr.setCacheName( "testRemove_PartialKey" );
++        cattr.setMaxKeySize( 100 );
++        cattr.setDiskPath( "target/test-sandbox/IndexDiskCacheUnitTest" );
++        IndexedDiskCache disk = new IndexedDiskCache( cattr );
++
++        disk.doRemoveAll();
++
++        int cnt = 25;
++        for ( int i = 0; i < cnt; i++ )
++        {
++            IElementAttributes eAttr = new ElementAttributes();
++            eAttr.setIsSpool( true );
++            ICacheElement element = new CacheElement( "testRemove_PartialKey", i + ":key", "data:" + i );
++            element.setElementAttributes( eAttr );
++            disk.doUpdate( element );
++        }
++
++        // verif each
++        for ( int i = 0; i < cnt; i++ )
++        {
++            ICacheElement element = disk.doGet( i + ":key" );
++            assertNotNull( "Shoulds have recevied an element.", element );
++        }
++
++        // remove each
++        for ( int i = 0; i < cnt; i++ )
++        {
++            disk.remove( i + ":" );
++            ICacheElement element = disk.doGet( i + ":key" );
++            assertNull( "Should not have recevied an element.", element );
++        }
++    }
++
++    /**
++     * Verify that group members are removed if we call remove with a group.
++     */
++    public void testRemove_Group()
++    {
++        // SETUP
++        IndexedDiskCacheAttributes cattr = new IndexedDiskCacheAttributes();
++        cattr.setCacheName( "testRemove_Group" );
++        cattr.setMaxKeySize( 100 );
++        cattr.setDiskPath( "target/test-sandbox/IndexDiskCacheUnitTest" );
++        IndexedDiskCache disk = new IndexedDiskCache( cattr );
++
++        disk.doRemoveAll();
++
++        String cacheName = "testRemove_Group_Region";
++        String groupName = "testRemove_Group";
++
++        int cnt = 25;
++        for ( int i = 0; i < cnt; i++ )
++        {
++            GroupAttrName groupAttrName = getGroupAttrName( cacheName, groupName, i + ":key" );
++
++            CacheElement element = new CacheElement( cacheName, groupAttrName, "data:" + i );
++
++            IElementAttributes eAttr = new ElementAttributes();
++            eAttr.setIsSpool( true );
++            element.setElementAttributes( eAttr );
++
++            disk.doUpdate( element );
++        }
++
++        // verify each
++        for ( int i = 0; i < cnt; i++ )
++        {
++            GroupAttrName groupAttrName = getGroupAttrName( cacheName, groupName, i + ":key" );
++            ICacheElement element = disk.doGet( groupAttrName );
++            assertNotNull( "Should have recevied an element.", element );
++        }
++
++        // DO WORK
++        // remove the group
++        GroupId gid = new GroupId( cacheName, groupName );
++        disk.remove( gid );
++
++        for ( int i = 0; i < cnt; i++ )
++        {
++            GroupAttrName groupAttrName = getGroupAttrName( cacheName, groupName, i + ":key" );
++            ICacheElement element = disk.doGet( groupAttrName );
++
++            // VERIFY
++            assertNull( "Should not have recevied an element.", element );
++        }
++
++    }
++
++    /**
++     * Internal method used for group functionality.
++     * <p>
++     * @param cacheName 
++     * @param group
++     * @param name
++     * @return GroupAttrName
++     */
++    private GroupAttrName getGroupAttrName( String cacheName, String group, Object name )
++    {
++        GroupId gid = new GroupId( cacheName, group );
++        return new GroupAttrName( gid, name );
++    }
+ }
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCacheOptimizationUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCacheOptimizationUnitTest.java
+index 43f5de996..af2556688 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCacheOptimizationUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCacheOptimizationUnitTest.java
+@@ -6,12 +6,13 @@
+ import org.apache.jcs.utils.timing.SleepUtil;
+ 
+ /**
++ * Tests for the optimization routine.
++ * <p>
+  * @author Aaron Smuts
+  */
+ public class IndexedDiskCacheOptimizationUnitTest
+     extends TestCase
+ {
+-
+     /**
+      * Set the optimize at remove count to 10. Add 20. Check the file size. Remove 10. Check the
+      * times optimized. Check the file size.
+@@ -20,6 +21,7 @@ public class IndexedDiskCacheOptimizationUnitTest
+     public void testBasicOptimization()
+         throws Exception
+     {
++        // SETUP
+         int removeCount = 50;
+ 
+         IndexedDiskCacheAttributes cattr = new IndexedDiskCacheAttributes();
+@@ -46,23 +48,27 @@ public void testBasicOptimization()
+         System.out.println( "file sizeBeforeRemove " + sizeBeforeRemove );
+         System.out.println( "totalSize inserted " + DiskTestObjectUtil.totalSize( elements, numberToInsert ) );
+ 
++        // DO WORK
+         for ( int i = 0; i < removeCount; i++ )
+         {
+             disk.doRemove( new Integer( i ) );
+         }
+ 
+-        Thread.sleep( 500 );
+-        Thread.yield();
+-        Thread.sleep( 500 );
+-        SleepUtil.sleepAtLeast( 750 );
++        SleepUtil.sleepAtLeast( 1000 );
+         
++        // VERIFY
+         long sizeAfterRemove = disk.getDataFileSize();
+         System.out.println( "file sizeAfterRemove " + sizeAfterRemove );
+         long expectedSizeAfterRemove = DiskTestObjectUtil.totalSize( elements, removeCount, elements.length );
+         System.out.println( "totalSize expected after remove " + expectedSizeAfterRemove );
+ 
++        // test is prone to failure for timing reasons.
++        if ( expectedSizeAfterRemove != sizeAfterRemove )
++        {
++            SleepUtil.sleepAtLeast( 2000 ); 
++        }
++        
+         assertTrue( "The post optimization size should be smaller.", sizeAfterRemove < sizeBeforeRemove );
+-
+         assertEquals( "The file size is not as expected size.", expectedSizeAfterRemove, sizeAfterRemove );
+     }
+ }
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheShrinkUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheShrinkUnitTest.java
+index 677d878fb..665f47308 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheShrinkUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheShrinkUnitTest.java
+@@ -10,6 +10,7 @@
+ 
+ import org.apache.jcs.JCS;
+ import org.apache.jcs.access.exception.CacheException;
++import org.apache.jcs.utils.timing.SleepUtil;
+ 
+ /**
+  * Runs basic tests for the JDBC disk cache.
+@@ -77,7 +78,7 @@ public void testExpireInBackground()
+         System.out.println( jcsExpire.getStats() );
+ 
+         // the shrinker is supposed to run every second
+-        Thread.sleep( 3000 );
++        SleepUtil.sleepAtLeast( 3000 );
+ 
+         System.out.println( jcsExpire.getStats() );
+ 
+@@ -113,7 +114,7 @@ public void testDidNotExpire()
+ 
+         System.out.println( jcs.getStats() );
+ 
+-        Thread.sleep( 1000 );
++        SleepUtil.sleepAtLeast( 1000 );
+ 
+         System.out.println( jcs.getStats() );
+ 
+@@ -166,7 +167,7 @@ public void testDidNotExpireEternal()
+ 
+         System.out.println( jcs.getStats() );
+ 
+-        Thread.sleep( 1000 );
++        SleepUtil.sleepAtLeast( 1000 );
+ 
+         System.out.println( jcs.getStats() );
+ 
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index f39f4ffd0..d378ce787 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -6,11 +6,19 @@
+ 	<body>
+ 
+ 		<release version="1.2.7.9.3" date="in CVS">
++			<action dev="asmuts" type="fix" issue="JCS-15"
++				due-to="Kevin Preece">
++				Fixed partial key and group id removal bug in indexed disk cache.
++			</action>
+ 			<action dev="asmuts" type="fix" issue="JCS-20"
+ 				due-to="Alistair Forbes">
+ 				Fixed partial key removal SQL syntax problem with the
+ 				JDBC disk cache.
+ 			</action>
++			<action dev="asmuts" type="fix" issue="JCS-21"
++				due-to="Michael Stevens">
++				Fixed a few minor missing locks.
++			</action>
+ 		</release>
+ 
+ 		<release version="1.2.7.9.2" date="in CVS">

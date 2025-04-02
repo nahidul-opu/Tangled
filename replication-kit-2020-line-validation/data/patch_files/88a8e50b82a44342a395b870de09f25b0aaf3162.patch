@@ -1,0 +1,284 @@
+From 88a8e50b82a44342a395b870de09f25b0aaf3162 Mon Sep 17 00:00:00 2001
+From: Ralph Goers <rgoers@apache.org>
+Date: Mon, 22 Jun 2009 03:33:03 +0000
+Subject: [PATCH] Fix CONFIGURATION-388 - delimiters will not be escaped if
+ delimiter parsing/attribute splitting are disabled
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@787128 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration2/XMLConfiguration.java      | 40 ++++++++----
+ .../configuration2/TestXMLConfiguration.java  | 62 +++++++++++++++++++
+ xdocs/changes.xml                             | 17 ++---
+ 3 files changed, 99 insertions(+), 20 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/XMLConfiguration.java b/src/main/java/org/apache/commons/configuration2/XMLConfiguration.java
+index 7f996829ad..3acbb52351 100644
+--- a/src/main/java/org/apache/commons/configuration2/XMLConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/XMLConfiguration.java
+@@ -839,7 +839,8 @@ protected Document createDocument() throws ConfigurationException
+             }
+ 
+             XMLBuilderVisitor builder = new XMLBuilderVisitor(document,
+-                    isDelimiterParsingDisabled() ? (char) 0 : getListDelimiter());
++                    isDelimiterParsingDisabled() ? (char) 0 : getListDelimiter(),
++                    isAttributeSplittingDisabled());
+             visit(getRootNode(), builder);
+             initRootElementText(document, getRootNode().getValue());
+             return document;
+@@ -1324,9 +1325,9 @@ private void updateElement(Object value)
+             {
+                 if (txtNode == null)
+                 {
+-                    txtNode = document
+-                            .createTextNode(PropertyConverter.escapeDelimiters(
+-                                    value.toString(), getListDelimiter()));
++                    String newValue = isDelimiterParsingDisabled() ? value.toString() :
++                        PropertyConverter.escapeDelimiters(value.toString(), getListDelimiter());
++                    txtNode = document.createTextNode(newValue);
+                     if (((Element) getReference()).getFirstChild() != null)
+                     {
+                         ((Element) getReference()).insertBefore(txtNode,
+@@ -1339,8 +1340,9 @@ private void updateElement(Object value)
+                 }
+                 else
+                 {
+-                    txtNode.setNodeValue(PropertyConverter.escapeDelimiters(
+-                            value.toString(), getListDelimiter()));
++                    String newValue = isDelimiterParsingDisabled() ? value.toString() :
++                        PropertyConverter.escapeDelimiters(value.toString(), getListDelimiter());
++                    txtNode.setNodeValue(newValue);
+                 }
+             }
+         }
+@@ -1351,7 +1353,8 @@ private void updateElement(Object value)
+          */
+         private void updateAttribute()
+         {
+-            XMLBuilderVisitor.updateAttribute(getParentNode(), getName(), getListDelimiter());
++            XMLBuilderVisitor.updateAttribute(getParentNode(), getName(), getListDelimiter(),
++                    isAttributeSplittingDisabled());
+         }
+ 
+         /**
+@@ -1414,16 +1417,20 @@ static class XMLBuilderVisitor extends BuilderVisitor
+         private char listDelimiter = AbstractConfiguration.
+                 getDefaultListDelimiter();
+ 
++        /** True if attributes should not be split */
++        private boolean isAttributeSplittingDisabled;
+         /**
+          * Creates a new instance of <code>XMLBuilderVisitor</code>
+          *
+          * @param doc the document to be created
+          * @param listDelimiter the delimiter for attribute properties with multiple values
++         * @param isAttributeSplittingDisabled true if attribute splitting is disabled.
+          */
+-        public XMLBuilderVisitor(Document doc, char listDelimiter)
++        public XMLBuilderVisitor(Document doc, char listDelimiter, boolean isAttributeSplittingDisabled)
+         {
+             document = doc;
+             this.listDelimiter = listDelimiter;
++            this.isAttributeSplittingDisabled = isAttributeSplittingDisabled;
+         }
+ 
+         /**
+@@ -1441,7 +1448,7 @@ protected Object insert(ConfigurationNode newNode, ConfigurationNode parent, Con
+         {
+             if (newNode.isAttribute())
+             {
+-                updateAttribute(parent, getElement(parent), newNode.getName(), listDelimiter);
++                updateAttribute(parent, getElement(parent), newNode.getName(), listDelimiter, isAttributeSplittingDisabled);
+                 return null;
+             }
+ 
+@@ -1481,8 +1488,10 @@ else if (sibling1 != null)
+          * @param elem the element that is associated with this node
+          * @param name the name of the affected attribute
+          * @param listDelimiter the delimiter for attributes with multiple values
++         * @param isAttributeSplittingDisabled true if attribute splitting is disabled.
+          */
+-        private static void updateAttribute(ConfigurationNode node, Element elem, String name, char listDelimiter)
++        private static void updateAttribute(ConfigurationNode node, Element elem, String name, char listDelimiter,
++                                            boolean isAttributeSplittingDisabled)
+         {
+             if (node != null && elem != null)
+             {
+@@ -1497,7 +1506,10 @@ private static void updateAttribute(ConfigurationNode node, Element elem, String
+                         {
+                             buf.append(delimiter);
+                         }
+-                        buf.append(PropertyConverter.escapeDelimiters(attribute.getValue().toString(), delimiter));
++                        String value = isAttributeSplittingDisabled ? attribute.getValue().toString() :
++                            PropertyConverter.escapeDelimiters(attribute.getValue().toString(),
++                                    delimiter);
++                        buf.append(value);
+                     }
+                     attribute.setReference(elem);
+                 }
+@@ -1521,12 +1533,14 @@ private static void updateAttribute(ConfigurationNode node, Element elem, String
+          * @param node the affected node
+          * @param name the name of the attribute
+          * @param listDelimiter the delimiter for attributes with multiple values
++         * @param isAttributeSplittingDisabled true if attribute splitting is disabled.
+          */
+-        static void updateAttribute(ConfigurationNode node, String name, char listDelimiter)
++        static void updateAttribute(ConfigurationNode node, String name, char listDelimiter,
++                                    boolean isAttributeSplittingDisabled)
+         {
+             if (node != null)
+             {
+-                updateAttribute(node, (Element) node.getReference(), name, listDelimiter);
++                updateAttribute(node, (Element) node.getReference(), name, listDelimiter, isAttributeSplittingDisabled);
+             }
+         }
+ 
+diff --git a/src/test/java/org/apache/commons/configuration2/TestXMLConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestXMLConfiguration.java
+index 6a27ceb911..c6ea2f4be7 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestXMLConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestXMLConfiguration.java
+@@ -77,6 +77,7 @@ public class TestXMLConfiguration extends TestCase
+     private String testProperties2 = ConfigurationAssert.getTestFile("testDigesterConfigurationInclude1.xml").getAbsolutePath();
+     private String testBasePath = ConfigurationAssert.TEST_DIR.getAbsolutePath();
+     private File testSaveConf = ConfigurationAssert.getOutFile("testsave.xml");
++    private File testSaveFile = ConfigurationAssert.getOutFile("testsample2.xml");
+     private String testFile2 = ConfigurationAssert.getTestFile("sample.xml").getAbsolutePath();
+ 
+     private XMLConfiguration conf;
+@@ -784,6 +785,67 @@ public void testDelimiterParsingDisabled() throws ConfigurationException {
+         assertEquals("a\\,b\\,c", conf2.getString("split/list2"));
+     }
+ 
++     /**
++     * Tests string properties with list delimiters when delimiter parsing
++     * is disabled
++     */
++    public void testSaveWithDelimiterParsingDisabled() throws ConfigurationException {
++        XMLConfiguration conf = new XMLConfiguration();
++        conf.setExpressionEngine(new XPathExpressionEngine());
++        conf.setDelimiterParsingDisabled(true);
++        conf.setAttributeSplittingDisabled(true);
++        conf.setFile(new File(testProperties));
++        conf.load();
++
++        assertEquals("a,b,c", conf.getString("split/list3/@values"));
++        assertEquals(0, conf.getMaxIndex("split/list3/@values"));
++        assertEquals("a\\,b\\,c", conf.getString("split/list4/@values"));
++        assertEquals("a,b,c", conf.getString("split/list1"));
++        assertEquals(0, conf.getMaxIndex("split/list1"));
++        assertEquals("a\\,b\\,c", conf.getString("split/list2"));
++        // save the configuration
++        conf.save(testSaveConf.getAbsolutePath());
++
++        // read the configuration and compare the properties
++        XMLConfiguration checkConfig = new XMLConfiguration();
++        checkConfig.setFileName(testSaveConf.getAbsolutePath());
++        checkSavedConfig(checkConfig);
++        XMLConfiguration config = new XMLConfiguration();
++        config.setFileName(testFile2);
++        //config.setExpressionEngine(new XPathExpressionEngine());
++        config.setDelimiterParsingDisabled(true);
++        config.setAttributeSplittingDisabled(true);
++        config.load();
++        config.setProperty("Employee[@attr1]", "3,2,1");
++        assertEquals("3,2,1", config.getString("Employee[@attr1]"));
++        config.save(testSaveFile.getAbsolutePath());
++        config = new XMLConfiguration();
++        config.setFileName(testSaveFile.getAbsolutePath());
++        //config.setExpressionEngine(new XPathExpressionEngine());
++        config.setDelimiterParsingDisabled(true);
++        config.setAttributeSplittingDisabled(true);
++        config.load();
++        config.setProperty("Employee[@attr1]", "1,2,3");
++        assertEquals("1,2,3", config.getString("Employee[@attr1]"));
++        config.setProperty("Employee[@attr2]", "one, two, three");
++        assertEquals("one, two, three", config.getString("Employee[@attr2]"));
++        config.setProperty("Employee.text", "a,b,d");
++        assertEquals("a,b,d", config.getString("Employee.text"));
++        config.setProperty("Employee.Salary", "100,000");
++        assertEquals("100,000", config.getString("Employee.Salary"));
++        config.save(testSaveFile.getAbsolutePath());
++        checkConfig = new XMLConfiguration();
++        checkConfig.setFileName(testSaveFile.getAbsolutePath());
++        checkConfig.setExpressionEngine(new XPathExpressionEngine());
++        checkConfig.setDelimiterParsingDisabled(true);
++        checkConfig.setAttributeSplittingDisabled(true);
++        checkConfig.load();
++        assertEquals("1,2,3", checkConfig.getString("Employee/@attr1"));
++        assertEquals("one, two, three", checkConfig.getString("Employee/@attr2"));
++        assertEquals("a,b,d", checkConfig.getString("Employee/text"));
++        assertEquals("100,000", checkConfig.getString("Employee/Salary"));
++    }
++
+     /**
+      * Tests whether a DTD can be accessed.
+      */
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index 7ee1ce6d4d..b9f8d2463e 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -85,6 +85,9 @@
+     </release>
+ 
+     <release version="1.7" date="in SVN" description="">
++      <action dev="rgoers" type="fix" issue="CONFIGURATION-388">
++        Attribute or element values will not be escaped when attribute or element splitting are disabled.
++      </action>      
+       <action dev="oheger" type="fix" issue="CONFIGURATION-385">
+         DatabaseConfiguration now generates correct events for the clear() and
+         clearProperty() methods.
+@@ -93,7 +96,7 @@
+         Add ExprLookup to allow expressions to be evaluated in configurations. When
+         used, this requires that Apache Commons Jexl be added as a dependency to
+         projects using Commons Configuration.
+-      </action>      
++      </action>
+       <action dev="oheger" type="add" issue="CONFIGURATION-374">
+         MapConfiguration now provides a way of controlling the trimming
+         behavior.
+@@ -760,7 +763,7 @@
+       </action>
+       <action dev="oheger" type="update" issue="CONFIGURATION-63">
+         Loading of file-based configurations no longer throws a NullPointerException
+-        in setups where the thread context class loader is not set. 
++        in setups where the thread context class loader is not set.
+       </action>
+       <action dev="oheger" type="update">
+         The dependency to dom4j was removed; it was only used by two test classes,
+@@ -871,7 +874,7 @@
+         ConfigurationMap.
+       </action>
+     </release>
+-    
++
+     <release version="1.2-rc1" date="2005-11-11">
+       <action dev="oheger" type="update" issue="CONFIGURATION-33">
+         The reload() method in AbstractFileConfiguration was updated to prevent
+@@ -1093,7 +1096,7 @@
+       </action>
+       <action dev="ebourg" type="update" issue="CONFIGURATION-58">
+         Fixed getLongArray(), getFloatArray() and getDoubleArray() in DataConfiguration,
+-        the values were cast into integers. 
++        the values were cast into integers.
+       </action>
+     </release>
+ 
+@@ -1140,7 +1143,7 @@
+       </action>
+       <action dev="ebourg" type="fix">
+         Calling getProperties on a JNDIConfiguration no longer throws an
+-        UnsupportedOperationException.        
++        UnsupportedOperationException.
+       </action>
+       <action dev="ebourg" type="remove">
+         Removed the getPropertyDirect method from AbstractConfiguration,
+@@ -1193,8 +1196,8 @@
+         XMLConfiguration to AbstractFileConfiguration.
+       </action>
+       <action dev="epugh" type="remove">
+-        Remove deprecated getVector() implementations. 
+-      </action>        
++        Remove deprecated getVector() implementations.
++      </action>
+       <action dev="ebourg" type="add" issue="CONFIGURATION-147">
+         File based configurations can now be automatically reloaded when the
+         underlying file is modified.

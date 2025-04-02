@@ -1,0 +1,110 @@
+From b34fdc404f53efeb27725f8e2017711e0eb9255e Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 28 Feb 2006 12:07:57 +0000
+Subject: [PATCH] FIX: incorrect configuration definition gives misleading
+ NullPointerException (IVY-175)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484227 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                       |  1 +
+ .../fr/jayasoft/ivy/DefaultModuleDescriptor.java  | 15 +++++++++++++++
+ .../ivy/xml/XmlModuleDescriptorParser.java        |  9 +++++----
+ .../ivy/xml/XmlModuleDescriptorParserTest.java    |  9 +++++++++
+ test/java/fr/jayasoft/ivy/xml/test-bad-confs.xml  |  9 +++++++++
+ 5 files changed, 39 insertions(+), 4 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/xml/test-bad-confs.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 95474bc93..caf7df569 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,5 +1,6 @@
+ - IMPROVE: Retrieve task now also optionally do ivy file downloads (IVY-167) (with the contribution of Costin Leau)
+ 
++- FIX: incorrect configuration definition gives misleading NullPointerException (IVY-175)
+ - FIX: throw an error when using a non-existing conflict manager as default (IVY-179) (thanks to Maarten Coene)
+ - FIX: eviction problem with different conflicts in multiple confs (IVY-173)
+ 
+diff --git a/src/java/fr/jayasoft/ivy/DefaultModuleDescriptor.java b/src/java/fr/jayasoft/ivy/DefaultModuleDescriptor.java
+index ccbb75b58..99d76523c 100644
+--- a/src/java/fr/jayasoft/ivy/DefaultModuleDescriptor.java
++++ b/src/java/fr/jayasoft/ivy/DefaultModuleDescriptor.java
+@@ -363,4 +363,19 @@ public void setNamespace(Namespace ns) {
+         _namespace = ns;
+     }
+ 
++    /**
++     * Throws an exception if the module descriptor is inconsistent
++     * For the moment, only extended configurations existence is checked
++     */
++    public void check() {
++        for (Iterator iter = _configurations.values().iterator(); iter.hasNext();) {
++            Configuration conf = (Configuration)iter.next();
++            String[] ext = conf.getExtends();
++            for (int i = 0; i < ext.length; i++) {
++                if (!_configurations.containsKey(ext[i].trim())) {
++                    throw new IllegalStateException("unknown configuration '"+ext[i]+"'. It is extended by "+conf.getName());
++                }
++            }
++        }
++    }
+ }
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+index 6124d336b..051f80954 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+@@ -143,14 +143,15 @@ private void parse(URL xmlURL, Resource res, boolean validate) throws ParseExcep
+                     _md.addArtifact(confs[i], new MDArtifact(_md, _md.getModuleRevisionId().getName(), "jar", "jar"));
+                 }
+             }
+-        } catch (SAXException ex) {
+-            ParseException pe = new ParseException(ex.getMessage()+" in "+xmlURL, 0);
+-            pe.initCause(ex);
+-            throw pe;
++            _md.check();
+         } catch (ParserConfigurationException ex) {
+             IllegalStateException ise = new IllegalStateException(ex.getMessage()+" in "+xmlURL);
+             ise.initCause(ex);
+             throw ise;
++        } catch (Exception ex) {
++            ParseException pe = new ParseException(ex.getMessage()+" in "+xmlURL, 0);
++            pe.initCause(ex);
++            throw pe;
+         }
+     }
+ 
+diff --git a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+index 0aab108bc..c10790e42 100644
+--- a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+@@ -70,6 +70,15 @@ public void testBad2() throws IOException {
+         }
+     }
+ 
++    public void testBadConfs() throws IOException {
++        try {
++            XmlModuleDescriptorParser.getInstance().parseDescriptor(_ivy, getClass().getResource("test-bad-confs.xml"), true);
++            fail("bad ivy file raised no error");
++        } catch (ParseException ex) {
++            assertTrue(ex.getMessage().indexOf("invalidConf") != -1);
++        }
++    }
++
+     public void testNoValidate() throws IOException, ParseException {
+         XmlModuleDescriptorParser.getInstance().parseDescriptor(_ivy, getClass().getResource("test-novalidate.xml"), false);
+     }
+diff --git a/test/java/fr/jayasoft/ivy/xml/test-bad-confs.xml b/test/java/fr/jayasoft/ivy/xml/test-bad-confs.xml
+new file mode 100644
+index 000000000..cf7e35b8b
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/xml/test-bad-confs.xml
+@@ -0,0 +1,9 @@
++<ivy-module version="1.0">
++	<info  organisation="myorg"
++	       module="mymodule"
++	       status="integration"
++	/>
++	<configurations>
++		<conf name="A" extends="invalidConf"/>
++	</configurations>
++</ivy-module>

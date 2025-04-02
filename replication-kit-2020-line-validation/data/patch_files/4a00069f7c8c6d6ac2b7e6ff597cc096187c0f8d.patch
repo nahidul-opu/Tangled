@@ -1,0 +1,90 @@
+From 4a00069f7c8c6d6ac2b7e6ff597cc096187c0f8d Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Tue, 18 Sep 2012 16:18:34 +0000
+Subject: [PATCH] [SANTUARIO-344] - Close the internal InputStream of
+ XMLSignatureInput on an Exception
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1387232 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../security/signature/XMLSignatureInput.java | 24 ++++++++++++++-----
+ .../impl/transformer/TransformIdentity.java   |  4 ++--
+ .../utils/UnsyncByteArrayOutputStream.java    |  1 +
+ 3 files changed, 21 insertions(+), 8 deletions(-)
+
+diff --git a/src/main/java/org/apache/xml/security/signature/XMLSignatureInput.java b/src/main/java/org/apache/xml/security/signature/XMLSignatureInput.java
+index d5e17e89e4..0efa18b83d 100644
+--- a/src/main/java/org/apache/xml/security/signature/XMLSignatureInput.java
++++ b/src/main/java/org/apache/xml/security/signature/XMLSignatureInput.java
+@@ -487,8 +487,13 @@ public void updateOutputStream(OutputStream diOs, boolean c14n11)
+         } else {
+             byte[] buffer = new byte[4 * 1024];
+             int bytesread = 0;
+-            while ((bytesread = inputOctetStreamProxy.read(buffer)) != -1) {
+-                diOs.write(buffer, 0, bytesread);
++            try {
++                while ((bytesread = inputOctetStreamProxy.read(buffer)) != -1) {
++                    diOs.write(buffer, 0, bytesread);
++                }
++            } catch (IOException ex) {
++                inputOctetStreamProxy.close();
++                throw ex;
+             }
+         }
+     }
+@@ -507,8 +512,11 @@ private byte[] getBytesFromInputStream() throws IOException {
+         if (inputOctetStreamProxy == null) {
+             return null;
+         }
+-        bytes = JavaUtils.getBytesFromStream(inputOctetStreamProxy);
+-        inputOctetStreamProxy.close();
++        try {
++            bytes = JavaUtils.getBytesFromStream(inputOctetStreamProxy);
++        } finally {
++            inputOctetStreamProxy.close();
++        }
+         return bytes;
+     }
+         
+@@ -568,9 +576,13 @@ void convertToNodes() throws CanonicalizationException,
+             byte result[] = baos.toByteArray();
+             Document document = db.parse(new ByteArrayInputStream(result));
+             this.subNode = document.getDocumentElement().getFirstChild().getFirstChild();				
++        } finally {
++            if (this.inputOctetStreamProxy != null) {
++                this.inputOctetStreamProxy.close();
++            }
++            this.inputOctetStreamProxy = null;
++            this.bytes = null;
+         }
+-        this.inputOctetStreamProxy = null;
+-        this.bytes = null;
+     }
+     
+ }
+diff --git a/src/main/java/org/apache/xml/security/stax/impl/transformer/TransformIdentity.java b/src/main/java/org/apache/xml/security/stax/impl/transformer/TransformIdentity.java
+index f6d8ad156e..e5c6d5772f 100644
+--- a/src/main/java/org/apache/xml/security/stax/impl/transformer/TransformIdentity.java
++++ b/src/main/java/org/apache/xml/security/stax/impl/transformer/TransformIdentity.java
+@@ -35,8 +35,8 @@
+  */
+ public class TransformIdentity implements Transformer {
+ 
+-    private static XMLOutputFactory xmlOutputFactory;
+-    private static XMLInputFactory xmlInputFactory;
++    private static volatile XMLOutputFactory xmlOutputFactory;
++    private static volatile XMLInputFactory xmlInputFactory;
+     private OutputStream outputStream;
+     private XMLEventWriter xmlEventWriterForOutputStream;
+     private Transformer transformer;
+diff --git a/src/main/java/org/apache/xml/security/utils/UnsyncByteArrayOutputStream.java b/src/main/java/org/apache/xml/security/utils/UnsyncByteArrayOutputStream.java
+index a4af8691f2..729188ef08 100644
+--- a/src/main/java/org/apache/xml/security/utils/UnsyncByteArrayOutputStream.java
++++ b/src/main/java/org/apache/xml/security/utils/UnsyncByteArrayOutputStream.java
+@@ -93,6 +93,7 @@ public void reset() {
+     @Override
+     public void close() throws IOException {
+         bufCache.remove();
++        buf = null;
+     }
+ 
+     private void expandSize(int newPos) {

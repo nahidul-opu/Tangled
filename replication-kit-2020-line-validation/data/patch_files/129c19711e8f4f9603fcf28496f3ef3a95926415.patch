@@ -1,0 +1,252 @@
+From 129c19711e8f4f9603fcf28496f3ef3a95926415 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 24 Apr 2007 17:53:20 +0000
+Subject: [PATCH] BUG: ivy:install ant task does not fail on error (IVY-475)
+ (thanks to Jeffrey Blatttman)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@532027 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   4 +
+ doc/doc/use/install.html                      |   2 +
+ src/java/org/apache/ivy/ant/IvyInstall.java   |  35 ++++--
+ .../org/apache/ivy/ant/IvyInstallTest.java    | 101 ++++++++++++++++++
+ 4 files changed, 132 insertions(+), 10 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/ant/IvyInstallTest.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 4cc86e54c..1ad9d2942 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -13,6 +13,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+  	Ingo Adler
+ 	Stephane Baillez
+ 	Karl Baum
++	Jeffrey Blatttman
+ 	Matthieu Brouillard
+ 	Kristian Cibulskis
+ 	Pierre Hägnestrand
+@@ -43,6 +44,9 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Johan Stuyts
+ 	John Williams
+ 
++   version in SVN
++=====================================
++- BUG: ivy:install ant task does not fail on error (IVY-475) (thanks to Jeffrey Blatttman)
+ 
+    2.0.0-alpha1-incubating
+ =====================================
+diff --git a/doc/doc/use/install.html b/doc/doc/use/install.html
+index e608feb08..81caf5a7d 100644
+--- a/doc/doc/use/install.html
++++ b/doc/doc/use/install.html
+@@ -56,6 +56,8 @@
+         <td>No, defaults to false</td></tr>
+     <tr><td>matcher</td><td>the name of the matcher to use to find the modules to install</td>
+         <td>No, defaults to exact</td></tr>
++    <tr><td>haltonunresolved</td><td>true to fail build on unresolved dependencies <span class="since">since 2.0</span></td>
++        <td>No, defaults to true</td></tr>
+ </tbody>
+ </table>
+ <h1>Examples</h1>
+diff --git a/src/java/org/apache/ivy/ant/IvyInstall.java b/src/java/org/apache/ivy/ant/IvyInstall.java
+index 2fe5b7410..020d71a33 100644
+--- a/src/java/org/apache/ivy/ant/IvyInstall.java
++++ b/src/java/org/apache/ivy/ant/IvyInstall.java
+@@ -25,12 +25,13 @@
+ import org.apache.ivy.plugins.matcher.PatternMatcher;
+ import org.apache.ivy.util.filter.FilterHelper;
+ import org.apache.tools.ant.BuildException;
+-
++import org.apache.ivy.core.report.ResolveReport;
++import org.apache.tools.ant.BuildException;
+ 
+ /**
+  * Allow to install a module or a set of module from repository to another one.
+- * 
+- * 
++ *
++ *
+  * @author Xavier Hanin
+  *
+  */
+@@ -38,13 +39,14 @@ public class IvyInstall extends IvyTask {
+     private String  _organisation;
+     private String  _module;
+     private String  _revision;
+-    private File 	_cache; 
++    private File 	_cache;
+     private boolean _overwrite = false;
+     private String _from;
+     private String _to;
+     private boolean _transitive;
+     private String _type;
+     private String _matcher = PatternMatcher.EXACT;
++    private boolean _haltOnUnresolved = true;
+     
+     public void execute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+@@ -58,12 +60,12 @@ public void execute() throws BuildException {
+         if (_module == null && PatternMatcher.EXACT.equals(_matcher)) {
+             throw new BuildException("no module name provided for ivy publish task: It can either be set explicitely via the attribute 'module' or via 'ivy.module' property or a prior call to <resolve/>");
+         } else if (_module == null && !PatternMatcher.EXACT.equals(_matcher)) {
+-        	_module = PatternMatcher.ANY_EXPRESSION;
++            _module = PatternMatcher.ANY_EXPRESSION;
+         }
+         if (_revision == null && PatternMatcher.EXACT.equals(_matcher)) {
+             throw new BuildException("no module revision provided for ivy publish task: It can either be set explicitely via the attribute 'revision' or via 'ivy.revision' property or a prior call to <resolve/>");
+         } else if (_revision == null && !PatternMatcher.EXACT.equals(_matcher)) {
+-        	_revision = PatternMatcher.ANY_EXPRESSION;
++            _revision = PatternMatcher.ANY_EXPRESSION;
+         }
+         if (_from == null) {
+             throw new BuildException("no from resolver name: please provide it through parameter 'from'");
+@@ -72,13 +74,26 @@ public void execute() throws BuildException {
+             throw new BuildException("no to resolver name: please provide it through parameter 'to'");
+         }
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance(_organisation, _module, _revision);
++        ResolveReport report;
+         try {
+-            ivy.install(mrid, _from, _to, _transitive, doValidate(settings), _overwrite, FilterHelper.getArtifactTypeFilter(_type), _cache, _matcher);
++            report = ivy.install(mrid, _from, _to, _transitive, doValidate(settings), _overwrite, FilterHelper.getArtifactTypeFilter(_type), _cache, _matcher);
+         } catch (Exception e) {
+             throw new BuildException("impossible to install "+ mrid +": "+e, e);
+         }
++        
++        if (report.getUnresolvedDependencies().length > 0 && isHaltonunresolved()) {
++            throw new BuildException(report.getUnresolvedDependencies().length
++            		+" unresolved dependencies - see output for details");
++        }
+     }
+-
++    
++    public boolean isHaltonunresolved() {
++        return _haltOnUnresolved;
++    }
++    public void setHaltonunresolved(boolean haltOnUnresolved) {
++        _haltOnUnresolved = haltOnUnresolved;
++    }
++    
+     public File getCache() {
+         return _cache;
+     }
+@@ -134,11 +149,11 @@ public String getType() {
+     public void setType(String type) {
+         _type = type;
+     }
+-
++    
+     public String getMatcher() {
+         return _matcher;
+     }
+-
++    
+     public void setMatcher(String matcher) {
+         _matcher = matcher;
+     }
+diff --git a/test/java/org/apache/ivy/ant/IvyInstallTest.java b/test/java/org/apache/ivy/ant/IvyInstallTest.java
+new file mode 100644
+index 000000000..a2bdf6476
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/IvyInstallTest.java
+@@ -0,0 +1,101 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.ant;
++
++import java.io.File;
++
++import junit.framework.TestCase;
++
++import org.apache.tools.ant.BuildException;
++import org.apache.tools.ant.Project;
++import org.apache.tools.ant.taskdefs.Delete;
++
++
++public class IvyInstallTest extends TestCase {
++    private File _cache;
++    private IvyInstall _install;
++    private Project _project;
++
++    protected void setUp() throws Exception {
++        createCache();
++        cleanTestLib();
++        _project = new Project();
++        _project.setProperty("ivy.settings.file", "test/repositories/ivysettings.xml");
++
++        _install = new IvyInstall();
++        _install.setProject(_project);
++        _install.setCache(_cache);
++    }
++
++    private void createCache() {
++        _cache = new File("build/cache");
++        _cache.mkdirs();
++    }
++
++    protected void tearDown() throws Exception {
++        cleanCache();
++        cleanTestLib();
++    }
++
++    private void cleanCache() {
++        Delete del = new Delete();
++        del.setProject(new Project());
++        del.setDir(_cache);
++        del.execute();
++    }
++
++    private void cleanTestLib() {
++        Delete del = new Delete();
++        del.setProject(new Project());
++        del.setDir(new File("build/test/lib"));
++        del.execute();
++    }
++
++    public void testDependencyNotFoundFailure() {
++        _install.setOrganisation("xxx");
++        _install.setModule("yyy");
++        _install.setRevision("zzz");
++        _install.setFrom("test");
++        _install.setTo("1");
++        
++        try {
++            _install.execute();
++            fail("unknown dependency, failure expected (haltunresolved=true)");
++        } catch (BuildException be) {
++            // success
++            assertTrue("invalid exception message, it should contain '1 unresolved',"
++            		+" but it's: '"+be.getMessage()+"'", 
++            		be.getMessage().indexOf("1 unresolved") != -1);
++        }  
++    }
++
++    public void testDependencyNotFoundSuccess() {
++        _install.setOrganisation("xxx");
++        _install.setModule("yyy");
++        _install.setRevision("zzz");
++        _install.setFrom("test");
++        _install.setTo("1");
++        _install.setHaltonunresolved(false);
++        
++        try {
++            _install.execute();
++        } catch (BuildException be) {
++            fail("unknown dependency, failure unexepected (haltunresolved=false)");
++        }  
++    }
++}

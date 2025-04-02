@@ -1,0 +1,94 @@
+From 3851f46884e916474818d00295f524ed6db29b21 Mon Sep 17 00:00:00 2001
+From: Phil Steitz <psteitz@apache.org>
+Date: Sun, 26 Jul 2015 15:41:28 +0000
+Subject: [PATCH] Ensured that logical connection is closed when pooled
+ connections are validated with null validation query.  JIRA: DBCP-442.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/trunk@1692727 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../datasources/CPDSConnectionFactory.java      |  9 +++++++--
+ .../datasources/TestCPDSConnectionFactory.java  | 15 +++++++++++++++
+ .../TestKeyedCPDSConnectionFactory.java         | 17 ++++++++++++++++-
+ 3 files changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/dbcp2/datasources/CPDSConnectionFactory.java b/src/main/java/org/apache/commons/dbcp2/datasources/CPDSConnectionFactory.java
+index 655dc5ae95..938263f4ce 100644
+--- a/src/main/java/org/apache/commons/dbcp2/datasources/CPDSConnectionFactory.java
++++ b/src/main/java/org/apache/commons/dbcp2/datasources/CPDSConnectionFactory.java
+@@ -172,18 +172,23 @@ public boolean validateObject(PooledObject<PooledConnectionAndInfo> p) {
+         }
+         boolean valid = false;
+         PooledConnection pconn = p.getObject().getPooledConnection();
++        Connection conn = null;
++        validatingSet.add(pconn);
+         if (null == _validationQuery) {
+             int timeout = _validationQueryTimeout;
+             if (timeout < 0) {
+                 timeout = 0;
+             }
+             try {
+-                valid = pconn.getConnection().isValid(timeout);
++                conn = pconn.getConnection();
++                valid = conn.isValid(timeout);
+             } catch (SQLException e) {
+                 valid = false;
++            } finally {
++                Utils.closeQuietly(conn);
++                validatingSet.remove(pconn); 
+             }
+         } else {
+-            Connection conn = null;
+             Statement stmt = null;
+             ResultSet rset = null;
+             // logical Connection from the PooledConnection must be closed
+diff --git a/src/test/java/org/apache/commons/dbcp2/datasources/TestCPDSConnectionFactory.java b/src/test/java/org/apache/commons/dbcp2/datasources/TestCPDSConnectionFactory.java
+index c7e1b26db5..fefdba7f2f 100644
+--- a/src/test/java/org/apache/commons/dbcp2/datasources/TestCPDSConnectionFactory.java
++++ b/src/test/java/org/apache/commons/dbcp2/datasources/TestCPDSConnectionFactory.java
+@@ -143,5 +143,20 @@ public void testConnectionErrorCleanup() throws Exception {
+         factory.getPool().clear();
+         assertEquals(0, pool.getNumIdle());
+     }
++    
++    /**
++     * JIRA: DBCP-442
++     */
++    @Test
++    public void testNullValidationQuery() throws Exception {
++        CPDSConnectionFactory factory =
++                new CPDSConnectionFactory(cpds, null, -1, false, "username", "password");
++        GenericObjectPool<PooledConnectionAndInfo> pool = new GenericObjectPool<>(factory);
++        factory.setPool(pool);
++        pool.setTestOnBorrow(true);
++        PooledConnection pcon = pool.borrowObject().getPooledConnection();
++        Connection con = pcon.getConnection();
++        con.close();
++    }
+ 
+ }
+diff --git a/src/test/java/org/apache/commons/dbcp2/datasources/TestKeyedCPDSConnectionFactory.java b/src/test/java/org/apache/commons/dbcp2/datasources/TestKeyedCPDSConnectionFactory.java
+index 68139dccc8..9d49e5bd94 100644
+--- a/src/test/java/org/apache/commons/dbcp2/datasources/TestKeyedCPDSConnectionFactory.java
++++ b/src/test/java/org/apache/commons/dbcp2/datasources/TestKeyedCPDSConnectionFactory.java
+@@ -151,5 +151,20 @@ public void testConnectionErrorCleanup() throws Exception {
+         factory.getPool().clear();
+         assertEquals(0, pool.getNumIdle(key));
+     }
+-
++    
++    /**
++     * JIRA: DBCP-442
++     */
++    @Test
++    public void testNullValidationQuery() throws Exception {
++        UserPassKey key = new UserPassKey("username", "password");
++        KeyedCPDSConnectionFactory factory =
++                new KeyedCPDSConnectionFactory(cpds, null, -1, false);
++        GenericKeyedObjectPool<UserPassKey, PooledConnectionAndInfo> pool = new GenericKeyedObjectPool<>(factory);
++        factory.setPool(pool);
++        pool.setTestOnBorrow(true);
++        PooledConnection pcon = pool.borrowObject(key).getPooledConnection();
++        Connection con = pcon.getConnection();
++        con.close();
++    }
+ }

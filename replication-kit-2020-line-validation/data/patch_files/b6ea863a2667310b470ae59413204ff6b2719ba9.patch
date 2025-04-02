@@ -1,0 +1,407 @@
+From b6ea863a2667310b470ae59413204ff6b2719ba9 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Sun, 7 Aug 2016 09:49:54 +0000
+Subject: [PATCH] JCS-165: BlockDiskCache partial remove / group remove doesn't
+ work
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1755432 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../auxiliary/disk/block/BlockDiskCache.java  | 152 +++++++++++------
+ .../block/BlockDiskCacheUnitTestAbstract.java | 158 +++++++++++++++++-
+ src/changes/changes.xml                       |   3 +
+ 3 files changed, 263 insertions(+), 50 deletions(-)
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java
+index f7af8b55c..684218710 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java
+@@ -26,6 +26,8 @@
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.Iterator;
++import java.util.LinkedList;
++import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.ScheduledExecutorService;
+@@ -40,6 +42,7 @@
+ import org.apache.commons.jcs.engine.behavior.IElementSerializer;
+ import org.apache.commons.jcs.engine.behavior.IRequireScheduler;
+ import org.apache.commons.jcs.engine.control.group.GroupAttrName;
++import org.apache.commons.jcs.engine.control.group.GroupId;
+ import org.apache.commons.jcs.engine.stats.StatElement;
+ import org.apache.commons.jcs.engine.stats.Stats;
+ import org.apache.commons.jcs.engine.stats.behavior.IStatElement;
+@@ -447,60 +450,17 @@ protected boolean processRemove( K key )
+ 
+         try
+         {
+-            if ( key instanceof String && key.toString().endsWith( CacheConstants.NAME_COMPONENT_DELIMITER ) )
++            if (key instanceof String && key.toString().endsWith(CacheConstants.NAME_COMPONENT_DELIMITER))
+             {
+-                // remove all keys of the same name group.
+-                Iterator<Map.Entry<K, int[]>> iter = this.keyStore.entrySet().iterator();
+-
+-                while ( iter.hasNext() )
+-                {
+-                    Map.Entry<K, int[]> entry = iter.next();
+-                    K k = entry.getKey();
+-
+-                    if ( k instanceof String && k.toString().startsWith( key.toString() ) )
+-                    {
+-                        int[] ded = entry.getValue();
+-                        this.dataFile.freeBlocks( ded );
+-                        iter.remove();
+-                        removed = true;
+-                        // TODO this needs to update the remove count separately
+-                    }
+-                }
++                removed = performPartialKeyRemoval((String) key);
+             }
+-            else if ( key instanceof GroupAttrName && ((GroupAttrName<?>)key).attrName == null )
++            else if (key instanceof GroupAttrName && ((GroupAttrName<?>) key).attrName == null)
+             {
+-                // remove all keys of the same name hierarchy.
+-                Iterator<Map.Entry<K, int[]>> iter = this.keyStore.entrySet().iterator();
+-                while ( iter.hasNext() )
+-                {
+-                    Map.Entry<K, int[]> entry = iter.next();
+-                    K k = entry.getKey();
+-
+-                    if ( k instanceof GroupAttrName &&
+-                        ((GroupAttrName<?>)k).groupId.equals(((GroupAttrName<?>)key).groupId))
+-                    {
+-                        int[] ded = entry.getValue();
+-                        this.dataFile.freeBlocks( ded );
+-                        iter.remove();
+-                        removed = true;
+-                    }
+-                }
++                removed = performGroupRemoval(((GroupAttrName<?>) key).groupId);
+             }
+             else
+             {
+-                // remove single item.
+-                int[] ded = this.keyStore.remove( key );
+-                removed = ded != null;
+-                if ( removed )
+-                {
+-                    this.dataFile.freeBlocks( ded );
+-                }
+-
+-                if ( log.isDebugEnabled() )
+-                {
+-                    log.debug( logCacheName + "Disk removal: Removed from key hash, key [" + key + "] removed = "
+-                        + removed );
+-                }
++                removed = performSingleKeyRemoval(key);
+             }
+         }
+         catch ( Exception e )
+@@ -521,6 +481,102 @@ else if ( key instanceof GroupAttrName && ((GroupAttrName<?>)key).attrName == nu
+         return removed;
+     }
+ 
++    /**
++     * Remove all elements from the group. This does not use the iterator to remove. It builds a
++     * list of group elements and then removes them one by one.
++     * <p>
++     * This operates under a lock obtained in doRemove().
++     * <p>
++     *
++     * @param key
++     * @return true if an element was removed
++     */
++    private boolean performGroupRemoval(GroupId key)
++    {
++        boolean removed = false;
++
++        // remove all keys of the same name group.
++        List<K> itemsToRemove = new LinkedList<K>();
++
++        // remove all keys of the same name hierarchy.
++        for (K k : keyStore.keySet())
++        {
++            if (k instanceof GroupAttrName && ((GroupAttrName<?>) k).groupId.equals(key))
++            {
++                itemsToRemove.add(k);
++            }
++        }
++
++        // remove matches.
++        for (K fullKey : itemsToRemove)
++        {
++            // Don't add to recycle bin here
++            // https://issues.apache.org/jira/browse/JCS-67
++            performSingleKeyRemoval(fullKey);
++            removed = true;
++            // TODO this needs to update the remove count separately
++        }
++
++        return removed;
++    }
++
++    /**
++     * Iterates over the keyset. Builds a list of matches. Removes all the keys in the list. Does
++     * not remove via the iterator, since the map impl may not support it.
++     * <p>
++     * This operates under a lock obtained in doRemove().
++     * <p>
++     *
++     * @param key
++     * @return true if there was a match
++     */
++    private boolean performPartialKeyRemoval(String key)
++    {
++        boolean removed = false;
++
++        // remove all keys of the same name hierarchy.
++        List<K> itemsToRemove = new LinkedList<K>();
++
++        for (K k : keyStore.keySet())
++        {
++            if (k instanceof String && k.toString().startsWith(key))
++            {
++                itemsToRemove.add(k);
++            }
++        }
++
++        // remove matches.
++        for (K fullKey : itemsToRemove)
++        {
++            // Don't add to recycle bin here
++            // https://issues.apache.org/jira/browse/JCS-67
++            performSingleKeyRemoval(fullKey);
++            removed = true;
++            // TODO this needs to update the remove count separately
++        }
++
++        return removed;
++    }
++
++    
++	private boolean performSingleKeyRemoval(K key) {
++		boolean removed;
++		// remove single item.
++		int[] ded = this.keyStore.remove( key );
++		removed = ded != null;
++		if ( removed )
++		{
++		    this.dataFile.freeBlocks( ded );
++		}
++
++		if ( log.isDebugEnabled() )
++		{
++		    log.debug( logCacheName + "Disk removal: Removed from key hash, key [" + key + "] removed = "
++		        + removed );
++		}
++		return removed;
++	}
++
+     /**
+      * Resets the keyfile, the disk file, and the memory key map.
+      * <p>
+diff --git a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java
+index baf2645fe..7de0d2a1a 100644
+--- a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java
++++ b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java
+@@ -20,13 +20,18 @@
+  */
+ 
+ import java.io.File;
++import java.io.IOException;
+ import java.io.Serializable;
+ import java.util.Map;
+ 
+ import junit.framework.TestCase;
+ 
+ import org.apache.commons.jcs.engine.CacheElement;
++import org.apache.commons.jcs.engine.ElementAttributes;
+ import org.apache.commons.jcs.engine.behavior.ICacheElement;
++import org.apache.commons.jcs.engine.behavior.IElementAttributes;
++import org.apache.commons.jcs.engine.control.group.GroupAttrName;
++import org.apache.commons.jcs.engine.control.group.GroupId;
+ import org.apache.commons.jcs.utils.serialization.StandardSerializer;
+ 
+ /** Unit tests for the Block Disk Cache */
+@@ -327,8 +332,8 @@ public void testLoadFromDisk() throws Exception
+             oneLoadFromDisk();
+         }
+     }
+-    
+-    public void testAppendToDisk() throws Exception 
++
++    public void testAppendToDisk() throws Exception
+     {
+         String cacheName = "testAppendToDisk";
+         BlockDiskCacheAttributes cattr = getCacheAttributes();
+@@ -403,6 +408,155 @@ public void oneLoadFromDisk() throws Exception
+         diskCache.dispose();
+     }
+ 
++    /**
++     * Add some items to the disk cache and then remove them one by one.
++     *
++     * @throws IOException
++     */
++    public void testRemoveItems() throws IOException
++    {
++        BlockDiskCacheAttributes cattr = getCacheAttributes();
++        cattr.setCacheName("testRemoveItems");
++        cattr.setMaxKeySize(100);
++        cattr.setDiskPath("target/test-sandbox/BlockDiskCacheUnitTest");
++        BlockDiskCache<String, String> disk = new BlockDiskCache<String, String>(cattr);
++
++        disk.processRemoveAll();
++
++        int cnt = 25;
++        for (int i = 0; i < cnt; i++)
++        {
++            IElementAttributes eAttr = new ElementAttributes();
++            eAttr.setIsSpool(true);
++            ICacheElement<String, String> element = new CacheElement<String, String>("testRemoveItems", "key:" + i, "data:" + i);
++            element.setElementAttributes(eAttr);
++            disk.processUpdate(element);
++        }
++
++        // remove each
++        for (int i = 0; i < cnt; i++)
++        {
++            disk.remove("key:" + i);
++            ICacheElement<String, String> element = disk.processGet("key:" + i);
++            assertNull("Should not have received an element.", element);
++        }
++    }
++
++    /**
++     * Add some items to the disk cache and then remove them one by one.
++     * <p>
++     *
++     * @throws IOException
++     */
++    public void testRemove_PartialKey() throws IOException
++    {
++        BlockDiskCacheAttributes cattr = getCacheAttributes();
++        cattr.setCacheName("testRemove_PartialKey");
++        cattr.setMaxKeySize(100);
++        cattr.setDiskPath("target/test-sandbox/BlockDiskCacheUnitTest");
++        BlockDiskCache<String, String> disk = new BlockDiskCache<String, String>(cattr);
++
++        disk.processRemoveAll();
++
++        int cnt = 25;
++        for (int i = 0; i < cnt; i++)
++        {
++            IElementAttributes eAttr = new ElementAttributes();
++            eAttr.setIsSpool(true);
++            ICacheElement<String, String> element = new CacheElement<String, String>("testRemove_PartialKey", i + ":key", "data:"
++                + i);
++            element.setElementAttributes(eAttr);
++            disk.processUpdate(element);
++        }
++
++        // verify each
++        for (int i = 0; i < cnt; i++)
++        {
++            ICacheElement<String, String> element = disk.processGet(i + ":key");
++            assertNotNull("Shoulds have received an element.", element);
++        }
++
++        // remove each
++        for (int i = 0; i < cnt; i++)
++        {
++            disk.remove(i + ":");
++            ICacheElement<String, String> element = disk.processGet(i + ":key");
++            assertNull("Should not have received an element.", element);
++        }
++    }
++
++
++    /**
++     * Verify that group members are removed if we call remove with a group.
++     *
++     * @throws IOException
++     */
++    public void testRemove_Group() throws IOException
++    {
++        // SETUP
++        BlockDiskCacheAttributes cattr = getCacheAttributes();
++        cattr.setCacheName("testRemove_Group");
++        cattr.setMaxKeySize(100);
++        cattr.setDiskPath("target/test-sandbox/BlockDiskCacheUnitTest");
++        BlockDiskCache<GroupAttrName<String>, String> disk = new BlockDiskCache<GroupAttrName<String>, String>(cattr);
++
++        disk.processRemoveAll();
++
++        String cacheName = "testRemove_Group_Region";
++        String groupName = "testRemove_Group";
++
++        int cnt = 25;
++        for (int i = 0; i < cnt; i++)
++        {
++            GroupAttrName<String> groupAttrName = getGroupAttrName(cacheName, groupName, i + ":key");
++            CacheElement<GroupAttrName<String>, String> element = new CacheElement<GroupAttrName<String>, String>(cacheName,
++                groupAttrName, "data:" + i);
++
++            IElementAttributes eAttr = new ElementAttributes();
++            eAttr.setIsSpool(true);
++            element.setElementAttributes(eAttr);
++
++            disk.processUpdate(element);
++        }
++
++        // verify each
++        for (int i = 0; i < cnt; i++)
++        {
++            GroupAttrName<String> groupAttrName = getGroupAttrName(cacheName, groupName, i + ":key");
++            ICacheElement<GroupAttrName<String>, String> element = disk.processGet(groupAttrName);
++            assertNotNull("Should have received an element.", element);
++        }
++
++        // DO WORK
++        // remove the group
++        disk.remove(getGroupAttrName(cacheName, groupName, null));
++
++        for (int i = 0; i < cnt; i++)
++        {
++            GroupAttrName<String> groupAttrName = getGroupAttrName(cacheName, groupName, i + ":key");
++            ICacheElement<GroupAttrName<String>, String> element = disk.processGet(groupAttrName);
++
++            // VERIFY
++            assertNull("Should not have received an element.", element);
++        }
++
++    }
++
++    /**
++     * Internal method used for group functionality.
++     * <p>
++     *
++     * @param cacheName
++     * @param group
++     * @param name
++     * @return GroupAttrName
++     */
++    private GroupAttrName<String> getGroupAttrName(String cacheName, String group, String name)
++    {
++        GroupId gid = new GroupId(cacheName, group);
++        return new GroupAttrName<String>(gid, name);
++    }
++
+     /** Holder for a string and byte array. */
+     static class X implements Serializable
+     {
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 984cc7754..415ea3fc7 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,9 @@
+ 	</properties>
+ 	<body>
+         <release version="2.0" date="unreleased" description="JDK 1.6 based major release">
++            <action issue="JCS-165" dev="tv" type="fix" due-to="Wiktor Niesiobedzki">
++                Fix: BlockDiskCache partial remove / group remove doesn't work
++            </action>
+             <action issue="JCS-156" dev="sebb" type="fix" due-to="Ryan Fong">
+                 BlockDiskCache is limited to 2GB
+             </action>

@@ -1,0 +1,105 @@
+From 60fe05eb7a32a4a178f4212da6a812c80cedce82 Mon Sep 17 00:00:00 2001
+From: Henri Yandell <bayard@apache.org>
+Date: Wed, 5 Sep 2007 10:13:49 +0000
+Subject: [PATCH] Applying Jason Madden's patch from LANG-334 to provide
+ enums.Enum with optimized thread safety. As Jason's used this in production I
+ think it's fair to use it rather than the simpler
+ Collections.synchronizedMap(..). I've also applied the patch to the enum.Enum
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/lang/trunk@572930 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../org/apache/commons/lang/enum/Enum.java    | 23 +++++++++++------
+ .../org/apache/commons/lang/enums/Enum.java   | 25 +++++++++++++------
+ 2 files changed, 33 insertions(+), 15 deletions(-)
+
+diff --git a/src/java/org/apache/commons/lang/enum/Enum.java b/src/java/org/apache/commons/lang/enum/Enum.java
+index de57cc05c4b..89e9de26701 100644
+--- a/src/java/org/apache/commons/lang/enum/Enum.java
++++ b/src/java/org/apache/commons/lang/enum/Enum.java
+@@ -256,7 +256,11 @@ public abstract class Enum implements Comparable, Serializable {
+     /**
+      * <code>Map</code>, key of class name, value of <code>Entry</code>.
+      */
+-    private static final Map cEnumClasses = new WeakHashMap();
++    private static Map cEnumClasses
++        // LANG-334: To avoid exposing a mutating map,
++        // we copy it each time we add to it. This is cheaper than
++        // using a synchronized map since we are almost entirely reads
++        = new WeakHashMap();
+     
+     /**
+      * The string representation of the Enum.
+@@ -349,12 +353,17 @@ private void init(String name) {
+         if (ok == false) {
+             throw new IllegalArgumentException("getEnumClass() must return a superclass of this class");
+         }
+-        
+-        // create entry
+-        Entry entry = (Entry) cEnumClasses.get(enumClass);
+-        if (entry == null) {
+-            entry = createEntry(enumClass);
+-            cEnumClasses.put(enumClass, entry);
++
++        Entry entry;
++        synchronized( Enum.class ) { // LANG-334
++            // create entry
++            entry = (Entry) cEnumClasses.get(enumClass);
++            if (entry == null) {
++                entry = createEntry(enumClass);
++                Map myMap = new WeakHashMap( cEnumClasses );
++                myMap.put(enumClass, entry);
++                cEnumClasses = myMap;
++            }
+         }
+         if (entry.map.containsKey(name)) {
+             throw new IllegalArgumentException("The Enum name must be unique, '" + name + "' has already been added");
+diff --git a/src/java/org/apache/commons/lang/enums/Enum.java b/src/java/org/apache/commons/lang/enums/Enum.java
+index 6fce6fbc3aa..c26c474c08c 100644
+--- a/src/java/org/apache/commons/lang/enums/Enum.java
++++ b/src/java/org/apache/commons/lang/enums/Enum.java
+@@ -302,7 +302,11 @@ public abstract class Enum implements Comparable, Serializable {
+     /**
+      * <code>Map</code>, key of class name, value of <code>Entry</code>.
+      */
+-    private static final Map cEnumClasses = new WeakHashMap();
++    private static Map cEnumClasses
++        // LANG-334: To avoid exposing a mutating map,
++        // we copy it each time we add to it. This is cheaper than
++        // using a synchronized map since we are almost entirely reads
++        = new WeakHashMap();
+     
+     /**
+      * The string representation of the Enum.
+@@ -345,7 +349,7 @@ private static class Entry {
+          * <p>Restrictive constructor.</p>
+          */
+         protected Entry() {
+-          super();
++            super();
+         }
+     }
+ 
+@@ -395,12 +399,17 @@ private void init(String name) {
+         if (ok == false) {
+             throw new IllegalArgumentException("getEnumClass() must return a superclass of this class");
+         }
+-        
+-        // create entry
+-        Entry entry = (Entry) cEnumClasses.get(enumClass);
+-        if (entry == null) {
+-            entry = createEntry(enumClass);
+-            cEnumClasses.put(enumClass, entry);
++
++        Entry entry;
++        synchronized( Enum.class ) { // LANG-334
++            // create entry
++            entry = (Entry) cEnumClasses.get(enumClass);
++            if (entry == null) {
++                entry = createEntry(enumClass);
++                Map myMap = new WeakHashMap( cEnumClasses );
++                myMap.put(enumClass, entry);
++                cEnumClasses = myMap;
++            }
+         }
+         if (entry.map.containsKey(name)) {
+             throw new IllegalArgumentException("The Enum name must be unique, '" + name + "' has already been added");

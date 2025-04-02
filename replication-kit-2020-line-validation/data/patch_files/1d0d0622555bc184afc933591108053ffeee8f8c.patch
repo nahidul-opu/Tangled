@@ -1,0 +1,206 @@
+From 1d0d0622555bc184afc933591108053ffeee8f8c Mon Sep 17 00:00:00 2001
+From: Mark Thomas <markt@apache.org>
+Date: Mon, 3 Feb 2014 23:18:24 +0000
+Subject: [PATCH] Fix DBCP-372 Using batchUpdate() should not invalidate the
+ PreparedStatement when it is returned to the pool.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/branches/DBCP_1_5_x_BRANCH@1564125 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 ++
+ .../dbcp/PoolablePreparedStatement.java       | 22 +++++-----
+ .../apache/commons/dbcp/TestPStmtPooling.java | 42 +++++++++++++++----
+ .../apache/commons/dbcp/TesterStatement.java  |  2 +-
+ 4 files changed, 51 insertions(+), 19 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index ac0ab0893a..c8192b33d8 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -99,6 +99,10 @@ The <action> type attribute can be add,update,fix,remove.
+         made to commit the current transaction for a connection when no
+         transaction has been started.
+       </action>
++      <action dev="markt" issue="DBCP-372" type="fix">
++        Using batchUpdate() should not invalidate the PreparedStatement when it
++        is returned to the pool.
++      </action>
+     </release>
+     <release version="1.4.1" date="TBD" description="TBD">
+       <action dev="psteitz" issue="DBCP-367" type="fix" due-to="Ken Tatsushita">
+diff --git a/src/main/java/org/apache/commons/dbcp/PoolablePreparedStatement.java b/src/main/java/org/apache/commons/dbcp/PoolablePreparedStatement.java
+index 5b0d456c2e..6878a6234f 100644
+--- a/src/main/java/org/apache/commons/dbcp/PoolablePreparedStatement.java
++++ b/src/main/java/org/apache/commons/dbcp/PoolablePreparedStatement.java
+@@ -5,9 +5,9 @@
+  * The ASF licenses this file to You under the Apache License, Version 2.0
+  * (the "License"); you may not use this file except in compliance with
+  * the License.  You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -63,7 +63,7 @@ public PoolablePreparedStatement(PreparedStatement stmt, Object key, KeyedObject
+         _pool = pool;
+         _key = key;
+ 
+-        // Remove from trace now because this statement will be 
++        // Remove from trace now because this statement will be
+         // added by the activate method.
+         if(_conn != null) {
+             _conn.removeTrace(this);
+@@ -103,7 +103,7 @@ public void close() throws SQLException {
+             }
+         }
+     }
+-    
++
+     protected void activate() throws SQLException{
+         _closed = false;
+         if(_conn != null) {
+@@ -111,14 +111,19 @@ protected void activate() throws SQLException{
+         }
+         super.activate();
+     }
+-  
++
+     protected void passivate() throws SQLException {
++        // DBCP-372. clearBatch with throw an exception if called when the
++        // connection is marked as closed.
++        if (batchAdded) {
++            clearBatch();
++        }
+         _closed = true;
+         if(_conn != null) {
+             _conn.removeTrace(this);
+         }
+ 
+-        // The JDBC spec requires that a statment close any open
++        // The JDBC spec requires that a statement close any open
+         // ResultSet's when it is closed.
+         // FIXME The PreparedStatement we're wrapping should handle this for us.
+         // See bug 17301 for what could happen when ResultSets are closed twice.
+@@ -130,10 +135,7 @@ protected void passivate() throws SQLException {
+             }
+             clearTrace();
+         }
+-        if (batchAdded) {
+-            clearBatch();
+-        }
+-        
++
+         super.passivate();
+     }
+ 
+diff --git a/src/test/java/org/apache/commons/dbcp/TestPStmtPooling.java b/src/test/java/org/apache/commons/dbcp/TestPStmtPooling.java
+index c3819aef69..4e37f0f5f9 100644
+--- a/src/test/java/org/apache/commons/dbcp/TestPStmtPooling.java
++++ b/src/test/java/org/apache/commons/dbcp/TestPStmtPooling.java
+@@ -5,9 +5,9 @@
+  * The ASF licenses this file to You under the Apache License, Version 2.0
+  * (the "License"); you may not use this file except in compliance with
+  * the License.  You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -18,6 +18,8 @@
+ package org.apache.commons.dbcp;
+ 
+ import java.sql.Connection;
++import java.sql.Driver;
++import java.sql.PreparedStatement;
+ import java.sql.Statement;
+ import java.sql.SQLException;
+ 
+@@ -34,7 +36,7 @@
+ 
+ /**
+  * TestSuite for BasicDataSource with prepared statement pooling enabled
+- * 
++ *
+  * @author Dirk Verbeeck
+  * @version $Revision$ $Date$
+  */
+@@ -69,7 +71,7 @@ public void testStmtPool() throws Exception {
+         stmt2.close();
+         assertSame(ustmt1, ustmt2);
+     }
+-    
++
+     public void testCallableStatementPooling() throws Exception {
+         new TesterDriver();
+         ConnectionFactory connFactory = new DriverManagerConnectionFactory(
+@@ -105,7 +107,7 @@ public void testCallableStatementPooling() throws Exception {
+         assertNotSame(ustmt1, ustmt3);
+         assertNotSame(ustmt3, ucstmt1);
+     }
+-    
++
+     public void testClosePool() throws Exception {
+         new TesterDriver();
+         ConnectionFactory connFactory = new DriverManagerConnectionFactory(
+@@ -122,9 +124,9 @@ public void testClosePool() throws Exception {
+ 
+         Connection conn = ds.getConnection();
+         conn.prepareStatement("select 1 from dual");
+-        
++
+         Connection poolableConnection = ((DelegatingConnection) conn).getDelegate();
+-        Connection poolingConnection = 
++        Connection poolingConnection =
+             ((DelegatingConnection) poolableConnection).getDelegate();
+         poolingConnection.close();
+         try {
+@@ -132,6 +134,30 @@ public void testClosePool() throws Exception {
+             fail("Expecting SQLException");
+         } catch (SQLException ex) {
+             assertTrue(ex.getMessage().endsWith("invalid PoolingConnection."));
+-        }     
++        }
++    }
++
++    public void testBatchUpdate() throws Exception {
++        @SuppressWarnings("unused") // Ensure TesterDriver is registered
++        Driver d = new TesterDriver();
++        ConnectionFactory connFactory = new DriverManagerConnectionFactory(
++                "jdbc:apache:commons:testdriver","u1","p1");
++
++        ObjectPool connPool = new GenericObjectPool();
++        KeyedObjectPoolFactory stmtPoolFactory = new GenericKeyedObjectPoolFactory(null);
++
++        new PoolableConnectionFactory(connFactory, connPool, stmtPoolFactory,
++                null, false, true);
++
++        DataSource ds = new PoolingDataSource(connPool);
++
++        Connection conn = ds.getConnection();
++        PreparedStatement ps = conn.prepareStatement("select 1 from dual");
++        Statement inner = ((DelegatingPreparedStatement) ps).getInnermostDelegate();
++        // Check DBCP-372
++        ps.addBatch();
++        ps.close();
++        conn.close();
++        assertFalse(inner.isClosed());
+     }
+ }
+diff --git a/src/test/java/org/apache/commons/dbcp/TesterStatement.java b/src/test/java/org/apache/commons/dbcp/TesterStatement.java
+index da4861f19b..4a81e10dc3 100644
+--- a/src/test/java/org/apache/commons/dbcp/TesterStatement.java
++++ b/src/test/java/org/apache/commons/dbcp/TesterStatement.java
+@@ -285,7 +285,7 @@ public <T> T unwrap(Class<T> iface) throws SQLException {
+     }
+ 
+     public boolean isClosed() throws SQLException {
+-        throw new SQLException("Not implemented.");
++        return !_open;
+     }
+ 
+     public void setPoolable(boolean poolable) throws SQLException {

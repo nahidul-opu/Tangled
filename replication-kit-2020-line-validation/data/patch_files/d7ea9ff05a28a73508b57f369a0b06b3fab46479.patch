@@ -1,0 +1,80 @@
+From d7ea9ff05a28a73508b57f369a0b06b3fab46479 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Fri, 12 Mar 2010 15:35:44 +0000
+Subject: [PATCH] Check a data descriptor actually uses the signature before
+ skipping too many bytes if it doesn't.  COMPRESS-101
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@922298 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                                |  4 ++++
+ .../compress/archivers/zip/ZipArchiveInputStream.java  | 10 +++++++++-
+ .../compress/archivers/zip/ZipArchiveOutputStream.java |  2 +-
+ .../apache/commons/compress/archivers/zip/ZipLong.java |  6 ++++++
+ 4 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 16b469af4d5..9d68e83cbea 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -23,6 +23,10 @@
+   </properties>
+   <body>
+     <release version="1.1" date="as in SVN" description="Release 1.1">
++      <action type="fix" date="2010-03-12" issue="COMPRESS-101">
++        ZipArchiveInputStream should now properly read archives that
++        use data descriptors but without the "unofficial" signature.
++      </action>
+       <action type="add" date="2010-03-09" issue="COMPRESS-98">
+         The ZIP classes will throw specialized exceptions if any
+         attempt is made to read or write data that uses zip features
+diff --git a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java
+index d196bb6a50b..3a8ff14cd16 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java
+@@ -373,7 +373,15 @@ private void closeEntry() throws IOException {
+         }
+ 
+         if (hasDataDescriptor) {
+-            readFully(new byte[4 * WORD]);
++            byte[] sig = new byte[WORD];
++            readFully(sig);
++            if (ZipLong.DD_SIG.equals(new ZipLong(sig))) {
++                readFully(new byte[3 * WORD]);
++            } else {
++                // data descriptor without signature, we've already
++                // read the CRC
++                readFully(new byte[2 * WORD]);
++            }
+         }
+ 
+         inf.reset();
+diff --git a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveOutputStream.java b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveOutputStream.java
+index 2793de6bb34..ccd97d8346f 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveOutputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveOutputStream.java
+@@ -597,7 +597,7 @@ public void flush() throws IOException {
+     /**
+      * data descriptor signature
+      */
+-    static final byte[] DD_SIG = ZipLong.getBytes(0X08074B50L);
++    static final byte[] DD_SIG = ZipLong.DD_SIG.getBytes();
+     /**
+      * central file header signature
+      */
+diff --git a/src/main/java/org/apache/commons/compress/archivers/zip/ZipLong.java b/src/main/java/org/apache/commons/compress/archivers/zip/ZipLong.java
+index 6119fb2b580..af9648b76f2 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/zip/ZipLong.java
++++ b/src/main/java/org/apache/commons/compress/archivers/zip/ZipLong.java
+@@ -48,6 +48,12 @@ public final class ZipLong implements Cloneable {
+     /** Local File Header Signature */
+     public static final ZipLong LFH_SIG = new ZipLong(0X04034B50L);
+ 
++    /**
++     * Data Descriptor signature
++     * @since Commons Compress 1.1
++     */
++    public static final ZipLong DD_SIG = new ZipLong(0X08074B50L);
++
+     /**
+      * Create instance from a number.
+      * @param value the long to store as a ZipLong

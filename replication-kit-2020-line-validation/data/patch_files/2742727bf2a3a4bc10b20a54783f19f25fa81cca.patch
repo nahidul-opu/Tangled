@@ -1,0 +1,335 @@
+From 2742727bf2a3a4bc10b20a54783f19f25fa81cca Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 3 Jul 2007 14:32:47 +0000
+Subject: [PATCH] - FIX: XmlModuleDescriptorWriter does not produce matcher
+ attribute on include and exclude rules (IVY-556) - review module wide exclude
+ syntax: use exclude tags in dependencies element (IVY-431)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@552853 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/xml/XmlModuleDescriptorParser.java | 31 ++++++++------
+ .../parser/xml/XmlModuleDescriptorWriter.java | 29 +++++++++++++
+ .../org/apache/ivy/plugins/parser/xml/ivy.xsd | 42 ++++++++-----------
+ .../ivy/plugins/parser/xml/test-update.xml    |  7 ++--
+ .../plugins/parser/xml/test-write-full.xml    |  8 ++--
+ .../apache/ivy/plugins/parser/xml/test.xml    |  7 ++--
+ .../apache/ivy/plugins/parser/xml/updated.xml |  7 ++--
+ .../1/org2/mod2.6/ivys/ivy-0.11.xml           |  5 +--
+ 9 files changed, 82 insertions(+), 55 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 4fc80a404..af06a9ff2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -64,6 +64,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Javadoc improvements (IVY-544) (with contribution from Tjeerd Verhagen)
+ - IMPROVEMENT: Unit test improvements (IVY-545) (thanks to Tjeerd Verhagen)
+ 
++- FIX: XmlModuleDescriptorWriter does not produce matcher attribute on include and exclude rules (IVY-556)
+ - FIX: pom.groupId is not recognized in maven 2 pom parser (IVY-550)
+ - FIX: Evicted modules report depends on the order of the dependencies (IVY-526)
+ - FIX: Ivy does not work on Turkish machines (IVY-65)
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index cb9c6980a..31396cb15 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -173,6 +173,8 @@ private static class Parser extends AbstractParser {
+ 
+         private static final int EXCLUDE = 9;
+ 
++        private static final int DEPS = 10;
++
+         private int _state = NONE;
+ 
+         private final URL xmlURL;
+@@ -317,7 +319,7 @@ public void startElement(String uri, String localName, String qName, Attributes
+                     _artifactsDeclared = true;
+                     checkConfigurations();
+                 } else if ("dependencies".equals(qName)) {
+-                    _state = DEP;
++                    _state = DEPS;
+                     String defaultConf = _ivy.substitute(attributes.getValue("defaultconf"));
+                     if (defaultConf != null) {
+                         setDefaultConf(defaultConf);
+@@ -335,9 +337,6 @@ public void startElement(String uri, String localName, String qName, Attributes
+                 } else if ("conflicts".equals(qName)) {
+                     _state = CONFLICT;
+                     checkConfigurations();
+-                } else if ("exclude".equals(qName) && _state != DEP) {
+-                    _state = EXCLUDE;
+-                    checkConfigurations();
+                 } else if ("artifact".equals(qName)) {
+                     if (_state == PUB) {
+                         // this is a published artifact
+@@ -377,7 +376,12 @@ public void startElement(String uri, String localName, String qName, Attributes
+                     addIncludeRule(qName, attributes);
+                 } else if ("exclude".equals(qName) && _state == DEP) {
+                     addExcludeRule(qName, attributes);
+-                } else if ("dependency".equals(qName)) {
++                } else if ("exclude".equals(qName) && _state == DEPS) {
++                    _state = EXCLUDE;
++                    parseRule(qName, attributes);
++                    md.addExcludeRule((ExcludeRule) _confAware);
++               } else if ("dependency".equals(qName)) {
++                    _state = DEP;
+                     String org = _ivy.substitute(attributes.getValue("org"));
+                     if (org == null) {
+                         org = md.getModuleRevisionId().getOrganisation();
+@@ -490,10 +494,7 @@ public void startElement(String uri, String localName, String qName, Attributes
+                         return;
+                     }
+                     md.addConflictManager(new ModuleId(org, mod), matcher, cm);
+-                } else if ("rule".equals(qName) && _state == EXCLUDE) {
+-                    parseRule(qName, attributes);
+-                    md.addExcludeRule((ExcludeRule) _confAware);
+-                } else if ("include".equals(qName) && _state == CONF) {
++                 } else if ("include".equals(qName) && _state == CONF) {
+                     URL url = _ivy.getRelativeUrlResolver().getURL(xmlURL,
+                             _ivy.substitute(attributes.getValue("file")),
+                             _ivy.substitute(attributes.getValue("url")));
+@@ -583,7 +584,7 @@ private void parseRule(String tag, Attributes attributes) throws MalformedURLExc
+                 Map extraAtt = ExtendableItemHelper.getExtraAttributes(attributes, new String[] {
+                         "org", "module", "name", "type", "ext", "matcher", "conf"});
+                 _confAware = new DefaultIncludeRule(aid, matcher, extraAtt);
+-            } else { // _state == ARTIFACT_EXCLUDE
++            } else { // _state == ARTIFACT_EXCLUDE || EXCLUDE
+                 PatternMatcher matcher = getPatternMatcher(attributes.getValue("matcher"));
+                 String org = _ivy.substitute(attributes.getValue("org"));
+                 org = org == null ? PatternMatcher.ANY_EXPRESSION : org;
+@@ -663,7 +664,7 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+                     }
+                 }
+                 _confAware = null;
+-            } else if (_state == EXCLUDE && "rule".equals(qName)) {
++            } else if (_state == EXCLUDE) {
+                 if (_confAware.getConfigurations().length == 0) {
+                     String[] confs = md.getConfigurationsNames();
+                     for (int i = 0; i < confs.length; i++) {
+@@ -671,8 +672,12 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+                     }
+                 }
+                 _confAware = null;
+-            } else if ("dependency".equals(qName) && _dd.getModuleConfigurations().length == 0) {
+-                parseDepsConfs(getDefaultConf(), _dd);
++                _state = DEPS;
++            } else if ("dependency".equals(qName)) {
++                if (_dd.getModuleConfigurations().length == 0) {
++                    parseDepsConfs(getDefaultConf(), _dd);
++                }
++                _state = DEPS;
+             } else if ("dependencies".equals(qName)) {
+                 _state = NONE;
+             }
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+index fc6b75ff3..84acb9d37 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+@@ -204,6 +204,7 @@ public static void write(ModuleDescriptor md, String licenseHeader, File output)
+                                 }
+                                 out.print("\"");
+                             }
++                            out.print(" matcher=\"" + includes[j].getMatcher().getName() + "\"");
+                             out.println("/>");
+                         }
+                     }
+@@ -233,6 +234,7 @@ public static void write(ModuleDescriptor md, String licenseHeader, File output)
+                                 }
+                                 out.print("\"");
+                             }
++                            out.print(" matcher=\"" + excludes[j].getMatcher().getName() + "\"");
+                             out.println("/>");
+                         }
+                     }
+@@ -242,6 +244,33 @@ public static void write(ModuleDescriptor md, String licenseHeader, File output)
+                         out.println("\t\t</dependency>");
+                     }
+                 }
++                ExcludeRule[] excludes = md.getAllExcludeRules();
++                if (excludes.length > 0) {
++                    for (int j = 0; j < excludes.length; j++) {
++                        out.print("\t\t<exclude");
++                        out.print(" org=\""
++                                + excludes[j].getId().getModuleId().getOrganisation() + "\"");
++                        out.print(" module=\"" + excludes[j].getId().getModuleId().getName()
++                                + "\"");
++                        out.print(" artifact=\"" + excludes[j].getId().getName() + "\"");
++                        out.print(" type=\"" + excludes[j].getId().getType() + "\"");
++                        out.print(" ext=\"" + excludes[j].getId().getExt() + "\"");
++                        String[] ruleConfs = excludes[j].getConfigurations();
++                        if (!Arrays.asList(ruleConfs).equals(
++                            Arrays.asList(md.getConfigurationsNames()))) {
++                            out.print(" conf=\"");
++                            for (int k = 0; k < ruleConfs.length; k++) {
++                                out.print(ruleConfs[k]);
++                                if (k + 1 < ruleConfs.length) {
++                                    out.print(",");
++                                }
++                            }
++                            out.print("\"");
++                        }
++                        out.print(" matcher=\"" + excludes[j].getMatcher().getName() + "\"");
++                        out.println("/>");
++                    }
++                }
+                 out.println("\t</dependencies>");
+             }
+             out.println("</ivy-module>");
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd b/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd
+index b0c2ae0be..0cd625854 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd
++++ b/src/java/org/apache/ivy/plugins/parser/xml/ivy.xsd
+@@ -201,6 +201,24 @@
+ 						            <xs:attribute name="conf" type="xs:string"/>
+ 				            	</xs:complexType>
+ 				      		</xs:element>
++				      		<xs:element name="exclude" minOccurs="0" maxOccurs="unbounded">
++				            	<xs:complexType>
++							        <xs:sequence>
++							      		<xs:element name="conf" minOccurs="0" maxOccurs="unbounded">
++							            	<xs:complexType>
++									            <xs:attribute name="name" type="xs:string" use="required"/>
++							            	</xs:complexType>
++							      		</xs:element>
++							        </xs:sequence>
++						            <xs:attribute name="org" type="xs:string"/>
++						            <xs:attribute name="module" type="xs:string"/>
++						            <xs:attribute name="artifact" type="xs:string"/>
++						            <xs:attribute name="type" type="xs:string"/>
++						            <xs:attribute name="ext" type="xs:string"/>
++						            <xs:attribute name="conf" type="xs:string"/>
++						            <xs:attribute name="matcher" type="xs:string"/>
++				            	</xs:complexType>
++				      		</xs:element>
+ 				        </xs:sequence>
+ 						<xs:attribute name="defaultconf" type="xs:string"/>				        
+ 						<xs:attribute name="defaultconfmapping" type="xs:string"/>				        
+@@ -222,30 +240,6 @@
+ 				        </xs:sequence>
+ 			      </xs:complexType>
+       		</xs:element>
+-      		<xs:element name="exclude" minOccurs="0">
+-			      <xs:complexType>
+-				        <xs:sequence>
+-				      		<xs:element name="rule" minOccurs="0" maxOccurs="unbounded">
+-				            	<xs:complexType>
+-							        <xs:sequence>
+-							      		<xs:element name="conf" minOccurs="0" maxOccurs="unbounded">
+-							            	<xs:complexType>
+-									            <xs:attribute name="name" type="xs:string" use="required"/>
+-							            	</xs:complexType>
+-							      		</xs:element>
+-							        </xs:sequence>
+-						            <xs:attribute name="org" type="xs:string"/>
+-						            <xs:attribute name="module" type="xs:string"/>
+-						            <xs:attribute name="artifact" type="xs:string"/>
+-						            <xs:attribute name="type" type="xs:string"/>
+-						            <xs:attribute name="ext" type="xs:string"/>
+-						            <xs:attribute name="conf" type="xs:string"/>
+-						            <xs:attribute name="matcher" type="xs:string"/>
+-				            	</xs:complexType>
+-				      		</xs:element>
+-				        </xs:sequence>
+-			      </xs:complexType>
+-      		</xs:element>
+         </xs:sequence>
+         <xs:attribute name="version" type="xs:string" use="required"/>
+       </xs:complexType>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml
+index b10b7a317..567df0941 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-update.xml
+@@ -99,13 +99,12 @@
+ 			<exclude name="toexclude"/>
+ 		</dependency>
+ 		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->@"/>
++
++		<exclude module="*servlet*" matcher="glob" conf="myconf1" /> 
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar" /> 
+ 	</dependencies>
+ 	<conflicts>
+ 		<manager org="yourorg" module=".*" name="all" matcher="regexp"/>
+ 		<manager org="theirorg" module="theirmodule1" rev="1.0, 1.1"/>
+ 	</conflicts>
+-	<exclude>
+-		<rule module="*servlet*" matcher="glob" conf="myconf1" /> 
+-		<rule org="acme" module="test" artifact="test" type="source" ext="jar" /> 
+-	</exclude>
+ </ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
+index 7489eac1e..d15ed797d 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
+@@ -56,10 +56,12 @@
+ 			<artifact name="yourartifact9-2" type="jar" ext="jar" conf="myconf2,myconf3"/>
+ 		</dependency>
+ 		<dependency org="yourorg" name="yourmodule10" rev="10.1" conf="*->*">
+-			<include name="your.*" type="jar" ext="jar"/>
+-			<include name="*" type="*" ext="xml"/>
+-			<exclude org="*" module="*" name="toexclude" type="*" ext="*"/>
++			<include name="your.*" type="jar" ext="jar" matcher="exact"/>
++			<include name="*" type="*" ext="xml" matcher="exact"/>
++			<exclude org="*" module="*" name="toexclude" type="*" ext="*" matcher="exact"/>
+ 		</dependency>
+ 		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->*"/>
++		<exclude org="*" module="*servlet*" artifact="*" type="*" ext="*" conf="myconf1" matcher="glob"/>
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar" matcher="exact"/>
+ 	</dependencies>
+ </ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test.xml b/test/java/org/apache/ivy/plugins/parser/xml/test.xml
+index 091dc30aa..af567e8fb 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test.xml
+@@ -95,13 +95,12 @@
+ 			<exclude name="toexclude"/>
+ 		</dependency>
+ 		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->@"/>
++		
++		<exclude module="*servlet*" matcher="glob" conf="myconf1" /> 
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar" /> 
+ 	</dependencies>
+ 	<conflicts>
+ 		<manager org="yourorg" module=".*" name="all" matcher="regexp"/>
+ 		<manager org="theirorg" module="theirmodule1" rev="1.0, 1.1"/>
+ 	</conflicts>
+-	<exclude>
+-		<rule module="*servlet*" matcher="glob" conf="myconf1" /> 
+-		<rule org="acme" module="test" artifact="test" type="source" ext="jar" /> 
+-	</exclude>
+ </ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/updated.xml b/test/java/org/apache/ivy/plugins/parser/xml/updated.xml
+index cf85a9eaf..4e4459ea1 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/updated.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/updated.xml
+@@ -96,13 +96,12 @@
+ 			<exclude name="toexclude"/>
+ 		</dependency>
+ 		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->@"/>
++
++		<exclude module="*servlet*" matcher="glob" conf="myconf1"/> 
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar"/> 
+ 	</dependencies>
+ 	<conflicts>
+ 		<manager org="yourorg" module=".*" name="all" matcher="regexp"/>
+ 		<manager org="theirorg" module="theirmodule1" rev="1.0, 1.1"/>
+ 	</conflicts>
+-	<exclude>
+-		<rule module="*servlet*" matcher="glob" conf="myconf1"/> 
+-		<rule org="acme" module="test" artifact="test" type="source" ext="jar"/> 
+-	</exclude>
+ </ivy-module>
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.11.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.11.xml
+index 7d15975bc..daa68dca4 100644
+--- a/test/repositories/1/org2/mod2.6/ivys/ivy-0.11.xml
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.11.xml
+@@ -24,8 +24,7 @@
+ 	/>
+ 	<dependencies>
+ 		<dependency name="mod2.1" rev="0.3" />
++		<dependency org="org1" name="mod1.4" rev="1.0.1" />
++		<exclude module="mod1.1" />
+ 	</dependencies>
+-	<exclude>
+-		<rule module="mod1.1" />
+-	</exclude>
+ </ivy-module>

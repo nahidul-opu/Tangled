@@ -1,0 +1,136 @@
+From 1cd1f347f0e3d126f6568f0a246c0dce1de20122 Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <majakabiljo@fb.com>
+Date: Tue, 11 Feb 2014 10:37:13 -0800
+Subject: [PATCH] GIRAPH-816: ByteArrayPartition not combining vertex edges
+ (cmuchins via majakabiljo)
+
+---
+ CHANGELOG                                     |  1 +
+ .../giraph/partition/ByteArrayPartition.java  | 34 +++++++------
+ .../giraph/partition/TestPartitionStores.java | 48 +++++++++++++++++++
+ 3 files changed, 69 insertions(+), 14 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index feb919340..3e1acc212 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,7 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-816: ByteArrayPartition not combining vertex edges (cmuchins via majakabiljo)
+ 
+   GIRAPH-844: TextInputFormat for SimpleShortestPaths (ssc)
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/partition/ByteArrayPartition.java b/giraph-core/src/main/java/org/apache/giraph/partition/ByteArrayPartition.java
+index cef39cd5d..048fca2ac 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/partition/ByteArrayPartition.java
++++ b/giraph-core/src/main/java/org/apache/giraph/partition/ByteArrayPartition.java
+@@ -151,17 +151,7 @@ public void addPartition(Partition<I, V, E> partition) {
+             representativeVertex, useUnsafeSerialization, getConf());
+         WritableUtils.reinitializeVertexFromByteArray(entry.getValue(),
+             representativeCombinerVertex, useUnsafeSerialization, getConf());
+-        getVertexValueCombiner().combine(representativeVertex.getValue(),
+-            representativeCombinerVertex.getValue());
+-
+-        // Add the edges to the representative vertex
+-        for (Edge<I, E> edge : representativeCombinerVertex.getEdges()) {
+-          representativeVertex.addEdge(edge);
+-        }
+-
+-        byte[] vertexData = WritableUtils.writeVertexToByteArray(
+-            representativeCombinerVertex, useUnsafeSerialization, getConf());
+-        vertexMap.put(entry.getKey(), vertexData);
++        combine(representativeVertex, representativeCombinerVertex);
+       }
+     }
+   }
+@@ -179,12 +169,28 @@ public synchronized boolean putOrCombine(Vertex<I, V, E> vertex) {
+ 
+     WritableUtils.reinitializeVertexFromByteArray(oldVertexBytes,
+         representativeVertex, useUnsafeSerialization, getConf());
++    combine(representativeVertex, vertex);
++    return false;
++  }
++
++  /**
++   * Combine two vertices together and store the serialized bytes
++   * in the vertex map.
++   *
++   * @param representativeVertex existing vertex
++   * @param representativeCombinerVertex new vertex to combine
++   */
++  private void combine(Vertex<I, V, E> representativeVertex,
++      Vertex<I, V, E> representativeCombinerVertex) {
+     getVertexValueCombiner().combine(representativeVertex.getValue(),
+-        vertex.getValue());
+-    vertexMap.put(vertex.getId(),
++        representativeCombinerVertex.getValue());
++    // Add the edges to the representative vertex
++    for (Edge<I, E> edge : representativeCombinerVertex.getEdges()) {
++      representativeVertex.addEdge(edge);
++    }
++    vertexMap.put(representativeCombinerVertex.getId(),
+         WritableUtils.writeVertexToByteArray(
+             representativeVertex, useUnsafeSerialization, getConf()));
+-    return false;
+   }
+ 
+   @Override
+diff --git a/giraph-core/src/test/java/org/apache/giraph/partition/TestPartitionStores.java b/giraph-core/src/test/java/org/apache/giraph/partition/TestPartitionStores.java
+index 0dd9b9c1d..08f4544ac 100644
+--- a/giraph-core/src/test/java/org/apache/giraph/partition/TestPartitionStores.java
++++ b/giraph-core/src/test/java/org/apache/giraph/partition/TestPartitionStores.java
+@@ -238,4 +238,52 @@ public void testReadWrite(
+     partitionStore.deletePartition(2);
+     assertEquals(2, partitionStore.getNumPartitions());
+   }
++  
++  @Test
++  public void testEdgeCombineWithSimplePartition() throws IOException {
++    testEdgeCombine(SimplePartition.class);
++  }
++  
++  @Test
++  public void testEdgeCombineWithByteArrayPartition() throws IOException {
++    testEdgeCombine(ByteArrayPartition.class);
++  }
++  
++  private void testEdgeCombine(Class<? extends Partition> partitionClass)
++      throws IOException {
++    Vertex<IntWritable, IntWritable, NullWritable> v1 = conf.createVertex();
++    v1.initialize(new IntWritable(1), new IntWritable(1));
++    Vertex<IntWritable, IntWritable, NullWritable> v2 = conf.createVertex();
++    v2.initialize(new IntWritable(2), new IntWritable(2));
++    Vertex<IntWritable, IntWritable, NullWritable> v3 = conf.createVertex();
++    v3.initialize(new IntWritable(3), new IntWritable(3));
++    Vertex<IntWritable, IntWritable, NullWritable> v1e2 = conf.createVertex();
++    v1e2.initialize(new IntWritable(1), new IntWritable(1));
++    v1e2.addEdge(EdgeFactory.create(new IntWritable(2)));
++    Vertex<IntWritable, IntWritable, NullWritable> v1e3 = conf.createVertex();
++    v1e3.initialize(new IntWritable(1), new IntWritable(1));
++    v1e3.addEdge(EdgeFactory.create(new IntWritable(3)));
++
++    GiraphConfiguration newconf = new GiraphConfiguration(conf);
++    newconf.setPartitionClass(partitionClass);
++    Partition<IntWritable, IntWritable, NullWritable> partition =
++        (new ImmutableClassesGiraphConfiguration<IntWritable, IntWritable,
++            NullWritable>(newconf)).createPartition(1, context);
++    assertEquals(partitionClass, partition.getClass());
++    partition.putVertex(v1);
++    partition.putVertex(v2);
++    partition.putVertex(v3);
++    assertEquals(3, partition.getVertexCount());
++    assertEquals(0, partition.getEdgeCount());
++    partition.putOrCombine(v1e2);
++    assertEquals(3, partition.getVertexCount());
++    assertEquals(1, partition.getEdgeCount());
++    partition.putOrCombine(v1e3);
++    assertEquals(3, partition.getVertexCount());
++    assertEquals(2, partition.getEdgeCount());
++    v1 = partition.getVertex(new IntWritable(1));
++    assertEquals(new IntWritable(1), v1.getId());
++    assertEquals(new IntWritable(1), v1.getValue());
++    assertEquals(2, v1.getNumEdges());
++  }
+ }

@@ -1,0 +1,183 @@
+From 2c932d1af2182f60a8629fc8059c3681e9ede9ac Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 26 Mar 2007 09:48:54 +0000
+Subject: [PATCH] FIX: Conflict managers ignored, when assigned to modules in
+ Ivy settings (IVY-448)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@522467 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/resolve/IvyNode.java  |  2 +-
+ .../conflict/LatestConflictManager.java       |  2 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 20 +++++++++++++++++++
+ test/repositories/IVY-448/ivy.xml             |  7 +++++++
+ test/repositories/IVY-448/ivysettings.xml     | 12 +++++++++++
+ test/repositories/IVY-448/module2/ivy-1.0.xml |  6 ++++++
+ .../IVY-448/module2/module2-1.0.jar           |  1 +
+ test/repositories/IVY-448/module3/ivy-1.0.xml |  3 +++
+ test/repositories/IVY-448/module3/ivy-2.0.xml |  3 +++
+ .../IVY-448/module3/module3-1.0.jar           |  1 +
+ .../IVY-448/module3/module3-2.0.jar           |  1 +
+ 12 files changed, 57 insertions(+), 2 deletions(-)
+ create mode 100644 test/repositories/IVY-448/ivy.xml
+ create mode 100644 test/repositories/IVY-448/ivysettings.xml
+ create mode 100644 test/repositories/IVY-448/module2/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-448/module2/module2-1.0.jar
+ create mode 100644 test/repositories/IVY-448/module3/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-448/module3/ivy-2.0.xml
+ create mode 100644 test/repositories/IVY-448/module3/module3-1.0.jar
+ create mode 100644 test/repositories/IVY-448/module3/module3-2.0.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e0e06a8cf..abaef4c83 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -18,6 +18,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ - IMPROVE: Generated XML reports now contains more information about the resolved module (IVY-446)
+ 
++- FIX: Conflict managers ignored, when assigned to modules in Ivy configuration (setting, ivyconf.xml) (IVY-448)
+ - FIX: Ivy should fail if ';' has been used in publications/artifact/@conf of ivy.xml (IVY-441)
+ - FIX: Ivy should fail where dependency uses undefined configuration (IVY-442)
+ - FIX: Dynamic revision not calculated properly when using multiple directories (IVY-427)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 23ba2f114..66bb10ffc 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -879,7 +879,7 @@ public ConflictManager getConflictManager(ModuleId mid) {
+             throw new IllegalStateException("impossible to get conflict manager when data has not been loaded");
+         }
+         ConflictManager cm = _md.getConflictManager(mid);
+-        return cm == null ? _settings.getDefaultConflictManager() : cm;
++        return cm == null ? _settings.getConflictManager(mid) : cm;
+     }
+     
+     public IvyNode getRealNode() {
+diff --git a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+index 52fe0966d..85223120c 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+@@ -145,6 +145,6 @@ public void setStrategy(LatestStrategy strategy) {
+     
+ 
+     public String toString() {
+-        return String.valueOf(_strategy);
++        return _strategy != null?String.valueOf(_strategy):_strategyName;
+     }
+ }
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 9c3c2e50c..b77e8cb27 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -243,6 +243,26 @@ public void testResolveNoRevisionNowhere() throws Exception {
+         assertFalse(report.hasError());
+     }
+ 
++    public void testResolveWithConflictManagerPerModule() throws Exception {
++        // test case for IVY-448
++    	// all modules from myorg
++        // module1 
++    	//    -> module2-1.0
++    	//    -> module3-2.0
++    	// module2
++    	//    -> module3-1.0
++    	// settings use 'all' as default conflict manager, and latest-revision for modules from myorg
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/IVY-448/ivysettings.xml").toURL());
++        ResolveReport report = ivy.resolve(new File("test/repositories/IVY-448/ivy.xml").toURL(),
++        		getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++        
++        // rev 1.0 should have been evicted by latest-revision conflict manager
++        assertTrue(getArchiveFileInCache("myorg", "module3", "2.0", "module3", "jar", "jar").exists());
++        assertFalse(getArchiveFileInCache("myorg", "module3", "1.0", "module3", "jar", "jar").exists());
++    }
++
+     public void testResolveRequiresIvyFile() throws Exception {
+         // mod1.1 depends on mod1.2, mod1.2 has no ivy file
+         Ivy ivy = new Ivy();
+diff --git a/test/repositories/IVY-448/ivy.xml b/test/repositories/IVY-448/ivy.xml
+new file mode 100644
+index 000000000..8d134317a
+--- /dev/null
++++ b/test/repositories/IVY-448/ivy.xml
+@@ -0,0 +1,7 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module1"/>
++    <dependencies>
++        <dependency org="myorg" name="module2" rev="1.0" />
++        <dependency org="myorg" name="module3" rev="2.0" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-448/ivysettings.xml b/test/repositories/IVY-448/ivysettings.xml
+new file mode 100644
+index 000000000..39d2f9b31
+--- /dev/null
++++ b/test/repositories/IVY-448/ivysettings.xml
+@@ -0,0 +1,12 @@
++<ivysettings>
++    <settings defaultResolver="myresolver" defaultConflictManager="all"/>
++    <resolvers>
++			<url name="myresolver">
++				<ivy pattern="${ivy.settings.dir}/[module]/ivy-[revision].xml" />
++				<artifact pattern="${ivy.settings.dir}/[module]/[artifact]-[revision].[ext]" />
++			</url>
++    </resolvers>
++    <modules>
++        <module organisation="myorg" name=".*" conflict-manager="latest-revision"/>
++    </modules>
++</ivysettings>
+diff --git a/test/repositories/IVY-448/module2/ivy-1.0.xml b/test/repositories/IVY-448/module2/ivy-1.0.xml
+new file mode 100644
+index 000000000..a407e0f04
+--- /dev/null
++++ b/test/repositories/IVY-448/module2/ivy-1.0.xml
+@@ -0,0 +1,6 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module2" revision="1.0"/>
++    <dependencies>
++        <dependency org="myorg" name="module3" rev="1.0" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-448/module2/module2-1.0.jar b/test/repositories/IVY-448/module2/module2-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-448/module2/module2-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-448/module3/ivy-1.0.xml b/test/repositories/IVY-448/module3/ivy-1.0.xml
+new file mode 100644
+index 000000000..16e7c362b
+--- /dev/null
++++ b/test/repositories/IVY-448/module3/ivy-1.0.xml
+@@ -0,0 +1,3 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module3" revision="1.0"/>
++</ivy-module>
+diff --git a/test/repositories/IVY-448/module3/ivy-2.0.xml b/test/repositories/IVY-448/module3/ivy-2.0.xml
+new file mode 100644
+index 000000000..77f895752
+--- /dev/null
++++ b/test/repositories/IVY-448/module3/ivy-2.0.xml
+@@ -0,0 +1,3 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module3" revision="2.0"/>
++</ivy-module>
+diff --git a/test/repositories/IVY-448/module3/module3-1.0.jar b/test/repositories/IVY-448/module3/module3-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-448/module3/module3-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-448/module3/module3-2.0.jar b/test/repositories/IVY-448/module3/module3-2.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-448/module3/module3-2.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file

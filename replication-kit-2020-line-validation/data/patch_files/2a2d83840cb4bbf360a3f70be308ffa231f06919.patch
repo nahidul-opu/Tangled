@@ -1,0 +1,71 @@
+From 2a2d83840cb4bbf360a3f70be308ffa231f06919 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Wed, 27 Apr 2016 08:35:05 +0000
+Subject: [PATCH] OPENNLP-835 Fix early termination, reset behavior and minor
+ memory leak
+
+The class SequenceStreamEventStream has a few bugs.
+(1) It truncates the stream early if any sequence is empty.
+(2) After reset, it will emit the remaining elements from the underlying sequence that was being iterated over before the reset, and then start over from the beginning.
+(3) It leaks memory by not discarding references to objects it doesn't need anymore.
+
+Thanks to Steven Taschuk for providing a patch.
+
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1741161 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../ml/model/SequenceStreamEventStream.java   | 22 ++++++-------------
+ 1 file changed, 7 insertions(+), 15 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/ml/model/SequenceStreamEventStream.java b/opennlp-tools/src/main/java/opennlp/tools/ml/model/SequenceStreamEventStream.java
+index 7744081f5..6966f5817 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/ml/model/SequenceStreamEventStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/ml/model/SequenceStreamEventStream.java
+@@ -28,7 +28,6 @@
+ 
+ /**
+  * Class which turns a sequence stream into an event stream.
+- *
+  */
+ public class SequenceStreamEventStream implements ObjectStream<Event> {
+ 
+@@ -42,32 +41,25 @@ public SequenceStreamEventStream(SequenceStream sequenceStream) {
+ 
+   @Override
+   public Event read() throws IOException {
+-
+-    if (eventIt.hasNext()) {
+-      return eventIt.next();
+-    }
+-    else {
++    while (!eventIt.hasNext()) {
+       Sequence<?> sequence = sequenceStream.read();
+-
+-      if (sequence != null) {
+-        eventIt = Arrays.asList(sequence.getEvents()).iterator();
+-      }
+-
+-      if (eventIt.hasNext()) {
+-        return read();
++      if (sequence == null) {
++        return null;
+       }
++      eventIt = Arrays.asList(sequence.getEvents()).iterator();
+     }
+-
+-    return null;
++    return eventIt.next();
+   }
+ 
+   @Override
+   public void reset() throws IOException, UnsupportedOperationException {
++    eventIt = Collections.emptyListIterator();
+     sequenceStream.reset();
+   }
+ 
+   @Override
+   public void close() throws IOException {
++    eventIt = Collections.emptyListIterator();
+     sequenceStream.close();
+   }
+ }

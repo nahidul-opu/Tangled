@@ -1,0 +1,263 @@
+From 870e1d3d98318745d0552c7a6a6f5dada90d7c82 Mon Sep 17 00:00:00 2001
+From: Thomas Neidhart <thomas.neidhart@gmail.com>
+Date: Sun, 26 Apr 2015 21:10:01 +0200
+Subject: [PATCH] [MATH-1197] 2-sample KS statistic was wrong in case of ties.
+
+---
+ src/changes/changes.xml                       |  6 +-
+ .../stat/inference/KolmogorovSmirnovTest.java | 45 ++++++++--
+ .../inference/KolmogorovSmirnovTestTest.java  | 83 ++++++++++++++++---
+ 3 files changed, 116 insertions(+), 18 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 609835d4ad..02a4406d85 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -50,7 +50,11 @@ If the output is not quite correct, check for invisible trailing spaces!
+     <title>Commons Math Release Notes</title>
+   </properties>
+   <body>
+-    <release version="TBD" date="TBD" description="TBD">
++    <release version="3.6" date="XXXX-XX-XX" description="">
++      <action dev="tn" type="fix" issue="MATH-1197">
++        Computation of 2-sample Kolmogoriv-Smirnov statistic in case of ties
++        was not correct.
++      </action>    
+     </release>
+     <release version="3.5" date="2015-04-17" description="
+ This is a minor release: It combines bug fixes and new features.
+diff --git a/src/main/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTest.java b/src/main/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTest.java
+index 131d0c6569..6b2fba21ad 100644
+--- a/src/main/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTest.java
++++ b/src/main/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTest.java
+@@ -298,9 +298,13 @@ public double kolmogorovSmirnovStatistic(double[] x, double[] y) {
+         double supD = 0d;
+         // First walk x points
+         for (int i = 0; i < n; i++) {
+-            final double cdf_x = (i + 1d) / n;
+-            final int yIndex = Arrays.binarySearch(sy, sx[i]);
+-            final double cdf_y = yIndex >= 0 ? (yIndex + 1d) / m : (-yIndex - 1d) / m;
++            final double x_i = sx[i];
++            // ties can be safely ignored
++            if (i > 0 && x_i == sx[i-1]) {
++                continue;
++            }
++            final double cdf_x = edf(x_i, sx);
++            final double cdf_y = edf(x_i, sy);
+             final double curD = FastMath.abs(cdf_x - cdf_y);
+             if (curD > supD) {
+                 supD = curD;
+@@ -308,9 +312,13 @@ public double kolmogorovSmirnovStatistic(double[] x, double[] y) {
+         }
+         // Now look at y
+         for (int i = 0; i < m; i++) {
+-            final double cdf_y = (i + 1d) / m;
+-            final int xIndex = Arrays.binarySearch(sx, sy[i]);
+-            final double cdf_x = xIndex >= 0 ? (xIndex + 1d) / n : (-xIndex - 1d) / n;
++            final double y_i = sy[i];
++            // ties can be safely ignored
++            if (i > 0 && y_i == sy[i-1]) {
++                continue;
++            }
++            final double cdf_x = edf(y_i, sx);
++            final double cdf_y = edf(y_i, sy);
+             final double curD = FastMath.abs(cdf_x - cdf_y);
+             if (curD > supD) {
+                 supD = curD;
+@@ -319,6 +327,24 @@ public double kolmogorovSmirnovStatistic(double[] x, double[] y) {
+         return supD;
+     }
+ 
++    /**
++     * Computes the empirical distribution function.
++     *
++     * @param x the given x
++     * @param samples the observations
++     * @return the empirical distribution function \(F_n(x)\)
++     */
++    private double edf(final double x, final double[] samples) {
++        final int n = samples.length;
++        int index = Arrays.binarySearch(samples, x);
++        if (index >= 0) {
++            while(index < (n - 1) && samples[index+1] == x) {
++                ++index;
++            }
++        }
++        return index >= 0 ? (index + 1d) / n : (-index - 1d) / n;
++    }
++
+     /**
+      * Computes the <i>p-value</i>, or <i>observed significance level</i>, of a one-sample <a
+      * href="http://en.wikipedia.org/wiki/Kolmogorov-Smirnov_test"> Kolmogorov-Smirnov test</a>
+@@ -429,7 +455,7 @@ public double cdf(double d, int n, boolean exact)
+             return 1;
+         }
+         if (exact) {
+-            return exactK(d,n);
++            return exactK(d, n);
+         }
+         if (n <= 140) {
+             return roundedK(d, n);
+@@ -834,8 +860,13 @@ private void checkArray(double[] array) {
+      * @throws TooManyIterationsException if the series does not converge
+      */
+     public double ksSum(double t, double tolerance, int maxIterations) {
++        if (t == 0.0) {
++            return 1.0;
++        }
++
+         // TODO: for small t (say less than 1), the alternative expansion in part 3 of [1]
+         // from class javadoc should be used.
++
+         final double x = -2 * t * t;
+         int sign = -1;
+         long i = 1;
+diff --git a/src/test/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTestTest.java b/src/test/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTestTest.java
+index 9ac5c7cf52..56e4c58535 100644
+--- a/src/test/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTestTest.java
++++ b/src/test/java/org/apache/commons/math3/stat/inference/KolmogorovSmirnovTestTest.java
+@@ -26,7 +26,7 @@
+ 
+ /**
+  * Test cases for {@link KolmogorovSmirnovTest}.
+- * 
++ *
+  * @since 3.3
+  */
+ public class KolmogorovSmirnovTestTest {
+@@ -220,7 +220,7 @@ public void testTwoSampleApproximateCritialValues() {
+             }
+         }
+     }
+-    
++
+     @Test
+     public void testPelzGoodApproximation() {
+         KolmogorovSmirnovTest ksTest = new KolmogorovSmirnovTest();
+@@ -236,7 +236,7 @@ public void testPelzGoodApproximation() {
+             0.9999999999999877, 0.9999999999999191, 0.9999999999999254, 0.9999999999998178, 0.9999999999917788,
+             0.9999999999998556, 0.9999999999992014, 0.9999999999988859, 0.9999999999999325, 0.9999999999821726
+         };
+-        
++
+         final double tol = 10e-15;
+         int k = 0;
+         for (int i = 0; i < 6; i++) {
+@@ -254,8 +254,8 @@ public void testTwoSampleApproximateP() {
+         Assert.assertEquals(0.0319983962391632, test.kolmogorovSmirnovTest(gaussian, gaussian2), TOLERANCE);
+         Assert.assertEquals(0.202352941176471, test.kolmogorovSmirnovStatistic(gaussian, gaussian2), TOLERANCE);
+     }
+-    
+-    /** 
++
++    /**
+      * MATH-1181
+      * Verify that large sample method is selected for sample product > Integer.MAX_VALUE
+      * (integer overflow in sample product)
+@@ -269,7 +269,7 @@ public void testTwoSampleProductSizeOverflow() {
+         final KolmogorovSmirnovTest test = new KolmogorovSmirnovTest();
+         Assert.assertFalse(Double.isNaN(test.kolmogorovSmirnovTest(x, y)));
+     }
+-    
++
+ 
+     /**
+      * Verifies that Monte Carlo simulation gives results close to exact p values. This test is a
+@@ -302,15 +302,78 @@ public void testTwoSampleMonteCarlo() {
+         }
+     }
+ 
++    @Test
++    public void testTwoSampleWithManyTies() {
++        // MATH-1197
++        final double[] x = {
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 2.202653, 2.202653, 2.202653, 2.202653, 2.202653,
++            2.202653, 2.202653, 2.202653, 2.202653, 2.202653, 2.202653,
++            2.202653, 2.202653, 2.202653, 2.202653, 2.202653, 2.202653,
++            2.202653, 2.202653, 2.202653, 2.202653, 2.202653, 2.202653,
++            2.202653, 2.202653, 2.202653, 2.202653, 2.202653, 2.202653,
++            2.202653, 2.202653, 2.202653, 2.202653, 2.202653, 2.202653,
++            3.181199, 3.181199, 3.181199, 3.181199, 3.181199, 3.181199,
++            3.723539, 3.723539, 3.723539, 3.723539, 4.383482, 4.383482,
++            4.383482, 4.383482, 5.320671, 5.320671, 5.320671, 5.717284,
++            6.964001, 7.352165, 8.710510, 8.710510, 8.710510, 8.710510,
++            8.710510, 8.710510, 9.539004, 9.539004, 10.720619, 17.726077,
++            17.726077, 17.726077, 17.726077, 22.053875, 23.799144, 27.355308,
++            30.584960, 30.584960, 30.584960, 30.584960, 30.751808
++        };
++
++        final double[] y = {
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 0.000000, 0.000000, 0.000000,
++            0.000000, 0.000000, 0.000000, 2.202653, 2.202653, 2.202653,
++            2.202653, 2.202653, 2.202653, 2.202653, 2.202653, 3.061758,
++            3.723539, 5.628420, 5.628420, 5.628420, 5.628420, 5.628420,
++            6.916982, 6.916982, 6.916982, 10.178538, 10.178538, 10.178538,
++            10.178538, 10.178538
++        };
++
++        final KolmogorovSmirnovTest test = new KolmogorovSmirnovTest();
++
++        Assert.assertEquals(0.0640394088, test.kolmogorovSmirnovStatistic(x, y), 1e-6);
++        Assert.assertEquals(0.9792777290, test.kolmogorovSmirnovTest(x, y), 1e-6);
++
++    }
++
+     /**
+      * Verifies the inequality exactP(criticalValue, n, m, true) < alpha < exactP(criticalValue, n,
+      * m, false).
+-     * 
++     *
+      * Note that the validity of this check depends on the fact that alpha lies strictly between two
+      * attained values of the distribution and that criticalValue is one of the attained values. The
+      * critical value table (reference below) uses attained values. This test therefore also
+      * verifies that criticalValue is attained.
+-     * 
++     *
+      * @param n first sample size
+      * @param m second sample size
+      * @param criticalValue critical value
+@@ -324,7 +387,7 @@ private void checkExactTable(int n, int m, double criticalValue, double alpha) {
+ 
+     /**
+      * Verifies that approximateP(criticalValue, n, m) is within epsilon of alpha.
+-     * 
++     *
+      * @param n first sample size
+      * @param m second sample size
+      * @param criticalValue critical value (from table)
+@@ -335,5 +398,5 @@ private void checkApproximateTable(int n, int m, double criticalValue, double al
+         final KolmogorovSmirnovTest test = new KolmogorovSmirnovTest();
+         Assert.assertEquals(alpha, test.approximateP(criticalValue, n, m), epsilon);
+     }
+-    
++
+ }
+\ No newline at end of file

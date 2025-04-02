@@ -1,0 +1,103 @@
+From 8e0358065b9b05d30104abc17892a7f13a071053 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 18 Oct 2012 19:32:08 +0000
+Subject: [PATCH] Merged changes for IVY-1036 from trunk.
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/branches/2.3.x@1399811 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/plugins/resolver/IBiblioResolver.java |  9 ++++-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 40 +++++++++++++++++++
+ 3 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index a7e47898d..7eb7e7a02 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -130,6 +130,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	
+    2.3.x
+ =====================================
++- FIX: latest.integration isn't resolved against a Maven snapshot repository (when uniqueVersion = true) (IVY-1036)
+ - FIX: Resolve does not deliver all dependent artifacts (IVY-1366) (thanks to Wolfgang Frank)
+ - FIX: Ivy descriptors are merged incorrectly when there is an <exclude> element (IVY-1356)
+ - FIX: SimpleDateFormat is not thread safe (IVY-1373)
+diff --git a/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java b/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
+index a20dc52bd..4731729bd 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
+@@ -399,8 +399,15 @@ protected ResolvedResource[] listResources(
+                 List rres = new ArrayList();
+                 for (Iterator iter = revs.iterator(); iter.hasNext();) {
+                     String rev = (String) iter.next();
++                    ModuleRevisionId historicalMrid = ModuleRevisionId.newInstance(mrid, rev);
++                    if (rev.endsWith("SNAPSHOT")) {
++                        String snapshotVersion = findSnapshotVersion(historicalMrid);
++                        if (snapshotVersion != null) {
++                            pattern = pattern.replaceFirst("\\-\\[revision\\]", "-" + snapshotVersion);
++                        }
++                    }
+                     String resolvedPattern = IvyPatternHelper.substitute(
+-                        pattern, ModuleRevisionId.newInstance(mrid, rev), artifact);
++                        pattern, historicalMrid, artifact);
+                     try {
+                         Resource res = repository.getResource(resolvedPattern);
+                         if ((res != null) && res.exists()) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index bb7030f62..1368fc617 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -4602,6 +4602,26 @@ public void testResolveMaven2Snapshot1() throws Exception {
+             "test-SNAPSHOT1", "jar", "jar").exists());
+     }
+ 
++    public void testResolveMaven2Snapshot1AsLatestIntegration() throws Exception {
++        // test case for IVY-1036
++        // here we test maven SNAPSHOT versions handling, 
++        // with m2 snapshotRepository/uniqueVersion set to true
++        // but retrieving by latest.integration
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml"));
++        ResolveReport report = ivy.resolve(
++            ModuleRevisionId.newInstance("org.apache", "test-SNAPSHOT1", "latest.integration"),
++            getResolveOptions(new String[] {"*(public)"}), true);
++        assertNotNull(report);
++        assertFalse(report.hasError());
++
++        // dependencies
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org.apache", "test-SNAPSHOT1", "2.0.2-SNAPSHOT")).exists());
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test-SNAPSHOT1", "2.0.2-SNAPSHOT",
++            "test-SNAPSHOT1", "jar", "jar").exists());
++    }
++
+     public void testResolveMaven2Snapshot2() throws Exception {
+         // test case for IVY-501
+         // here we test maven SNAPSHOT versions handling, 
+@@ -4621,6 +4641,26 @@ public void testResolveMaven2Snapshot2() throws Exception {
+             "test-SNAPSHOT2", "jar", "jar").exists());
+     }
+ 
++    public void testResolveMaven2Snapshot2AsLatestIntegration() throws Exception {
++        // test case for IVY-1036
++        // here we test maven SNAPSHOT versions handling, 
++        // with m2 snapshotRepository/uniqueVersion set to true
++        // but retrieving by latest.integration
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml"));
++        ResolveReport report = ivy.resolve(
++            ModuleRevisionId.newInstance("org.apache", "test-SNAPSHOT2", "latest.integration"),
++            getResolveOptions(new String[] { "*(public)" }), true);
++        assertNotNull(report);
++        assertFalse(report.hasError());
++
++        // dependencies
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org.apache", "test-SNAPSHOT2", "2.0.2-SNAPSHOT"))
++                .exists());
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test-SNAPSHOT2", "2.0.2-SNAPSHOT",
++            "test-SNAPSHOT2", "jar", "jar").exists());
++    }
+ 
+     public void testNamespaceMapping() throws Exception {
+         // the dependency is in another namespace

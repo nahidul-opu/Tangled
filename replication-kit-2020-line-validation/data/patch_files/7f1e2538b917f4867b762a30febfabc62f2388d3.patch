@@ -1,0 +1,158 @@
+From 7f1e2538b917f4867b762a30febfabc62f2388d3 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 8 Nov 2006 19:39:42 +0000
+Subject: [PATCH] FIX: confmappingoverride doesn't work for configurations
+ extending from "*(public)" (IVY-326)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484580 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../AbstractModuleDescriptorParser.java       | 21 ++++++++++++++----
+ test/java/fr/jayasoft/ivy/ivy-218.xml         |  4 ++--
+ .../xml/XmlModuleDescriptorParserTest.java    | 22 +++++++++++++++++++
+ .../ivy/xml/test-configextendsothers3.xml     | 18 +++++++++++++++
+ 5 files changed, 60 insertions(+), 6 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/xml/test-configextendsothers3.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 54a4293af..cc27e675d 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -19,6 +19,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - FIX: ChainVersionMatcher doesn't handle IvyAware children version matchers (IVY-331)
+ - FIX: latest.<status> does not work properly when no matching revision exist (IVY-318)
+ - FIX: attribute name in macrodef is not handled as expected (IVY-319)
++- FIX: confmappingoverride doesn't work for configurations extending from "*(public)" (IVY-326)
+ 
+ 
+    version 1.4 - 2006-10-09
+diff --git a/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java
+index 54e81f024..b65f08e9f 100644
+--- a/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java
+@@ -87,6 +87,10 @@ protected void parseDepsConfs(String confs, DefaultDependencyDescriptor dd, bool
+         	parseDepsConfs(confs, dd, useDefaultMappingToGuessRightOperande, true);
+         }
+         protected void parseDepsConfs(String confs, DefaultDependencyDescriptor dd, boolean useDefaultMappingToGuessRightOperande, boolean evaluateConditions) {
++        	if (confs == null) {
++        		return;
++        	}
++        	
+             String[] conf = confs.split(";");
+             parseDepsConfs(conf, dd, useDefaultMappingToGuessRightOperande, evaluateConditions);
+         }
+@@ -94,6 +98,7 @@ protected void parseDepsConfs(String[] conf, DefaultDependencyDescriptor dd, boo
+         	parseDepsConfs(conf, dd, useDefaultMappingToGuessRightOperande, true);
+         }
+         protected void parseDepsConfs(String[] conf, DefaultDependencyDescriptor dd, boolean useDefaultMappingToGuessRightOperande, boolean evaluateConditions) {
++        	replaceConfigurationWildcards(_md);
+             for (int i = 0; i < conf.length; i++) {
+                 String[] ops = conf[i].split("->");
+                 if (ops.length == 1) {
+@@ -212,11 +217,11 @@ private void addExtendingConfigurations(String conf, DefaultDependencyDescriptor
+         		for (int j = 0; j < ext.length; j++) {
+         			if (conf.equals(ext[j])) {
+         				String configName = configs[i].getName();
+-                		if (getDefaultConfMappingDescriptor().getDependencyConfigurations(configName).length > 0) {
++//                		if (getDefaultConfMappingDescriptor().getDependencyConfigurations(configName).length > 0) {
+             				configsToAdd.add(configName);
+-                		} else {
++//                		} else {
+                 			addExtendingConfigurations(configName, dd, useDefaultMappingToGuessRightOperande);
+-                		}
++//                		}
+         			}
+         		}
+         	}
+@@ -302,5 +307,13 @@ protected long getLastModified() {
+                 return System.currentTimeMillis();
+             }
+         }
+-    }
++        
++        private void replaceConfigurationWildcards(ModuleDescriptor md) {
++            Configuration[] configs = md.getConfigurations();
++            for (int i = 0; i < configs.length; i++) {
++                configs[i].replaceWildcards(md);
++            }
++        }
++
++    }    
+ }
+diff --git a/test/java/fr/jayasoft/ivy/ivy-218.xml b/test/java/fr/jayasoft/ivy/ivy-218.xml
+index 2f8837ae3..956bde8b6 100644
+--- a/test/java/fr/jayasoft/ivy/ivy-218.xml
++++ b/test/java/fr/jayasoft/ivy/ivy-218.xml
+@@ -1,12 +1,12 @@
+ <ivy-module version="1.0">
+ 	<info organisation="test" module="IVY-218" status="integration" publication="20050202110000"/>
+-	<configurations defaultconfmapping="compile-&gt;A;test-&gt;B" confmappingoverride="true">
++	<configurations defaultconfmapping="compile,runtime->A;test->B" confmappingoverride="true">
+ 		<conf name="compile"/>
+ 		<conf name="runtime" extends="compile"/>
+ 		<conf name="test" extends="runtime"/>
+ 	</configurations>
+ 	<dependencies>
+ 		<dependency org="org5" name="mod5.1" rev="4.2" force="true" conf="compile" transitive="false"/>
+-		<dependency org="org3" name="mod3.2" rev="1+" conf="test-&gt;default" transitive="false"/>
++		<dependency org="org3" name="mod3.2" rev="1+" conf="test->default" transitive="false"/>
+ 	</dependencies>
+ </ivy-module>
+\ No newline at end of file
+diff --git a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+index b9a174c54..d4bd6a7ad 100644
+--- a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+@@ -621,6 +621,28 @@ public void testImportConfigurationsWithMappingOverride() throws Exception {
+         assertEquals(Arrays.asList(new String[] {"B"}), Arrays.asList(dd.getDependencyConfigurations("conf2")));  
+     }
+     
++    public void testImportConfigurationsWithWildcardAndMappingOverride() throws Exception {
++        // import configurations and default mapping
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(_ivy, getClass().getResource("test-configextendsothers3.xml"), true);
++        assertNotNull(md);
++        
++        // has 2 dependencies
++        DependencyDescriptor[] dependencies = md.getDependencies();
++        assertNotNull(dependencies);
++        assertEquals(2, dependencies.length);
++        
++        // confs dep1: all-public->all-public (mappingoverride = true)
++        DependencyDescriptor dd = getDependency(dependencies, "mymodule1");
++        assertEquals(Arrays.asList(new String[] {"all-public"}), Arrays.asList(dd.getModuleConfigurations()));
++        assertEquals(Arrays.asList(new String[] {"all-public"}), Arrays.asList(dd.getDependencyConfigurations("all-public"))); 
++        
++        // confs dep2: extra->extra;all-public->all-public (mappingoverride = true)
++        dd = getDependency(dependencies, "mymodule2");
++        assertEquals(Arrays.asList(new String[] {"all-public", "extra"}), Arrays.asList(dd.getModuleConfigurations()));
++        assertEquals(Arrays.asList(new String[] {"extra"}), Arrays.asList(dd.getDependencyConfigurations("extra")));  
++        assertEquals(Arrays.asList(new String[] {"all-public"}), Arrays.asList(dd.getDependencyConfigurations("all-public")));  
++    }
++
+     public void testDefaultConfMappingWithSelectors() throws Exception {
+         // import configurations and default mapping
+         ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(_ivy, getClass().getResource("test-defaultconfmapping-withselectors.xml"), true);
+diff --git a/test/java/fr/jayasoft/ivy/xml/test-configextendsothers3.xml b/test/java/fr/jayasoft/ivy/xml/test-configextendsothers3.xml
+new file mode 100644
+index 000000000..404b04a44
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/xml/test-configextendsothers3.xml
+@@ -0,0 +1,18 @@
++<?xml version="1.0" encoding="ISO-8859-1"?>
++<?xml-stylesheet type="text/xsl" href="http://www.jayasoft.fr/org/ivyrep/ivy-doc.xsl"?>
++<ivy-module version="1.0">
++	<info organisation="myorg"
++	       module="mymodule"
++	       revision="myrev"
++	       status="integration"
++	       publication="20041101110000"/>
++	<configurations>
++		<include file="test/java/fr/jayasoft/ivy/xml/imported-configurations-with-wildcard.xml"/>
++		<conf name="priv" visibility="private" />
++		<conf name="extra" />
++	</configurations>
++	<dependencies confmappingoverride="true">
++		<dependency name="mymodule1" rev="1.0" conf="all-public"/>
++		<dependency name="mymodule2" rev="2.0" conf="extra"/>
++	</dependencies>
++</ivy-module>

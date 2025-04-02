@@ -1,0 +1,115 @@
+From d8f288a35e63d1e9682c7e188b37c0d7e8e537a7 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 22 Mar 2007 23:01:40 +0000
+Subject: [PATCH] Ivy should fail if ';' has been used in
+ publications/artifact/@conf of ivy.xml (IVY-441)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@521518 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../descriptor/DefaultModuleDescriptor.java   |  5 +++++
+ .../xml/XmlModuleDescriptorParserTest.java    | 19 +++++++++++++++++++
+ .../parser/xml/test-incorrectconf2.xml        | 19 +++++++++++++++++++
+ .../parser/xml/test-incorrectconf3.xml        | 11 +++++++++++
+ 5 files changed, 55 insertions(+)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf2.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf3.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 27d827983..e0e06a8cf 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -18,6 +18,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ - IMPROVE: Generated XML reports now contains more information about the resolved module (IVY-446)
+ 
++- FIX: Ivy should fail if ';' has been used in publications/artifact/@conf of ivy.xml (IVY-441)
+ - FIX: Ivy should fail where dependency uses undefined configuration (IVY-442)
+ - FIX: Dynamic revision not calculated properly when using multiple directories (IVY-427)
+ - FIX: LatestRevisionStrategy.sort() doesn't sort as specified (IVY-435)
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+index 03ec59dd1..85f8ba3a5 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+@@ -260,6 +260,11 @@ public void addConfiguration(Configuration conf) {
+      * @param artifact
+      */
+     public void addArtifact(String conf, Artifact artifact) {
++    	if (!_configurations.containsKey(conf)) {
++    		throw new IllegalArgumentException("Configuration '" + conf 
++    				+ "' doesn't exist in module " + this);
++    	}
++    	
+         Collection artifacts = (Collection)_artifactsByConf.get(conf);
+         if (artifacts == null) {
+             artifacts = new ArrayList();
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+index f2d5e1bee..af71fbfba 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+@@ -694,4 +694,23 @@ public void testWithNonExistingConfigInDependency() throws Exception {
+     		// expected
+     	}
+     }
++    
++    public void testWithNonExistingConfigInPublications() throws Exception {
++    	try {
++    		XmlModuleDescriptorParser.getInstance().parseDescriptor(_settings, getClass().getResource("test-incorrectconf2.xml"), true);
++    		fail("ParseException hasn't been thrown");
++    	} catch (ParseException e) {
++    		// expected
++    	}
++    }
++    
++    public void testWithExistingConfigsInPublicationsSeparatedBySemiColon() throws Exception {
++    	// IVY-441
++    	try {
++    		XmlModuleDescriptorParser.getInstance().parseDescriptor(_settings, getClass().getResource("test-incorrectconf3.xml"), true);
++    		fail("ParseException hasn't been thrown");
++    	} catch (ParseException e) {
++    		// expected
++    	}
++    }
+ }
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf2.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf2.xml
+new file mode 100644
+index 000000000..34e4cb591
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf2.xml
+@@ -0,0 +1,19 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++	<info organisation="myorg"
++	       module="mymodule"
++	       revision="1.0"
++	       publication="20050913185628"
++	/>
++	<publications>
++        <artifact name="art1" type="jar" conf="default"/>
++        <artifact name="art2" type="jar" conf="default,bad"/>
++    </publications>
++	
++	<dependencies>
++		<dependency name="mod1" rev="1.0"/>
++		<dependency org="test" name="mod2" rev="2.0" conf="*"/>
++		<dependency org="test" name="mod3" rev="2.0" conf="default->*"/>
++		<dependency org="test" name="mod4" rev="2.0" conf="%->*"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf3.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf3.xml
+new file mode 100644
+index 000000000..077874a07
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-incorrectconf3.xml
+@@ -0,0 +1,11 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++	<info organisation="ivy-bug" module="test_proj" revision="1.0"/>
++	<configurations>
++		<conf name="compile" transitive="false"/>
++		<conf name="runtime"/>
++	</configurations>
++	<publications>
++		<artifact name="test_proj" type="jar" conf="compile;runtime"/>
++	</publications>
++</ivy-module>

@@ -1,0 +1,386 @@
+From 15449c2d8975402964565b4103664bd39eb5ee41 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 19 Jan 2006 16:53:07 +0000
+Subject: [PATCH] FIX another contradictory conflict issue (IVY-130)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484121 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/java/fr/jayasoft/ivy/Ivy.java          | 125 +++++++++++++++------
+ src/java/fr/jayasoft/ivy/IvyNode.java      |  49 ++++++--
+ test/java/fr/jayasoft/ivy/ResolveTest.java |  18 ++-
+ test/repositories/2/mod10.1/ivy-1.2.xml    |  15 +++
+ test/repositories/2/mod10.1/ivy-1.3.xml    |  12 ++
+ test/repositories/2/mod4.1/ivy-4.4.xml     |  15 +++
+ test/repositories/2/mod4.1/mod4.1-4.4.jar  |   1 +
+ 7 files changed, 191 insertions(+), 44 deletions(-)
+ create mode 100644 test/repositories/2/mod10.1/ivy-1.2.xml
+ create mode 100644 test/repositories/2/mod10.1/ivy-1.3.xml
+ create mode 100644 test/repositories/2/mod4.1/ivy-4.4.xml
+ create mode 100644 test/repositories/2/mod4.1/mod4.1-4.4.jar
+
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index 12f30faeb..ee6514c72 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -1007,42 +1007,15 @@ private void resolveConflict(IvyNode node, IvyNode parent, Collection toevict) {
+         if (parent == null || node == parent) {
+             return;
+         }
+-        if (parent.getResolvedRevisions(node.getModuleId(), node.getRootModuleConf()).contains(node.getResolvedId())) {
+-            // resolve conflict has already be done with node with the same id
+-            // => job already done, we just have to check if the node wasn't previously evicted in root ancestor
+-            EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), parent);
+-            if (evictionData != null) {
+-                // node has been previously evicted in an ancestor: we mark it as evicted and ensure selected are selected
+-                if (evictionData.getSelected() != null) {
+-                    for (Iterator iter = evictionData.getSelected().iterator(); iter.hasNext();) {
+-                        IvyNode selected = (IvyNode)iter.next();
+-                        if (selected.isEvicted(node.getRootModuleConf())) {
+-                            selected.markSelected(node.getRootModuleConf());
+-                            Message.debug("selecting "+selected+" in "+parent+" due to eviction of "+node);
+-                        }
+-                    }
+-                }
+-
+-
+-                node.markEvicted(evictionData);                
+-                Message.debug("evicting "+node+" by "+evictionData);                
+-            }
++        // check if job is not already done
++        if (checkConflictSolved(node, parent)) {
+             return;
+         }
+-        Collection conflicts = new HashSet();
++        
++        // compute conflicts
+         Collection resolvedNodes = new HashSet(parent.getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
+-        if (resolvedNodes.removeAll(toevict)) {
+-            // parent.resolved(node.mid) is not up to date:
+-            // recompute resolved from all sub nodes
+-            Collection deps = parent.getDependencies(parent.getRequiredConfigurations());
+-            for (Iterator iter = deps.iterator(); iter.hasNext();) {
+-                IvyNode dep = (IvyNode)iter.next();
+-                conflicts.addAll(dep.getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
+-            }
+-        } else {
+-            conflicts.add(node);
+-            conflicts.addAll(resolvedNodes);
+-        }
++        Collection conflicts = computeConflicts(node, parent, toevict, resolvedNodes);
++        
+         Collection resolved = parent.getConflictManager(node.getModuleId()).resolveConflicts(parent, conflicts);
+         if (resolved.contains(node)) {
+             // node has been selected for the current parent
+@@ -1061,10 +1034,16 @@ private void resolveConflict(IvyNode node, IvyNode parent, Collection toevict) {
+                 Message.debug("evicting "+te+" by "+te.getEvictedData(node.getRootModuleConf()));
+             }
+             
+-            // it's very important to update resolved BEFORE recompute parent call
++            // it's very important to update resolved and evicted nodes BEFORE recompute parent call
+             // to allow it to recompute its resolved collection with correct data
+-            // if necessary
++            // if necessary            
+             parent.setResolvedNodes(node.getModuleId(), node.getRootModuleConf(), resolved); 
++
++            Collection evicted = new HashSet(parent.getEvictedNodes(node.getModuleId(), node.getRootModuleConf()));
++            evicted.removeAll(resolved);
++            evicted.addAll(toevict);
++            parent.setEvictedNodes(node.getModuleId(), node.getRootModuleConf(), evicted);
++            
+             resolveConflict(node, parent.getParent(), toevict);
+         } else {
+             // node has been evicted for the current parent
+@@ -1078,15 +1057,89 @@ private void resolveConflict(IvyNode node, IvyNode parent, Collection toevict) {
+                 }
+             }
+             
+-            // it's time to update parent resolved with found resolved...
++            // it's time to update parent resolved and evicted with what was found...
+             // if they have not been recomputed, it does not change anything
+             parent.setResolvedNodes(node.getModuleId(), node.getRootModuleConf(), resolved); 
++
++            Collection evicted = new HashSet(parent.getEvictedNodes(node.getModuleId(), node.getRootModuleConf()));
++            evicted.removeAll(resolved);
++            evicted.addAll(toevict);
++            evicted.add(node);
++            parent.setEvictedNodes(node.getModuleId(), node.getRootModuleConf(), evicted);
++
+             
+             node.markEvicted(node.getRootModuleConf(), parent, parent.getConflictManager(node.getModuleId()), resolved);
+             Message.debug("evicting "+node+" by "+node.getEvictedData(node.getRootModuleConf()));
+         }
+     }
+ 
++    private Collection computeConflicts(IvyNode node, IvyNode parent, Collection toevict, Collection resolvedNodes) {
++        Collection conflicts = new HashSet();
++        if (resolvedNodes.removeAll(toevict)) {
++            // parent.resolved(node.mid) is not up to date:
++            // recompute resolved from all sub nodes
++            conflicts.add(node);
++            Collection deps = parent.getDependencies(parent.getRequiredConfigurations());
++            for (Iterator iter = deps.iterator(); iter.hasNext();) {
++                IvyNode dep = (IvyNode)iter.next();
++                conflicts.addAll(dep.getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
++            }
++        } else if (resolvedNodes.isEmpty() && node.getParent() != parent) {
++            conflicts.add(node);
++            DependencyDescriptor[] dds = parent.getDescriptor().getDependencies();
++            for (int i = 0; i < dds.length; i++) {
++                if (dds[i].getDependencyId().equals(node.getModuleId())) {
++                    IvyNode n = node.findNode(dds[i].getDependencyRevisionId());
++                    if (n != null) {
++                        conflicts.add(n);
++                        break;
++                    }
++                }
++            }
++        } else {
++            conflicts.add(node);
++            conflicts.addAll(resolvedNodes);
++        }
++        return conflicts;
++    }
++
++    private boolean checkConflictSolved(IvyNode node, IvyNode parent) {
++        if (parent.getResolvedRevisions(node.getModuleId(), node.getRootModuleConf()).contains(node.getResolvedId())) {
++            // resolve conflict has already be done with node with the same id
++            // => job already done, we just have to check if the node wasn't previously evicted in root ancestor
++            EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), parent);
++            if (evictionData != null) {
++                // node has been previously evicted in an ancestor: we mark it as evicted and ensure selected are selected
++                if (evictionData.getSelected() != null) {
++                    for (Iterator iter = evictionData.getSelected().iterator(); iter.hasNext();) {
++                        IvyNode selected = (IvyNode)iter.next();
++                        if (selected.isEvicted(node.getRootModuleConf())) {
++                            selected.markSelected(node.getRootModuleConf());
++                            Message.debug("selecting "+selected+" in "+parent+" due to eviction of "+node);
++                        }
++                    }
++                }
++
++
++                node.markEvicted(evictionData);                
++                Message.debug("evicting "+node+" by "+evictionData);                
++            }
++            return true;
++        } else if (parent.getEvictedRevisions(node.getModuleId(), node.getRootModuleConf()).contains(node.getResolvedId())) {
++            // resolve conflict has already be done with node with the same id
++            // => job already done, we just have to check if the node wasn't previously selected in root ancestor
++            EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), parent);
++            if (evictionData == null) {
++                // node was selected in the root, we have to select it
++
++                node.markSelected(node.getRootModuleConf());            
++                Message.debug("selecting "+node+" in "+parent);
++            }
++            return true;
++        }
++        return false;
++    }
++
+     public ResolvedModuleRevision findModuleInCache(ModuleRevisionId mrid, File cache, boolean validate) {
+         // first, check if it is in cache
+         if (mrid.isExactRevision()) {
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 05bb7c9e3..59452d897 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -190,8 +190,10 @@ public int hashCode() {
+     private String _parentConf = null;
+     private String _rootModuleConf;
+ 
+-    private Map _selected = new HashMap(); // Map (ModuleIdConf -> Set(Node))
+-    private Map _evicted = new HashMap(); // Map (root module conf -> EvictionData)
++    private Map _selectedDeps = new HashMap(); // Map (ModuleIdConf -> Set(Node)) // map indicating for each dependency which revision has been selected
++    private Map _evictedDeps = new HashMap(); // Map (ModuleIdConf -> Set(Node)) // map indicating for each dependency which revision has been evicted
++    
++    private Map _evicted = new HashMap(); // Map (root module conf -> EvictionData) // indicates if the node is evicted in each root module conf
+ 
+     // Map (String rootModuleConf -> Map (ModuleRevisionId -> Caller)): key in second map is used to easily get a caller by its mrid
+     private Map _callersByRootConf = new HashMap(); 
+@@ -272,7 +274,7 @@ public ConflictManager getConflictManager(ModuleId mid) {
+     }
+     
+     public Collection getResolvedNodes(ModuleId mid, String rootModuleConf) {
+-        Collection resolved = (Collection)_selected.get(new ModuleIdConf(mid, rootModuleConf));
++        Collection resolved = (Collection)_selectedDeps.get(new ModuleIdConf(mid, rootModuleConf));
+         Set ret = new HashSet();
+         if (resolved != null) {
+             for (Iterator iter = resolved.iterator(); iter.hasNext();) {
+@@ -283,7 +285,7 @@ public Collection getResolvedNodes(ModuleId mid, String rootModuleConf) {
+         return ret;
+     }
+     public Collection getResolvedRevisions(ModuleId mid, String rootModuleConf) {
+-        Collection resolved = (Collection)_selected.get(new ModuleIdConf(mid, rootModuleConf));
++        Collection resolved = (Collection)_selectedDeps.get(new ModuleIdConf(mid, rootModuleConf));
+         if (resolved == null) {
+             return new HashSet();
+         } else {
+@@ -297,7 +299,36 @@ public Collection getResolvedRevisions(ModuleId mid, String rootModuleConf) {
+     }
+ 
+     public void setResolvedNodes(ModuleId moduleId, String rootModuleConf, Collection resolved) {
+-        _selected.put(new ModuleIdConf(moduleId, rootModuleConf), new HashSet(resolved));
++        _selectedDeps.put(new ModuleIdConf(moduleId, rootModuleConf), new HashSet(resolved));
++    }
++    
++    public Collection getEvictedNodes(ModuleId mid, String rootModuleConf) {
++        Collection resolved = (Collection)_evictedDeps.get(new ModuleIdConf(mid, rootModuleConf));
++        Set ret = new HashSet();
++        if (resolved != null) {
++            for (Iterator iter = resolved.iterator(); iter.hasNext();) {
++                IvyNode node = (IvyNode)iter.next();
++                ret.add(node.getRealNode());
++            }
++        }
++        return ret;
++    }
++    public Collection getEvictedRevisions(ModuleId mid, String rootModuleConf) {
++        Collection resolved = (Collection)_evictedDeps.get(new ModuleIdConf(mid, rootModuleConf));
++        if (resolved == null) {
++            return new HashSet();
++        } else {
++            Collection ret = new HashSet();
++            for (Iterator iter = resolved.iterator(); iter.hasNext();) {
++                IvyNode node = (IvyNode)iter.next();
++                ret.add(node.getRealNode().getResolvedId());
++            }
++            return ret;
++        }
++    }
++
++    public void setEvictedNodes(ModuleId moduleId, String rootModuleConf, Collection evicted) {
++        _evictedDeps.put(new ModuleIdConf(moduleId, rootModuleConf), new HashSet(evicted));
+     }
+     
+ 
+@@ -1094,7 +1125,7 @@ public void setRootModuleConf(String rootModuleConf) {
+             _confsToFetch.clear(); // we change of root module conf => we discard all confs to fetch
+         }
+         if (rootModuleConf != null && rootModuleConf.equals(_rootModuleConf)) {
+-            _selected.put(new ModuleIdConf(_id.getModuleId(), rootModuleConf), Collections.singleton(this));
++            _selectedDeps.put(new ModuleIdConf(_id.getModuleId(), rootModuleConf), Collections.singleton(this));
+         }
+         _rootModuleConf = rootModuleConf;
+     }
+@@ -1136,7 +1167,7 @@ public EvictionData getEvictionDataInRoot(String rootModuleConf, IvyNode parent)
+             }
+         }
+         // we didn't find this mrid in the selected ones for the root: it has been previously evicted
+-        return new EvictionData(rootModuleConf, this, root.getConflictManager(getModuleId()), selectedNodes);
++        return new EvictionData(rootModuleConf, parent, root.getConflictManager(getModuleId()), selectedNodes);
+     }
+ 
+     public static IvyNode getRoot(IvyNode parent) {
+@@ -1147,4 +1178,8 @@ public static IvyNode getRoot(IvyNode parent) {
+         return root;
+     }
+ 
++    public IvyNode findNode(ModuleRevisionId mrid) {
++        return _data.getNode(mrid);
++    }
++
+ }
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index f619c1447..0bba8028c 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -633,7 +633,7 @@ public void testResolveContradictoryConflictResolution() throws Exception {
+     }
+     
+     public void testResolveContradictoryConflictResolution2() throws Exception {
+-        // BUG IVY-130 : only mod1.2 v2.0 should resolved and not v2.1 (because of force)
++        // BUG IVY-130 : only mod1.2 v2.0 should be resolved and not v2.1 (because of force)
+         // mod10.1 v 1.1 depends on 
+         //   - mod1.2 v 2.0 and forces it 
+         //   - mod4.1 v 4.3
+@@ -651,6 +651,22 @@ public void testResolveContradictoryConflictResolution2() throws Exception {
+         assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
+     }
+     
++    public void testResolveContradictoryConflictResolution3() throws Exception {
++        // mod 1.2 v2.0 should be selected (despite conflict manager in 4.1, because of force in 10.1)
++        // mod10.1 v 1.3 depends on 
++        //   - mod1.2 v 2.0 and forces it
++        //   - mod4.1 v 4.4
++        // mod4.1 v 4.4 depends on 
++        //   - mod1.2 v 2.0 but selects mod1.2 v 2.1
++        //   - mod3.1 v 1.1 which depends on mod1.2 v 2.1
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod10.1/ivy-1.3.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        
++        IvyNode[] evicted = report.getConfigurationReport("default").getEvictedNodes();
++        assertEquals(1, evicted.length);
++        assertEquals(ModuleRevisionId.newInstance("org1", "mod1.2", "2.1"), evicted[0].getResolvedId());
++    }
++    
+     public void testExtends() throws Exception {
+         // mod 5.2 depends on mod5.1 conf B
+         // mod5.1 conf B publishes art51B
+diff --git a/test/repositories/2/mod10.1/ivy-1.2.xml b/test/repositories/2/mod10.1/ivy-1.2.xml
+new file mode 100644
+index 000000000..99edbcb97
+--- /dev/null
++++ b/test/repositories/2/mod10.1/ivy-1.2.xml
+@@ -0,0 +1,15 @@
++<ivy-module version="1.0">
++	<info organisation="org10"
++	       module="mod10.1"
++	       revision="1.2"
++	       status="integration"
++	       publication="20051025110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.1"/>
++		<dependency org="org4" name="mod4.1" rev="4.3"/>
++	</dependencies>
++    <conflicts>
++        <manager org="org1" module="mod1.2" rev="2.0"/>
++    </conflicts>
++</ivy-module>
+diff --git a/test/repositories/2/mod10.1/ivy-1.3.xml b/test/repositories/2/mod10.1/ivy-1.3.xml
+new file mode 100644
+index 000000000..deb6ae776
+--- /dev/null
++++ b/test/repositories/2/mod10.1/ivy-1.3.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org10"
++	       module="mod10.1"
++	       revision="1.3"
++	       status="integration"
++	       publication="20051025110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0" force="true"/>
++		<dependency org="org4" name="mod4.1" rev="4.4"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod4.1/ivy-4.4.xml b/test/repositories/2/mod4.1/ivy-4.4.xml
+new file mode 100644
+index 000000000..df84c2ab1
+--- /dev/null
++++ b/test/repositories/2/mod4.1/ivy-4.4.xml
+@@ -0,0 +1,15 @@
++<ivy-module version="1.0">
++	<info organisation="org4"
++	       module="mod4.1"
++	       revision="4.4"
++	       status="integration"
++	       publication="20041202110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0"/>
++		<dependency org="org3" name="mod3.1" rev="1.1"/>
++	</dependencies>
++    <conflicts>
++        <manager org="org1" module="mod1.2" rev="2.1"/>
++    </conflicts>
++</ivy-module>
+diff --git a/test/repositories/2/mod4.1/mod4.1-4.4.jar b/test/repositories/2/mod4.1/mod4.1-4.4.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod4.1/mod4.1-4.4.jar
+@@ -0,0 +1 @@
++ 

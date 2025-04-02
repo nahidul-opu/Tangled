@@ -1,0 +1,562 @@
+From 9b08d0f9d1eb159322e8d456f1ff5e647925c8c7 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 3 Apr 2008 16:22:47 +0000
+Subject: [PATCH] FIX: unable to resolve snapshot versions (IVY-501)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@644393 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../ivy/plugins/resolver/IBiblioResolver.java | 134 +++++++++++++++++-
+ .../apache/ivy/core/resolve/ResolveTest.java  |  38 +++++
+ test/repositories/m2/ivysettings.xml          |   6 +-
+ .../2.0.2-SNAPSHOT/maven-metadata.xml         |  14 ++
+ ...test-SNAPSHOT1-2.0.2-20070310.181613-3.jar |   1 +
+ ...test-SNAPSHOT1-2.0.2-20070310.181613-3.pom |  26 ++++
+ .../apache/test-SNAPSHOT1/maven-metadata.xml  |  12 ++
+ .../2.0.2-SNAPSHOT/maven-metadata.xml         |  12 ++
+ .../test-SNAPSHOT2-2.0.2-SNAPSHOT.jar         |   1 +
+ .../test-SNAPSHOT2-2.0.2-SNAPSHOT.pom         |  26 ++++
+ .../apache/test-SNAPSHOT2/maven-metadata.xml  |  12 ++
+ .../m2/org/apache/test4/1.0/test4-1.0.jar     |   1 +
+ .../m2/org/apache/test4/1.0/test4-1.0.pom     |  38 +++++
+ .../m2/org/apache/test4/1.1/test4-1.1.jar     |   1 +
+ .../m2/org/apache/test4/1.1/test4-1.1.pom     |  38 +++++
+ 16 files changed, 350 insertions(+), 11 deletions(-)
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/maven-metadata.xml
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.jar
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.pom
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT1/maven-metadata.xml
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/maven-metadata.xml
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.jar
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.pom
+ create mode 100644 test/repositories/m2/org/apache/test-SNAPSHOT2/maven-metadata.xml
+ create mode 100644 test/repositories/m2/org/apache/test4/1.0/test4-1.0.jar
+ create mode 100644 test/repositories/m2/org/apache/test4/1.0/test4-1.0.pom
+ create mode 100644 test/repositories/m2/org/apache/test4/1.1/test4-1.1.jar
+ create mode 100644 test/repositories/m2/org/apache/test4/1.1/test4-1.1.pom
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 42f000aba..18a1269b3 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -76,6 +76,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: unable to resolve snapshot versions (IVY-501)
+ - FIX: No error or warning when a resolver references a non-existent cache (IVY-777)
+ - FIX: ivy properties defined in an include file not available in the file that includes it (IVY-780)
+ - FIX: SFTPRepository.list(String) hides exceptions (IVY-751)
+diff --git a/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java b/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
+index c2a9b2247..268288f53 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/IBiblioResolver.java
+@@ -42,6 +42,7 @@
+ import org.apache.ivy.core.search.ModuleEntry;
+ import org.apache.ivy.core.search.OrganisationEntry;
+ import org.apache.ivy.core.search.RevisionEntry;
++import org.apache.ivy.plugins.matcher.PatternMatcher;
+ import org.apache.ivy.plugins.repository.Repository;
+ import org.apache.ivy.plugins.repository.Resource;
+ import org.apache.ivy.plugins.resolver.util.ResolvedResource;
+@@ -76,13 +77,25 @@ public class IBiblioResolver extends URLResolver {
+     private boolean useMavenMetadata = true;
+ 
+     public IBiblioResolver() {
++        // SNAPSHOT revisions are changing revisions
++        setChangingMatcher(PatternMatcher.REGEXP);
++        setChangingPattern(".*-SNAPSHOT");
+     }
+ 
+     public ResolvedResource findIvyFileRef(DependencyDescriptor dd, ResolveData data) {
+         if (isM2compatible() && isUsepoms()) {
+             ModuleRevisionId mrid = dd.getDependencyRevisionId();
+             mrid = convertM2IdForResourceSearch(mrid);
+-            ResolvedResource rres = findResourceUsingPatterns(mrid, getIvyPatterns(),
++            
++            ResolvedResource rres = null;
++            if (dd.getDependencyRevisionId().getRevision().endsWith("SNAPSHOT")) {
++                rres = findSnapshotDescriptor(dd, data, mrid);
++                if (rres != null) {
++                    return rres;
++                }
++            }
++            
++            rres = findResourceUsingPatterns(mrid, getIvyPatterns(),
+                 DefaultArtifact.newPomArtifact(mrid, data.getDate()), getRMDParser(dd, data), data
+                         .getDate());
+             return rres;
+@@ -91,6 +104,112 @@ public ResolvedResource findIvyFileRef(DependencyDescriptor dd, ResolveData data
+         }
+     }
+ 
++    protected ResolvedResource findArtifactRef(Artifact artifact, Date date) {
++        ensureConfigured(getSettings());
++        ModuleRevisionId mrid = artifact.getModuleRevisionId();
++        if (isM2compatible()) {
++            mrid = convertM2IdForResourceSearch(mrid);
++        }
++        ResolvedResource rres = null;
++        if (artifact.getId().getRevision().endsWith("SNAPSHOT")) {
++            rres = findSnapshotArtifact(artifact, date, mrid);            
++            if (rres != null) {
++                return rres;
++            }
++        }
++        return findResourceUsingPatterns(mrid, getArtifactPatterns(), artifact,
++            getDefaultRMDParser(artifact.getModuleRevisionId().getModuleId()), date);
++    }
++
++    private ResolvedResource findSnapshotArtifact(Artifact artifact, Date date,
++            ModuleRevisionId mrid) {
++        String rev = findSnapshotVersion(mrid);
++        if (rev != null) {
++            // replace the revision token in file name with the resolved revision
++            String pattern = (String) getArtifactPatterns().get(0);
++            pattern = pattern.replaceFirst("\\-\\[revision\\]", "-" + rev);
++            return findResourceUsingPattern(mrid, pattern, artifact,
++                getDefaultRMDParser(artifact.getModuleRevisionId().getModuleId()), date);
++        }
++        return null;
++    }
++
++    private ResolvedResource findSnapshotDescriptor(DependencyDescriptor dd, ResolveData data,
++            ModuleRevisionId mrid) {
++        String rev = findSnapshotVersion(mrid);
++        if (rev != null) {
++            // here it would be nice to be able to store the resolved snapshot version, to avoid
++            // having to follow the same process to download artifacts
++            
++            Message.verbose("[" + rev + "] " + mrid);
++
++            // replace the revision token in file name with the resolved revision
++            String pattern = (String) getIvyPatterns().get(0);
++            pattern = pattern.replaceFirst("\\-\\[revision\\]", "-" + rev);
++            return findResourceUsingPattern(mrid, pattern,
++                DefaultArtifact.newPomArtifact(
++                    mrid, data.getDate()), getRMDParser(dd, data), data.getDate());
++        }
++        return null;
++    }
++    
++    private String findSnapshotVersion(ModuleRevisionId mrid) {
++        String pattern = (String) getIvyPatterns().get(0);
++        if (shouldUseMavenMetadata(pattern)) {
++            InputStream metadataStream = null;
++            try {
++                String metadataLocation = IvyPatternHelper.substitute(
++                    root + "[organisation]/[module]/[revision]/maven-metadata.xml", mrid);
++                Resource metadata = getRepository().getResource(metadataLocation);
++                if (metadata.exists()) {
++                    metadataStream = metadata.openStream();
++                    final StringBuffer snapshotRev = new StringBuffer();
++                    XMLHelper.parse(metadataStream, null, new ContextualSAXHandler() {
++                        public void endElement(String uri, String localName, String qName) 
++                                throws SAXException {
++                            if ("metadata/versioning/snapshot/timestamp".equals(getContext())) {
++                                snapshotRev.append(getText()).append("-");
++                            }
++                            if ("metadata/versioning/snapshot/buildNumber"
++                                    .equals(getContext())) {
++                                snapshotRev.append(getText());
++                            }
++                            super.endElement(uri, localName, qName);
++                        }
++                    }, null);
++                    if (snapshotRev.indexOf("-") != -1) {
++                        // we have found a timestamp, so this is a snapshot unique version
++                        String rev = mrid.getRevision();
++                        rev = rev.substring(0, rev.length() - "SNAPSHOT".length());
++                        rev += snapshotRev;
++                        
++                        return rev;
++                    }
++                } else {
++                    Message.verbose("\tmaven-metadata not available: " + metadata);
++                }
++            } catch (IOException e) {
++                Message.verbose(
++                    "impossible to access maven metadata file, ignored: " + e.getMessage());
++            } catch (SAXException e) {
++                Message.verbose(
++                    "impossible to parse maven metadata file, ignored: " + e.getMessage());
++            } catch (ParserConfigurationException e) {
++                Message.verbose(
++                    "impossible to parse maven metadata file, ignored: " + e.getMessage());
++            } finally {
++                if (metadataStream != null) {
++                    try {
++                        metadataStream.close();
++                    } catch (IOException e) {
++                        // ignored
++                    }
++                }
++            }
++        }
++        return null;
++    }
++
+     public void setM2compatible(boolean m2compatible) {
+         super.setM2compatible(m2compatible);
+         if (m2compatible) {
+@@ -213,7 +332,7 @@ public RevisionEntry[] listRevisions(ModuleEntry mod) {
+     
+     protected ResolvedResource[] listResources(
+             Repository repository, ModuleRevisionId mrid, String pattern, Artifact artifact) {
+-        if (isUseMavenMetadata() && isM2compatible() && pattern.endsWith(M2_PATTERN)) {
++        if (shouldUseMavenMetadata(pattern)) {
+             // use maven-metadata.xml if it exists
+             InputStream metadataStream = null;
+             try {
+@@ -279,10 +398,16 @@ public void endElement(String uri, String localName, String qName)
+         }
+     }
+ 
++    private boolean shouldUseMavenMetadata(String pattern) {
++        return isUseMavenMetadata() && isM2compatible() && pattern.endsWith(M2_PATTERN);
++    }
++
+ 
+     public String getTypeName() {
+         return "ibiblio";
+     }
++    
++    
+ 
+     // override some methods to ensure configuration
+     public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+@@ -291,11 +416,6 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+         return super.getDependency(dd, data);
+     }
+ 
+-    protected ResolvedResource findArtifactRef(Artifact artifact, Date date) {
+-        ensureConfigured(getSettings());
+-        return super.findArtifactRef(artifact, date);
+-    }
+-
+     public DownloadReport download(Artifact[] artifacts, DownloadOptions options) {
+         ensureConfigured(getSettings());
+         return super.download(artifacts, options);
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 1b65f61ba..f74143e54 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3610,6 +3610,44 @@ public void testResolveMaven2ParentPomDependencyManagementOverrideTransitiveVers
+             "test4", "jar", "jar").exists());
+     }
+     
++    public void testResolveMaven2Snapshot1() throws Exception {
++        // test case for IVY-501
++        // here we test maven SNAPSHOT versions handling, 
++        // with m2 snapshotRepository/uniqueVersion set to true
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml"));
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/m2/org/apache/test4/1.0/test4-1.0.pom")
++                .toURL(), getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        assertFalse(report.hasError());
++
++        // dependencies
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org.apache", "test-SNAPSHOT1", "2.0.2-SNAPSHOT")).exists());
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test-SNAPSHOT1", "2.0.2-SNAPSHOT",
++            "test-SNAPSHOT1", "jar", "jar").exists());
++    }
++
++    public void testResolveMaven2Snapshot2() throws Exception {
++        // test case for IVY-501
++        // here we test maven SNAPSHOT versions handling, 
++        // without m2 snapshotRepository/uniqueVersion set to true
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml"));
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/m2/org/apache/test4/1.1/test4-1.1.pom")
++                .toURL(), getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        assertFalse(report.hasError());
++
++        // dependencies
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org.apache", "test-SNAPSHOT2", "2.0.2-SNAPSHOT")).exists());
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test-SNAPSHOT2", "2.0.2-SNAPSHOT",
++            "test-SNAPSHOT2", "jar", "jar").exists());
++    }
++
+ 
+     public void testNamespaceMapping() throws Exception {
+         // the dependency is in another namespace
+diff --git a/test/repositories/m2/ivysettings.xml b/test/repositories/m2/ivysettings.xml
+index 3a612ee83..14d57e8db 100644
+--- a/test/repositories/m2/ivysettings.xml
++++ b/test/repositories/m2/ivysettings.xml
+@@ -19,9 +19,7 @@
+ <ivysettings>
+ 	<settings defaultCache="build/cache" defaultResolver="m2"/>
+ 	<resolvers>
+-		<filesystem name="m2" m2compatible="true">
+-			<ivy pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/[module]-[revision].pom"/>
+-			<artifact pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/[artifact]-[revision](-[classifier]).[ext]"/>
+-		</filesystem>
++		<ibiblio name="m2" m2compatible="true" useMavenMetadata="true" 
++		         root="file://${ivy.settings.dir}" />
+ 	</resolvers>
+ </ivysettings>
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/maven-metadata.xml b/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/maven-metadata.xml
+new file mode 100644
+index 000000000..0c0614774
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/maven-metadata.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<metadata>
++  <groupId>org.apache</groupId>
++  <artifactId>test-SNAPSHOT1</artifactId>
++  <version>2.0.2-SNAPSHOT</version>
++  <versioning>
++    <snapshot>
++      <timestamp>20070310.181613</timestamp>
++
++      <buildNumber>3</buildNumber>
++    </snapshot>
++    <lastUpdated>20070310181754</lastUpdated>
++  </versioning>
++</metadata>
+\ No newline at end of file
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.jar b/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.pom b/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.pom
+new file mode 100644
+index 000000000..cc93b7cc6
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT1/2.0.2-SNAPSHOT/test-SNAPSHOT1-2.0.2-20070310.181613-3.pom
+@@ -0,0 +1,26 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test-SNAPSHOT1</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>2.0.2-SNAPSHOT</version>
++</project>
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT1/maven-metadata.xml b/test/repositories/m2/org/apache/test-SNAPSHOT1/maven-metadata.xml
+new file mode 100644
+index 000000000..d453efcb1
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT1/maven-metadata.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="UTF-8"?><metadata>
++  <groupId>org.apache</groupId>
++  <artifactId>test-SNAPSHOT1</artifactId>
++  <version>2.0.2-SNAPSHOT</version>
++  <versioning>
++    <versions>
++      <version>2.0.2-SNAPSHOT</version>
++    </versions>
++
++    <lastUpdated>20070310181754</lastUpdated>
++  </versioning>
++</metadata>
+\ No newline at end of file
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/maven-metadata.xml b/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/maven-metadata.xml
+new file mode 100644
+index 000000000..36db1f1bf
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/maven-metadata.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<metadata>
++  <groupId>org.apache</groupId>
++  <artifactId>test-SNAPSHOT2</artifactId>
++  <version>2.0.2-SNAPSHOT</version>
++  <versioning>
++    <snapshot>
++      <buildNumber>3</buildNumber>
++    </snapshot>
++    <lastUpdated>20070310181754</lastUpdated>
++  </versioning>
++</metadata>
+\ No newline at end of file
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.jar b/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.pom b/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.pom
+new file mode 100644
+index 000000000..756aecb8e
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT2/2.0.2-SNAPSHOT/test-SNAPSHOT2-2.0.2-SNAPSHOT.pom
+@@ -0,0 +1,26 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test-SNAPSHOT2</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>2.0.2-SNAPSHOT</version>
++</project>
+diff --git a/test/repositories/m2/org/apache/test-SNAPSHOT2/maven-metadata.xml b/test/repositories/m2/org/apache/test-SNAPSHOT2/maven-metadata.xml
+new file mode 100644
+index 000000000..9422bc687
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-SNAPSHOT2/maven-metadata.xml
+@@ -0,0 +1,12 @@
++<?xml version="1.0" encoding="UTF-8"?><metadata>
++  <groupId>org.apache</groupId>
++  <artifactId>test-SNAPSHOT2</artifactId>
++  <version>2.0.2-SNAPSHOT</version>
++  <versioning>
++    <versions>
++      <version>2.0.2-SNAPSHOT</version>
++    </versions>
++
++    <lastUpdated>20070310181754</lastUpdated>
++  </versioning>
++</metadata>
+\ No newline at end of file
+diff --git a/test/repositories/m2/org/apache/test4/1.0/test4-1.0.jar b/test/repositories/m2/org/apache/test4/1.0/test4-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test4/1.0/test4-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test4/1.0/test4-1.0.pom b/test/repositories/m2/org/apache/test4/1.0/test4-1.0.pom
+new file mode 100644
+index 000000000..ad3cb2970
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test4/1.0/test4-1.0.pom
+@@ -0,0 +1,38 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test4</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.0</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test-SNAPSHOT1</artifactId>
++      <version>2.0.2-SNAPSHOT</version>
++    </dependency>
++  </dependencies>
++</project>
+diff --git a/test/repositories/m2/org/apache/test4/1.1/test4-1.1.jar b/test/repositories/m2/org/apache/test4/1.1/test4-1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test4/1.1/test4-1.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test4/1.1/test4-1.1.pom b/test/repositories/m2/org/apache/test4/1.1/test4-1.1.pom
+new file mode 100644
+index 000000000..665749147
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test4/1.1/test4-1.1.pom
+@@ -0,0 +1,38 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test4</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.1</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test-SNAPSHOT2</artifactId>
++      <version>2.0.2-SNAPSHOT</version>
++    </dependency>
++  </dependencies>
++</project>

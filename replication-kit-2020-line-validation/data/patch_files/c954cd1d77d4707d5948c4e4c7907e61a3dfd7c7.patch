@@ -1,0 +1,271 @@
+From c954cd1d77d4707d5948c4e4c7907e61a3dfd7c7 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 21 May 2008 23:01:47 +0000
+Subject: [PATCH] FIX: Maven scope defined in POM dependencyManagement section
+ not honoured (IVY-811)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@658922 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/m2/DefaultPomDependencyMgt.java    |  8 ++-
+ .../plugins/parser/m2/PomDependencyMgt.java   |  2 +
+ .../parser/m2/PomModuleDescriptorBuilder.java | 68 ++++++++++++++++---
+ .../parser/m2/PomModuleDescriptorParser.java  | 12 ++--
+ .../ivy/plugins/parser/m2/PomReader.java      | 15 ++--
+ 6 files changed, 83 insertions(+), 23 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f8be13fe1..6ad80e14f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -81,6 +81,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: Maven scope defined in POM dependencyManagement section not honoured (IVY-811)
+ - FIX: SFTPRepository incorrectly calculates last modified time for resources (IVY-815)
+ - FIX: Filesystem resolver does not evaluate [branch] token when publishing (IVY-814)
+ - FIX: Using ivy:settings with the "id" attribute not behaving as expected (IVY-809)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java b/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java
+index 25331c364..7b4c54537 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java
+@@ -21,11 +21,17 @@ public class DefaultPomDependencyMgt implements PomDependencyMgt {
+     private String groupId;
+     private String artifactId;
+     private String version;
++    private String scope;
+     
+-    public DefaultPomDependencyMgt(String groupId, String artifactId, String version) {
++    public DefaultPomDependencyMgt(String groupId, String artifactId, String version, String scope) {
+         this.groupId = groupId;
+         this.artifactId = artifactId;
+         this.version = version;
++        this.scope = scope;
++    }
++    
++    public String getScope() {
++        return scope;
+     }
+ 
+     public String getGroupId() {
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java b/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java
+index 947f89632..51ea625e9 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java
+@@ -24,5 +24,7 @@ public interface PomDependencyMgt {
+     public abstract String getArtifactId();
+ 
+     public abstract String getVersion();
++    
++    public abstract String getScope();
+ 
+ }
+\ No newline at end of file
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index 84b9fcc57..dcfafa4ec 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -56,7 +56,7 @@
+ public class PomModuleDescriptorBuilder {
+ 
+     
+-    private static final int DEPENDENCY_MANAGEMENT_KEY_PARTS_COUNT = 3;
++    private static final int DEPENDENCY_MANAGEMENT_KEY_PARTS_COUNT = 4;
+ 
+     public static final Configuration[] MAVEN2_CONFIGURATIONS = new Configuration[] {
+         new Configuration("default", Visibility.PUBLIC,
+@@ -227,8 +227,10 @@ public void addArtifact(String artifactId, String packaging) {
+ 
+ 
+     public void addDependency(Resource res, PomDependencyData dep) throws ParseException {
+-        if (!MAVEN2_CONF_MAPPING.containsKey(dep.getScope())) {
+-            String msg = "Unknown scope " + dep.getScope() + " for dependency "
++        String scope = dep.getScope();
++        System.out.println("*** scope = " + scope);
++        if ((scope != null) && (scope.length() > 0) && !MAVEN2_CONF_MAPPING.containsKey(scope)) {
++            String msg = "Unknown scope '" + scope + "' for dependency "
+                     + ModuleId.newInstance(dep.getGroupId(), dep.getArtifactId()) + " in "
+                     + res.getName();
+             throw new ParseException(msg, 0);
+@@ -240,7 +242,8 @@ public void addDependency(Resource res, PomDependencyData dep) throws ParseExcep
+                 .getArtifactId(), version);
+         DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(ivyModuleDescriptor,
+                 moduleRevId, true, false, true);
+-        ConfMapper mapping = (ConfMapper) MAVEN2_CONF_MAPPING.get(dep.getScope());
++        scope = (scope == null || scope.length() == 0) ? getDefaultScope(dep): scope;
++        ConfMapper mapping = (ConfMapper) MAVEN2_CONF_MAPPING.get(scope);
+         mapping.addMappingConfs(dd, dep.isOptional());
+         Map extraAtt = new HashMap();
+         if (dep.getClassifier() != null) {
+@@ -252,7 +255,7 @@ public void addDependency(Resource res, PomDependencyData dep) throws ParseExcep
+                         "jar", "jar", null, extraAtt);
+             // here we have to assume a type and ext for the artifact, so this is a limitation
+             // compared to how m2 behave with classifiers
+-            String optionalizedScope = dep.isOptional() ? "optional" : dep.getScope();
++            String optionalizedScope = dep.isOptional() ? "optional" : scope;
+             dd.addDependencyArtifact(optionalizedScope, depArtifact);
+         }
+         
+@@ -278,8 +281,12 @@ public void addDependency(DependencyDescriptor descriptor) {
+ 
+ 
+     public void addDependencyMgt(PomDependencyMgt dep) {
+-        String key = getDependencyMgtExtraInfoKey(dep.getGroupId(), dep.getArtifactId());
++        String key = getDependencyMgtExtraInfoKeyForVersion(dep.getGroupId(), dep.getArtifactId());
+         ivyModuleDescriptor.addExtraInfo(key, dep.getVersion());
++        if (dep.getScope() != null) {
++            String scopeKey = getDependencyMgtExtraInfoKeyForScope(dep.getGroupId(), dep.getArtifactId());
++            ivyModuleDescriptor.addExtraInfo(scopeKey, dep.getScope());
++        }
+         // dependency management info is also used for version mediation of transitive dependencies
+         ivyModuleDescriptor.addDependencyDescriptorMediator(
+             ModuleId.newInstance(dep.getGroupId(), dep.getArtifactId()), 
+@@ -336,17 +343,34 @@ public String getArtifactId() {
+         public String getVersion() {
+             return version;
+         }
++        
++        public String getScope() {
++            return null;
++        }
+     }
+ 
+     private String getDefaultVersion(PomDependencyData dep) {
+-        String key = getDependencyMgtExtraInfoKey(dep.getGroupId(), dep.getArtifactId());        
++        String key = getDependencyMgtExtraInfoKeyForVersion(dep.getGroupId(), dep.getArtifactId());        
+         return (String) ivyModuleDescriptor.getExtraInfo().get(key);
+     }
+ 
++    private String getDefaultScope(PomDependencyData dep) {
++        String key = getDependencyMgtExtraInfoKeyForScope(dep.getGroupId(), dep.getArtifactId());        
++        String result = (String) ivyModuleDescriptor.getExtraInfo().get(key);
++        if (result == null) {
++            result = "compile";
++        }
++        return result;
++    }
+ 
+-    private static String getDependencyMgtExtraInfoKey(String groupId, String artifaceId) {
++    private static String getDependencyMgtExtraInfoKeyForVersion(String groupId, String artifaceId) {
+         return DEPENDENCY_MANAGEMENT + EXTRA_INFO_DELIMITER + groupId
+-                + EXTRA_INFO_DELIMITER + artifaceId;
++                + EXTRA_INFO_DELIMITER + artifaceId + EXTRA_INFO_DELIMITER + "version";
++    }
++    
++    private static String getDependencyMgtExtraInfoKeyForScope(String groupId, String artifaceId) {
++        return DEPENDENCY_MANAGEMENT + EXTRA_INFO_DELIMITER + groupId
++                + EXTRA_INFO_DELIMITER + artifaceId + EXTRA_INFO_DELIMITER + "scope";
+     }
+     
+     private static String getPropertyExtraInfoKey(String propertyName) {
+@@ -372,6 +396,32 @@ private static String getPropertyExtraInfoKey(String propertyName) {
+         return ret;
+     }
+     
++    public static List getDependencyManagements(ModuleDescriptor md) {
++        List result = new ArrayList();
++        
++        for (Iterator iterator = md.getExtraInfo().entrySet().iterator(); iterator.hasNext();) {
++            Map.Entry entry = (Map.Entry) iterator.next();
++            String key = (String) entry.getKey();
++            if ((key).startsWith(DEPENDENCY_MANAGEMENT)) {
++                String[] parts = key.split(EXTRA_INFO_DELIMITER);
++                if (parts.length != DEPENDENCY_MANAGEMENT_KEY_PARTS_COUNT) {
++                    Message.warn("what seem to be a dependency management extra info "
++                        + "doesn't match expected pattern: " + key);
++                } else {
++                    String versionKey = DEPENDENCY_MANAGEMENT + EXTRA_INFO_DELIMITER + parts[1] + EXTRA_INFO_DELIMITER + parts[2] + EXTRA_INFO_DELIMITER + "version";
++                    String scopeKey = DEPENDENCY_MANAGEMENT + EXTRA_INFO_DELIMITER + parts[1] + EXTRA_INFO_DELIMITER + parts[2] + EXTRA_INFO_DELIMITER + "scope";
++
++                    String version = (String) md.getExtraInfo().get(versionKey);
++                    String scope = (String) md.getExtraInfo().get(scopeKey);
++                    
++                    result.add(new DefaultPomDependencyMgt(parts[1], parts[2], version, scope));
++                }
++            }
++        }
++        
++        return result;
++    }
++    
+ 
+     public void addExtraInfos(Map extraAttributes) {
+         for (Iterator it = extraAttributes.entrySet().iterator(); it.hasNext();) {
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 513c49cac..6b992fee4 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -33,7 +33,6 @@
+ import org.apache.ivy.core.module.descriptor.DefaultDependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+-import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.resolve.ResolveData;
+ import org.apache.ivy.core.resolve.ResolveEngine;
+@@ -41,6 +40,7 @@
+ import org.apache.ivy.core.resolve.ResolvedModuleRevision;
+ import org.apache.ivy.plugins.parser.ModuleDescriptorParser;
+ import org.apache.ivy.plugins.parser.ParserSettings;
++import org.apache.ivy.plugins.parser.m2.PomReader.PomPluginElement;
+ import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorWriter;
+ import org.apache.ivy.plugins.repository.Resource;
+ import org.apache.ivy.plugins.repository.url.URLResource;
+@@ -208,13 +208,9 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                     mdBuilder.addExtraInfos(parentDescr.getExtraInfo());
+                     
+                     // add dependency management info from parent
+-                    Map depMgt = PomModuleDescriptorBuilder.getDependencyManagementMap(parentDescr);
+-                    for (Iterator iterator = depMgt.entrySet().iterator(); iterator.hasNext();) {
+-                        Map.Entry entry = (Map.Entry) iterator.next();
+-                        ModuleId mid = (ModuleId) entry.getKey();
+-                        String v = (String) entry.getValue();
+-                        mdBuilder.addDependencyMgt(
+-                            new DefaultPomDependencyMgt(mid.getOrganisation(), mid.getName(), v));
++                    List depMgt = PomModuleDescriptorBuilder.getDependencyManagements(parentDescr);
++                    for (Iterator it = depMgt.iterator(); it.hasNext();) {
++                        mdBuilder.addDependencyMgt((PomDependencyMgt) it.next());
+                     }
+                     
+                     // add plugins from parent
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+index 0938f3852..2a7d68c27 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+@@ -258,6 +258,11 @@ public String getVersion() {
+             return replaceProps(val);
+         }
+         
++        public String getScope() {
++            String val = getFirstChildText(depElement , SCOPE);
++            return replaceProps(val);
++        }
++        
+     }
+     
+     public List /* <PomPluginElement> */ getPlugins() {
+@@ -303,6 +308,10 @@ public String getVersion() {
+             return replaceProps(val);
+         }
+         
++        public String getScope() {
++            return null; // not used
++        }
++        
+     }
+     
+     
+@@ -315,11 +324,7 @@ public class PomDependencyData extends PomDependencyMgtElement {
+         
+         public String getScope() {
+             String val = getFirstChildText(depElement , SCOPE);
+-            if (val == null) {
+-                return "compile";
+-            } else {
+-                return replaceProps(val);
+-            }
++            return replaceProps(val);
+         }
+         
+         public String getClassifier() {

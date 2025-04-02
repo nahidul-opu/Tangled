@@ -1,0 +1,485 @@
+From 263e1a221a4d2d99fcc3cebf177887689a48f8ae Mon Sep 17 00:00:00 2001
+From: Colm O hEigeartaigh <coheigea@apache.org>
+Date: Thu, 27 Apr 2017 09:21:55 +0000
+Subject: [PATCH] SANTUARIO-463 - ConcurrentModificationException from
+ Canonicalizer.canonicalize
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1792855 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../Canonicalizer20010315.java                | 58 ++++++++++---------
+ .../Canonicalizer20010315Excl.java            | 46 ++++++++-------
+ .../implementations/CanonicalizerBase.java    | 51 ++++++++--------
+ .../CanonicalizerPhysical.java                | 52 +++++++----------
+ 4 files changed, 101 insertions(+), 106 deletions(-)
+
+diff --git a/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java b/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java
+index f925e2677c..ae30ac6e6c 100644
+--- a/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java
++++ b/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java
+@@ -19,7 +19,8 @@
+ package org.apache.xml.security.c14n.implementations;
+ 
+ import java.io.IOException;
+-import java.util.Iterator;
++import java.io.OutputStream;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.SortedSet;
+ import java.util.TreeSet;
+@@ -29,9 +30,9 @@
+ import org.apache.xml.security.c14n.CanonicalizationException;
+ import org.apache.xml.security.c14n.helper.C14nHelper;
+ import org.apache.xml.security.signature.XMLSignatureInput;
+-import org.apache.xml.security.utils.Constants;
+ import org.apache.xml.security.utils.XMLUtils;
+ import org.w3c.dom.Attr;
++import org.w3c.dom.DOMException;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.NamedNodeMap;
+@@ -44,11 +45,8 @@
+  *
+  */
+ public abstract class Canonicalizer20010315 extends CanonicalizerBase {
+-    private static final String XMLNS_URI = Constants.NamespaceSpecNS;
+-    private static final String XML_LANG_URI = Constants.XML_LANG_SPACE_SpecNS;
+ 
+     private boolean firstCall = true;
+-    private final SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
+ 
+     private final XmlAttrStack xmlattrStack;
+     private final boolean c14n11;
+@@ -122,28 +120,28 @@ public byte[] engineCanonicalizeSubTree(
+     }
+ 
+     /**
+-     * Returns the Attr[]s to be output for the given element.
++     * Output the Attr[]s for the given element.
+      * <br>
+-     * The code of this method is a copy of {@link #handleAttributes(Element,
+-     * NameSpaceSymbTable)},
++     * The code of this method is a copy of {@link #outputAttributes(Element,
++     * NameSpaceSymbTable, Map<String, byte[]>)},
+      * whereas it takes into account that subtree-c14n is -- well -- subtree-based.
+      * So if the element in question isRoot of c14n, it's parent is not in the
+      * node set, as well as all other ancestors.
+      *
+      * @param element
+      * @param ns
+-     * @return the Attr[]s to be output
+-     * @throws CanonicalizationException
++     * @param cache
++     * @throws CanonicalizationException, DOMException, IOException
+      */
+     @Override
+-    protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException {
++    protected void outputAttributesSubtree(Element element, NameSpaceSymbTable ns,
++                                           Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException {
+         if (!element.hasAttributes() && !firstCall) {
+-            return null;
++            return;
+         }
+         // result will contain the attrs which have to be output
+-        final SortedSet<Attr> result = this.result;
+-        result.clear();
++        SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
+ 
+         if (element.hasAttributes()) {
+             NamedNodeMap attrs = element.getAttributes();
+@@ -185,11 +183,15 @@ protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbT
+             firstCall = false;
+         }
+ 
+-        return result.iterator();
++        OutputStream writer = getWriter();
++        //we output all Attrs which are available
++        for (Attr attr : result) {
++            outputAttrToWriter(attr.getNodeName(), attr.getNodeValue(), writer, cache);
++        }
+     }
+ 
+     /**
+-     * Returns the Attr[]s to be output for the given element.
++     * Output the Attr[]s for the given element.
+      * <br>
+      * IMPORTANT: This method expects to work on a modified DOM tree, i.e. a DOM which has
+      * been prepared using {@link org.apache.xml.security.utils.XMLUtils#circumventBug2650(
+@@ -197,17 +199,17 @@ protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbT
+      *
+      * @param element
+      * @param ns
+-     * @return the Attr[]s to be output
+-     * @throws CanonicalizationException
++     * @param cache
++     * @throws CanonicalizationException, DOMException, IOException
+      */
+     @Override
+-    protected Iterator<Attr> handleAttributes(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException {
++    protected void outputAttributes(Element element, NameSpaceSymbTable ns,
++                                    Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException {
+         // result will contain the attrs which have to be output
+         xmlattrStack.push(ns.getLevel());
+         boolean isRealVisible = isVisibleDO(element, ns.getLevel()) == 1;
+-        final SortedSet<Attr> result = this.result;
+-        result.clear();
++        SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
+ 
+         if (element.hasAttributes()) {
+             NamedNodeMap attrs = element.getAttributes();
+@@ -286,7 +288,11 @@ protected Iterator<Attr> handleAttributes(Element element, NameSpaceSymbTable ns
+             ns.getUnrenderedNodes(result);
+         }
+ 
+-        return result.iterator();
++        OutputStream writer = getWriter();
++        //we output all Attrs which are available
++        for (Attr attr : result) {
++            outputAttrToWriter(attr.getNodeName(), attr.getNodeValue(), writer, cache);
++        }
+     }
+ 
+     protected void circumventBugIfNeeded(XMLSignatureInput input)
+@@ -316,8 +322,8 @@ protected void handleParent(Element e, NameSpaceSymbTable ns) {
+             String NName = attribute.getLocalName();
+             String NValue = attribute.getNodeValue();
+ 
+-            if (Constants.NamespaceSpecNS.equals(attribute.getNamespaceURI())) {
+-                if (!XML.equals(NName) || !Constants.XML_LANG_SPACE_SpecNS.equals(NValue)) {
++            if (XMLNS_URI.equals(attribute.getNamespaceURI())) {
++                if (!XML.equals(NName) || !XML_LANG_URI.equals(NValue)) {
+                     ns.addMapping(NName, NValue, attribute);
+                 }
+             } else if (XML_LANG_URI.equals(attribute.getNamespaceURI())
+diff --git a/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java b/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java
+index f80b6a16f5..b6095141a6 100644
+--- a/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java
++++ b/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java
+@@ -19,7 +19,8 @@
+ package org.apache.xml.security.c14n.implementations;
+ 
+ import java.io.IOException;
+-import java.util.Iterator;
++import java.io.OutputStream;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.SortedSet;
+ import java.util.TreeSet;
+@@ -29,9 +30,9 @@
+ import org.apache.xml.security.c14n.helper.C14nHelper;
+ import org.apache.xml.security.signature.XMLSignatureInput;
+ import org.apache.xml.security.transforms.params.InclusiveNamespaces;
+-import org.apache.xml.security.utils.Constants;
+ import org.apache.xml.security.utils.XMLUtils;
+ import org.w3c.dom.Attr;
++import org.w3c.dom.DOMException;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.NamedNodeMap;
+@@ -54,18 +55,13 @@
+  */
+ public abstract class Canonicalizer20010315Excl extends CanonicalizerBase {
+ 
+-    private static final String XML_LANG_URI = Constants.XML_LANG_SPACE_SpecNS;
+-    private static final String XMLNS_URI = Constants.NamespaceSpecNS;
+-
+     /**
+-      * This Set contains the names (Strings like "xmlns" or "xmlns:foo") of
+-      * the inclusive namespaces.
+-      */
++     * This Set contains the names (Strings like "xmlns" or "xmlns:foo") of
++     * the inclusive namespaces.
++     */
+     private SortedSet<String> inclusiveNSSet;
+     private boolean propagateDefaultNamespace = false;
+ 
+-    private final SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
+-
+     /**
+      * Constructor Canonicalizer20010315Excl
+      *
+@@ -161,11 +157,11 @@ public byte[] engineCanonicalizeXPathNodeSet(
+     }
+ 
+     @Override
+-    protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException {
++    protected void outputAttributesSubtree(Element element, NameSpaceSymbTable ns,
++                                           Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException {
+         // result will contain the attrs which have to be output
+-        final SortedSet<Attr> result = this.result;
+-        result.clear();
++        SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
+ 
+         // The prefix visibly utilized (in the attribute or in the name) in
+         // the element
+@@ -227,20 +223,22 @@ protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbT
+             }
+         }
+ 
+-        return result.iterator();
++        OutputStream writer = getWriter();
++        //we output all Attrs which are available
++        for (Attr attr : result) {
++            outputAttrToWriter(attr.getNodeName(), attr.getNodeValue(), writer, cache);
++        }
+     }
+ 
+     /**
+      * {@inheritDoc}
+-     * @param element
+-     * @throws CanonicalizationException
+      */
+     @Override
+-    protected final Iterator<Attr> handleAttributes(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException {
++    protected void outputAttributes(Element element, NameSpaceSymbTable ns,
++                                    Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException {
+         // result will contain the attrs which have to be output
+-        final SortedSet<Attr> result = this.result;
+-        result.clear();
++        SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
+ 
+         // The prefix visibly utilized (in the attribute or in the name) in
+         // the element
+@@ -330,7 +328,11 @@ protected final Iterator<Attr> handleAttributes(Element element, NameSpaceSymbTa
+             }
+         }
+ 
+-        return result.iterator();
++        OutputStream writer = getWriter();
++        //we output all Attrs which are available
++        for (Attr attr : result) {
++            outputAttrToWriter(attr.getNodeName(), attr.getNodeValue(), writer, cache);
++        }
+     }
+ 
+     protected void circumventBugIfNeeded(XMLSignatureInput input)
+diff --git a/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java b/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
+index a1098b3559..8a329cfb3f 100644
+--- a/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
++++ b/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
+@@ -42,6 +42,7 @@
+ import org.apache.xml.security.utils.XMLUtils;
+ import org.w3c.dom.Attr;
+ import org.w3c.dom.Comment;
++import org.w3c.dom.DOMException;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.NamedNodeMap;
+@@ -51,11 +52,14 @@
+ 
+ /**
+  * Abstract base class for canonicalization algorithms.
+- *
++ * Please note that these implementations are NOT thread safe - please see the following JIRA for more information:
++ * https://issues.apache.org/jira/browse/SANTUARIO-463
+  */
+ public abstract class CanonicalizerBase extends CanonicalizerSpi {
+     public static final String XML = "xml";
+     public static final String XMLNS = "xmlns";
++    public static final String XMLNS_URI = Constants.NamespaceSpecNS;
++    public static final String XML_LANG_URI = Constants.XML_LANG_SPACE_SpecNS;
+ 
+     protected static final AttrCompare COMPARE = new AttrCompare();
+ 
+@@ -172,6 +176,10 @@ public void setWriter(OutputStream writer) {
+         this.writer = writer;
+     }
+ 
++    protected OutputStream getWriter() {
++        return writer;
++    }
++
+     /**
+      * Canonicalizes a Subtree node.
+      *
+@@ -288,14 +296,8 @@ protected final void canonicalizeSubTree(
+                 String name = currentElement.getTagName();
+                 UtfHelpper.writeByte(name, writer, cache);
+ 
+-                Iterator<Attr> attrs = this.handleAttributesSubtree(currentElement, ns);
+-                if (attrs != null) {
+-                    //we output all Attrs which are available
+-                    while (attrs.hasNext()) {
+-                        Attr attr = attrs.next();
+-                        outputAttrToWriter(attr.getNodeName(), attr.getNodeValue(), writer, cache);
+-                    }
+-                }
++                outputAttributesSubtree(currentElement, ns, cache);
++
+                 writer.write('>');
+                 sibling = currentNode.getFirstChild();
+                 if (sibling == null) {
+@@ -397,7 +399,6 @@ protected final void canonicalizeXPathNodeSet(Node currentNode, Node endnode)
+         }
+         Node sibling = null;
+         Node parentNode = null;
+-        OutputStream writer = this.writer;
+         int documentLevel = NODE_BEFORE_DOCUMENT_ELEMENT;
+         Map<String, byte[]> cache = new HashMap<>();
+         do {
+@@ -463,14 +464,8 @@ protected final void canonicalizeXPathNodeSet(Node currentNode, Node endnode)
+                     ns.push();
+                 }
+ 
+-                Iterator<Attr> attrs = handleAttributes(currentElement, ns);
+-                if (attrs != null) {
+-                    //we output all Attrs which are available
+-                    while (attrs.hasNext()) {
+-                        Attr attr = attrs.next();
+-                        outputAttrToWriter(attr.getNodeName(), attr.getNodeValue(), writer, cache);
+-                    }
+-                }
++                outputAttributes(currentElement, ns, cache);
++
+                 if (currentNodeIsVisible) {
+                     writer.write('>');
+                 }
+@@ -637,26 +632,26 @@ protected final void getParentNameSpaces(Element el, NameSpaceSymbTable ns)  {
+     }
+ 
+     /**
+-     * Obtain the attributes to output for this node in XPathNodeSet c14n.
++     * Output the attributes for this node in XPathNodeSet c14n.
+      *
+      * @param element
+      * @param ns
+-     * @return the attributes nodes to output.
+-     * @throws CanonicalizationException
++     * @param cache
++     * @throws CanonicalizationException, DOMException, IOException
+      */
+-    abstract Iterator<Attr> handleAttributes(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException;
++    abstract void outputAttributes(Element element, NameSpaceSymbTable ns, Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException;
+ 
+     /**
+-     * Obtain the attributes to output for this node in a Subtree c14n.
++     * Output the attributes for this node in a Subtree c14n.
+      *
+      * @param element
+      * @param ns
+-     * @return the attributes nodes to output.
+-     * @throws CanonicalizationException
++     * @param cache
++     * @throws CanonicalizationException, DOMException, IOException
+      */
+-    abstract Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException;
++    abstract void outputAttributesSubtree(Element element, NameSpaceSymbTable ns, Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException;
+ 
+     abstract void circumventBugIfNeeded(XMLSignatureInput input)
+         throws CanonicalizationException, ParserConfigurationException, IOException, SAXException;
+diff --git a/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerPhysical.java b/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerPhysical.java
+index 1cee4b5fe7..64304aa152 100644
+--- a/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerPhysical.java
++++ b/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerPhysical.java
+@@ -20,7 +20,7 @@
+ 
+ import java.io.IOException;
+ import java.io.OutputStream;
+-import java.util.Iterator;
++import java.util.Map;
+ import java.util.Set;
+ import java.util.SortedSet;
+ import java.util.TreeSet;
+@@ -32,6 +32,7 @@
+ import org.apache.xml.security.signature.XMLSignatureInput;
+ import org.w3c.dom.Attr;
+ import org.w3c.dom.Comment;
++import org.w3c.dom.DOMException;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.NamedNodeMap;
+ import org.w3c.dom.Node;
+@@ -50,8 +51,6 @@
+  */
+ public class CanonicalizerPhysical extends CanonicalizerBase {
+ 
+-    private final SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
+-
+     /**
+      * Constructor Canonicalizer20010315
+      */
+@@ -106,31 +105,27 @@ public byte[] engineCanonicalizeSubTree(
+     }
+ 
+     /**
+-     * Returns the Attr[]s to be output for the given element.
++     * Output the Attr[]s for the given element.
+      * <br>
+-     * The code of this method is a copy of {@link #handleAttributes(Element,
+-     * NameSpaceSymbTable)},
++     * The code of this method is a copy of {@link #outputAttributes(Element,
++     * NameSpaceSymbTable, Map<String, byte[]>)},
+      * whereas it takes into account that subtree-c14n is -- well -- subtree-based.
+      * So if the element in question isRoot of c14n, it's parent is not in the
+      * node set, as well as all other ancestors.
+      *
+      * @param element
+      * @param ns
+-     * @return the Attr[]s to be output
+-     * @throws CanonicalizationException
++     * @param cache
++     * @throws CanonicalizationException, DOMException, IOException
+      */
+     @Override
+-    protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException {
+-        if (!element.hasAttributes()) {
+-            return null;
+-        }
+-
+-        // result will contain all the attrs declared directly on that element
+-        final SortedSet<Attr> result = this.result;
+-        result.clear();
+-
++    protected void outputAttributesSubtree(Element element, NameSpaceSymbTable ns,
++                                           Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException {
+         if (element.hasAttributes()) {
++            // result will contain all the attrs declared directly on that element
++            SortedSet<Attr> result = new TreeSet<Attr>(COMPARE);
++
+             NamedNodeMap attrs = element.getAttributes();
+             int attrsLength = attrs.getLength();
+ 
+@@ -138,22 +133,19 @@ protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbT
+                 Attr attribute = (Attr) attrs.item(i);
+                 result.add(attribute);
+             }
+-        }
+ 
+-        return result.iterator();
++            OutputStream writer = getWriter();
++            //we output all Attrs which are available
++            for (Attr attr : result) {
++                outputAttrToWriter(attr.getNodeName(), attr.getNodeValue(), writer, cache);
++            }
++        }
+     }
+ 
+-    /**
+-     * Returns the Attr[]s to be output for the given element.
+-     *
+-     * @param element
+-     * @param ns
+-     * @return the Attr[]s to be output
+-     * @throws CanonicalizationException
+-     */
+     @Override
+-    protected Iterator<Attr> handleAttributes(Element element, NameSpaceSymbTable ns)
+-        throws CanonicalizationException {
++    protected void outputAttributes(Element element, NameSpaceSymbTable ns,
++                                    Map<String, byte[]> cache)
++        throws CanonicalizationException, DOMException, IOException {
+ 
+         /** $todo$ well, should we throw UnsupportedOperationException ? */
+         throw new CanonicalizationException("c14n.Canonicalizer.UnsupportedOperation");

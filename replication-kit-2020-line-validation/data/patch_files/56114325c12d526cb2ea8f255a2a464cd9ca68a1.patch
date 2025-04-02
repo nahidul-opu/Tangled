@@ -1,0 +1,163 @@
+From 56114325c12d526cb2ea8f255a2a464cd9ca68a1 Mon Sep 17 00:00:00 2001
+From: Aaron Smuts <asmuts@apache.org>
+Date: Fri, 29 Aug 2008 18:05:21 +0000
+Subject: [PATCH] https://issues.apache.org/jira/browse/JCS-32
+
+Moved shutdown hook to composite cache manager from indexed disk cache.
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/jcs/trunk@690353 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../disk/indexed/IndexedDiskCache.java        | 26 +------------
+ .../engine/control/CompositeCacheManager.java | 39 +++++++++++++++++--
+ xdocs/changes.xml                             |  6 +--
+ 3 files changed, 40 insertions(+), 31 deletions(-)
+
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+index 91e702951..47e1ee2cc 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+@@ -236,8 +236,6 @@ public IndexedDiskCache( IndexedDiskCacheAttributes cattr )
+             // Kick off a real time optimization, in case we didn't do a final optimization.
+             doOptimizeRealTime();
+         }
+-        ShutdownHook shutdownHook = new ShutdownHook();
+-        Runtime.getRuntime().addShutdownHook( shutdownHook );
+     }
+ 
+     /**
+@@ -569,7 +567,7 @@ protected ICacheElement doGet( Serializable key )
+ 
+     /**
+      * @param key
+-     * @param object 
++     * @param object
+      * @return ICacheElement or null
+      * @see AbstractDiskCache#doGet
+      */
+@@ -1694,26 +1692,4 @@ protected void processRemovedLRU( Object key, Object value )
+             doOptimizeRealTime();
+         }
+     }
+-
+-    /**
+-     * Called on shutdown. This gives use a chance to store the keys and to optimize even if the
+-     * cache manager's shutdown method was not called.
+-     */
+-    class ShutdownHook
+-        extends Thread
+-    {
+-        /**
+-         * This will persist the keys on shutdown.
+-         * <p>
+-         * @see java.lang.Thread#run()
+-         */
+-        public void run()
+-        {
+-            if ( alive )
+-            {
+-                log.warn( logCacheName + "Disk cache not shutdown properly, shutting down now." );
+-                doDispose();
+-            }
+-        }
+-    }
+ }
+diff --git a/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java b/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
+index 3253ae647..b410ba9b0 100644
+--- a/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
++++ b/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
+@@ -103,9 +103,12 @@ public class CompositeCacheManager
+     /** Should we use system property substitutions. */
+     private static final boolean DEFAULT_USE_SYSTEM_PROPERTIES = true;
+ 
+-    /** Those waiting for notification of a shutdown.  */
++    /** Those waiting for notification of a shutdown. */
+     private Set shutdownObservers = new HashSet();
+ 
++    /** Indicates whether shutdown has been called. */
++    private boolean isShutdown = false;
++
+     /**
+      * Gets the CacheHub instance. For backward compatibility, if this creates the instance it will
+      * attempt to configure it with the default configuration. If you want to configure from your
+@@ -185,6 +188,13 @@ protected static CompositeCacheManager createInstance()
+         return new CompositeCacheManager();
+     }
+ 
++    /** CreAtes a shutdown hook */
++    protected CompositeCacheManager()
++    {
++        ShutdownHook shutdownHook = new ShutdownHook();
++        Runtime.getRuntime().addShutdownHook( shutdownHook );
++    }
++
+     /**
+      * Configure with default properties file
+      */
+@@ -470,10 +480,12 @@ public void freeCache( String name, boolean fromRemote )
+      */
+     public void shutDown()
+     {
++        isShutdown = true;
++
+         // notify any observers
+         synchronized ( shutdownObservers )
+         {
+-            // We don't need to worry about lcoking the set.
++            // We don't need to worry about locking the set.
+             // since this is a shutdown command, nor do we need
+             // to queue these up.
+             Iterator it = shutdownObservers.iterator();
+@@ -607,7 +619,6 @@ AuxiliaryCacheAttributes registryAttrGet( String name )
+         return (AuxiliaryCacheAttributes) auxiliaryAttributeRegistry.get( name );
+     }
+ 
+-
+     /**
+      * Gets stats for debugging. This calls gets statistics and then puts all the results in a
+      * string. This returns data for all regions.
+@@ -683,4 +694,26 @@ public void deregisterShutdownObserver( IShutdownObserver observer )
+             shutdownObservers.remove( observer );
+         }
+     }
++
++    /**
++     * Called on shutdown. This gives use a chance to store the keys and to optimize even if the
++     * cache manager's shutdown method was not called manually.
++     */
++    class ShutdownHook
++        extends Thread
++    {
++        /**
++         * This will persist the keys on shutdown.
++         * <p>
++         * @see java.lang.Thread#run()
++         */
++        public void run()
++        {
++            if ( !isShutdown )
++            {
++                log.info( "Shutdown hook activated.  Shutdown was not called.  Shutting down JCS." );
++                shutDown();
++            }
++        }
++    }
+ }
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index 850dc184d..3f210f95d 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -44,11 +44,11 @@
+ 			<action dev="asmuts" type="fix" issue="JCS-32" due-to="Andy">Moved
+ 				shutdown hook from disk cache to composite cache manager.</action>
+ 		</release>
+-		<release version="1.3.1.0" date="in SVN">
+-			<action dev="asmuts" type="update"> Added getMultiple() method to
++		<release version="1.3.1.0" date="2008-04-11" description="tempbuild">
++			<action dev="asmuts" type="update" due-to="Chris Fairbanks"> Added getMultiple() method to
+ 				ICache</action>
+ 		</release>
+-		<release version="1.3" date="2007-06-05">
++		<release version="1.3" date="2007-06-05" description="First formal release">
+ 			<action dev="tv" type="update"> Updated/added license headers in all
+ 				files.</action>
+ 		</release>

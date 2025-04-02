@@ -1,0 +1,438 @@
+From 537e13241a7ffd99e5a3676e574e3cd9ea9aae03 Mon Sep 17 00:00:00 2001
+From: Brett Randall <javabrett@gmail.com>
+Date: Fri, 25 Mar 2016 20:55:15 +1100
+Subject: [PATCH] IVY-1545: Added tracking for a cycle in parent-POM ancestry,
+ throw a CircularDependencyException if found. Added tests for cycles in
+ parent ancestry and references-self as parent.
+
+This closes #66 pull request at github/apache/ant-ivy repo
+---
+ asciidoc/release-notes.adoc                   |  1 +
+ .../circular/CircularDependencyException.java | 12 +++++-
+ .../parser/m2/PomModuleDescriptorParser.java  | 40 ++++++++++++++---
+ .../apache/ivy/core/resolve/ResolveTest.java  | 43 +++++++++++++++++++
+ .../org/apache/dm/parent4/1.0/parent4-1.0.pom | 36 ++++++++++++++++
+ .../org/apache/dm/parent5/1.0/parent5-1.0.pom | 36 ++++++++++++++++
+ .../org/apache/dm/test6/1.0/test6-1.0.jar     |  1 +
+ .../org/apache/dm/test6/1.0/test6-1.0.pom     | 37 ++++++++++++++++
+ .../org/apache/dm/test7/1.0/test7-1.0.jar     |  1 +
+ .../org/apache/dm/test7/1.0/test7-1.0.pom     | 37 ++++++++++++++++
+ 10 files changed, 237 insertions(+), 7 deletions(-)
+ create mode 100644 test/repositories/parentPom/org/apache/dm/parent4/1.0/parent4-1.0.pom
+ create mode 100644 test/repositories/parentPom/org/apache/dm/parent5/1.0/parent5-1.0.pom
+ create mode 100644 test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.jar
+ create mode 100644 test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.pom
+ create mode 100644 test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.jar
+ create mode 100644 test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.pom
+
+diff --git a/asciidoc/release-notes.adoc b/asciidoc/release-notes.adoc
+index 38ca44bd9..986b15324 100644
+--- a/asciidoc/release-notes.adoc
++++ b/asciidoc/release-notes.adoc
+@@ -74,6 +74,7 @@ For details about the following changes, check our JIRA install at link:https://
+ - FIX: ApacheURLLister skips versions with URL encoded characters [jira:IVY-1442[]] [jira:IVY-1573[]]
+ - FIX: Configuration lists are sensitive to whitespace; multiple split/merge methods [jira:IVY-309[]] [jira:IVY-1282[]]
+ - FIX: Warnings about illegal reflection access due to lack of methods to retrieve default authenticator in Java 5 to 8 [jira:IVY-1569[]]
++- FIX: Cycle in parent POM ancestry yields StackOverflowError in PomModuleDescriptorParser [jira:IVY-1545] (Thanks to Brett Randall)
+ 
+ - IMPROVEMENT: Throw an IllegalStateException when retrieving the resolutionCacheRoot on the DefaultResolutionCacheManager if the basedir (or IvySettings) is not set (jira:IVY-1482[])
+ - IMPROVEMENT: Optimization: limit the revision numbers scanned if revision prefix is specified (Thanks to Ernestas Vaiciukevi&#269;ius)
+diff --git a/src/java/org/apache/ivy/plugins/circular/CircularDependencyException.java b/src/java/org/apache/ivy/plugins/circular/CircularDependencyException.java
+index 438c57293..788b994e0 100644
+--- a/src/java/org/apache/ivy/plugins/circular/CircularDependencyException.java
++++ b/src/java/org/apache/ivy/plugins/circular/CircularDependencyException.java
+@@ -17,15 +17,21 @@
+  */
+ package org.apache.ivy.plugins.circular;
+ 
++import java.util.Collection;
++
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ 
+ /**
+  * Unchecked exception thrown when a circular dependency exists between projects.
+  */
+ 
+-@SuppressWarnings("serial")
+ public class CircularDependencyException extends RuntimeException {
+ 
++    /**
++     * 
++     */
++    private static final long serialVersionUID = 670272039106237360L;
++
+     private ModuleRevisionId[] mrids;
+ 
+     /**
+@@ -37,6 +43,10 @@ public CircularDependencyException(final ModuleRevisionId[] mrids) {
+         this.mrids = mrids;
+     }
+ 
++    public CircularDependencyException(final Collection<ModuleRevisionId> mrids) {
++        this(mrids.toArray(new ModuleRevisionId[mrids.size()]));
++    }
++
+     public ModuleRevisionId[] getPath() {
+         return this.mrids;
+     }
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 01b35098f..b1c0b7f8a 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -23,8 +23,11 @@
+ import java.net.URL;
+ import java.text.ParseException;
+ import java.util.Date;
++import java.util.HashSet;
++import java.util.LinkedHashSet;
+ import java.util.Map;
+ 
++import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.cache.ArtifactOrigin;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.Configuration;
+@@ -38,6 +41,7 @@
+ import org.apache.ivy.core.resolve.ResolveEngine;
+ import org.apache.ivy.core.resolve.ResolveOptions;
+ import org.apache.ivy.core.resolve.ResolvedModuleRevision;
++import org.apache.ivy.plugins.circular.CircularDependencyException;
+ import org.apache.ivy.plugins.parser.ModuleDescriptorParser;
+ import org.apache.ivy.plugins.parser.ParserSettings;
+ import org.apache.ivy.plugins.parser.m2.PomModuleDescriptorBuilder.PomDependencyDescriptor;
+@@ -52,7 +56,6 @@
+ import org.apache.ivy.util.Message;
+ import org.xml.sax.SAXException;
+ 
+-import static org.apache.ivy.core.IvyContext.getContext;
+ import static org.apache.ivy.core.module.descriptor.Configuration.Visibility.PUBLIC;
+ import static org.apache.ivy.plugins.namespace.NameSpaceHelper.toSystem;
+ import static org.apache.ivy.plugins.parser.m2.PomModuleDescriptorBuilder.MAVEN2_CONFIGURATIONS;
+@@ -63,9 +66,9 @@
+ /**
+  * A parser for Maven 2 POM.
+  * <p>
+- * The configurations used in the generated module descriptor mimics the behavior defined by
+- * Maven 2 scopes, as documented
+- * <a href="http://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html">here</a>.
++ * The configurations used in the generated module descriptor mimics the behavior defined by Maven 2
++ * scopes, as documented <a href=
++ * "http://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html">here</a>.
+  * The PomModuleDescriptorParser use a PomDomReader to read the pom, and the
+  * PomModuleDescriptorBuilder to write the ivy module descriptor using the info read by the
+  * PomDomReader.
+@@ -75,6 +78,8 @@ public final class PomModuleDescriptorParser implements ModuleDescriptorParser {
+ 
+     private static final PomModuleDescriptorParser INSTANCE = new PomModuleDescriptorParser();
+ 
++    private static final String PARENT_MAP_KEY = PomModuleDescriptorParser.class.getName() + ".parentMap";
++    
+     public static PomModuleDescriptorParser getInstance() {
+         return INSTANCE;
+     }
+@@ -123,12 +128,25 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                 ivySettings);
+ 
+         try {
++            final IvyContext ivyContext = IvyContext.pushNewCopyContext();
++            @SuppressWarnings("unchecked")
++            HashSet<ModuleRevisionId> parents = (HashSet<ModuleRevisionId>) ivyContext
++                    .get(PARENT_MAP_KEY);
++            if (parents == null) {
++                parents = new LinkedHashSet<ModuleRevisionId>();
++                ivyContext.set(PARENT_MAP_KEY, parents);
++            }
++
+             PomReader domReader = new PomReader(descriptorURL, res);
+             domReader.setProperty("parent.version", domReader.getParentVersion());
+             domReader.setProperty("parent.groupId", domReader.getParentGroupId());
+             domReader.setProperty("project.parent.version", domReader.getParentVersion());
+             domReader.setProperty("project.parent.groupId", domReader.getParentGroupId());
+ 
++            Message.debug("parent.groupId: " + domReader.getParentGroupId());
++            Message.debug("parent.artifactId: " + domReader.getParentArtifactId());
++            Message.debug("parent.version: " + domReader.getParentVersion());
++
+             for (Map.Entry<String, String> prop : domReader.getPomProperties().entrySet()) {
+                 domReader.setProperty(prop.getKey(), prop.getValue());
+                 mdBuilder.addProperty(prop.getKey(), prop.getValue());
+@@ -141,6 +159,14 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                 ModuleRevisionId parentModRevID = ModuleRevisionId.newInstance(
+                     domReader.getParentGroupId(), domReader.getParentArtifactId(),
+                     domReader.getParentVersion());
++
++                // check for cycles
++                if (parents.contains(parentModRevID)) {
++                    throw new CircularDependencyException(parents);
++                } else {
++                    parents.add(parentModRevID);
++                }
++
+                 ResolvedModuleRevision parentModule = parseOtherPom(ivySettings, parentModRevID);
+                 if (parentModule == null) {
+                     throw new IOException("Impossible to load parent for " + res.getName()
+@@ -282,6 +308,8 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+             }
+         } catch (SAXException e) {
+             throw newParserException(e);
++        } finally {
++            IvyContext.popContext();
+         }
+ 
+         return mdBuilder.getModuleDescriptor();
+@@ -383,9 +411,9 @@ private void addSourcesAndJavadocArtifactsIfPresent(PomModuleDescriptorBuilder m
+     private ResolvedModuleRevision parseOtherPom(ParserSettings ivySettings,
+             ModuleRevisionId parentModRevID) throws ParseException {
+         DependencyDescriptor dd = new DefaultDependencyDescriptor(parentModRevID, true);
+-        ResolveData data = getContext().getResolveData();
++        ResolveData data = IvyContext.getContext().getResolveData();
+         if (data == null) {
+-            ResolveEngine engine = getContext().getIvy().getResolveEngine();
++            ResolveEngine engine = IvyContext.getContext().getIvy().getResolveEngine();
+             ResolveOptions options = new ResolveOptions();
+             options.setDownload(false);
+             data = new ResolveData(engine, options);
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index a41f91f1f..c3fe21a14 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -79,6 +79,7 @@
+ import static org.junit.Assert.assertNotNull;
+ import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
+ 
+ /**
+  *
+@@ -4921,6 +4922,48 @@ public void testResolveMaven2ParentPomChainResolver() throws Exception {
+             "jar").exists());
+     }
+ 
++    @Test
++    public void testErrorResolveMaven2ParentPomWithCycle() throws Exception {
++        // IVY-1545
++        // test6 has parent parent4, parent4 parent is parent5, parent5 parent is parent4, a cycle.
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/parentPom/ivysettings.xml"));
++        ivy.getSettings().setDefaultResolver("parentChain");
++
++        try {
++            ivy.resolve(
++                new File("test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.pom"),
++                getResolveOptions(new String[] {"*"}));
++
++            // don't expect to get here, should suffer StackOverflowError if cycle is not detected
++            fail("Expected CircularDependencyException from parent cycle detection");
++        } catch (CircularDependencyException e) {
++            // ok
++            assertEquals("org.apache.dm#parent4;1.0->org.apache.dm#parent5;1.0", e.getMessage());
++        }
++    }
++
++    @Test
++    public void testErrorResolveMaven2SelfAsParent() throws Exception {
++        // IVY-1545
++        // test7 has parent == self
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/parentPom/ivysettings.xml"));
++        ivy.getSettings().setDefaultResolver("parentChain");
++
++        try {
++            ivy.resolve(
++                new File("test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.pom"),
++                getResolveOptions(new String[] {"*"}));
++
++            // don't expect to get here, should suffer StackOverflowError if cycle is not detected
++            fail("Expected CircularDependencyException from parent cycle detection");
++        } catch (CircularDependencyException e) {
++            // ok
++            assertEquals("org.apache.dm#test7;1.0", e.getMessage());
++        }
++    }
++
+     /**
+      * Test case for IVY-1186.
+      *
+diff --git a/test/repositories/parentPom/org/apache/dm/parent4/1.0/parent4-1.0.pom b/test/repositories/parentPom/org/apache/dm/parent4/1.0/parent4-1.0.pom
+new file mode 100644
+index 000000000..82a69f5c7
+--- /dev/null
++++ b/test/repositories/parentPom/org/apache/dm/parent4/1.0/parent4-1.0.pom
+@@ -0,0 +1,36 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <parent>
++    <artifactId>parent5</artifactId>
++    <groupId>org.apache.dm</groupId>
++    <version>1.0</version>
++  </parent>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache.dm</groupId>
++  <artifactId>parent4</artifactId>
++  <name>Test Module for Ivy M2 parsing - detects circular parent references</name>
++  <version>1.0</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++</project>
+diff --git a/test/repositories/parentPom/org/apache/dm/parent5/1.0/parent5-1.0.pom b/test/repositories/parentPom/org/apache/dm/parent5/1.0/parent5-1.0.pom
+new file mode 100644
+index 000000000..596a8f1b7
+--- /dev/null
++++ b/test/repositories/parentPom/org/apache/dm/parent5/1.0/parent5-1.0.pom
+@@ -0,0 +1,36 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <parent>
++    <artifactId>parent4</artifactId>
++    <groupId>org.apache.dm</groupId>
++    <version>1.0</version>
++  </parent>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache.dm</groupId>
++  <artifactId>parent5</artifactId>
++  <name>Test Module for Ivy M2 parsing - detects circular parent references</name>
++  <version>1.0</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++</project>
+diff --git a/test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.jar b/test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.pom b/test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.pom
+new file mode 100644
+index 000000000..35e1a3cae
+--- /dev/null
++++ b/test/repositories/parentPom/org/apache/dm/test6/1.0/test6-1.0.pom
+@@ -0,0 +1,37 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <!-- has parent cycle parent4 -> parent5 -> parent4 ... -->
++  <parent>
++    <artifactId>parent4</artifactId>
++    <groupId>org.apache.dm</groupId>
++    <version>1.0</version>
++   </parent>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache.dm</groupId>
++  <artifactId>test6</artifactId>
++  <name>Test safe-failure of parent with dependency cycle</name>
++  <version>1.0</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++</project>
+diff --git a/test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.jar b/test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.pom b/test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.pom
+new file mode 100644
+index 000000000..be74ee2db
+--- /dev/null
++++ b/test/repositories/parentPom/org/apache/dm/test7/1.0/test7-1.0.pom
+@@ -0,0 +1,37 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <!-- illegal, references itself as parent -->
++  <parent>
++    <artifactId>test7</artifactId>
++    <groupId>org.apache.dm</groupId>
++    <version>1.0</version>
++   </parent>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache.dm</groupId>
++  <artifactId>test7</artifactId>
++  <name>Test safe-failure of references self as parent</name>
++  <version>1.0</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++</project>

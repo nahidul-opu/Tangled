@@ -1,0 +1,74 @@
+From 63b85e9c1489baed177698da20ab1cead3065cee Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Fri, 23 Mar 2012 23:11:41 +0000
+Subject: [PATCH] FIX: Ivy didn't properly handle some file: URLs (IVY-1340)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1304651 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../plugins/repository/url/URLRepository.java |  7 ++++++-
+ .../ivy/plugins/resolver/URLResolverTest.java | 21 +++++++++++++++++++
+ 3 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 92607813d..b98bffafd 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -145,6 +145,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: Ivy didn't properly handle some file: URLs (IVY-1340)
+ - FIX: fallback mechanism didn't work properly for private configurations
+ - FIX: /localivy target does not work when building Ivy jar (IVY-1338) (thanks to Ben Schmidt)
+ - FIX: The showprogress=false attribute of ivy:resolve doesn't do what it should (IVY-1052) (thanks to Joseph Boyd)
+diff --git a/src/java/org/apache/ivy/plugins/repository/url/URLRepository.java b/src/java/org/apache/ivy/plugins/repository/url/URLRepository.java
+index 238490b8a..7f459f356 100644
+--- a/src/java/org/apache/ivy/plugins/repository/url/URLRepository.java
++++ b/src/java/org/apache/ivy/plugins/repository/url/URLRepository.java
+@@ -109,7 +109,12 @@ public List list(String parent) throws IOException {
+         } else if (parent.startsWith("file")) {
+             String path;
+             try {
+-                path = new URI(parent).getPath();
++                URI uri = new URI(parent);
++                if (uri.isOpaque()) {
++                    path = uri.getSchemeSpecificPart();
++                } else {
++                    path = uri.getPath();
++                }
+             } catch (URISyntaxException e) {
+                 IOException ioe = new IOException("Couldn't list content of '" + parent + "'");
+                 ioe.initCause(e);
+diff --git a/test/java/org/apache/ivy/plugins/resolver/URLResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/URLResolverTest.java
+index b734f4643..e11d01753 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/URLResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/URLResolverTest.java
+@@ -138,6 +138,27 @@ public void testLatestFile() throws Exception {
+         assertEquals(pubdate, rmr.getPublicationDate());
+     }
+ 
++    public void testLatestFileWithOpaqueURL() throws Exception {
++        URLResolver resolver = new URLResolver();
++        resolver.setSettings(_settings);
++//        String rootpath = new File("test/repositories/1").toURI().toURL().toExternalForm();
++        String rootpath = new File("test/repositories/1").getAbsolutePath();
++        resolver.addIvyPattern("file:" + rootpath + "/[organisation]/[module]/ivys/ivy-[revision].xml");
++        resolver.addArtifactPattern("file:" + rootpath + "/[organisation]/[module]/[type]s/[artifact]-[revision].[type]");
++        resolver.setName("test");
++        assertEquals("test", resolver.getName());
++
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org1", "mod1.1", "2.0");
++        ResolvedModuleRevision rmr = resolver
++                .getDependency(new DefaultDependencyDescriptor(ModuleRevisionId.newInstance("org1",
++                    "mod1.1", "latest.integration"), false), _data);
++        assertNotNull(rmr);
++
++        assertEquals(mrid, rmr.getId());
++        Date pubdate = new GregorianCalendar(2005, 1, 15, 11, 0, 0).getTime();
++        assertEquals(pubdate, rmr.getPublicationDate());
++    }
++
+     public void testIBiblio() throws Exception {
+         String ibiblioRoot = IBiblioHelper.getIBiblioMirror();
+         if (ibiblioRoot == null) {

@@ -1,0 +1,69 @@
+From d8bbd2f6cb457e84429ef13425851beb272a09af Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Fri, 2 Mar 2012 19:48:42 +0000
+Subject: [PATCH] NET-442 StringIndexOutOfBoundsException: String index out of
+ range: -1 if server respond with root is current directory
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/net/trunk@1296413 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  3 ++
+ .../org/apache/commons/net/ftp/FTPClient.java | 29 +++++++++++++++----
+ 2 files changed, 26 insertions(+), 6 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index fea42b977..f073a8fc6 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -65,6 +65,9 @@ The <action> type attribute can be add,update,fix,remove.
+         <release version="3.2" date="TBA" description="
+         ">
+ TBA
++            <action issue="NET-442" dev="sebb" type="fix">
++            StringIndexOutOfBoundsException: String index out of range: -1 if server respond with root is current directory.
++            </action>
+             <action issue="NET-444" dev="sebb" type="fix">
+             FTPTimestampParserImpl fails to parse future dates correctly on Feb 28th in a leap year.
+             </action>
+diff --git a/src/main/java/org/apache/commons/net/ftp/FTPClient.java b/src/main/java/org/apache/commons/net/ftp/FTPClient.java
+index a8344586d..79702fca1 100644
+--- a/src/main/java/org/apache/commons/net/ftp/FTPClient.java
++++ b/src/main/java/org/apache/commons/net/ftp/FTPClient.java
+@@ -469,15 +469,32 @@ private void __initDefaults()
+         __featuresMap = null;
+     }
+ 
+-    private String __parsePathname(String reply)
++    /**
++     * Parse the pathname from a CWD reply.
++     * According to RFC959 (http://www.ietf.org/rfc/rfc959.txt), 
++     * it should be the same as for MKD, i.e.
++     * 257<space>"<directory-name>"<space><commentary>
++     * where any embedded double-quotes are doubled.
++     * 
++     * However, see NET-442 for an exception.
++     * 
++     * @param reply
++     * @return
++     */
++    private static String __parsePathname(String reply)
+     {
+-        int begin = reply.indexOf('"') + 1;
+-        int end = reply.indexOf('"', begin);
+-
+-        return reply.substring(begin, end);
++        int begin = reply.indexOf('"'); // find first double quote
++        if (begin == -1) { // not found, return all after reply code and space
++            return reply.substring(REPLY_CODE_LEN + 1);
++        }
++        int end = reply.lastIndexOf("\" "); // N.B. assume commentary does not contain double-quote
++        if (end != -1 ){ // found end of quoted string, de-duplicate any embedded quotes
++            return reply.substring(begin+1, end).replace("\"\"", "\"");            
++        }
++        // malformed reply, return all after reply code and space
++        return reply.substring(REPLY_CODE_LEN + 1);
+     }
+ 
+-
+     protected void _parsePassiveModeReply(String reply)
+     throws MalformedServerReplyException
+     {

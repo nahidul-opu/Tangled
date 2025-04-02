@@ -1,0 +1,60 @@
+From 944291b748bcfec4e2f3c17623884db7a17b9f21 Mon Sep 17 00:00:00 2001
+From: Liwei Lin <proflin.me@gmail.com>
+Date: Mon, 15 Feb 2016 16:37:04 -0800
+Subject: [PATCH] PARQUET-431: Make ParquetOutputFormat.memoryManager volatile
+
+Currently ParquetOutputFormat.getRecordWriter() contains an unsynchronized lazy initialization of the non-volatile static field *memoryManager*.
+
+Because the compiler or processor may reorder instructions, threads are not guaranteed to see a completely initialized object, when ParquetOutputFormat.getRecordWriter() is called by multiple threads.
+
+This PR makes *memoryManager* volatile to correct the problem.
+
+Author: Liwei Lin <proflin.me@gmail.com>
+Author: proflin <proflin.me@gmail.com>
+
+Closes #313 from proflin/PARQUET-431 and squashes the following commits:
+
+1aa4a44 [Liwei Lin] empty commit to trigger CI
+5e94fa3 [Liwei Lin] Remove the volatile modifier for memoryManager
+d54bb99 [Liwei Lin] Undo the Deprecated anotation
+fd1df4e [Liwei Lin] Adds synchronization around the creation of memoryManager as well as getMemoryManager()
+615aa5a [proflin] PARQUET-431
+---
+ .../apache/parquet/hadoop/ParquetOutputFormat.java   | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetOutputFormat.java b/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetOutputFormat.java
+index 31cc96ba10..6accce17c5 100644
+--- a/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetOutputFormat.java
++++ b/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/ParquetOutputFormat.java
+@@ -394,9 +394,12 @@ public RecordWriter<Void, T> getRecordWriter(Configuration conf, Path file, Comp
+         MemoryManager.DEFAULT_MEMORY_POOL_RATIO);
+     long minAllocation = conf.getLong(ParquetOutputFormat.MIN_MEMORY_ALLOCATION,
+         MemoryManager.DEFAULT_MIN_MEMORY_ALLOCATION);
+-    if (memoryManager == null) {
+-      memoryManager = new MemoryManager(maxLoad, minAllocation);
+-    } else if (memoryManager.getMemoryPoolRatio() != maxLoad) {
++    synchronized (ParquetOutputFormat.class) {
++      if (memoryManager == null) {
++        memoryManager = new MemoryManager(maxLoad, minAllocation);
++      }
++    }
++    if (memoryManager.getMemoryPoolRatio() != maxLoad) {
+       LOG.warn("The configuration " + MEMORY_POOL_RATIO + " has been set. It should not " +
+           "be reset by the new value: " + maxLoad);
+     }
+@@ -441,13 +444,12 @@ public OutputCommitter getOutputCommitter(TaskAttemptContext context)
+     return committer;
+   }
+ 
+-
+   /**
+    * This memory manager is for all the real writers (InternalParquetRecordWriter) in one task.
+    */
+   private static MemoryManager memoryManager;
+ 
+-  public static MemoryManager getMemoryManager() {
++  public synchronized static MemoryManager getMemoryManager() {
+     return memoryManager;
+   }
+ }

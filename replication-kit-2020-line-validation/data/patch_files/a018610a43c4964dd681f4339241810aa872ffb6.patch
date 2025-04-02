@@ -1,0 +1,593 @@
+From a018610a43c4964dd681f4339241810aa872ffb6 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Tue, 18 Feb 2014 10:38:02 +0000
+Subject: [PATCH] OPENNLP-600 Updated streams to use the InputStreamFactory
+ instead of using InputStream directly.
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1569256 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../opennlp/tools/cmdline/CmdLineUtil.java    |  6 +++-
+ .../cmdline/MarkableFileInputStream.java      |  2 +-
+ .../MarkableFileInputStreamFactory.java       |  2 +-
+ .../formats/BioNLP2004NameSampleStream.java   | 17 +++++++++++
+ .../formats/Conll02NameSampleStream.java      | 15 +++++++++-
+ .../Conll02NameSampleStreamFactory.java       | 10 +++++--
+ .../formats/Conll03NameSampleStream.java      | 15 ++++++++++
+ .../Conll03NameSampleStreamFactory.java       | 11 +++++--
+ .../tools/formats/ConllXPOSSampleStream.java  |  7 +++--
+ .../formats/ConllXPOSSampleStreamFactory.java | 18 +++++++----
+ .../formats/EvalitaNameSampleStream.java      | 15 ++++++++++
+ .../EvalitaNameSampleStreamFactory.java       | 11 +++++--
+ .../tools/formats/ad/ADChunkSampleStream.java | 13 ++++++++
+ .../tools/formats/ad/ADNameSampleStream.java  | 27 +++++++++++++++++
+ .../tools/formats/ad/ADPOSSampleStream.java   | 30 +++++++++++++++++++
+ .../formats/ad/ADSentenceSampleStream.java    | 26 ++++++++++++++++
+ .../formats/ConllXPOSSampleStreamTest.java    |  6 ++--
+ 17 files changed, 208 insertions(+), 23 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
+index fe520931a..a6d88508f 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
+@@ -307,8 +307,12 @@ public static void handleStdinIoError(IOException e) {
+     throw new TerminateToolException(-1, "IO Error while reading from stdin: " + e.getMessage(), e);
+   }
+ 
++  public static TerminateToolException createObjectStreamError(IOException e) {
++    return new TerminateToolException(-1, "IO Error while creating an Input Stream: " + e.getMessage(), e);
++  }
++  
+   public static void handleCreateObjectStreamError(IOException e) {
+-    throw new TerminateToolException(-1, "IO Error while creating an Input Stream: " + e.getMessage(), e);
++    throw createObjectStreamError(e);
+   }
+   
+   // its optional, passing null is allowed
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStream.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStream.java
+index 78862e389..cda8bd6f4 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStream.java
+@@ -26,7 +26,7 @@
+ /**
+  * A markable File Input Stream.
+  */
+-public class MarkableFileInputStream extends InputStream {
++class MarkableFileInputStream extends InputStream {
+ 
+   private FileInputStream in;
+   
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java
+index 6fc116b2f..9619f51f4 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java
+@@ -27,7 +27,7 @@
+ /**
+  * A factory that creates {@link MarkableFileInputStream} from a {@link File}
+  */
+-public class MarkableFileInputStreamFactory implements InputStreamFactory {
++class MarkableFileInputStreamFactory implements InputStreamFactory {
+ 
+   private File file;
+ 
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/BioNLP2004NameSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/BioNLP2004NameSampleStream.java
+index 4eb5cd36c..d0eebf737 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/BioNLP2004NameSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/BioNLP2004NameSampleStream.java
+@@ -21,10 +21,13 @@
+ import java.io.InputStream;
+ import java.io.PrintStream;
+ import java.io.UnsupportedEncodingException;
++import java.nio.charset.Charset;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
++import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.namefind.NameSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.util.Span;
+@@ -52,6 +55,20 @@ public class BioNLP2004NameSampleStream implements ObjectStream<NameSample> {
+   
+   private final ObjectStream<String> lineStream;
+   
++  public BioNLP2004NameSampleStream(InputStreamFactory in, int types) throws IOException {
++    try {
++      this.lineStream = new PlainTextByLineStream(in, Charset.forName("UTF-8"));
++      System.setOut(new PrintStream(System.out, true, "UTF-8"));
++    } catch (UnsupportedEncodingException e) {
++      // UTF-8 is available on all JVMs, will never happen
++      throw new IllegalStateException(e);
++    }
++    
++    this.types = types;
++    
++  }
++  
++  @Deprecated
+   public BioNLP2004NameSampleStream(InputStream in, int types) {
+     try {
+       this.lineStream = new PlainTextByLineStream(in, "UTF-8");
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStream.java
+index 86b5801fa..02742066f 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStream.java
+@@ -25,6 +25,7 @@
+ import java.util.List;
+ 
+ import opennlp.tools.namefind.NameSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.InvalidFormatException;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+@@ -71,13 +72,25 @@ public Conll02NameSampleStream(LANGUAGE lang, ObjectStream<String> lineStream, i
+     this.types = types;
+   }
+   
++  public Conll02NameSampleStream(LANGUAGE lang, InputStreamFactory in, int types) throws IOException {
++    this.lang = lang;
++    try {
++      this.lineStream = new PlainTextByLineStream(in, "UTF-8");
++      System.setOut(new PrintStream(System.out, true, "UTF-8"));
++    } catch (UnsupportedEncodingException e) {
++      // UTF-8 is available on all JVMs, will never happen
++      throw new IllegalStateException(e);
++    } 
++    this.types = types;
++  }
++  
+   /**
+    * @param lang
+    * @param in an Input Stream to read data.
+    * @throws IOException 
+    */
++  @Deprecated
+   public Conll02NameSampleStream(LANGUAGE lang, InputStream in, int types) {
+-    
+     this.lang = lang;
+     try {
+       this.lineStream = new PlainTextByLineStream(in, "UTF-8");
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStreamFactory.java
+index d4effbbcd..688cfa1d0 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll02NameSampleStreamFactory.java
+@@ -17,6 +17,8 @@
+ 
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.ArgumentParser.ParameterDescription;
+ import opennlp.tools.cmdline.CmdLineUtil;
+@@ -86,7 +88,11 @@ else if ("es".equals(params.getLang())) {
+     }
+ 
+     
+-    return new Conll02NameSampleStream(lang,
+-        CmdLineUtil.openInFile(params.getData()), typesToGenerate);
++    try {
++      return new Conll02NameSampleStream(lang,
++          CmdLineUtil.createInputStreamFactory(params.getData()), typesToGenerate);
++    } catch (IOException e) {
++      throw CmdLineUtil.createObjectStreamError(e);
++    }
+   }
+ }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStream.java
+index 9cb31fa7d..de899b245 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStream.java
+@@ -25,6 +25,7 @@
+ import java.util.List;
+ 
+ import opennlp.tools.namefind.NameSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.util.Span;
+@@ -57,12 +58,26 @@ public Conll03NameSampleStream(LANGUAGE lang, ObjectStream<String> lineStream, i
+     this.types = types;
+   }
+ 
++  public Conll03NameSampleStream(LANGUAGE lang, InputStreamFactory in, int types) throws IOException {
++
++    this.lang = lang;
++    try {
++      this.lineStream = new PlainTextByLineStream(in, "UTF-8");
++      System.setOut(new PrintStream(System.out, true, "UTF-8"));
++    } catch (UnsupportedEncodingException e) {
++      // UTF-8 is available on all JVMs, will never happen
++      throw new IllegalStateException(e);
++    }
++    this.types = types;
++  }
++  
+   /**
+    *
+    * @param lang
+    * @param in
+    * @param types
+    */
++  @Deprecated
+   public Conll03NameSampleStream(LANGUAGE lang, InputStream in, int types) {
+ 
+     this.lang = lang;
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStreamFactory.java
+index cfaeac9d3..69da5bea1 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/Conll03NameSampleStreamFactory.java
+@@ -15,6 +15,8 @@
+ 
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.ArgumentParser.ParameterDescription;
+ import opennlp.tools.cmdline.CmdLineUtil;
+@@ -81,8 +83,11 @@ else if ("de".equals(params.getLang())) {
+           Conll02NameSampleStream.GENERATE_MISC_ENTITIES;
+     }
+ 
+-
+-    return new Conll03NameSampleStream(lang,
+-        CmdLineUtil.openInFile(params.getData()), typesToGenerate);
++    try {
++      return new Conll03NameSampleStream(lang,
++          CmdLineUtil.createInputStreamFactory(params.getData()), typesToGenerate);
++    } catch (IOException e) {
++      throw CmdLineUtil.createObjectStreamError(e);
++    }
+   }
+ }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStream.java
+index 12f16c7ea..6edec92ab 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStream.java
+@@ -21,11 +21,13 @@
+ import java.io.IOException;
+ import java.io.Reader;
+ import java.io.StringReader;
++import java.nio.charset.Charset;
+ import java.util.ArrayList;
+ import java.util.List;
+ 
+ import opennlp.tools.postag.POSSample;
+ import opennlp.tools.util.FilterObjectStream;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.InvalidFormatException;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.ParagraphStream;
+@@ -45,9 +47,8 @@ public ConllXPOSSampleStream(ObjectStream<String> lineStream) {
+     super(new ParagraphStream(lineStream));
+   }
+   
+-  ConllXPOSSampleStream(Reader in) throws IOException {
+-    // encoding is handled by the factory...
+-    super(new ParagraphStream(new PlainTextByLineStream(in)));
++  ConllXPOSSampleStream(InputStreamFactory in, Charset charset) throws IOException {
++    super(new ParagraphStream(new PlainTextByLineStream(in, charset)));
+   }
+ 
+   public POSSample read() throws IOException {
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStreamFactory.java
+index ff8fc46b2..6f4b4b8e9 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ConllXPOSSampleStreamFactory.java
+@@ -17,9 +17,10 @@
+ 
+ package opennlp.tools.formats;
+ 
+-import java.io.InputStreamReader;
++import java.io.IOException;
+ import java.io.PrintStream;
+ import java.io.UnsupportedEncodingException;
++import java.nio.charset.Charset;
+ 
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+@@ -27,8 +28,8 @@
+ import opennlp.tools.cmdline.TerminateToolException;
+ import opennlp.tools.cmdline.params.BasicFormatParams;
+ import opennlp.tools.postag.POSSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+-import opennlp.tools.util.PlainTextByLineStream;
+ 
+ /**
+  * <b>Note:</b> Do not use this class, internal use only!
+@@ -52,16 +53,21 @@ protected <P> ConllXPOSSampleStreamFactory(Class<P> params) {
+   public ObjectStream<POSSample> create(String[] args) {
+     Parameters params = ArgumentParser.parse(args, Parameters.class);
+ 
+-    ObjectStream<String> lineStream;
++    InputStreamFactory inFactory = 
++        CmdLineUtil.createInputStreamFactory(params.getData());
++    
+     try {
+-      lineStream = new PlainTextByLineStream(new InputStreamReader(
+-          CmdLineUtil.openInFile(params.getData()), "UTF-8"));
+       System.setOut(new PrintStream(System.out, true, "UTF-8"));
+ 
+-      return new ConllXPOSSampleStream(lineStream);
++      return new ConllXPOSSampleStream(inFactory, Charset.forName("UTF-8"));
+     } catch (UnsupportedEncodingException e) {
+       // this shouldn't happen
+       throw new TerminateToolException(-1, "UTF-8 encoding is not supported: " + e.getMessage(), e);
+     }
++    catch (IOException e) {
++      // That will throw an exception
++      CmdLineUtil.handleCreateObjectStreamError(e);
++      return null;
++    }
+   }
+ }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStream.java
+index d135ef9ab..f0d359227 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStream.java
+@@ -25,6 +25,7 @@
+ import java.util.List;
+ 
+ import opennlp.tools.namefind.NameSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.InvalidFormatException;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+@@ -78,11 +79,25 @@ public EvalitaNameSampleStream(LANGUAGE lang, ObjectStream<String> lineStream, i
+ 	    this.lineStream = lineStream;
+ 	    this.types = types;
+ 	  }
++	  
++	  public EvalitaNameSampleStream(LANGUAGE lang, InputStreamFactory in, int types) throws IOException {
++	    this.lang = lang;
++	    try {
++	      this.lineStream = new PlainTextByLineStream(in, "UTF-8");
++	      System.setOut(new PrintStream(System.out, true, "UTF-8"));
++	    } catch (UnsupportedEncodingException e) {
++	      // UTF-8 is available on all JVMs, will never happen
++	      throw new IllegalStateException(e);
++	    }
++	    this.types = types;
++	  }
++	  
+   /**
+    * @param lang
+    * @param in an Input Stream to read data.
+    * @throws IOException
+    */
++  @Deprecated
+   public EvalitaNameSampleStream(LANGUAGE lang, InputStream in, int types) {
+ 
+     this.lang = lang;
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStreamFactory.java
+index 7b115de7d..673df386d 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/EvalitaNameSampleStreamFactory.java
+@@ -17,6 +17,8 @@
+ 
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.ArgumentParser.ParameterDescription;
+ import opennlp.tools.cmdline.CmdLineUtil;
+@@ -81,9 +83,12 @@ public ObjectStream<NameSample> create(String[] args) {
+           EvalitaNameSampleStream.GENERATE_GPE_ENTITIES;
+     }
+ 
+-
+-    return new EvalitaNameSampleStream(lang,
+-        CmdLineUtil.openInFile(params.getData()), typesToGenerate);
++    try {
++      return new EvalitaNameSampleStream(lang,
++          CmdLineUtil.createInputStreamFactory(params.getData()), typesToGenerate);
++    } catch (IOException e) {
++      throw CmdLineUtil.createObjectStreamError(e);
++    }
+   }
+ }
+ 
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStream.java
+index f8b6bd9f8..5ca8039db 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStream.java
+@@ -29,6 +29,7 @@
+ import opennlp.tools.formats.ad.ADSentenceStream.SentenceParser.Node;
+ import opennlp.tools.formats.ad.ADSentenceStream.SentenceParser.TreeElement;
+ import opennlp.tools.namefind.NameSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.util.StringUtil;
+@@ -79,6 +80,17 @@ public ADChunkSampleStream(ObjectStream<String> lineStream) {
+ 	  this.adSentenceStream = new ADSentenceStream(lineStream);
+ 	}
+ 
++    public ADChunkSampleStream(InputStreamFactory in, String charsetName) throws IOException {
++
++      try {
++        this.adSentenceStream = new ADSentenceStream(new PlainTextByLineStream(
++            in, charsetName));
++      } catch (UnsupportedEncodingException e) {
++        // UTF-8 is available on all JVMs, will never happen
++        throw new IllegalStateException(e);
++      }
++    }
++	   
+ 	/**
+ 	 * Creates a new {@link NameSample} stream from a {@link InputStream}
+ 	 * 
+@@ -87,6 +99,7 @@ public ADChunkSampleStream(ObjectStream<String> lineStream) {
+ 	 * @param charsetName
+ 	 *          the charset of the Arvores Deitadas Corpus
+ 	 */
++    @Deprecated
+ 	public ADChunkSampleStream(InputStream in, String charsetName) {
+ 
+ 		try {
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java
+index a6a7e2395..16204baf5 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java
+@@ -35,6 +35,7 @@
+ import opennlp.tools.formats.ad.ADSentenceStream.SentenceParser.Node;
+ import opennlp.tools.formats.ad.ADSentenceStream.SentenceParser.TreeElement;
+ import opennlp.tools.namefind.NameSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.util.Span;
+@@ -186,6 +187,32 @@ public ADNameSampleStream(ObjectStream<String> lineStream, boolean splitHyphenat
+    *          if true hyphenated tokens will be separated: "carros-monstro" >
+    *          "carros" "-" "monstro"
+    */
++  @Deprecated
++  public ADNameSampleStream(InputStreamFactory in, String charsetName,
++      boolean splitHyphenatedTokens) throws IOException {
++
++    try {
++      this.adSentenceStream = new ADSentenceStream(new PlainTextByLineStream(
++          in, charsetName));
++      this.splitHyphenatedTokens = splitHyphenatedTokens;
++    } catch (UnsupportedEncodingException e) {
++      // UTF-8 is available on all JVMs, will never happen
++      throw new IllegalStateException(e);
++    }
++  }
++  
++  /**
++   * Creates a new {@link NameSample} stream from a {@link InputStream}
++   * 
++   * @param in
++   *          the Corpus {@link InputStream}
++   * @param charsetName
++   *          the charset of the Arvores Deitadas Corpus
++   * @param splitHyphenatedTokens
++   *          if true hyphenated tokens will be separated: "carros-monstro" >
++   *          "carros" "-" "monstro"
++   */
++  @Deprecated
+   public ADNameSampleStream(InputStream in, String charsetName,
+       boolean splitHyphenatedTokens) {
+ 
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStream.java
+index 4e4db030e..6958f9742 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStream.java
+@@ -29,6 +29,7 @@
+ import opennlp.tools.formats.ad.ADSentenceStream.SentenceParser.Node;
+ import opennlp.tools.formats.ad.ADSentenceStream.SentenceParser.TreeElement;
+ import opennlp.tools.postag.POSSample;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -76,6 +77,35 @@ public ADPOSSampleStream(ObjectStream<String> lineStream, boolean expandME,
+    * @param includeFeatures
+    *          if true will combine the POS Tag with the feature tags
+    */
++  public ADPOSSampleStream(InputStreamFactory in, String charsetName,
++      boolean expandME, boolean includeFeatures) throws IOException {
++
++    try {
++      this.adSentenceStream = new ADSentenceStream(new PlainTextByLineStream(
++          in, charsetName));
++      this.expandME = expandME;
++      this.isIncludeFeatures = includeFeatures;
++    } catch (UnsupportedEncodingException e) {
++      // UTF-8 is available on all JVMs, will never happen
++      throw new IllegalStateException(e);
++    }
++  }
++  
++  /**
++   * Creates a new {@link POSSample} stream from a {@link InputStream}
++   * 
++   * @param in
++   *          the Corpus {@link InputStream}
++   * @param charsetName
++   *          the charset of the Arvores Deitadas Corpus
++   * @param expandME
++   *          if true will expand the multiword expressions, each word of the
++   *          expression will have the POS Tag that was attributed to the
++   *          expression plus the prefix B- or I- (CONLL convention)
++   * @param includeFeatures
++   *          if true will combine the POS Tag with the feature tags
++   */
++  @Deprecated
+   public ADPOSSampleStream(InputStream in, String charsetName,
+       boolean expandME, boolean includeFeatures) {
+ 
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStream.java
+index e412e3cb4..2504e8bb3 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStream.java
+@@ -29,6 +29,7 @@
+ import opennlp.tools.formats.ad.ADSentenceStream.Sentence;
+ import opennlp.tools.sentdetect.SentenceSample;
+ import opennlp.tools.sentdetect.lang.Factory;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.util.Span;
+@@ -77,6 +78,31 @@ public ADSentenceSampleStream(ObjectStream<String> lineStream, boolean includeHe
+    * @param includeHeadlines
+    *          if true will output the sentences marked as news headlines
+    */
++  public ADSentenceSampleStream(InputStreamFactory in, String charsetName,
++      boolean includeHeadlines) throws IOException {
++    try {
++      this.adSentenceStream = new ADSentenceStream(new PlainTextByLineStream(
++          in, charsetName));
++    } catch (UnsupportedEncodingException e) {
++      // UTF-8 is available on all JVMs, will never happen
++      throw new IllegalStateException(e);
++    }
++    ptEosCharacters = Factory.ptEosCharacters;
++    Arrays.sort(ptEosCharacters);
++    this.isIncludeTitles = includeHeadlines;
++  }
++  
++  /**
++   * Creates a new {@link SentenceSample} stream from a {@link FileInputStream}
++   * 
++   * @param in
++   *          input stream from the corpus
++   * @param charsetName
++   *          the charset to use while reading the corpus
++   * @param includeHeadlines
++   *          if true will output the sentences marked as news headlines
++   */
++  @Deprecated
+   public ADSentenceSampleStream(FileInputStream in, String charsetName,
+       boolean includeHeadlines) {
+     try {
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/formats/ConllXPOSSampleStreamTest.java b/opennlp-tools/src/test/java/opennlp/tools/formats/ConllXPOSSampleStreamTest.java
+index be221d91c..dbb0f9956 100644
+--- a/opennlp-tools/src/test/java/opennlp/tools/formats/ConllXPOSSampleStreamTest.java
++++ b/opennlp-tools/src/test/java/opennlp/tools/formats/ConllXPOSSampleStreamTest.java
+@@ -22,9 +22,10 @@
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
+-import java.io.InputStreamReader;
++import java.nio.charset.Charset;
+ 
+ import opennlp.tools.postag.POSSample;
++import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ 
+ import org.junit.Test;
+@@ -36,7 +37,8 @@ public void testParsingSample() throws IOException {
+     
+     InputStream in = ConllXPOSSampleStreamTest.class.getResourceAsStream("/opennlp/tools/formats/conllx.sample");
+     
+-    ObjectStream<POSSample> sampleStream = new ConllXPOSSampleStream(new InputStreamReader(in, "UTF-8"));
++    ObjectStream<POSSample> sampleStream = new ConllXPOSSampleStream(new MockInputStreamFactory(in),
++        Charset.forName("UTF-8"));
+     
+     POSSample a = sampleStream.read();
+     

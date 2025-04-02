@@ -1,0 +1,120 @@
+From 117fdf1a6e53c715f228e51cead16861fa9ae5f9 Mon Sep 17 00:00:00 2001
+From: Joerg Schaible <joehni@apache.org>
+Date: Wed, 17 Jun 2009 22:28:09 +0000
+Subject: [PATCH] Removing entries with the MapIterator may also result in a
+ ConcurrentModificationException (COLLECTIONS-330).
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/collections/trunk@785844 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../commons/collections/map/TestLRUMap.java   | 84 ++++++++++++++++++-
+ 1 file changed, 83 insertions(+), 1 deletion(-)
+
+diff --git a/src/test/org/apache/commons/collections/map/TestLRUMap.java b/src/test/org/apache/commons/collections/map/TestLRUMap.java
+index 4bfaf37d97..9f73551da6 100644
+--- a/src/test/org/apache/commons/collections/map/TestLRUMap.java
++++ b/src/test/org/apache/commons/collections/map/TestLRUMap.java
+@@ -26,6 +26,7 @@
+ import junit.textui.TestRunner;
+ 
+ import org.apache.commons.collections.BulkTest;
++import org.apache.commons.collections.MapIterator;
+ import org.apache.commons.collections.OrderedMap;
+ import org.apache.commons.collections.ResettableIterator;
+ 
+@@ -455,6 +456,87 @@ public void testInternalState_getEntry_int() {
+         } catch (IndexOutOfBoundsException ex) {}
+     }
+     
++    // TODO: COLLECTIONS-330
++    public void todoTestSynchronizedRemoveFromMapIterator() throws InterruptedException {
++
++        final LRUMap map = new LRUMap(10000);
++        
++        final Map exceptions = new HashMap();
++        final ThreadGroup tg = new ThreadGroup(getName()) {
++            public void uncaughtException(Thread t, Throwable e) {
++                exceptions.put(e, t.getName());
++                super.uncaughtException(t, e);
++            }
++        };
++
++        final int[] counter = new int[1];
++        counter[0] = 0;
++        final Thread[] threads = new Thread[50];
++        for (int i = 0; i < threads.length; ++i) {
++            threads[i] = new Thread(tg, "JUnit Thread " + i) {
++
++                public void run() {
++                    int i = 0;
++                    try {
++                        synchronized (this) {
++                            notifyAll();
++                            wait();
++                        }
++                        Thread thread = Thread.currentThread();
++                        while (i < 1000  && !interrupted()) {
++                            synchronized (map) {
++                                map.put(thread.getName() + "[" + ++i + "]", thread);
++                            }
++                        }
++                        synchronized (map) {
++                            for (MapIterator iter = map.mapIterator(); iter.hasNext();) {
++                                if (map.get(iter.getValue()) == this) {
++                                    iter.remove();
++                                }
++                            }
++                        }
++                    } catch (InterruptedException e) {
++                        fail("Unexpected InterruptedException");
++                    }
++                    if (i > 0) {
++                        synchronized (counter) {
++                            counter[0]++;
++                        }
++                    }
++                }
++
++            };
++        }
++
++        for (int i = 0; i < threads.length; ++i) {
++            synchronized (threads[i]) {
++                threads[i].start();
++                threads[i].wait();
++            }
++        }
++
++        for (int i = 0; i < threads.length; ++i) {
++            synchronized (threads[i]) {
++                threads[i].notifyAll();
++            }
++        }
++
++        Thread.sleep(1000);
++
++        for (int i = 0; i < threads.length; ++i) {
++            threads[i].interrupt();
++        }
++        for (int i = 0; i < threads.length; ++i) {
++            synchronized (threads[i]) {
++                threads[i].join();
++            }
++        }
++
++        assertEquals("Exceptions have been thrown: " + exceptions, 0, exceptions.size());
++        assertTrue("Each thread should have put at least 1 element into the map, but only " 
++                + counter[0] + " did succeed", counter[0] >= threads.length);
++    }
++    
+     public void testSynchronizedRemoveFromEntrySet() throws InterruptedException {
+ 
+         final Map map = new LRUMap(10000);
+@@ -536,7 +618,7 @@ public void run() {
+                 + counter[0] + " did succeed", counter[0] >= threads.length);
+     }
+     
+-    // TODO: COLLECTIONS-3
++    // TODO: COLLECTIONS-330
+     public void todoTestSynchronizedRemoveFromKeySet() throws InterruptedException {
+ 
+         final Map map = new LRUMap(10000);

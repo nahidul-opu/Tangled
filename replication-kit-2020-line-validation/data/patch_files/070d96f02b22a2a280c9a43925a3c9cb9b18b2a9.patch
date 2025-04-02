@@ -1,0 +1,94 @@
+From 070d96f02b22a2a280c9a43925a3c9cb9b18b2a9 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 2 Mar 2007 10:43:20 +0000
+Subject: [PATCH] FIX: Static revision replacement is not working when
+ delivering an artifact with a dependency on a branch (IVY-404)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@513696 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/xml/XmlModuleDescriptorParser.java |  8 ++++++-
+ .../org/apache/ivy/ant/IvyDeliverTest.java    | 21 +++++++++++++++++++
+ .../org/apache/ivy/ant/ivy-latest-branch.xml  | 10 +++++++++
+ 4 files changed, 39 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/org/apache/ivy/ant/ivy-latest-branch.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index c0f13e1d7..e2328d7f0 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -14,6 +14,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - IMPROVE: Add a unit test to verify that latest.integration accepts released modules (IVY-394) (thanks to Gilles Scokart)
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ 
++- FIX: Static revision replacement is not working when delivering an artifact with a dependency on a branch (IVY-404)
+ - FIX: latest-time conflict manager not working properly (IVY-407)
+ - FIX: LatestRevisionStrategy do not consider all dynamic revisions properly (IVY-383) (thanks to John Williams for the unit test)
+ - FIX: IOException during publish causes NullPointerException (IVY-371)
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index 63cb978eb..0bc33de50 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -308,7 +308,13 @@ public void startElement(String uri, String localName, String qName, Attributes
+                 String name = _ivy.substitute(attributes.getValue("name"));
+                 String branch = _ivy.substitute(attributes.getValue("branch"));
+                 String rev = _ivy.substitute(attributes.getValue("rev"));
+-                _dd = new DefaultDependencyDescriptor(_md, ModuleRevisionId.newInstance(org, name, branch, rev, ExtendableItemHelper.getExtraAttributes(attributes, new String[] {"org", "name", "rev", "force", "transitive", "changing", "conf"})), force, changing, transitive);
++                _dd = new DefaultDependencyDescriptor(
++                		_md, 
++                		ModuleRevisionId.newInstance(org, name, branch, rev, 
++                				ExtendableItemHelper.getExtraAttributes(
++                						attributes, 
++                						new String[] {"org", "name", "branch", "rev", "force", "transitive", "changing", "conf"})), 
++                		force, changing, transitive);
+                 _md.addDependency(_dd);
+                 String confs = _ivy.substitute(attributes.getValue("conf"));
+                 if (confs != null && confs.length() > 0) {
+diff --git a/test/java/org/apache/ivy/ant/IvyDeliverTest.java b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+index ddd93606f..a0e100956 100644
+--- a/test/java/org/apache/ivy/ant/IvyDeliverTest.java
++++ b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+@@ -103,6 +103,27 @@ public void testSimple() throws Exception {
+         assertEquals(ModuleRevisionId.newInstance("org1", "mod1.2", "2.2"), dds[0].getDependencyRevisionId());
+     }
+ 
++    public void testWithBranch() throws Exception {
++    	// test case for IVY-404
++        _project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-latest-branch.xml");
++        IvyResolve res = new IvyResolve();
++        res.setProject(_project);
++        res.execute();
++        
++        _deliver.setPubrevision("1.2");
++        _deliver.setDeliverpattern("build/test/deliver/ivy-[revision].xml");
++        _deliver.execute();
++        
++        // should have done the ivy delivering
++        File deliveredIvyFile = new File("build/test/deliver/ivy-1.2.xml");
++        assertTrue(deliveredIvyFile.exists()); 
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(new IvySettings(), deliveredIvyFile.toURL(), true);
++        assertEquals(ModuleRevisionId.newInstance("apache", "resolve-latest", "1.2"), md.getModuleRevisionId());
++        DependencyDescriptor[] dds = md.getDependencies();
++        assertEquals(1, dds.length);
++        assertEquals(ModuleRevisionId.newInstance("org1", "mod1.2", "TRUNK", "2.2"), dds[0].getDependencyRevisionId());
++    }
++
+     public void testReplaceImportedConfigurations() throws Exception {
+         _project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-import-confs.xml");
+         IvyResolve res = new IvyResolve();
+diff --git a/test/java/org/apache/ivy/ant/ivy-latest-branch.xml b/test/java/org/apache/ivy/ant/ivy-latest-branch.xml
+new file mode 100644
+index 000000000..69ca0ec6f
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/ivy-latest-branch.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0"> 
++	<info organisation="apache"
++	       module="resolve-latest"
++	       revision="1.0"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="latest.integration" branch="TRUNK" />
++	</dependencies>
++</ivy-module>

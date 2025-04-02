@@ -1,0 +1,186 @@
+From c7cc07a3bf92a2328ae4923fad0e0d125763912b Mon Sep 17 00:00:00 2001
+From: William Colen <colen@apache.org>
+Date: Wed, 4 Apr 2012 18:11:22 +0000
+Subject: [PATCH] OPENNLP-481: Instead of using a custom detokenizer we should
+ use the new MERGE_BOTH option
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1309510 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../lang/pt/tokenizer/pt-detokenizer.xml      |  3 ++
+ .../tools/formats/ad/ADNameSampleStream.java  | 52 ++++++++++++++++---
+ .../ad/ADTokenSampleStreamFactory.java        | 50 ------------------
+ 3 files changed, 48 insertions(+), 57 deletions(-)
+
+diff --git a/opennlp-tools/lang/pt/tokenizer/pt-detokenizer.xml b/opennlp-tools/lang/pt/tokenizer/pt-detokenizer.xml
+index 2e35ca2bd..06e89e907 100644
+--- a/opennlp-tools/lang/pt/tokenizer/pt-detokenizer.xml
++++ b/opennlp-tools/lang/pt/tokenizer/pt-detokenizer.xml
+@@ -89,4 +89,7 @@ under the License.
+   <entry operation="MOVE_RIGHT">
+     <token>#</token>
+   </entry>
++  <entry operation="MOVE_BOTH">
++    <token>-</token>
++  </entry>
+ </dictionary>
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java
+index 41f6fd6d7..c4c87afb8 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStream.java
+@@ -22,7 +22,6 @@
+ import java.io.UnsupportedEncodingException;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+-import java.util.Collection;
+ import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.LinkedList;
+@@ -71,7 +70,8 @@ public class ADNameSampleStream implements ObjectStream<NameSample> {
+   
+   private static final Pattern whitespacePattern = Pattern.compile("\\s+");
+   private static final Pattern underlinePattern = Pattern.compile("[_]+");
+-  private static final Pattern alphanumericPattern = Pattern.compile("^[\\p{L}\\p{Nd}-]+$");
++  private static final Pattern hyphenPattern = Pattern.compile("((\\p{L}+)-$)|(^-(\\p{L}+)(.*))|((\\p{L}+)-(\\p{L}+)(.*))");
++  private static final Pattern alphanumericPattern = Pattern.compile("^[\\p{L}\\p{Nd}]+$");
+ 
+   /** 
+    * Map to the Arvores Deitadas types to our types. It is read-only.
+@@ -350,7 +350,8 @@ private List<String> processLexeme(String lexemeStr) {
+     return out;
+   }
+ 
+-  private Collection<? extends String> processTok(String tok) {
++  private List<String> processTok(String tok) {
++    boolean tokAdded = false;
+     String original = tok;
+     List<String> out = new ArrayList<String>();
+     LinkedList<String> suffix = new LinkedList<String>();
+@@ -365,15 +366,52 @@ private Collection<? extends String> processTok(String tok) {
+       tok = tok.substring(0, tok.length() - 1);
+     }
+     
+-    if(!original.equals(tok) && tok.length() > 1 && !alphanumericPattern.matcher(tok).matches()) {
+-      out.addAll(processTok(tok));
+-    } else {
+-      out.add(tok);
++    // lets split all hyphens
++    if (tok.contains("-") && tok.length() > 1) {
++      Matcher matcher = hyphenPattern.matcher(tok);
++
++      String firstTok = null;
++      String hyphen = "-";
++      String secondTok = null;
++      String rest = null;
++
++      if (matcher.matches()) {
++        if (matcher.group(1) != null) {
++          firstTok = matcher.group(2);
++        } else if (matcher.group(3) != null) {
++          secondTok = matcher.group(4);
++          rest = matcher.group(5);
++        } else if (matcher.group(6) != null) {
++          firstTok = matcher.group(7);
++          secondTok = matcher.group(8);
++          rest = matcher.group(9);
++        }
++
++        addIfNotEmpty(firstTok, out);
++        addIfNotEmpty(hyphen, out);
++        addIfNotEmpty(secondTok, out);
++        addIfNotEmpty(rest, out);
++        tokAdded = true;
++      }
++    }
++    if (!tokAdded) {
++      if (!original.equals(tok) && tok.length() > 1
++          && !alphanumericPattern.matcher(tok).matches()) {
++        out.addAll(processTok(tok));
++      } else {
++        out.add(tok);
++      }
+     }
+     out.addAll(suffix);
+     return out;
+   }
+ 
++  private void addIfNotEmpty(String firstTok, List<String> out) {
++    if (firstTok != null && firstTok.length() > 0) {
++      out.addAll(processTok(firstTok));
++    }
++  }
++
+   /**
+    * Parse a NER tag in Arvores Deitadas format.
+    * 
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java
+index 2a3e89c83..34b0be1ec 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADTokenSampleStreamFactory.java
+@@ -17,21 +17,12 @@
+ 
+ package opennlp.tools.formats.ad;
+ 
+-import java.io.File;
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.util.regex.Pattern;
+-
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+-import opennlp.tools.cmdline.TerminateToolException;
+ import opennlp.tools.cmdline.params.DetokenizerParameter;
+ import opennlp.tools.formats.DetokenizerSampleStreamFactory;
+ import opennlp.tools.formats.NameToTokenSampleStream;
+ import opennlp.tools.namefind.NameSample;
+-import opennlp.tools.tokenize.DetokenizationDictionary;
+-import opennlp.tools.tokenize.Detokenizer;
+-import opennlp.tools.tokenize.DictionaryDetokenizer;
+ import opennlp.tools.tokenize.TokenSample;
+ import opennlp.tools.util.ObjectStream;
+ 
+@@ -65,45 +56,4 @@ public ObjectStream<TokenSample> create(String[] args) {
+                 ADNameSampleStreamFactory.Parameters.class));
+     return new NameToTokenSampleStream(createDetokenizer(params), samples);
+   }
+-
+-  protected Detokenizer createDetokenizer(DetokenizerParameter p) {
+-    try {
+-      return new ADDictionaryDetokenizer(new DetokenizationDictionary(
+-          new FileInputStream(new File(p.getDetokenizer()))));
+-    } catch (IOException e) {
+-      throw new TerminateToolException(-1,
+-          "IO error while loading detokenizer dict: " + e.getMessage());
+-    }
+-  }
+-
+-  static class ADDictionaryDetokenizer extends DictionaryDetokenizer {
+-
+-    public ADDictionaryDetokenizer(DetokenizationDictionary dict) {
+-      super(dict);
+-    }
+-
+-    @Override
+-    public DetokenizationOperation[] detokenize(String[] tokens) {
+-      DetokenizationOperation[] operations = super.detokenize(tokens);
+-      for (int i = 0; i < tokens.length; i++) {
+-        if (operations[i].equals(DetokenizationOperation.NO_OPERATION)
+-            && isMergeToRight(tokens[i])) {
+-          operations[i] = DetokenizationOperation.MERGE_TO_RIGHT;
+-        }
+-      }
+-      return operations;
+-    }
+-
+-    private static final Pattern hyphenPattern = Pattern
+-        .compile(".*?[\\p{L}]-$");
+-
+-    private boolean isMergeToRight(String token) {
+-      if (token != null) {
+-        if (hyphenPattern.matcher(token).matches()) {
+-          return true;
+-        }
+-      }
+-      return false;
+-    }
+-  }
+ }

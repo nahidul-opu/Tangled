@@ -1,0 +1,268 @@
+From e4241930b32676966aab270ba122972ec5eb71ae Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 23 Jun 2006 09:47:00 +0000
+Subject: [PATCH] FIX: NullPointer in BasicResolver (IVY-258)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484372 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../jayasoft/ivy/resolver/BasicResolver.java  | 24 ++++++++++++++--
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 28 +++++++++++++++++++
+ .../1/org1/mod1.1/ivys/ivy-3.0.xml            |  8 ++++++
+ .../1/org1/mod1.4/ivys/ivy-1.2.xml            | 10 +++++++
+ test/repositories/IVY-258/ivy.xml             |  9 ++++++
+ test/repositories/IVY-258/ivyconf.xml         | 12 ++++++++
+ test/repositories/IVY-258/module2/ivy.xml     |  6 ++++
+ test/repositories/IVY-258/module2/module2.jar |  1 +
+ test/repositories/norev/ivy.xml               |  9 ++++++
+ test/repositories/norev/ivyconf.xml           | 12 ++++++++
+ test/repositories/norev/module2/ivy.xml       |  6 ++++
+ test/repositories/norev/module2/module2.jar   |  1 +
+ 13 files changed, 125 insertions(+), 2 deletions(-)
+ create mode 100644 test/repositories/1/org1/mod1.1/ivys/ivy-3.0.xml
+ create mode 100644 test/repositories/1/org1/mod1.4/ivys/ivy-1.2.xml
+ create mode 100644 test/repositories/IVY-258/ivy.xml
+ create mode 100644 test/repositories/IVY-258/ivyconf.xml
+ create mode 100644 test/repositories/IVY-258/module2/ivy.xml
+ create mode 100644 test/repositories/IVY-258/module2/module2.jar
+ create mode 100644 test/repositories/norev/ivy.xml
+ create mode 100644 test/repositories/norev/ivyconf.xml
+ create mode 100644 test/repositories/norev/module2/ivy.xml
+ create mode 100644 test/repositories/norev/module2/module2.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 82045ca87..d13f440e7 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -36,6 +36,7 @@ Changes:
+   - IMPROVE: prints URL before downloading in verbose mode (IVY-257)
+   - IMPROVE: incorrect value in status attribute causes silent failure (IVY-259)
+ 
++  - FIX: NullPointer in BasicResolver (IVY-258)
+   - FIX: Bad diagnostics message when no space left (IVY-250)
+   - FIX: Parent version is expected to be equal to the module version in POM (IVY-241)
+   - FIX: problem with cache and returnFirst (IVY-207)
+diff --git a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+index 84cca842f..6a573bf43 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+@@ -219,7 +219,8 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                     checkDescriptorConsistency(systemDd.getDependencyRevisionId(), systemMd, ivyRef);
+                 } else {
+                     if (md instanceof DefaultModuleDescriptor) {
+-                        ((DefaultModuleDescriptor)md).setModuleRevisionId(ModuleRevisionId.newInstance(mrid.getOrganisation(), mrid.getName(), ivyRef.getRevision(), mrid.getExtraAttributes()));
++                        String revision = getRevision(ivyRef, mrid, md);
++                        ((DefaultModuleDescriptor)md).setModuleRevisionId(ModuleRevisionId.newInstance(mrid.getOrganisation(), mrid.getName(), revision, mrid.getExtraAttributes()));
+                     } else {
+                         Message.warn("consistency disabled with instance of non DefaultModuleDescriptor... module info can't be updated, so consistency check will be done");
+                         checkDescriptorConsistency(mrid, md, ivyRef);
+@@ -239,7 +240,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+             resolvedMrid = md.getResolvedModuleRevisionId();
+             if (resolvedMrid.getRevision() == null || resolvedMrid.getRevision().length() == 0) {
+                 if (ivyRef.getRevision() == null || ivyRef.getRevision().length() == 0) {
+-                    resolvedMrid = new ModuleRevisionId(resolvedMrid.getModuleId(), (_envDependent?"##":"")+DATE_FORMAT.format(data.getDate())+"@"+_workspaceName);
++                    resolvedMrid = new ModuleRevisionId(resolvedMrid.getModuleId(), "working@"+getName());
+                 } else {
+                     resolvedMrid = new ModuleRevisionId(resolvedMrid.getModuleId(), ivyRef.getRevision());
+                 }
+@@ -302,6 +303,25 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+         data.getIvy().saveArtResolver(data.getCache(), systemMd, getName());
+         return new DefaultModuleRevision(this, this, systemMd, searched, downloaded, cachedIvyURL);
+     }
++
++    private String getRevision(ResolvedResource ivyRef, ModuleRevisionId askedMrid, ModuleDescriptor md) throws ParseException {
++        String revision = ivyRef.getRevision();
++        if (revision == null) {
++            Message.debug("no revision found in reference for "+askedMrid);
++            if (getIvy().getVersionMatcher().isDynamic(askedMrid)) {
++                if (md.getModuleRevisionId().getRevision() == null) {
++                    return "working@"+getName();
++                } else {
++                    Message.debug("using  "+askedMrid);
++                    revision = md.getModuleRevisionId().getRevision();
++                }
++            } else {
++                Message.debug("using  "+askedMrid);
++                revision = askedMrid.getRevision();
++            }
++        }
++        return revision;
++    }
+     
+     public ResolvedModuleRevision parse(
+     		ResolvedResource ivyRef, 
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index ad02d4d0b..f79313c77 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -160,6 +160,34 @@ public void testResolveBadStatus() throws Exception {
+         assertTrue(report.hasError());
+     }
+ 
++    public void testResolveNoRevisionInPattern() throws Exception {
++        // module1 depends on latest version of module2, for which there is no revision in the pattern
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/norev/ivyconf.xml").toURL());
++        ResolveReport report = ivy.resolve(new File("test/repositories/norev/ivy.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        assertFalse(report.hasError());
++    }
++
++    public void testResolveNoRevisionInDep() throws Exception {
++        // mod1.4 depends on mod1.1, in which the ivy file has no revision
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org1/mod1.4/ivys/ivy-1.2.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        assertTrue(report.hasError());
++    }
++
++    public void testResolveNoRevisionNowhere() throws Exception {
++        // test case for IVY-258
++        // module1 depends on latest version of module2, which contains no revision in its ivy file, nor in the pattern
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/IVY-258/ivyconf.xml").toURL());
++        ResolveReport report = ivy.resolve(new File("test/repositories/IVY-258/ivy.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertFalse(report.hasError());
++    }
++
+     public void testResolveRequiresIvyFile() throws Exception {
+         // mod1.1 depends on mod1.2, mod1.2 has no ivy file
+         Ivy ivy = new Ivy();
+diff --git a/test/repositories/1/org1/mod1.1/ivys/ivy-3.0.xml b/test/repositories/1/org1/mod1.1/ivys/ivy-3.0.xml
+new file mode 100644
+index 000000000..c694c4338
+--- /dev/null
++++ b/test/repositories/1/org1/mod1.1/ivys/ivy-3.0.xml
+@@ -0,0 +1,8 @@
++<ivy-module version="1.0">
++	<info organisation="org1"
++	       module="mod1.1"
++	/> 
++	<dependencies>
++		<dependency name="mod1.2" rev="2.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org1/mod1.4/ivys/ivy-1.2.xml b/test/repositories/1/org1/mod1.4/ivys/ivy-1.2.xml
+new file mode 100644
+index 000000000..eef8b919e
+--- /dev/null
++++ b/test/repositories/1/org1/mod1.4/ivys/ivy-1.2.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0"> 
++	<info organisation="org1"
++	       module="mod1.4"
++	       revision="1.2"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency name="mod1.1" rev="3.0"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-258/ivy.xml b/test/repositories/IVY-258/ivy.xml
+new file mode 100644
+index 000000000..63a13302d
+--- /dev/null
++++ b/test/repositories/IVY-258/ivy.xml
+@@ -0,0 +1,9 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module1"/>
++    <configurations>
++    	<conf name="myconf"/>
++    </configurations>
++    <dependencies>
++        <dependency conf="myconf -> *" org="myorg" name="module2" rev="latest.integration" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-258/ivyconf.xml b/test/repositories/IVY-258/ivyconf.xml
+new file mode 100644
+index 000000000..84e076e29
+--- /dev/null
++++ b/test/repositories/IVY-258/ivyconf.xml
+@@ -0,0 +1,12 @@
++<ivyconf>
++    <conf defaultResolver="myresolver"/>
++    <resolvers>
++			<url name="myresolver">
++				<ivy pattern="${ivy.conf.dir}/[module]/ivy.xml" />
++				<artifact pattern="${ivy.conf.dir}/[module]/[artifact].[ext]" />
++			</url>
++    </resolvers>
++    <modules>
++        <module organisation="myorg" name=".*" resolver="myresolver" />
++    </modules>
++</ivyconf>
+diff --git a/test/repositories/IVY-258/module2/ivy.xml b/test/repositories/IVY-258/module2/ivy.xml
+new file mode 100644
+index 000000000..134ac36fe
+--- /dev/null
++++ b/test/repositories/IVY-258/module2/ivy.xml
+@@ -0,0 +1,6 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module2"/>
++    <configurations>
++    	<conf name="myconf"/>
++    </configurations>
++</ivy-module>
+diff --git a/test/repositories/IVY-258/module2/module2.jar b/test/repositories/IVY-258/module2/module2.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-258/module2/module2.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/norev/ivy.xml b/test/repositories/norev/ivy.xml
+new file mode 100644
+index 000000000..63a13302d
+--- /dev/null
++++ b/test/repositories/norev/ivy.xml
+@@ -0,0 +1,9 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module1"/>
++    <configurations>
++    	<conf name="myconf"/>
++    </configurations>
++    <dependencies>
++        <dependency conf="myconf -> *" org="myorg" name="module2" rev="latest.integration" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/norev/ivyconf.xml b/test/repositories/norev/ivyconf.xml
+new file mode 100644
+index 000000000..84e076e29
+--- /dev/null
++++ b/test/repositories/norev/ivyconf.xml
+@@ -0,0 +1,12 @@
++<ivyconf>
++    <conf defaultResolver="myresolver"/>
++    <resolvers>
++			<url name="myresolver">
++				<ivy pattern="${ivy.conf.dir}/[module]/ivy.xml" />
++				<artifact pattern="${ivy.conf.dir}/[module]/[artifact].[ext]" />
++			</url>
++    </resolvers>
++    <modules>
++        <module organisation="myorg" name=".*" resolver="myresolver" />
++    </modules>
++</ivyconf>
+diff --git a/test/repositories/norev/module2/ivy.xml b/test/repositories/norev/module2/ivy.xml
+new file mode 100644
+index 000000000..2cd3db697
+--- /dev/null
++++ b/test/repositories/norev/module2/ivy.xml
+@@ -0,0 +1,6 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="module2" revision="2.0"/>
++    <configurations>
++    	<conf name="myconf"/>
++    </configurations>
++</ivy-module>
+diff --git a/test/repositories/norev/module2/module2.jar b/test/repositories/norev/module2/module2.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/norev/module2/module2.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file

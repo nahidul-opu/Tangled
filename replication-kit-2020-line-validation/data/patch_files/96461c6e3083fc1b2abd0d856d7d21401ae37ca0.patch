@@ -1,0 +1,432 @@
+From 96461c6e3083fc1b2abd0d856d7d21401ae37ca0 Mon Sep 17 00:00:00 2001
+From:  <dev-null@apache.org>
+Date: Thu, 29 Nov 2007 01:13:06 +0000
+Subject: [PATCH] Fixed [JSPWIKI-82]. We were failing to properly close JDBC
+ connections in JDBCUserManager and JDBCGroupManager. Credit: Ounce Labs.
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/jspwiki/trunk@626887 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../auth/authorize/JDBCGroupDatabase.java     | 61 +++++++++++++------
+ .../jspwiki/auth/user/JDBCUserDatabase.java   | 59 ++++++++++++------
+ 2 files changed, 83 insertions(+), 37 deletions(-)
+
+diff --git a/src/com/ecyrd/jspwiki/auth/authorize/JDBCGroupDatabase.java b/src/com/ecyrd/jspwiki/auth/authorize/JDBCGroupDatabase.java
+index 5e690bbff6..bc36d78a69 100644
+--- a/src/com/ecyrd/jspwiki/auth/authorize/JDBCGroupDatabase.java
++++ b/src/com/ecyrd/jspwiki/auth/authorize/JDBCGroupDatabase.java
+@@ -215,10 +215,11 @@ public void delete( Group group ) throws WikiSecurityException
+         }
+ 
+         String groupName = group.getName();
++        Connection conn = null;
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             if ( m_supportsCommits )
+             {
+                 conn.setAutoCommit( false );
+@@ -239,12 +240,15 @@ public void delete( Group group ) throws WikiSecurityException
+             {
+                 conn.commit();
+             }
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new WikiSecurityException( "Could not delete group " + groupName + ": " + e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+     }
+ 
+     /**
+@@ -259,10 +263,11 @@ public void delete( Group group ) throws WikiSecurityException
+     public Group[] groups() throws WikiSecurityException
+     {
+         Set groups = new HashSet();
++        Connection conn = null;
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+ 
+             PreparedStatement ps = conn.prepareStatement( m_findAll );
+             ResultSet rs = ps.executeQuery();
+@@ -285,14 +290,15 @@ public Group[] groups() throws WikiSecurityException
+                 }
+             }
+             ps.close();
+-
+-            // Close connection
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new WikiSecurityException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+ 
+         return (Group[])groups.toArray( new Group[groups.size()] );
+     }
+@@ -316,11 +322,12 @@ public void save( Group group, Principal modifier ) throws WikiSecurityException
+         }
+ 
+         boolean exists = exists( group );
++        Connection conn = null;
+ 
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             if ( m_supportsCommits )
+             {
+                 conn.setAutoCommit( false );
+@@ -384,12 +391,15 @@ public void save( Group group, Principal modifier ) throws WikiSecurityException
+             {
+                 conn.commit();
+             }
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new WikiSecurityException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+     }
+ 
+     /**
+@@ -453,25 +463,29 @@ public void initialize( WikiEngine engine, Properties props ) throws NoRequiredP
+         }
+ 
+         // Test connection by doing a quickie select
++        Connection conn = null;
+         try
+         {
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement( m_findAll );
+             ps.executeQuery();
+             ps.close();
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             log.error( "JDBCGroupDatabase initialization error: " + e.getMessage() );
+             throw new NoRequiredPropertyException( PROP_GROUPDB_DATASOURCE, "JDBCGroupDatabase initialization error: " + e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+         log.info( "JDBCGroupDatabase initialized from JNDI DataSource: " + jndiName );
+ 
+         // Determine if the datasource supports commits
+         try
+         {
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             DatabaseMetaData dmd = conn.getMetaData();
+             if ( dmd.supportsTransactions() )
+             {
+@@ -479,13 +493,16 @@ public void initialize( WikiEngine engine, Properties props ) throws NoRequiredP
+                 conn.setAutoCommit( false );
+                 log.info("JDBCGroupDatabase supports transactions. Good; we will use them." );
+             }
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             log.warn("JDBCGroupDatabase warning: user database doesn't seem to support transactions. Reason: " + e.getMessage() );
+             throw new NoRequiredPropertyException( PROP_GROUPDB_DATASOURCE, "JDBCGroupDatabase initialization error: " + e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+     }
+ 
+     /**
+@@ -519,10 +536,11 @@ private Group findGroup( String index ) throws NoSuchPrincipalException
+         Group group = null;
+         boolean found = false;
+         boolean unique = true;
++        Connection conn = null;
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+ 
+             PreparedStatement ps = conn.prepareStatement( m_findGroup );
+             ps.setString( 1, index );
+@@ -543,14 +561,15 @@ private Group findGroup( String index ) throws NoSuchPrincipalException
+                 found = true;
+             }
+             ps.close();
+-
+-            // Close connection
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new NoSuchPrincipalException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+ 
+         if ( !found )
+         {
+@@ -570,10 +589,11 @@ private Group findGroup( String index ) throws NoSuchPrincipalException
+      */
+     private Group populateGroup( Group group )
+     {
++        Connection conn = null;
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+ 
+             PreparedStatement ps = conn.prepareStatement( m_findMembers );
+             ps.setString( 1, group.getName() );
+@@ -588,14 +608,15 @@ private Group populateGroup( Group group )
+                 }
+             }
+             ps.close();
+-            
+-            // Close connection
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             // I guess that means there aren't any principals...
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+         return group;
+     }
+ 
+diff --git a/src/com/ecyrd/jspwiki/auth/user/JDBCUserDatabase.java b/src/com/ecyrd/jspwiki/auth/user/JDBCUserDatabase.java
+index abddbb45b7..11885dae61 100644
+--- a/src/com/ecyrd/jspwiki/auth/user/JDBCUserDatabase.java
++++ b/src/com/ecyrd/jspwiki/auth/user/JDBCUserDatabase.java
+@@ -245,11 +245,12 @@ public void deleteByLoginName( String loginName ) throws NoSuchPrincipalExceptio
+     {
+         // Get the existing user; if not found, throws NoSuchPrincipalException
+         findByLoginName( loginName );
+-
++        Connection conn = null;
++        
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             if ( m_supportsCommits )
+             {
+                 conn.setAutoCommit( false );
+@@ -273,12 +274,15 @@ public void deleteByLoginName( String loginName ) throws NoSuchPrincipalExceptio
+             {
+                 conn.commit();
+             }
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new WikiSecurityException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+     }
+ 
+     /**
+@@ -323,9 +327,10 @@ public UserProfile findByWikiName( String index ) throws NoSuchPrincipalExceptio
+     public Principal[] getWikiNames() throws WikiSecurityException
+     {
+         Set principals = new HashSet();
++        Connection conn = null;
+         try
+         {
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement( m_findAll );
+             ResultSet rs = ps.executeQuery();
+             while ( rs.next() )
+@@ -342,12 +347,15 @@ public Principal[] getWikiNames() throws WikiSecurityException
+                 }
+             }
+             ps.close();
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new WikiSecurityException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+ 
+         return (Principal[])principals.toArray( new Principal[principals.size()] );
+     }
+@@ -431,25 +439,29 @@ public void initialize( WikiEngine engine, Properties props ) throws NoRequiredP
+         }
+ 
+         // Test connection by doing a quickie select
++        Connection conn = null;
+         try
+         {
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             PreparedStatement ps = conn.prepareStatement( m_findAll );
+             ps.executeQuery();
+             ps.close();
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             log.error( "JDBCUserDatabase initialization error: " + e.getMessage() );
+             throw new NoRequiredPropertyException( PROP_DB_DATASOURCE, "JDBCUserDatabase initialization error: " + e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+         log.info( "JDBCUserDatabase initialized from JNDI DataSource: " + jndiName );
+ 
+         // Determine if the datasource supports commits
+         try
+         {
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             DatabaseMetaData dmd = conn.getMetaData();
+             if ( dmd.supportsTransactions() )
+             {
+@@ -457,13 +469,16 @@ public void initialize( WikiEngine engine, Properties props ) throws NoRequiredP
+                 conn.setAutoCommit( false );
+                 log.info("JDBCUserDatabase supports transactions. Good; we will use them." );
+             }
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             log.warn("JDBCUserDatabase warning: user database doesn't seem to support transactions. Reason: " + e.getMessage() );
+             throw new NoRequiredPropertyException( PROP_DB_DATASOURCE, "JDBCUserDatabase initialization error: " + e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+     }
+ 
+     /**
+@@ -500,10 +515,11 @@ public void rename(String loginName, String newName)
+             // Good! That means it's safe to save using the new name
+         }
+ 
++        Connection conn = null;
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             if ( m_supportsCommits )
+             {
+                 conn.setAutoCommit( false );
+@@ -536,12 +552,15 @@ public void rename(String loginName, String newName)
+             {
+                 conn.commit();
+             }
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new WikiSecurityException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+     }
+ 
+     /**
+@@ -581,10 +600,11 @@ public void save( UserProfile profile ) throws WikiSecurityException
+             password =  m_hashPrefix ? SHA_PREFIX + getHash( password ) : getHash( password );
+         }
+ 
++        Connection conn = null;
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             if ( m_supportsCommits )
+             {
+                 conn.setAutoCommit( false );
+@@ -652,12 +672,15 @@ public void save( UserProfile profile ) throws WikiSecurityException
+             {
+                 conn.commit();
+             }
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new WikiSecurityException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+     }
+ 
+     /**
+@@ -671,10 +694,11 @@ private UserProfile findByPreparedStatement( String sql, String index ) throws N
+         UserProfile profile = null;
+         boolean found = false;
+         boolean unique = true;
++        Connection conn = null;
+         try
+         {
+             // Open the database connection
+-            Connection conn = m_ds.getConnection();
++            conn = m_ds.getConnection();
+             if ( m_supportsCommits )
+             {
+                 conn.setAutoCommit( false );
+@@ -700,14 +724,15 @@ private UserProfile findByPreparedStatement( String sql, String index ) throws N
+                 found = true;
+             }
+             ps.close();
+-
+-            // Close connection
+-            conn.close();
+         }
+         catch ( SQLException e )
+         {
+             throw new NoSuchPrincipalException( e.getMessage() );
+         }
++        finally
++        {
++            try { conn.close(); } catch (Exception e) {}
++        }
+ 
+         if ( !found )
+         {

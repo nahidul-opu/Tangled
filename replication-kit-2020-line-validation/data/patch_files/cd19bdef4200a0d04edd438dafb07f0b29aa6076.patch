@@ -1,0 +1,79 @@
+From cd19bdef4200a0d04edd438dafb07f0b29aa6076 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 1 Oct 2008 21:21:11 +0000
+Subject: [PATCH] FIX: HttpClientHandler hanging in certain cases (IVY-930)
+ (thanks to Scott Hebert)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@700932 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 ++
+ .../ivy/util/url/HttpClientHandler.java       | 21 ++++++++++++-------
+ 2 files changed, 15 insertions(+), 8 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 06b8bd085..5e139a31f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -34,6 +34,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Tobias Himstedt
+ 	Ben Hale
+ 	Peter Hayes
++	Scott Hebert
+ 	Matt Inger
+ 	Anders Janmyr
+ 	Christer Jonsson
+@@ -96,6 +97,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: StackOverflow when using ivy:settings with "ivy.instance" as id (IVY-924)
+ - FIX: Maven Pom reader doesn't handle optional dependencies correctly in some instances (IVY-926) (thanks to Phil Messenger)
+ - FIX: ivy:settings doesn't work if id is a property (IVY-925)
++- FIX: HttpClientHandler hanging in certain cases (IVY-930) (thanks to Scott Hebert)
+ 
+    2.0.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index 305eb0820..32e731fde 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -94,6 +94,7 @@ private void configureProxy() {
+     public InputStream openStream(URL url) throws IOException {
+         GetMethod get = doGet(url, 0);
+         if (!checkStatusCode(url, get)) {
++            get.releaseConnection();
+             throw new IOException(
+                     "The HTTP response code for " + url + " did not indicate a success."
+                             + " See log for more detail.");
+@@ -103,15 +104,18 @@ public InputStream openStream(URL url) throws IOException {
+ 
+     public void download(URL src, File dest, CopyProgressListener l) throws IOException {
+         GetMethod get = doGet(src, 0);
+-        // We can only figure the content we got is want we want if the status is success.
+-        if (!checkStatusCode(src, get)) {
+-            throw new IOException(
+-                    "The HTTP response code for " + src + " did not indicate a success."
+-                            + " See log for more detail.");
++        try {
++            // We can only figure the content we got is want we want if the status is success.
++            if (!checkStatusCode(src, get)) {
++                throw new IOException(
++                        "The HTTP response code for " + src + " did not indicate a success."
++                                + " See log for more detail.");
++            }
++            FileUtil.copy(get.getResponseBodyAsStream(), dest, l);
++            dest.setLastModified(getLastModified(get));
++        } finally {
++            get.releaseConnection();
+         }
+-        FileUtil.copy(get.getResponseBodyAsStream(), dest, l);
+-        dest.setLastModified(getLastModified(get));
+-        get.releaseConnection();
+     }
+ 
+     public void upload(File src, URL dest, CopyProgressListener l) throws IOException {
+@@ -133,6 +137,7 @@ public void upload(File src, URL dest, CopyProgressListener l) throws IOExceptio
+                     /* ignored */
+                 }
+             }
++            put.releaseConnection();
+         }
+     }
+ 

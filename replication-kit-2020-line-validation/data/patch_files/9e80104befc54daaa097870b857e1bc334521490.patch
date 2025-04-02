@@ -1,0 +1,107 @@
+From 9e80104befc54daaa097870b857e1bc334521490 Mon Sep 17 00:00:00 2001
+From: Jens Reimann <jreimann@redhat.com>
+Date: Mon, 9 Jul 2018 11:41:43 +0200
+Subject: [PATCH] Fix reading of multibyte name entries
+
+This fixes COMPRESS-459 by using the name number of bytes from the field
+in the stream instead of relying on the assumption that each character
+is exactly one byte, which isn't true for UTF-8, UTF-16 or other
+multi-byte character encodings.
+---
+ .../archivers/cpio/CpioArchiveEntry.java       |  17 ++++++++++++++++-
+ .../archivers/cpio/CpioArchiveInputStream.java |   4 ++--
+ .../cpio/CpioArchiveInputStreamTest.java       |  16 ++++++++++++++++
+ src/test/resources/COMPRESS-459.cpio           | Bin 0 -> 512 bytes
+ 4 files changed, 34 insertions(+), 3 deletions(-)
+ create mode 100644 src/test/resources/COMPRESS-459.cpio
+
+diff --git a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveEntry.java b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveEntry.java
+index 28e58238cc4..3ad7c87da80 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveEntry.java
++++ b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveEntry.java
+@@ -469,10 +469,25 @@ public int getAlignmentBoundary() {
+      * @return the number of bytes needed to pad the header (0,1,2,3)
+      */
+     public int getHeaderPadCount(){
++        long namesize = name != null ? name.length() : 0;
++        return getHeaderPadCount(namesize);
++    }
++
++    /**
++     * Get the number of bytes needed to pad the header to the alignment boundary.
++     *
++     * @param namesize
++     *            The length of the name in bytes, as read in the stream.
++     *            Without the trailing zero byte.
++     * @return the number of bytes needed to pad the header (0,1,2,3)
++     * 
++     * @since 1.18
++     */
++    public int getHeaderPadCount(long namesize){
+         if (this.alignmentBoundary == 0) { return 0; }
+         int size = this.headerSize + 1;  // Name has terminating null
+         if (name != null) {
+-            size += name.length();
++            size += namesize;
+         }
+         final int remain = size % this.alignmentBoundary;
+         if (remain > 0){
+diff --git a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStream.java b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStream.java
+index ad8e125a9b2..b64d0910457 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStream.java
+@@ -393,7 +393,7 @@ private CpioArchiveEntry readNewEntry(final boolean hasCrc)
+                                   + ArchiveUtils.sanitize(name)
+                                   + " Occured at byte: " + getBytesRead());
+         }
+-        skip(ret.getHeaderPadCount());
++        skip(ret.getHeaderPadCount(namesize-1));
+ 
+         return ret;
+     }
+@@ -449,7 +449,7 @@ private CpioArchiveEntry readOldBinaryEntry(final boolean swapHalfWord)
+                                   + ArchiveUtils.sanitize(name)
+                                   + "Occured at byte: " + getBytesRead());
+         }
+-        skip(ret.getHeaderPadCount());
++        skip(ret.getHeaderPadCount(namesize-1));
+ 
+         return ret;
+     }
+diff --git a/src/test/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStreamTest.java b/src/test/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStreamTest.java
+index f1744053cb1..762d4648e21 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStreamTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/cpio/CpioArchiveInputStreamTest.java
+@@ -65,4 +65,20 @@ public void testCpioUnarchiveCreatedByRedlineRpm() throws Exception {
+ 
+         assertEquals(count, 1);
+     }
++
++    @Test
++    public void testCpioUnarchiveMultibyteCharName() throws Exception {
++        final CpioArchiveInputStream in =
++            new CpioArchiveInputStream(new FileInputStream(getFile("COMPRESS-459.cpio")), "UTF-8");
++        CpioArchiveEntry entry= null;
++
++        int count = 0;
++        while ((entry = (CpioArchiveEntry) in.getNextEntry()) != null) {
++            count++;
++            assertNotNull(entry);
++        }
++        in.close();
++
++        assertEquals(2, count);
++    }
+ }
+diff --git a/src/test/resources/COMPRESS-459.cpio b/src/test/resources/COMPRESS-459.cpio
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ae1662a0be2e9c8ed26a71b7be372bb684b6916
+GIT binary patch
+literal 512
+zcmXpoH!wFaG%&C*wlH%tG5`V#Lnjj;W$5T?VvIzCqzp}+OpJ{zES*6d1aNbKvcdWh
+z;xLw>1&rnF?;8;08XT-^Vrr>>c-!G6hxh1}RFp6<FaTWvb%%?E5zsvb1}27JbFsO@
+sh&*=~z}#to><)z8FjwNG!EVE=0=uLWOgJRS(bLB@NKsJ{=<NXq0EysFh5!Hn
+
+literal 0
+HcmV?d00001
+

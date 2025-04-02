@@ -1,0 +1,112 @@
+From b34b8f3bb67d3c27b39219eecb2dc9bb8c442f3f Mon Sep 17 00:00:00 2001
+From: Avery Ching <aching@apache.org>
+Date: Tue, 25 Sep 2012 19:46:09 +0000
+Subject: [PATCH] GIRAPH-274: Jobs still failing due to tasks timeout during
+ INPUT_SUPERSTEP. (nitayj via aching)
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1390102 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                                   | 3 +++
+ .../org/apache/giraph/comm/netty/NettyWorkerServer.java     | 2 ++
+ src/main/java/org/apache/giraph/graph/BspServiceWorker.java | 6 ++++++
+ .../java/org/apache/giraph/graph/partition/Partition.java   | 5 +++--
+ 4 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 9024e777a..ac4d9b7ea 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -2,6 +2,9 @@ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
+ 
++  GIRAPH-274: Jobs still failing due to tasks timeout during
++  INPUT_SUPERSTEP. (nitayj via aching)
++
+   GIRAPH-337: Make a specific Giraph configuration for Class caching
+   and specific Giraph configuration. (aching)
+ 
+diff --git a/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java b/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
+index 9f2c4be63..001740181 100644
+--- a/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
++++ b/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
+@@ -161,6 +161,8 @@ public void prepareSuperstep() {
+           vertexIndex, originalVertex, mutations,
+           serverData.getCurrentMessageStore().
+               hasMessagesForVertex(vertexIndex));
++      service.getGraphMapper().getGraphState().getContext().progress();
++
+       if (LOG.isDebugEnabled()) {
+         LOG.debug("prepareSuperstep: Resolved vertex index " +
+             vertexIndex + " with original vertex " +
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+index 4ee96c737..e676b88bf 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+@@ -286,6 +286,7 @@ private String reserveInputSplit()
+         transferRegulator = null; // don't need this anymore
+         return null;
+       }
++      getContext().progress();
+       // Wait for either a reservation to go away or a notification that
+       // an InputSplit has finished.
+       context.progress();
+@@ -463,6 +464,7 @@ private VertexEdgeCount readVerticesFromInputSplit(
+       if (readerVertex.getValue() == null) {
+         readerVertex.setValue(getConfiguration().createVertexValue());
+       }
++      readerVertex.setGraphState(getGraphMapper().getGraphState());
+       PartitionOwner partitionOwner =
+           workerGraphPartitioner.getPartitionOwner(
+               readerVertex.getId());
+@@ -1111,8 +1113,10 @@ private void saveVertices() throws IOException, InterruptedException {
+     for (Partition<I, V, E, M> partition :
+         getPartitionStore().getPartitions()) {
+       for (Vertex<I, V, E, M> vertex : partition.getVertices()) {
++        getContext().progress();
+         vertexWriter.writeVertex(vertex);
+       }
++      getContext().progress();
+     }
+     vertexWriter.close(getContext());
+   }
+@@ -1230,6 +1234,7 @@ public void storeCheckpoint() throws IOException {
+             (verticesOutputStream.getPos() - startPos) +
+             ", partition = " + partition.toString());
+       }
++      getContext().progress();
+     }
+     // Metadata is buffered and written at the end since it's small and
+     // needs to know how many partitions this worker owns
+@@ -1342,6 +1347,7 @@ public void loadCheckpoint(long superstep) {
+                     partitionOwner);
+           }
+           getPartitionStore().addPartition(partition);
++          getContext().progress();
+           ++loadedPartitions;
+         } catch (IOException e) {
+           throw new RuntimeException(
+diff --git a/src/main/java/org/apache/giraph/graph/partition/Partition.java b/src/main/java/org/apache/giraph/graph/partition/Partition.java
+index 031c55058..e24bc0597 100644
+--- a/src/main/java/org/apache/giraph/graph/partition/Partition.java
++++ b/src/main/java/org/apache/giraph/graph/partition/Partition.java
+@@ -154,9 +154,9 @@ public void readFields(DataInput input) throws IOException {
+     int vertices = input.readInt();
+     for (int i = 0; i < vertices; ++i) {
+       Vertex<I, V, E, M> vertex = conf.createVertex();
++      vertex.getContext().progress();
+       vertex.readFields(input);
+-      if (vertexMap.put(vertex.getId(),
+-          (Vertex<I, V, E, M>) vertex) != null) {
++      if (vertexMap.put(vertex.getId(), vertex) != null) {
+         throw new IllegalStateException(
+             "readFields: " + this +
+             " already has same id " + vertex);
+@@ -168,6 +168,7 @@ public void readFields(DataInput input) throws IOException {
+   public void write(DataOutput output) throws IOException {
+     output.writeInt(vertexMap.size());
+     for (Vertex vertex : vertexMap.values()) {
++      vertex.getContext().progress();
+       vertex.write(output);
+     }
+   }

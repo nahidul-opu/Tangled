@@ -1,0 +1,788 @@
+From 8a34f4d46518b3d14d8de7d2e4b8555d3c972866 Mon Sep 17 00:00:00 2001
+From: Sean Joseph Mullan <mullan@apache.org>
+Date: Wed, 7 May 2014 12:10:17 +0000
+Subject: [PATCH] Fixed SANTUARIO-379: Signing XML with SHA1 with DSA throws
+ exception when key is larger than 1024 Also added support for dsa-sha256
+ Signature Algorithm.
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/branches/1.5.x-fixes@1592986 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../dsig/internal/dom/DOMSignatureMethod.java | 128 +++++-------------
+ .../internal/dom/DOMXMLSignatureFactory.java  |   2 +
+ .../xml/security/algorithms/JCEMapper.java    |   4 +
+ .../algorithms/SignatureAlgorithm.java        |   7 +-
+ .../implementations/SignatureDSA.java         | 127 ++++-------------
+ .../xml/security/signature/XMLSignature.java  |   4 +
+ .../apache/xml/security/utils/JavaUtils.java  |  94 +++++++++++++
+ .../test/dsig/CreateInteropXMLDSig11Test.java |   2 +-
+ .../javax/xml/crypto/test/dsig/TestUtils.java |  74 ++++++++--
+ .../crypto/test/dsig/XMLSignatureTest.java    |  39 +++++-
+ 10 files changed, 261 insertions(+), 220 deletions(-)
+
+diff --git a/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMSignatureMethod.java b/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMSignatureMethod.java
+index 545fe4bb61..639eff4693 100644
+--- a/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMSignatureMethod.java
++++ b/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMSignatureMethod.java
+@@ -30,10 +30,12 @@
+ 
+ import java.io.IOException;
+ import java.security.*;
++import java.security.interfaces.DSAKey;
+ import java.security.spec.AlgorithmParameterSpec;
+ import org.w3c.dom.Element;
+ 
+ import org.apache.xml.security.algorithms.implementations.SignatureECDSA;
++import org.apache.xml.security.utils.JavaUtils;
+ import org.apache.jcp.xml.dsig.internal.SignerOutputStream;
+ 
+ /**
+@@ -64,6 +66,8 @@ public abstract class DOMSignatureMethod extends AbstractDOMSignatureMethod {
+         "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384";
+     static final String ECDSA_SHA512 =
+         "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512";
++    static final String DSA_SHA256 =
++        "http://www.w3.org/2009/xmldsig11#dsa-sha256";
+ 
+     /**
+      * Creates a <code>DOMSignatureMethod</code>.
+@@ -115,6 +119,8 @@ static SignatureMethod unmarshal(Element smElem) throws MarshalException {
+             return new SHA512withRSA(smElem);
+         } else if (alg.equals(SignatureMethod.DSA_SHA1)) {
+             return new SHA1withDSA(smElem);
++        } else if (alg.equals(DSA_SHA256)) {
++            return new SHA256withDSA(smElem);
+         } else if (alg.equals(ECDSA_SHA1)) {
+             return new SHA1withECDSA(smElem);
+         } else if (alg.equals(ECDSA_SHA256)) {
+@@ -174,7 +180,9 @@ boolean verify(Key key, SignedInfo si, byte[] sig,
+         try {
+             Type type = getAlgorithmType();
+             if (type == Type.DSA) {
+-                return signature.verify(convertXMLDSIGtoASN1(sig));
++                int size = ((DSAKey)key).getParams().getQ().bitLength();
++                return signature.verify(JavaUtils.convertDsaXMLDSIGtoASN1(sig,
++                                                                       size/8));
+             } else if (type == Type.ECDSA) {
+                 return signature.verify(SignatureECDSA.convertXMLDSIGtoASN1(sig));
+             } else {
+@@ -218,7 +226,9 @@ byte[] sign(Key key, SignedInfo si, XMLSignContext context)
+         try {
+             Type type = getAlgorithmType();
+             if (type == Type.DSA) {
+-                return convertASN1toXMLDSIG(signature.sign());
++                int size = ((DSAKey)key).getParams().getQ().bitLength();
++                return JavaUtils.convertDsaASN1toXMLDSIG(signature.sign(),
++                                                         size/8);
+             } else if (type == Type.ECDSA) {
+                 return SignatureECDSA.convertASN1toXMLDSIG(signature.sign());
+             } else {
+@@ -231,101 +241,6 @@ byte[] sign(Key key, SignedInfo si, XMLSignContext context)
+         }
+     }
+ 
+-    /**
+-     * Converts an ASN.1 DSA value to a XML Signature DSA Value.
+-     *
+-     * The JAVA JCE DSA Signature algorithm creates ASN.1 encoded (r,s) value
+-     * pairs; the XML Signature requires the core BigInteger values.
+-     *
+-     * @param asn1Bytes
+-     *
+-     * @throws IOException
+-     * @see <A HREF="http://www.w3.org/TR/xmldsig-core/#dsa-sha1">6.4.1 DSA</A>
+-     */
+-    private static byte[] convertASN1toXMLDSIG(byte asn1Bytes[])
+-        throws IOException
+-    {
+-        byte rLength = asn1Bytes[3];
+-        int i;
+-
+-        for (i = rLength; (i > 0) && (asn1Bytes[(4 + rLength) - i] == 0); i--);
+-
+-        byte sLength = asn1Bytes[5 + rLength];
+-        int j;
+-
+-        for (j = sLength;
+-            (j > 0) && (asn1Bytes[(6 + rLength + sLength) - j] == 0); j--);
+-
+-        if ((asn1Bytes[0] != 48) || (asn1Bytes[1] != asn1Bytes.length - 2)
+-            || (asn1Bytes[2] != 2) || (i > 20)
+-            || (asn1Bytes[4 + rLength] != 2) || (j > 20)) {
+-            throw new IOException("Invalid ASN.1 format of DSA signature");
+-        } else {
+-            byte xmldsigBytes[] = new byte[40];
+-
+-            System.arraycopy(asn1Bytes, (4+rLength)-i, xmldsigBytes, 20-i, i);
+-            System.arraycopy(asn1Bytes, (6+rLength+sLength)-j, xmldsigBytes,
+-                             40 - j, j);
+-
+-            return xmldsigBytes;
+-        }
+-    }
+-
+-    /**
+-     * Converts a XML Signature DSA Value to an ASN.1 DSA value.
+-     *
+-     * The JAVA JCE DSA Signature algorithm creates ASN.1 encoded (r,s) value
+-     * pairs; the XML Signature requires the core BigInteger values.
+-     *
+-     * @param xmldsigBytes
+-     *
+-     * @throws IOException
+-     * @see <A HREF="http://www.w3.org/TR/xmldsig-core/#dsa-sha1">6.4.1 DSA</A>
+-     */
+-    private static byte[] convertXMLDSIGtoASN1(byte xmldsigBytes[])
+-        throws IOException
+-    {
+-        if (xmldsigBytes.length != 40) {
+-            throw new IOException("Invalid XMLDSIG format of DSA signature");
+-        }
+-
+-        int i;
+-
+-        for (i = 20; (i > 0) && (xmldsigBytes[20 - i] == 0); i--);
+-
+-        int j = i;
+-
+-        if (xmldsigBytes[20 - i] < 0) {
+-            j += 1;
+-        }
+-
+-        int k;
+-
+-        for (k = 20; (k > 0) && (xmldsigBytes[40 - k] == 0); k--);
+-
+-        int l = k;
+-
+-        if (xmldsigBytes[40 - k] < 0) {
+-            l += 1;
+-        }
+-
+-        byte asn1Bytes[] = new byte[6 + j + l];
+-
+-        asn1Bytes[0] = 48;
+-        asn1Bytes[1] = (byte)(4 + j + l);
+-        asn1Bytes[2] = 2;
+-        asn1Bytes[3] = (byte)j;
+-
+-        System.arraycopy(xmldsigBytes, 20 - i, asn1Bytes, (4 + j) - i, i);
+-
+-        asn1Bytes[4 + j] = 2;
+-        asn1Bytes[5 + j] = (byte) l;
+-
+-        System.arraycopy(xmldsigBytes, 40 - k, asn1Bytes, (6 + j + l) - k, k);
+-
+-        return asn1Bytes;
+-    }
+-
+     static final class SHA1withRSA extends DOMSignatureMethod {
+         SHA1withRSA(AlgorithmParameterSpec params)
+             throws InvalidAlgorithmParameterException {
+@@ -421,6 +336,25 @@ Type getAlgorithmType() {
+         }
+     }
+ 
++    static final class SHA256withDSA extends DOMSignatureMethod {
++        SHA256withDSA(AlgorithmParameterSpec params)
++            throws InvalidAlgorithmParameterException {
++            super(params);
++        }
++        SHA256withDSA(Element dmElem) throws MarshalException {
++            super(dmElem);
++        }
++        public String getAlgorithm() {
++            return DSA_SHA256;
++        }
++        String getJCAAlgorithm() {
++            return "SHA256withDSA";
++        }
++        Type getAlgorithmType() {
++            return Type.DSA;
++        }
++    }
++
+     static final class SHA1withECDSA extends DOMSignatureMethod {
+         SHA1withECDSA(AlgorithmParameterSpec params)
+             throws InvalidAlgorithmParameterException {
+diff --git a/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java b/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java
+index aa67a9f5aa..0a67154075 100644
+--- a/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java
++++ b/src/main/java/org/apache/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java
+@@ -235,6 +235,8 @@ public SignatureMethod newSignatureMethod(String algorithm,
+             return new DOMSignatureMethod.SHA512withRSA(params);
+         } else if (algorithm.equals(SignatureMethod.DSA_SHA1)) {
+             return new DOMSignatureMethod.SHA1withDSA(params);
++        } else if (algorithm.equals(DOMSignatureMethod.DSA_SHA256)) {
++            return new DOMSignatureMethod.SHA256withDSA(params);
+         } else if (algorithm.equals(SignatureMethod.HMAC_SHA1)) {
+             return new DOMHMACSignatureMethod.SHA1(params);
+         } else if (algorithm.equals(DOMHMACSignatureMethod.HMAC_SHA256)) {
+diff --git a/src/main/java/org/apache/xml/security/algorithms/JCEMapper.java b/src/main/java/org/apache/xml/security/algorithms/JCEMapper.java
+index 324276c334..4c77002800 100644
+--- a/src/main/java/org/apache/xml/security/algorithms/JCEMapper.java
++++ b/src/main/java/org/apache/xml/security/algorithms/JCEMapper.java
+@@ -82,6 +82,10 @@ public static void registerDefaultAlgorithms() {
+             XMLSignature.ALGO_ID_SIGNATURE_DSA, 
+             new Algorithm("", "SHA1withDSA", "Signature")
+         );
++        algorithmsMap.put(
++            XMLSignature.ALGO_ID_SIGNATURE_DSA_SHA256,
++            new Algorithm("", "SHA256withDSA", "Signature")
++        );
+         algorithmsMap.put(
+             XMLSignature.ALGO_ID_SIGNATURE_NOT_RECOMMENDED_RSA_MD5, 
+             new Algorithm("", "MD5withRSA", "Signature")
+diff --git a/src/main/java/org/apache/xml/security/algorithms/SignatureAlgorithm.java b/src/main/java/org/apache/xml/security/algorithms/SignatureAlgorithm.java
+index 5d25f888a7..b7c85bc398 100644
+--- a/src/main/java/org/apache/xml/security/algorithms/SignatureAlgorithm.java
++++ b/src/main/java/org/apache/xml/security/algorithms/SignatureAlgorithm.java
+@@ -377,7 +377,12 @@ public static void register(String algorithmURI, Class<? extends SignatureAlgori
+      * This method registers the default algorithms.
+      */
+     public static void registerDefaultAlgorithms() {
+-        algorithmHash.put(SignatureDSA.URI, SignatureDSA.class);
++        algorithmHash.put(
++            XMLSignature.ALGO_ID_SIGNATURE_DSA, SignatureDSA.class
++        );
++        algorithmHash.put(
++            XMLSignature.ALGO_ID_SIGNATURE_DSA_SHA256, SignatureDSA.SHA256.class
++        );
+         algorithmHash.put(
+             XMLSignature.ALGO_ID_SIGNATURE_RSA_SHA1, SignatureBaseRSA.SignatureRSASHA1.class
+         );
+diff --git a/src/main/java/org/apache/xml/security/algorithms/implementations/SignatureDSA.java b/src/main/java/org/apache/xml/security/algorithms/implementations/SignatureDSA.java
+index 99c3cfa98f..d22c61e97f 100644
+--- a/src/main/java/org/apache/xml/security/algorithms/implementations/SignatureDSA.java
++++ b/src/main/java/org/apache/xml/security/algorithms/implementations/SignatureDSA.java
+@@ -27,13 +27,15 @@
+ import java.security.SecureRandom;
+ import java.security.Signature;
+ import java.security.SignatureException;
++import java.security.interfaces.DSAKey;
+ import java.security.spec.AlgorithmParameterSpec;
+ 
+ import org.apache.xml.security.algorithms.JCEMapper;
+ import org.apache.xml.security.algorithms.SignatureAlgorithmSpi;
++import org.apache.xml.security.signature.XMLSignature;
+ import org.apache.xml.security.signature.XMLSignatureException;
+ import org.apache.xml.security.utils.Base64;
+-import org.apache.xml.security.utils.Constants;
++import org.apache.xml.security.utils.JavaUtils;
+ 
+ public class SignatureDSA extends SignatureAlgorithmSpi {
+ 
+@@ -41,19 +43,19 @@ public class SignatureDSA extends SignatureAlgorithmSpi {
+     private static org.apache.commons.logging.Log log = 
+         org.apache.commons.logging.LogFactory.getLog(SignatureDSA.class);
+ 
+-    /** Field URI */
+-    public static final String URI = Constants.SignatureSpecNS + "dsa-sha1";
+-
+     /** Field algorithm */
+     private java.security.Signature signatureAlgorithm = null;
+ 
++    /** size of Q */
++    private int size;
++
+     /**
+      * Method engineGetURI
+      *
+      * @inheritDoc
+      */
+     protected String engineGetURI() {
+-        return SignatureDSA.URI;
++        return XMLSignature.ALGO_ID_SIGNATURE_DSA;
+     }
+ 
+     /**
+@@ -62,7 +64,7 @@ protected String engineGetURI() {
+      * @throws XMLSignatureException
+      */
+     public SignatureDSA() throws XMLSignatureException {
+-        String algorithmID = JCEMapper.translateURItoJCEID(SignatureDSA.URI);
++        String algorithmID = JCEMapper.translateURItoJCEID(engineGetURI());
+         if (log.isDebugEnabled()) {
+             log.debug("Created SignatureDSA using " + algorithmID);
+         }
+@@ -106,7 +108,8 @@ protected boolean engineVerify(byte[] signature)
+                 log.debug("Called DSA.verify() on " + Base64.encode(signature));
+             }
+ 
+-            byte[] jcebytes = SignatureDSA.convertXMLDSIGtoASN1(signature);
++            byte[] jcebytes = JavaUtils.convertDsaXMLDSIGtoASN1(signature,
++                                                                size/8);
+ 
+             return this.signatureAlgorithm.verify(jcebytes);
+         } catch (SignatureException ex) {
+@@ -146,6 +149,7 @@ protected void engineInitVerify(Key publicKey) throws XMLSignatureException {
+             }
+             throw new XMLSignatureException("empty", ex);
+         }
++        size = ((DSAKey)publicKey).getParams().getQ().bitLength();
+     }
+ 
+     /**
+@@ -155,7 +159,7 @@ protected byte[] engineSign() throws XMLSignatureException {
+         try {
+             byte jcebytes[] = this.signatureAlgorithm.sign();
+ 
+-            return SignatureDSA.convertASN1toXMLDSIG(jcebytes);
++            return JavaUtils.convertDsaASN1toXMLDSIG(jcebytes, size/8);
+         } catch (IOException ex) {
+             throw new XMLSignatureException("empty", ex);
+         } catch (SignatureException ex) {
+@@ -181,6 +185,7 @@ protected void engineInitSign(Key privateKey, SecureRandom secureRandom)
+         } catch (InvalidKeyException ex) {
+             throw new XMLSignatureException("empty", ex);
+         }
++        size = ((DSAKey)privateKey).getParams().getQ().bitLength();
+     }
+ 
+     /**
+@@ -200,6 +205,7 @@ protected void engineInitSign(Key privateKey) throws XMLSignatureException {
+         } catch (InvalidKeyException ex) {
+             throw new XMLSignatureException("empty", ex);
+         }
++        size = ((DSAKey)privateKey).getParams().getQ().bitLength();
+     }
+ 
+     /**
+@@ -253,100 +259,6 @@ protected String engineGetJCEProviderName() {
+         return this.signatureAlgorithm.getProvider().getName();
+     }
+ 
+-    /**
+-     * Converts an ASN.1 DSA value to a XML Signature DSA Value.
+-     *
+-     * The JAVA JCE DSA Signature algorithm creates ASN.1 encoded (r,s) value
+-     * pairs; the XML Signature requires the core BigInteger values.
+-     *
+-     * @param asn1Bytes
+-     * @return the decode bytes
+-     *
+-     * @throws IOException
+-     * @see <A HREF="http://www.w3.org/TR/xmldsig-core/#dsa-sha1">6.4.1 DSA</A>
+-     */
+-    private static byte[] convertASN1toXMLDSIG(byte asn1Bytes[]) throws IOException {
+-
+-        byte rLength = asn1Bytes[3];
+-        int i;
+-
+-        for (i = rLength; (i > 0) && (asn1Bytes[(4 + rLength) - i] == 0); i--);
+-
+-        byte sLength = asn1Bytes[5 + rLength];
+-        int j;
+-
+-        for (j = sLength;
+-            (j > 0) && (asn1Bytes[(6 + rLength + sLength) - j] == 0); j--);
+-
+-        if ((asn1Bytes[0] != 48) || (asn1Bytes[1] != asn1Bytes.length - 2)
+-            || (asn1Bytes[2] != 2) || (i > 20)
+-            || (asn1Bytes[4 + rLength] != 2) || (j > 20)) {
+-            throw new IOException("Invalid ASN.1 format of DSA signature");
+-        } 
+-        byte xmldsigBytes[] = new byte[40];
+-
+-        System.arraycopy(asn1Bytes, (4 + rLength) - i, xmldsigBytes, 20 - i, i);
+-        System.arraycopy(asn1Bytes, (6 + rLength + sLength) - j, xmldsigBytes,
+-                         40 - j, j);
+-
+-        return xmldsigBytes;      
+-    }
+-
+-    /**
+-     * Converts a XML Signature DSA Value to an ASN.1 DSA value.
+-     *
+-     * The JAVA JCE DSA Signature algorithm creates ASN.1 encoded (r,s) value
+-     * pairs; the XML Signature requires the core BigInteger values.
+-     *
+-     * @param xmldsigBytes
+-     * @return the encoded ASN.1 bytes
+-     *
+-     * @throws IOException
+-     * @see <A HREF="http://www.w3.org/TR/xmldsig-core/#dsa-sha1">6.4.1 DSA</A>
+-     */
+-    private static byte[] convertXMLDSIGtoASN1(byte xmldsigBytes[]) throws IOException {
+-
+-        if (xmldsigBytes.length != 40) {
+-            throw new IOException("Invalid XMLDSIG format of DSA signature");
+-        }
+-
+-        int i;
+-
+-        for (i = 20; (i > 0) && (xmldsigBytes[20 - i] == 0); i--);
+-
+-        int j = i;
+-
+-        if (xmldsigBytes[20 - i] < 0) {
+-            j += 1;
+-        }
+-
+-        int k;
+-
+-        for (k = 20; (k > 0) && (xmldsigBytes[40 - k] == 0); k--);
+-
+-        int l = k;
+-
+-        if (xmldsigBytes[40 - k] < 0) {
+-            l += 1;
+-        }
+-
+-        byte asn1Bytes[] = new byte[6 + j + l];
+-
+-        asn1Bytes[0] = 48;
+-        asn1Bytes[1] = (byte) (4 + j + l);
+-        asn1Bytes[2] = 2;
+-        asn1Bytes[3] = (byte) j;
+-
+-        System.arraycopy(xmldsigBytes, 20 - i, asn1Bytes, (4 + j) - i, i);
+-
+-        asn1Bytes[4 + j] = 2;
+-        asn1Bytes[5 + j] = (byte) l;
+-
+-        System.arraycopy(xmldsigBytes, 40 - k, asn1Bytes, (6 + j + l) - k, k);
+-
+-        return asn1Bytes;
+-    }
+-
+     /**
+      * Method engineSetHMACOutputLength
+      *
+@@ -369,4 +281,15 @@ protected void engineInitSign(
+     ) throws XMLSignatureException {
+         throw new XMLSignatureException("algorithms.CannotUseAlgorithmParameterSpecOnDSA");
+     }
++
++    public static class SHA256 extends SignatureDSA {
++
++        public SHA256() throws XMLSignatureException {
++            super();
++        }
++
++        public String engineGetURI() {
++            return XMLSignature.ALGO_ID_SIGNATURE_DSA_SHA256;
++        }
++    }
+ }
+diff --git a/src/main/java/org/apache/xml/security/signature/XMLSignature.java b/src/main/java/org/apache/xml/security/signature/XMLSignature.java
+index c7c6f47195..4d326370b9 100644
+--- a/src/main/java/org/apache/xml/security/signature/XMLSignature.java
++++ b/src/main/java/org/apache/xml/security/signature/XMLSignature.java
+@@ -81,6 +81,10 @@ public final class XMLSignature extends SignatureElementProxy {
+     public static final String ALGO_ID_SIGNATURE_DSA = 
+         Constants.SignatureSpecNS + "dsa-sha1";
+ 
++    /** Signature - Optional DSAwithSHA256 */
++    public static final String ALGO_ID_SIGNATURE_DSA_SHA256 =
++        Constants.SignatureSpec11NS + "dsa-sha256";
++
+     /** Signature - Recommended RSAwithSHA1 */
+     public static final String ALGO_ID_SIGNATURE_RSA = 
+         Constants.SignatureSpecNS + "rsa-sha1";
+diff --git a/src/main/java/org/apache/xml/security/utils/JavaUtils.java b/src/main/java/org/apache/xml/security/utils/JavaUtils.java
+index 43b1288971..535ce3abde 100644
+--- a/src/main/java/org/apache/xml/security/utils/JavaUtils.java
++++ b/src/main/java/org/apache/xml/security/utils/JavaUtils.java
+@@ -141,4 +141,98 @@ public static byte[] getBytesFromStream(InputStream inputStream) throws IOExcept
+ 
+         return retBytes;
+     }
++
++    /**
++     * Converts an ASN.1 DSA value to a XML Signature DSA Value.
++     *
++     * The JCE DSA Signature algorithm creates ASN.1 encoded (r,s) value
++     * pairs (see section 2.2.2 of RFC 3279); the XML Signature requires the
++     * core BigInteger values.
++     *
++     * @param asn1Bytes the ASN.1 encoded bytes
++     * @param size size of r and s in bytes
++     * @return the XML Signature encoded bytes
++     * @throws IOException if the bytes are not encoded correctly
++     * @see <A HREF="http://www.w3.org/TR/xmldsig-core1/#sec-DSA">6.4.1 DSA</A>
++     */
++    public static byte[] convertDsaASN1toXMLDSIG(byte[] asn1Bytes, int size)
++        throws IOException
++    {
++        if (asn1Bytes[0] != 48 || asn1Bytes[1] != asn1Bytes.length - 2
++            || asn1Bytes[2] != 2) {
++            throw new IOException("Invalid ASN.1 format of DSA signature");
++        }
++
++        byte rLength = asn1Bytes[3];
++        int i;
++        for (i = rLength; i > 0 && asn1Bytes[4 + rLength - i] == 0; i--);
++
++        byte sLength = asn1Bytes[5 + rLength];
++        int j;
++        for (j = sLength;
++             j > 0 && asn1Bytes[6 + rLength + sLength - j] == 0; j--);
++
++        if (i > size || asn1Bytes[4 + rLength] != 2 || j > size) {
++            throw new IOException("Invalid ASN.1 format of DSA signature");
++        } else {
++            byte[] xmldsigBytes = new byte[size * 2];
++            System.arraycopy(asn1Bytes, 4 + rLength - i, xmldsigBytes,
++                             size - i, i);
++            System.arraycopy(asn1Bytes, 6 + rLength + sLength - j,
++                             xmldsigBytes, size * 2 - j, j);
++            return xmldsigBytes;
++        }
++    }
++
++    /**
++     * Converts an XML Signature DSA Value to a ASN.1 DSA value.
++     *
++     * The JCE DSA Signature algorithm creates ASN.1 encoded (r,s) value
++     * pairs (see section 2.2.2 of RFC 3279); the XML Signature requires the
++     * core BigInteger values.
++     *
++     * @param xmldsigBytes the XML Signature encoded bytes
++     * @param size size of r and s in bytes
++     * @return the ASN.1 encoded bytes
++     * @throws IOException if the bytes are not encoded correctly
++     * @see <A HREF="http://www.w3.org/TR/xmldsig-core1/#sec-DSA">6.4.1 DSA</A>
++     */
++    public static byte[] convertDsaXMLDSIGtoASN1(byte[] xmldsigBytes, int size)
++        throws IOException
++    {
++        int totalSize = size * 2;
++        if (xmldsigBytes.length != totalSize) {
++            throw new IOException("Invalid XMLDSIG format of DSA signature");
++        }
++
++        int i;
++        for (i = size; i > 0 && xmldsigBytes[size - i] == 0; i--);
++
++        int j = i;
++        if (xmldsigBytes[size - i] < 0) {
++            j++;
++        }
++
++        int k;
++        for (k = size; k > 0 && xmldsigBytes[totalSize - k] == 0; k--);
++
++        int l = k;
++        if (xmldsigBytes[totalSize - k] < 0) {
++            l++;
++        }
++
++        byte[] asn1Bytes = new byte[6 + j + l];
++        asn1Bytes[0] = 48;
++        asn1Bytes[1] = (byte)(4 + j + l);
++        asn1Bytes[2] = 2;
++        asn1Bytes[3] = (byte)j;
++        System.arraycopy(xmldsigBytes, size - i, asn1Bytes, 4 + j - i, i);
++
++        asn1Bytes[4 + j] = 2;
++        asn1Bytes[5 + j] = (byte) l;
++        System.arraycopy(xmldsigBytes, totalSize - k, asn1Bytes,
++                         6 + j + l - k, k);
++
++        return asn1Bytes;
++    }
+ }
+diff --git a/src/test/java/javax/xml/crypto/test/dsig/CreateInteropXMLDSig11Test.java b/src/test/java/javax/xml/crypto/test/dsig/CreateInteropXMLDSig11Test.java
+index bf3afa4120..690058709f 100644
+--- a/src/test/java/javax/xml/crypto/test/dsig/CreateInteropXMLDSig11Test.java
++++ b/src/test/java/javax/xml/crypto/test/dsig/CreateInteropXMLDSig11Test.java
+@@ -242,7 +242,7 @@ public void test_create_enveloping_rsa_sha512() throws Exception {
+     @org.junit.Test
+     public void test_create_enveloping_sha256_rsa_sha256() throws Exception {
+         test_create_signature_enveloping(rsaSha256, sha256, rsaki,
+-                                        TestUtils.getPrivateKey("RSA"), kvks);
++                                         TestUtils.getPrivateKey("RSA"), kvks);
+     }
+ 
+     @org.junit.Test
+diff --git a/src/test/java/javax/xml/crypto/test/dsig/TestUtils.java b/src/test/java/javax/xml/crypto/test/dsig/TestUtils.java
+index d7ade184ac..30ba5806ff 100644
+--- a/src/test/java/javax/xml/crypto/test/dsig/TestUtils.java
++++ b/src/test/java/javax/xml/crypto/test/dsig/TestUtils.java
+@@ -58,6 +58,16 @@ public class TestUtils {
+         "05421644057436475141609648488325705128047428394380474376834667300766108262613900542681289080713724597310673074119355136085795982097390670890367185141189796";
+     private static final String DSA_X = 
+         "0527140396812450214498055937934275626078768840117";
++    private static final String DSA_2048_Y =
++        "15119007057343785981993995134621348945077524760182795513668325877793414638620983617627033248732235626178802906346261435991040697338468329634416089753032362617771631199351767336660070462291411472735835843440140283101463231807789628656218830720378705090795271104661936237385140354825159080766174663596286149653433914842868551355716015585570827642835307073681358328172009941968323702291677280809277843998510864653406122348712345584706761165794179850728091522094227603562280855104749858249588234915206290448353957550635709520273178475097150818955098638774564910092913714625772708285992586894795017709678223469405896699928";
++    private static final String DSA_2048_P =
++        "18111848663142005571178770624881214696591339256823507023544605891411707081617152319519180201250440615163700426054396403795303435564101919053459832890139496933938670005799610981765220283775567361483662648340339405220348871308593627647076689407931875483406244310337925809427432681864623551598136302441690546585427193224254314088256212718983105131138772434658820375111735710449331518776858786793875865418124429269409118756812841019074631004956409706877081612616347900606555802111224022921017725537417047242635829949739109274666495826205002104010355456981211025738812433088757102520562459649777989718122219159982614304359";
++    private static final String DSA_2048_Q =
++        "19689526866605154788513693571065914024068069442724893395618704484701";
++    private static final String DSA_2048_G =
++        "2859278237642201956931085611015389087970918161297522023542900348087718063098423976428252369340967506010054236052095950169272612831491902295835660747775572934757474194739347115870723217560530672532404847508798651915566434553729839971841903983916294692452760249019857108409189016993380919900231322610083060784269299257074905043636029708121288037909739559605347853174853410208334242027740275688698461842637641566056165699733710043802697192696426360843173620679214131951400148855611740858610821913573088059404459364892373027492936037789337011875710759208498486908611261954026964574111219599568903257472567764789616958430";
++    private static final String DSA_2048_X =
++        "14562787764977288900757387442281559936279834964901963465277698843172";
+     private static final String RSA_MOD = 
+         "010800185049102889923150759252557522305032794699952150943573164381936603255999071981574575044810461362008102247767482738822150129277490998033971789476107463";
+     private static final String RSA_PUB = "065537";
+@@ -66,33 +76,68 @@ public class TestUtils {
+ 
+     private TestUtils() {}
+     
+-    public static PublicKey getPublicKey(String algo) 
++    public static PublicKey getPublicKey(String algo)
++        throws InvalidKeySpecException, NoSuchAlgorithmException {
++        if (algo.equalsIgnoreCase("DSA")) {
++            return getPublicKey("DSA", 1024);
++        } else if (algo.equalsIgnoreCase("RSA")) {
++            return getPublicKey("RSA", 512);
++        } else throw new RuntimeException("Unsupported key algorithm " + algo);
++    }
++        
++    public static PublicKey getPublicKey(String algo, int keysize)
+         throws InvalidKeySpecException, NoSuchAlgorithmException {
+         KeyFactory kf = KeyFactory.getInstance(algo);
+         KeySpec kspec;
+         if (algo.equalsIgnoreCase("DSA")) {
+-            kspec = new DSAPublicKeySpec(new BigInteger(DSA_Y), 
+-                                         new BigInteger(DSA_P), 
+-                                         new BigInteger(DSA_Q), 
+-                                         new BigInteger(DSA_G));
++            if (keysize == 1024) {
++                kspec = new DSAPublicKeySpec(new BigInteger(DSA_Y), 
++                                             new BigInteger(DSA_P), 
++                                             new BigInteger(DSA_Q), 
++                                             new BigInteger(DSA_G));
++            } else if (keysize == 2048) {
++                kspec = new DSAPublicKeySpec(new BigInteger(DSA_2048_Y), 
++                                             new BigInteger(DSA_2048_P), 
++                                             new BigInteger(DSA_2048_Q), 
++                                             new BigInteger(DSA_2048_G));
++            } else throw new RuntimeException("Unsupported keysize:" + keysize);
+         } else if (algo.equalsIgnoreCase("RSA")) {
+-            kspec = new RSAPublicKeySpec(new BigInteger(RSA_MOD), 
+-                                         new BigInteger(RSA_PUB));
++            if (keysize == 512) {
++                kspec = new RSAPublicKeySpec(new BigInteger(RSA_MOD), 
++                                             new BigInteger(RSA_PUB));
++            } else throw new RuntimeException("Unsupported keysize:" + keysize);
+         } else throw new RuntimeException("Unsupported key algorithm " + algo);
+         return kf.generatePublic(kspec);
+     }
+ 
+     public static PrivateKey getPrivateKey(String algo) 
++        throws InvalidKeySpecException, NoSuchAlgorithmException {
++        if (algo.equalsIgnoreCase("DSA")) {
++            return getPrivateKey("DSA", 1024);
++        } else if (algo.equalsIgnoreCase("RSA")) {
++            return getPrivateKey("RSA", 512);
++        } else throw new RuntimeException("Unsupported key algorithm " + algo);
++    }
++
++    public static PrivateKey getPrivateKey(String algo, int keysize)
+         throws InvalidKeySpecException, NoSuchAlgorithmException {
+         KeyFactory kf = KeyFactory.getInstance(algo);
+         KeySpec kspec;
+         if (algo.equalsIgnoreCase("DSA")) {
+-            kspec = new DSAPrivateKeySpec
+-                (new BigInteger(DSA_X), new BigInteger(DSA_P), 
+-                 new BigInteger(DSA_Q), new BigInteger(DSA_G));
++            if (keysize == 1024) {
++                kspec = new DSAPrivateKeySpec
++                    (new BigInteger(DSA_X), new BigInteger(DSA_P),
++                     new BigInteger(DSA_Q), new BigInteger(DSA_G));
++            } else if (keysize == 2048) {
++                kspec = new DSAPrivateKeySpec
++                    (new BigInteger(DSA_2048_X), new BigInteger(DSA_2048_P),
++                     new BigInteger(DSA_2048_Q), new BigInteger(DSA_2048_G));
++            } else throw new RuntimeException("Unsupported keysize:" + keysize);
+         } else if (algo.equalsIgnoreCase("RSA")) {
+-            kspec = new RSAPrivateKeySpec
+-                (new BigInteger(RSA_MOD), new BigInteger(RSA_PRIV));
++            if (keysize == 512) {
++                kspec = new RSAPrivateKeySpec
++                    (new BigInteger(RSA_MOD), new BigInteger(RSA_PRIV));
++            } else throw new RuntimeException("Unsupported keysize:" + keysize);
+         } else throw new RuntimeException("Unsupported key algorithm " + algo);
+         return kf.generatePrivate(kspec);
+     }
+@@ -133,11 +178,12 @@ public static XMLValidateContext getXMLValidateContext(String type,
+             Document doc = docBuilder.parse(input);
+             if (tag == null) {
+                 return new DOMValidateContext
+-                    (TestUtils.getPublicKey("RSA"), doc.getDocumentElement());
++                    (TestUtils.getPublicKey("RSA", 512),
++                     doc.getDocumentElement());
+             } else {
+                 NodeList list = doc.getElementsByTagName(tag);
+                 return new DOMValidateContext
+-                    (TestUtils.getPublicKey("RSA"), list.item(0));
++                    (TestUtils.getPublicKey("RSA", 512), list.item(0));
+             }
+         } else {
+             throw new Exception("Unsupported XMLValidateContext type: " + 
+diff --git a/src/test/java/javax/xml/crypto/test/dsig/XMLSignatureTest.java b/src/test/java/javax/xml/crypto/test/dsig/XMLSignatureTest.java
+index c28fa12f56..0de457637e 100644
+--- a/src/test/java/javax/xml/crypto/test/dsig/XMLSignatureTest.java
++++ b/src/test/java/javax/xml/crypto/test/dsig/XMLSignatureTest.java
+@@ -55,6 +55,8 @@ public class XMLSignatureTest extends org.junit.Assert {
+     private Key[] VALIDATE_KEYS;
+     private SignatureMethod[] SIG_METHODS;
+     private URIDereferencer ud;
++    private final static String DSA_SHA256 =
++        "http://www.w3.org/2009/xmldsig11#dsa-sha256";
+ 
+     static {
+         Security.insertProviderAt
+@@ -74,13 +76,13 @@ public XMLSignatureTest() throws Exception {
+         SIG_METHODS[2] = fac.newSignatureMethod(SignatureMethod.HMAC_SHA1, null);
+         // set up the signingKeys
+         SIGN_KEYS = new Key[3];
+-        SIGN_KEYS[0] = TestUtils.getPrivateKey("DSA");
+-        SIGN_KEYS[1] = TestUtils.getPrivateKey("RSA");
++        SIGN_KEYS[0] = TestUtils.getPrivateKey("DSA", 1024);
++        SIGN_KEYS[1] = TestUtils.getPrivateKey("RSA", 512);
+         SIGN_KEYS[2] = new SecretKeySpec(new byte[16], "HmacSHA1");
+         // set up the validatingKeys
+         VALIDATE_KEYS = new Key[3];
+-        VALIDATE_KEYS[0] = TestUtils.getPublicKey("DSA");
+-        VALIDATE_KEYS[1] = TestUtils.getPublicKey("RSA");
++        VALIDATE_KEYS[0] = TestUtils.getPublicKey("DSA", 1024);
++        VALIDATE_KEYS[1] = TestUtils.getPublicKey("RSA", 512);
+         VALIDATE_KEYS[2] = new SecretKeySpec(new byte[16], "HmacSHA1");
+         defSi = createSignedInfo(SIG_METHODS[0]);
+         defKi = kifac.newKeyInfo
+@@ -187,7 +189,7 @@ public void testsignANDvalidate() throws Exception {
+     }
+ 
+     @org.junit.Test
+-    public void testsignWithProvider() throws Exception {
++    public void testSignWithProvider() throws Exception {
+         XMLSignature sig;
+         SignedInfo si;
+         KeyInfo ki = null;
+@@ -361,6 +363,33 @@ public void testCreateSignatureWithEmptyId() throws Exception {
+         sig.sign(dsc);
+     }
+ 
++    @org.junit.Test
++    public void testCreateDSA2048Signature() throws Exception {
++
++        // check if SHA256withDSA is supported
++        boolean gotSHA256withDSA = false;
++        try {
++            Signature.getInstance("SHA256withDSA");
++            gotSHA256withDSA = true;
++        } catch (NoSuchAlgorithmException e) {}
++        org.junit.Assume.assumeTrue(gotSHA256withDSA);
++
++        SignatureMethod sm = fac.newSignatureMethod(DSA_SHA256, null);
++        SignedInfo si = createSignedInfo(sm);
++        KeyInfo ki = kifac.newKeyInfo(Collections.singletonList
++            (kifac.newKeyValue((PublicKey)TestUtils.getPublicKey("DSA", 2048))));
++        XMLSignature sig = fac.newXMLSignature(si, ki, objs, id, sigValueId); 
++        Document doc = TestUtils.newDocument();
++        XMLSignContext signContext =
++            new DOMSignContext(TestUtils.getPrivateKey("DSA", 2048), doc);
++        signContext.setURIDereferencer(ud);
++        sig.sign(signContext);
++        XMLValidateContext validateContext = new DOMValidateContext
++            (TestUtils.getPublicKey("DSA", 2048), doc.getDocumentElement());
++        validateContext.setURIDereferencer(ud);
++        assertTrue(sig.validate(validateContext));
++    }
++
+     private SignedInfo createSignedInfo(SignatureMethod sm) throws Exception {
+         // set up the building blocks
+         CanonicalizationMethod cm = fac.newCanonicalizationMethod

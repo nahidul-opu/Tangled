@@ -1,0 +1,395 @@
+From db3a06c85ab229c7b868755ce6d8b112c5403745 Mon Sep 17 00:00:00 2001
+From: alfonsonishikawa <alfonsonishikawa@unknown>
+Date: Tue, 12 Mar 2013 17:07:03 +0000
+Subject: [PATCH] Applied working patch GORA-174 [0] version 12/Mar/13 17:55
+
+[0] https://issues.apache.org/jira/browse/GORA-174
+
+
+git-svn-id: https://svn.apache.org/repos/asf/gora/branches/GORA_174@1455623 13f79535-47bb-0310-9956-ffa450edef68
+---
+ gora-core/src/examples/avro/webpage.json      |  2 +-
+ .../gora/examples/WebPageDataCreator.java     | 13 +++----
+ .../gora/examples/generated/Employee.java     | 19 ++++++++++
+ .../gora/examples/generated/Metadata.java     | 19 ++++++++++
+ .../gora/examples/generated/TokenDatum.java   | 19 ++++++++++
+ .../gora/examples/generated/WebPage.java      | 21 ++++++++++-
+ .../gora/examples/mapreduce/WordCount.java    | 16 +++++----
+ .../apache/gora/compiler/GoraCompiler.java    | 21 +++++++++++
+ .../gora/persistency/impl/PersistentBase.java | 24 ++++++++++++-
+ .../gora/mapreduce/MapReduceTestUtils.java    | 12 ++++---
+ .../apache/gora/store/DataStoreTestUtil.java  | 36 +++++++++++--------
+ 11 files changed, 167 insertions(+), 35 deletions(-)
+
+diff --git a/gora-core/src/examples/avro/webpage.json b/gora-core/src/examples/avro/webpage.json
+index b196d12a5..946dfe102 100644
+--- a/gora-core/src/examples/avro/webpage.json
++++ b/gora-core/src/examples/avro/webpage.json
+@@ -4,7 +4,7 @@
+   "namespace": "org.apache.gora.examples.generated",
+   "fields" : [
+     {"name": "url", "type": "string"},
+-    {"name": "content", "type": "bytes"},
++    {"name": "content", "type": ["null","bytes"]},
+     {"name": "parsedContent", "type": {"type":"array", "items": "string"}},
+     {"name": "outlinks", "type": {"type":"map", "values":"string"}},
+     {"name": "metadata", "type": {
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/WebPageDataCreator.java b/gora-core/src/examples/java/org/apache/gora/examples/WebPageDataCreator.java
+index 517591e7d..cfbf31ae6 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/WebPageDataCreator.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/WebPageDataCreator.java
+@@ -61,7 +61,7 @@ public class WebPageDataCreator {
+   }
+   
+   public static final String[] CONTENTS = {
+-    "foo baz bar",
++    null,
+     "foo",
+     "foo1 bar1 baz1",
+     "a b c d e",
+@@ -116,11 +116,12 @@ public static void createWebPageData(DataStore<String, WebPage> dataStore)
+ 	    for(int i=0; i<URLS.length; i++) {
+ 	      page = new WebPage();
+ 	      page.setUrl(new Utf8(URLS[i]));
+-	      page.setContent(ByteBuffer.wrap(CONTENTS[i].getBytes()));
+-	      for(String token : CONTENTS[i].split(" ")) {
+-	        page.addToParsedContent(new Utf8(token));  
+-	      }
+-	      
++	      if (CONTENTS[i]!=null){
++	        page.setContent(ByteBuffer.wrap(CONTENTS[i].getBytes()));
++	        for(String token : CONTENTS[i].split(" ")) {
++	    	  page.addToParsedContent(new Utf8(token));  
++	        }
++          }
+ 	      for(int j=0; j<LINKS[i].length; j++) {
+ 	        page.putToOutlinks(new Utf8(URLS[LINKS[i][j]]), new Utf8(ANCHORS[i][j]));
+ 	      }
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java b/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java
+index 96e0c10a3..529e9cb6f 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java
+@@ -1,3 +1,21 @@
++/**
++ *Licensed to the Apache Software Foundation (ASF) under one
++ *or more contributor license agreements.  See the NOTICE file
++ *distributed with this work for additional information
++ *regarding copyright ownership.  The ASF licenses this file
++ *to you under the Apache License, Version 2.0 (the"
++ *License"); you may not use this file except in compliance
++ *with the License.  You may obtain a copy of the License at
++ *
++  * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ *Unless required by applicable law or agreed to in writing, software
++ *distributed under the License is distributed on an "AS IS" BASIS,
++ *WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *See the License for the specific language governing permissions and
++ *limitations under the License.
++ */
++
+ package org.apache.gora.examples.generated;
+ 
+ import java.nio.ByteBuffer;
+@@ -10,6 +28,7 @@
+ import org.apache.avro.util.Utf8;
+ import org.apache.avro.ipc.AvroRemoteException;
+ import org.apache.avro.generic.GenericArray;
++import org.apache.avro.specific.FixedSize;
+ import org.apache.avro.specific.SpecificExceptionBase;
+ import org.apache.avro.specific.SpecificRecordBase;
+ import org.apache.avro.specific.SpecificRecord;
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java b/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java
+index cfa588ef9..21932dadf 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java
+@@ -1,3 +1,21 @@
++/**
++ *Licensed to the Apache Software Foundation (ASF) under one
++ *or more contributor license agreements.  See the NOTICE file
++ *distributed with this work for additional information
++ *regarding copyright ownership.  The ASF licenses this file
++ *to you under the Apache License, Version 2.0 (the"
++ *License"); you may not use this file except in compliance
++ *with the License.  You may obtain a copy of the License at
++ *
++  * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ *Unless required by applicable law or agreed to in writing, software
++ *distributed under the License is distributed on an "AS IS" BASIS,
++ *WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *See the License for the specific language governing permissions and
++ *limitations under the License.
++ */
++
+ package org.apache.gora.examples.generated;
+ 
+ import java.nio.ByteBuffer;
+@@ -10,6 +28,7 @@
+ import org.apache.avro.util.Utf8;
+ import org.apache.avro.ipc.AvroRemoteException;
+ import org.apache.avro.generic.GenericArray;
++import org.apache.avro.specific.FixedSize;
+ import org.apache.avro.specific.SpecificExceptionBase;
+ import org.apache.avro.specific.SpecificRecordBase;
+ import org.apache.avro.specific.SpecificRecord;
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/generated/TokenDatum.java b/gora-core/src/examples/java/org/apache/gora/examples/generated/TokenDatum.java
+index bd4fc6521..57f1b62b6 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/generated/TokenDatum.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/generated/TokenDatum.java
+@@ -1,3 +1,21 @@
++/**
++ *Licensed to the Apache Software Foundation (ASF) under one
++ *or more contributor license agreements.  See the NOTICE file
++ *distributed with this work for additional information
++ *regarding copyright ownership.  The ASF licenses this file
++ *to you under the Apache License, Version 2.0 (the"
++ *License"); you may not use this file except in compliance
++ *with the License.  You may obtain a copy of the License at
++ *
++  * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ *Unless required by applicable law or agreed to in writing, software
++ *distributed under the License is distributed on an "AS IS" BASIS,
++ *WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *See the License for the specific language governing permissions and
++ *limitations under the License.
++ */
++
+ package org.apache.gora.examples.generated;
+ 
+ import java.nio.ByteBuffer;
+@@ -10,6 +28,7 @@
+ import org.apache.avro.util.Utf8;
+ import org.apache.avro.ipc.AvroRemoteException;
+ import org.apache.avro.generic.GenericArray;
++import org.apache.avro.specific.FixedSize;
+ import org.apache.avro.specific.SpecificExceptionBase;
+ import org.apache.avro.specific.SpecificRecordBase;
+ import org.apache.avro.specific.SpecificRecord;
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java b/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java
+index 283f1821c..dea270a98 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java
+@@ -1,3 +1,21 @@
++/**
++ *Licensed to the Apache Software Foundation (ASF) under one
++ *or more contributor license agreements.  See the NOTICE file
++ *distributed with this work for additional information
++ *regarding copyright ownership.  The ASF licenses this file
++ *to you under the Apache License, Version 2.0 (the"
++ *License"); you may not use this file except in compliance
++ *with the License.  You may obtain a copy of the License at
++ *
++  * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ *Unless required by applicable law or agreed to in writing, software
++ *distributed under the License is distributed on an "AS IS" BASIS,
++ *WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *See the License for the specific language governing permissions and
++ *limitations under the License.
++ */
++
+ package org.apache.gora.examples.generated;
+ 
+ import java.nio.ByteBuffer;
+@@ -10,6 +28,7 @@
+ import org.apache.avro.util.Utf8;
+ import org.apache.avro.ipc.AvroRemoteException;
+ import org.apache.avro.generic.GenericArray;
++import org.apache.avro.specific.FixedSize;
+ import org.apache.avro.specific.SpecificExceptionBase;
+ import org.apache.avro.specific.SpecificRecordBase;
+ import org.apache.avro.specific.SpecificRecord;
+@@ -22,7 +41,7 @@
+ 
+ @SuppressWarnings("all")
+ public class WebPage extends PersistentBase {
+-  public static final Schema _SCHEMA = Schema.parse("{\"type\":\"record\",\"name\":\"WebPage\",\"namespace\":\"org.apache.gora.examples.generated\",\"fields\":[{\"name\":\"url\",\"type\":\"string\"},{\"name\":\"content\",\"type\":\"bytes\"},{\"name\":\"parsedContent\",\"type\":{\"type\":\"array\",\"items\":\"string\"}},{\"name\":\"outlinks\",\"type\":{\"type\":\"map\",\"values\":\"string\"}},{\"name\":\"metadata\",\"type\":{\"type\":\"record\",\"name\":\"Metadata\",\"fields\":[{\"name\":\"version\",\"type\":\"int\"},{\"name\":\"data\",\"type\":{\"type\":\"map\",\"values\":\"string\"}}]}}]}");
++  public static final Schema _SCHEMA = Schema.parse("{\"type\":\"record\",\"name\":\"WebPage\",\"namespace\":\"org.apache.gora.examples.generated\",\"fields\":[{\"name\":\"url\",\"type\":\"string\"},{\"name\":\"content\",\"type\":[\"null\",\"bytes\"]},{\"name\":\"parsedContent\",\"type\":{\"type\":\"array\",\"items\":\"string\"}},{\"name\":\"outlinks\",\"type\":{\"type\":\"map\",\"values\":\"string\"}},{\"name\":\"metadata\",\"type\":{\"type\":\"record\",\"name\":\"Metadata\",\"fields\":[{\"name\":\"version\",\"type\":\"int\"},{\"name\":\"data\",\"type\":{\"type\":\"map\",\"values\":\"string\"}}]}}]}");
+   public static enum Field {
+     URL(0,"url"),
+     CONTENT(1,"content"),
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/mapreduce/WordCount.java b/gora-core/src/examples/java/org/apache/gora/examples/mapreduce/WordCount.java
+index 3e89e6876..1609b7c9b 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/mapreduce/WordCount.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/mapreduce/WordCount.java
+@@ -65,13 +65,15 @@ public static class TokenizerMapper
+     protected void map(String key, WebPage page, Context context) 
+       throws IOException ,InterruptedException {
+       
+-      //Get the content from a WebPage as obtained from the DataStore
+-      String content =  new String(page.getContent().array());
+-      
+-      StringTokenizer itr = new StringTokenizer(content);
+-      while (itr.hasMoreTokens()) {
+-        word.set(itr.nextToken());
+-        context.write(word, one);
++      if (page.getContent() != null) {
++        // Get the content from a WebPage as obtained from the DataStore
++        String content = new String(page.getContent().array());
++
++        StringTokenizer itr = new StringTokenizer(content);
++        while (itr.hasMoreTokens()) {
++          word.set(itr.nextToken());
++          context.write(word, one);
++        }
+       }
+     };
+   }
+diff --git a/gora-core/src/main/java/org/apache/gora/compiler/GoraCompiler.java b/gora-core/src/main/java/org/apache/gora/compiler/GoraCompiler.java
+index 50857bf2e..2d40eae9f 100644
+--- a/gora-core/src/main/java/org/apache/gora/compiler/GoraCompiler.java
++++ b/gora-core/src/main/java/org/apache/gora/compiler/GoraCompiler.java
+@@ -374,6 +374,27 @@ private void compile(Schema schema) throws IOException {
+             line(2, "getStateManager().setDirty(this, "+i+");");
+             line(2, "return "+field.name()+".remove(key);");
+             line(1, "}");
++            break;
++          case UNION:
++            fieldType = type(fieldSchema);
++            //Create get method: public <unbox(field.schema())> get<camelKey>()
++            line(1, "public "+unbox(field.schema())+" get" +camelKey+"() {");
++            line(2, "return ("+unbox(field.schema())+") get("+i+");");
++            line(1, "}");
++            
++            //Create set methods: public void set<camelKey>(<subschema.fieldType> value)
++            for (Schema s : fieldSchema.getTypes()) {
++              if (s.getType().equals(Schema.Type.NULL)) continue ;
++              String unionFieldType = type(s);
++              line(1, "public void set"+camelKey+"("+unionFieldType+" value) {");
++              line(2, "put("+i+", value);");
++              line(1, "}");
++            }
++            break;
++          case NULL:
++            throw new RuntimeException("Unexpected NULL field: "+field);
++          default:
++            throw new RuntimeException("Unknown field: "+field);
+           }
+           i++;
+         }
+diff --git a/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java b/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
+index d55150d6c..ffbf7fc3f 100644
+--- a/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
++++ b/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
+@@ -24,6 +24,7 @@
+ 
+ import org.apache.avro.Schema.Field;
+ import org.apache.avro.Schema.Type;
++import org.apache.avro.generic.GenericData;
+ import org.apache.avro.specific.SpecificRecord;
+ import org.apache.gora.avro.PersistentDatumReader;
+ import org.apache.gora.persistency.ListGenericArray;
+@@ -253,12 +254,33 @@ public int hashCode() {
+     return result;
+   }
+ 
++  /**
++   * Computes a (record's) field's hash code.
++   * @param i Index of the field in the actual
++   * @param field
++   * @return
++   */
+   private int getFieldHashCode(int i, Field field) {
+     Object o = get(i);
+     if(o == null)
+       return 0;
+ 
+-    if(field.schema().getType() == Type.BYTES) {
++    // XXX Union special case: in a field being union we have to check the
++    // inner schemas for Type.BYTES special case, but because it is not a
++    // field we check it this way. Too simple case to create another
++    // private method
++    boolean isUnionField = false ;
++    int unionIndex = -1 ;
++    
++    if (field.schema().getType() == Type.UNION) {
++      isUnionField = true ;
++      unionIndex = GenericData.get().resolveUnion(field.schema(), o);
++    }
++    
++    if(field.schema().getType() == Type.BYTES
++       || (isUnionField
++           && field.schema().getTypes().get(unionIndex).getType() == Type.BYTES)) {
++      // ByteBuffer.hashCode() depends on internal 'position' index, but we must ignore that.
+       return getByteBufferHashCode((ByteBuffer)o);
+     }
+ 
+diff --git a/gora-core/src/test/java/org/apache/gora/mapreduce/MapReduceTestUtils.java b/gora-core/src/test/java/org/apache/gora/mapreduce/MapReduceTestUtils.java
+index 3316ecb05..409fe186f 100644
+--- a/gora-core/src/test/java/org/apache/gora/mapreduce/MapReduceTestUtils.java
++++ b/gora-core/src/test/java/org/apache/gora/mapreduce/MapReduceTestUtils.java
+@@ -78,11 +78,13 @@ public static void testWordCount(Configuration conf, DataStore<String,WebPage> i
+     //assert results
+     HashMap<String, Integer> actualCounts = new HashMap<String, Integer>();
+     for(String content : WebPageDataCreator.CONTENTS) {
+-      for(String token:content.split(" ")) {
+-        Integer count = actualCounts.get(token);
+-        if(count == null) 
+-          count = 0;
+-        actualCounts.put(token, ++count);
++      if (content != null) {
++        for(String token:content.split(" ")) {
++          Integer count = actualCounts.get(token);
++          if(count == null) 
++            count = 0;
++          actualCounts.put(token, ++count);
++        }
+       }
+     }
+     for(Map.Entry<String, Integer> entry:actualCounts.entrySet()) {
+diff --git a/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java b/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java
+index 61488df30..4bf45ff22 100644
+--- a/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java
++++ b/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java
+@@ -336,27 +336,35 @@ public static void assertWebPage(WebPage page, int i) throws Exception{
+     Assert.assertNotNull(page);
+ 
+     Assert.assertEquals(URLS[i], page.getUrl().toString());
+-    Assert.assertTrue("content error:" + new String( toByteArray(page.getContent()) ) +
++    // 'content' is optional
++    if (page.getContent() != null) {
++      Assert.assertTrue("content error:" + new String( toByteArray(page.getContent()) ) +
+         " actual=" + CONTENTS[i] + " i=" + i
+-    , Arrays.equals( toByteArray(page.getContent() )
++        , Arrays.equals( toByteArray(page.getContent() )
+         , CONTENTS[i].getBytes()));
+-
+-    GenericArray<Utf8> parsedContent = page.getParsedContent();
+-    Assert.assertNotNull(parsedContent);
+-    Assert.assertTrue(parsedContent.size() > 0);
+-
+-    int j=0;
+-    String[] tokens = CONTENTS[i].split(" ");
+-    for(Utf8 token : parsedContent) {
+-      Assert.assertEquals(tokens[j++], token.toString());
++      GenericArray<Utf8> parsedContent = page.getParsedContent();
++      Assert.assertNotNull(parsedContent);
++      Assert.assertTrue(parsedContent.size() > 0);
++    
++      int j=0;
++      String[] tokens = CONTENTS[i].split(" ");
++      for(Utf8 token : parsedContent) {
++        Assert.assertEquals(tokens[j++], token.toString());
++      }
++    } else {
++      // when page.getContent() is null
++      Assert.assertTrue(CONTENTS[i] == null) ;
++      GenericArray<Utf8> parsedContent = page.getParsedContent();
++      Assert.assertNotNull(parsedContent);
++      Assert.assertTrue(parsedContent.size() == 0);
+     }
+ 
+     if(LINKS[i].length > 0) {
+       Assert.assertNotNull(page.getOutlinks());
+       Assert.assertTrue(page.getOutlinks().size() > 0);
+-      for(j=0; j<LINKS[i].length; j++) {
+-        Assert.assertEquals(ANCHORS[i][j],
+-            page.getFromOutlinks(new Utf8(URLS[LINKS[i][j]])).toString());
++      for(int k=0; k<LINKS[i].length; k++) {
++        Assert.assertEquals(ANCHORS[i][k],
++          page.getFromOutlinks(new Utf8(URLS[LINKS[i][k]])).toString());
+       }
+     } else {
+       Assert.assertTrue(page.getOutlinks() == null || page.getOutlinks().isEmpty());

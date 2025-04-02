@@ -1,0 +1,361 @@
+From 2a617e6572d47292f26de86cf1ec0b4cc877e50b Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 3 Jan 2008 18:51:26 +0000
+Subject: [PATCH] FIX: Detection of newer and better artifacts should not
+ happen if 'checkModified' is set to 'false' (IVY-389) (with contribution from
+ Johan Stuyts)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@608593 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../cache/DefaultRepositoryCacheManager.java  |  13 ++-
+ .../settings/ivysettings-default-chain.xml    |   2 +-
+ .../plugins/resolver/AbstractResolver.java    |   7 +-
+ .../ivy/plugins/resolver/ChainResolver.java   |  49 ++++++++-
+ .../plugins/resolver/ChainResolverTest.java   | 103 +++++++++++++-----
+ .../plugins/resolver/chainresolverconf.xml    |   2 +-
+ 7 files changed, 138 insertions(+), 39 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 647310728..3efcd0278 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -64,6 +64,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Decrease memory footprint (IVY-662)
+ - IMPROVEMENT: Downgrade Ant version requirement to 1.6 to build Ivy (IVY-687)
+ 
++- FIX: Detection of newer and better artifacts should not happen if 'checkModified' is set to 'false' (IVY-389) (with contribution from Johan Stuyts)
+ - FIX: Ivy doesn't respect the order of the ivy patterns as defined in the settings (IVY-676)
+ - FIX: XmlModuleDescriptorWriter doesn't write the deprecated attribute of the "ivy-module/configurations/conf" element (IVY-664)
+ - FIX: XMLModuleDescriptorWriter does not write extra attributes (IVY-471) (with contribution from Mikkel Bjerg)
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index 31c6bd41c..e6fccc0a1 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -385,8 +385,8 @@ public ResolvedModuleRevision findModuleInCache(
+                         if (resolver != null) {
+                             Message.debug("\tfound ivy file in cache for " + mrid + " (resolved by "
+                                 + resolver.getName() + "): " + ivyFile);
+-                            if (expectedResolver != null 
+-                                    && expectedResolver.equals(resolver.getName())) {
++                            if (expectedResolver == null 
++                                    || expectedResolver.equals(resolver.getName())) {
+                                 MetadataArtifactDownloadReport madr 
+                                     = new MetadataArtifactDownloadReport(
+                                         depMD.getMetadataArtifact());
+@@ -562,7 +562,9 @@ public void originalToCachedModuleDescriptor(
+                 mdFileInCache);
+ 
+             saveResolvers(md, resolver.getName(), resolver.getName());
+-            rmr.getReport().setOriginalLocalFile(originalFileInCache);
++            if (!md.isDefault()) {
++                rmr.getReport().setOriginalLocalFile(originalFileInCache);
++            }
+             rmr.getReport().setLocalFile(mdFileInCache);
+         } catch (RuntimeException e) {
+             throw e;
+@@ -592,10 +594,9 @@ public ResolvedModuleRevision cacheModuleDescriptor(
+         }
+         try {
+             // now let's see if we can find it in cache and if it is up to date
+-            ResolvedModuleRevision rmr = findModuleInCache(
+-                mrid, options.isValidate(), resolver.getName());
++            ResolvedModuleRevision rmr = findModuleInCache(mrid, options.isValidate(), null);
+             if (rmr != null) {
+-                if (rmr.getDescriptor().isDefault() && rmr.getResolver() != this) {
++                if (rmr.getDescriptor().isDefault() && rmr.getResolver() != resolver) {
+                     Message.verbose("\t" + getName() + ": found revision in cache: " + mrid
+                         + " (resolved by " + rmr.getResolver().getName()
+                         + "): but it's a default one, maybe we can find a better one");
+diff --git a/src/java/org/apache/ivy/core/settings/ivysettings-default-chain.xml b/src/java/org/apache/ivy/core/settings/ivysettings-default-chain.xml
+index 4dd8f5d4c..2eeefd8c9 100644
+--- a/src/java/org/apache/ivy/core/settings/ivysettings-default-chain.xml
++++ b/src/java/org/apache/ivy/core/settings/ivysettings-default-chain.xml
+@@ -18,7 +18,7 @@
+ -->
+ <ivysettings>
+ 	<resolvers>
+-		<chain name="default" returnFirst="true">
++		<chain name="default" returnFirst="true" checkmodified="true">
+ 			<resolver ref="local"/>
+ 			<resolver ref="main"/>
+ 		</chain>
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+index f034711d4..8f3da1874 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+@@ -275,8 +275,13 @@ protected IvyNode getSystemNode(ResolveData data, ModuleRevisionId resolvedMrid)
+     }
+ 
+     protected ResolvedModuleRevision findModuleInCache(ResolveData data, ModuleRevisionId mrid) {
++        return findModuleInCache(data, mrid, false);
++    }
++
++    protected ResolvedModuleRevision findModuleInCache(
++            ResolveData data, ModuleRevisionId mrid, boolean anyResolver) {
+         return getRepositoryCacheManager().findModuleInCache(
+-            mrid, doValidate(data), getName());
++            mrid, doValidate(data), anyResolver ? null : getName());
+     }
+ 
+     public String getChangingMatcherName() {
+diff --git a/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java b/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
+index 8fff450ae..aa72d3efa 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
+@@ -68,10 +68,34 @@ public long getLastModified() {
+ 
+     private boolean dual;
+ 
++    private Boolean checkmodified = null;
++
+     public void add(DependencyResolver resolver) {
+         chain.add(resolver);
+     }
+ 
++    /**
++     * True if this resolver should check lastmodified date to know if ivy files are up to date.
++     * 
++     * @return
++     */
++    public boolean isCheckmodified() {
++        if (checkmodified == null) {
++            if (getSettings() != null) {
++                String check = getSettings().getVariable("ivy.resolver.default.check.modified");
++                return check != null ? Boolean.valueOf(check).booleanValue() : false;
++            } else {
++                return false;
++            }
++        } else {
++            return checkmodified.booleanValue();
++        }
++    }
++
++    public void setCheckmodified(boolean check) {
++        checkmodified = Boolean.valueOf(check);
++    }
++
+     public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+             throws ParseException {
+         data = new ResolveData(data, doValidate(data));
+@@ -79,10 +103,28 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+ 
+         List errors = new ArrayList();
+ 
++        ResolvedModuleRevision mr = null;
++
++        ModuleRevisionId mrid = dd.getDependencyRevisionId();
++
++        boolean isDynamic = getSettings().getVersionMatcher().isDynamic(mrid);
++
++        boolean isChangingRevision = getChangingMatcher().matches(mrid.getRevision());
++        boolean isChangingDependency = isChangingRevision || dd.isChanging();
++
++        if (!isDynamic && !isCheckmodified() && !isChangingDependency) {
++            Message.verbose(getName() + ": not dynamic, not check modified and not changing."
++                    + " Checking cache for: " + mrid);
++            mr = findModuleInCache(data, mrid, true);
++            if (mr != null) {
++                Message.verbose("chain " + getName() + ": module revision found in cache: " + mrid);
++                return resolvedRevision(mr);
++            }
++        }
++
+         for (Iterator iter = chain.iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+             LatestStrategy oldLatest = setLatestIfRequired(resolver, getLatestStrategy());
+-            ResolvedModuleRevision mr = null;
+             try {
+                 mr = resolver.getDependency(dd, data);
+             } catch (Exception ex) {
+@@ -97,8 +139,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+             checkInterrupted();
+             if (mr != null) {
+                 boolean shouldReturn = returnFirst;
+-                shouldReturn |= !getSettings().getVersionMatcher().isDynamic(
+-                    dd.getDependencyRevisionId())
++                shouldReturn |= !isDynamic
+                         && ret != null && !ret.getDescriptor().isDefault();
+                 if (!shouldReturn) {
+                     // check if latest is asked and compare to return the most recent
+@@ -118,7 +159,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                     } else {
+                         Message.debug("\tmodule revision discarded as older: " + mrDesc);
+                     }
+-                    if (!getSettings().getVersionMatcher().isDynamic(dd.getDependencyRevisionId())
++                    if (!isDynamic
+                             && !ret.getDescriptor().isDefault()) {
+                         Message.debug("\tmodule revision found and is not default: returning "
+                                 + mrDesc);
+diff --git a/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java
+index 2ded158be..c5093aa89 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java
+@@ -19,6 +19,7 @@
+ 
+ import java.io.File;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.Date;
+ import java.util.GregorianCalendar;
+ import java.util.List;
+@@ -339,12 +340,34 @@ public void testFixedWithDefaultAndRealResolver() throws Exception {
+         assertNotNull(rmr);
+         assertEquals("2", rmr.getResolver().getName());
+     }
++    
++
++    public void testUseCache() throws Exception {
++        DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(ModuleRevisionId
++            .newInstance("org1", "mod1.1", "1.0"), false);
++        // resolve dependency twice
++        chainToPutDefaultModuleInCache().getDependency(dd, data);
++
++        ChainResolver chain = new ChainResolver();
++        chain.setName("chain");
++        chain.setSettings(settings);
++        MockResolver[] resolvers = new MockResolver[] {
++                MockResolver.buildMockResolver("1", true, null)};
++        for (int i = 0; i < resolvers.length; i++) {
++            chain.add(resolvers[i]);
++        }
++        chain.getDependency(dd, data);
++        // should not have asked any dependency, should have hit the cache
++        assertEquals(Collections.EMPTY_LIST, resolvers[0].askedDeps);
++    }
++
+ 
+     public void testReturnFirst() throws Exception {
+         ChainResolver chain = new ChainResolver();
+         chain.setName("chain");
+         chain.setSettings(settings);
+         chain.setReturnFirst(true);
++        
+         MockResolver[] resolvers = new MockResolver[] {
+                 MockResolver.buildMockResolver("1", true, new GregorianCalendar(2005, 1, 20)
+                         .getTime()),
+@@ -372,39 +395,52 @@ public void testReturnFirst() throws Exception {
+     }
+ 
+     public void testReturnFirstWithDefaultAndCacheAndRealResolver() throws Exception {
+-        // test case for IVY-207
++        // test case for IVY-389
++        DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(ModuleRevisionId
++            .newInstance("org1", "mod1.1", "1.0"), false);
+ 
+         // 1 ---- we first do a first resolve which puts a default file in cache
+-        ChainResolver chain = new ChainResolver();
+-        chain.setName("chain");
+-        chain.setSettings(settings);
++        chainToPutDefaultModuleInCache().getDependency(dd, data);
+ 
+-        // no ivy pattern for resolver: will only find a 'default' module
+-        FileSystemResolver resolver = new FileSystemResolver();
+-        resolver.setName("old");
+-        resolver.setSettings(settings);
+-
+-        resolver
+-                .addArtifactPattern("test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[type]");
+-        chain.add(resolver);
++        // 2 ---- now we ask to resolve dependencies with a chain in return first mode with check
++        // modified = false, in which the first resolver is not able to find the module, but the
++        // second is
++        ChainResolver chain = returnFirstChain();
+ 
+-        settings.addResolver(chain);
++        ResolvedModuleRevision rmr = chain.getDependency(dd, data);
++        assertNotNull(rmr);
++        // the module returned should be the default one found in cache since check modified is false
++        assertEquals(true, rmr.getDescriptor().isDefault());
++    }
+ 
++    public void testReturnFirstWithCheckModifiedAndDefaultAndCacheAndRealResolver() throws Exception {
++        // test case for IVY-207
++        
+         DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(ModuleRevisionId
+-                .newInstance("org1", "mod1.1", "1.0"), false);
+-        chain.getDependency(dd, data);
++            .newInstance("org1", "mod1.1", "1.0"), false);
++
++        // 1 ---- we first do a first resolve which puts a default file in cache
++        chainToPutDefaultModuleInCache().getDependency(dd, data);
+ 
+         // 2 ---- now we ask to resolve dependencies with a chain in return first mode, in which the
+-        // first resolver
+-        // is not able to find the module, but the second is
++        // first resolver is not able to find the module, but the second is
++        ChainResolver chain = returnFirstChain();
++        chain.setCheckmodified(true);
+ 
+-        chain = new ChainResolver();
++        ResolvedModuleRevision rmr = chain.getDependency(dd, data);
++        assertNotNull(rmr);
++        assertEquals(false, rmr.getDescriptor().isDefault());
++        assertEquals("2", rmr.getResolver().getName());
++    }
++
++    private ChainResolver returnFirstChain() {
++        ChainResolver chain = new ChainResolver();
+         chain.setName("chain");
+         chain.setSettings(settings);
+         chain.setReturnFirst(true);
+ 
+         // no pattern for first resolver: will not find the module
+-        resolver = new FileSystemResolver();
++        FileSystemResolver resolver = new FileSystemResolver();
+         resolver.setName("1");
+         resolver.setSettings(settings);
+ 
+@@ -415,17 +451,32 @@ public void testReturnFirstWithDefaultAndCacheAndRealResolver() throws Exception
+         resolver.setName("2");
+         resolver.setSettings(settings);
+ 
+-        resolver
+-                .addIvyPattern("test/repositories/1/[organisation]/[module]/ivys/ivy-[revision].xml");
+-        resolver
+-                .addArtifactPattern("test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[type]");
++        resolver.addIvyPattern(
++            "test/repositories/1/[organisation]/[module]/ivys/ivy-[revision].xml");
++        resolver.addArtifactPattern(
++            "test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[type]");
+         chain.add(resolver);
+ 
+         settings.addResolver(chain);
++        return chain;
++    }
+ 
+-        ResolvedModuleRevision rmr = chain.getDependency(dd, data);
+-        assertNotNull(rmr);
+-        assertEquals("2", rmr.getResolver().getName());
++    private ChainResolver chainToPutDefaultModuleInCache() {
++        ChainResolver chain = new ChainResolver();
++        chain.setName("chain");
++        chain.setSettings(settings);
++
++        // no ivy pattern for resolver: will only find a 'default' module
++        FileSystemResolver resolver = new FileSystemResolver();
++        resolver.setName("old");
++        resolver.setSettings(settings);
++
++        resolver.addArtifactPattern(
++            "test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[type]");
++        chain.add(resolver);
++
++        settings.addResolver(chain);
++        return chain;
+     }
+ 
+     public void testDual() throws Exception {
+diff --git a/test/java/org/apache/ivy/plugins/resolver/chainresolverconf.xml b/test/java/org/apache/ivy/plugins/resolver/chainresolverconf.xml
+index 6f01a3366..3b7639d9a 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/chainresolverconf.xml
++++ b/test/java/org/apache/ivy/plugins/resolver/chainresolverconf.xml
+@@ -17,7 +17,7 @@
+    under the License.    
+ -->
+ <ivysettings>
+-  <conf defaultResolver="chain"/>
++  <settings defaultResolver="chain"/>
+   <resolvers>
+     <chain name="chain">
+       <ibiblio name="1" />

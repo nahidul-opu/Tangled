@@ -1,0 +1,1175 @@
+From 49fb920c82072e8b9bb4e1dbdb97be29416c0ad5 Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Fri, 7 Dec 2012 17:55:36 +0000
+Subject: [PATCH] [SANTUARIO-337] - Patch applied for trunk with test code
+ modifications to use the new API
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1418413 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../utils/resolver/ResourceResolver.java      | 48 +++++++++++------
+ .../resolver/ResourceResolverContext.java     | 39 ++++++++++++++
+ .../resolver/ResourceResolverException.java   | 42 ++++++++++++---
+ .../utils/resolver/ResourceResolverSpi.java   | 53 +++++++++++++++++--
+ .../implementations/ResolverAnonymous.java    | 18 ++++---
+ .../implementations/ResolverDirectHTTP.java   | 36 ++++++-------
+ .../implementations/ResolverFragment.java     | 40 +++++++-------
+ .../ResolverLocalFilesystem.java              | 27 +++++-----
+ .../implementations/ResolverXPointer.java     | 35 ++++++------
+ .../signature/ProcessingInstructionTest.java  | 13 +++--
+ .../signature/XPointerResourceResolver.java   | 24 +++++----
+ .../security/test/dom/utils/OldApiTest.java   | 27 +++++-----
+ .../dom/utils/resolver/OfflineResolver.java   | 26 ++++-----
+ .../resolver/ResolverDirectHTTPTest.java      | 21 ++++++--
+ .../utils/resolver/ResourceResolverTest.java  |  6 +--
+ 15 files changed, 299 insertions(+), 156 deletions(-)
+ create mode 100644 src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverContext.java
+
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolver.java b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolver.java
+index 2946a72b8c..4c9aa529e3 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolver.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolver.java
+@@ -81,8 +81,14 @@ public static final ResourceResolver getInstance(Attr uri, String baseURI)
+      * @throws ResourceResolverException
+      */
+     public static final ResourceResolver getInstance(
+-        Attr uri, String baseURI, boolean secureValidation
++        Attr uriAttr, String baseURI, boolean secureValidation
+     ) throws ResourceResolverException {
++        ResourceResolverContext context = new ResourceResolverContext(uriAttr, baseURI, secureValidation);
++        return internalGetInstance(context);
++    }
++
++    private static <N> ResourceResolver internalGetInstance(ResourceResolverContext context)
++            throws ResourceResolverException {
+         synchronized (resolverList) {
+             for (ResourceResolver resolver : resolverList) {
+                 ResourceResolver resolverTmp = resolver;
+@@ -91,9 +97,9 @@ public static final ResourceResolver getInstance(
+                         resolverTmp = 
+                             new ResourceResolver(resolver.resolverSpi.getClass().newInstance());
+                     } catch (InstantiationException e) {
+-                        throw new ResourceResolverException("", e, uri, baseURI);
++                        throw new ResourceResolverException("", e, context.uriToResolve, context.baseUri);
+                     } catch (IllegalAccessException e) {
+-                        throw new ResourceResolverException("", e, uri, baseURI);			
++                        throw new ResourceResolverException("", e, context.uriToResolve, context.baseUri);			
+                     }
+                 }
+     
+@@ -103,15 +109,14 @@ public static final ResourceResolver getInstance(
+                     );
+                 }
+     
+-                resolverTmp.resolverSpi.secureValidation = secureValidation;
+-                if ((resolverTmp != null) && resolverTmp.canResolve(uri, baseURI)) {
++                if ((resolverTmp != null) && resolverTmp.canResolve(context)) {
+                     // Check to see whether the Resolver is allowed
+-                    if (secureValidation 
++                    if (context.secureValidation 
+                         && (resolverTmp.resolverSpi instanceof ResolverLocalFilesystem
+                             || resolverTmp.resolverSpi instanceof ResolverDirectHTTP)) {
+                         Object exArgs[] = { resolverTmp.resolverSpi.getClass().getName() };
+                         throw new ResourceResolverException(
+-                            "signature.Reference.ForbiddenResolver", exArgs, uri, baseURI
++                            "signature.Reference.ForbiddenResolver", exArgs, context.uriToResolve, context.baseUri
+                         );
+                     }
+                     return resolverTmp;
+@@ -119,9 +124,10 @@ public static final ResourceResolver getInstance(
+             }
+         }
+         
+-        Object exArgs[] = { ((uri != null) ? uri.getNodeValue() : "null"), baseURI };
++        Object exArgs[] = { ((context.uriToResolve != null)
++                ? context.uriToResolve : "null"), context.baseUri };
+ 
+-        throw new ResourceResolverException("utils.resolver.noClass", exArgs, uri, baseURI);
++        throw new ResourceResolverException("utils.resolver.noClass", exArgs, context.uriToResolve, context.baseUri);
+     }
+     
+     /**
+@@ -161,6 +167,8 @@ public static ResourceResolver getInstance(
+             );
+         }
+ 
++        ResourceResolverContext context = new ResourceResolverContext(uri, baseURI, secureValidation);
++        
+         // first check the individual Resolvers
+         if (individualResolvers != null) {
+             for (int i = 0; i < individualResolvers.size(); i++) {
+@@ -172,15 +180,14 @@ public static ResourceResolver getInstance(
+                         log.debug("check resolvability by class " + currentClass);
+                     }
+ 
+-                    resolver.resolverSpi.secureValidation = secureValidation;
+-                    if (resolver.canResolve(uri, baseURI)) {
++                    if (resolver.canResolve(context)) {
+                         return resolver;
+                     }
+                 }
+             }
+         }
+ 
+-        return getInstance(uri, baseURI, secureValidation);
++        return internalGetInstance(context);
+     }
+ 
+     /**
+@@ -265,6 +272,14 @@ public static void registerDefaultResolvers() {
+         }
+     }
+     
++    /**
++     * @deprecated New clients should use {@link #resolve(Attr, String, boolean)}
++     */
++    public XMLSignatureInput resolve(Attr uri, String baseURI)
++        throws ResourceResolverException {
++        return resolve(uri, baseURI, true);
++    }
++
+     /**
+      * Method resolve
+      *
+@@ -274,9 +289,10 @@ public static void registerDefaultResolvers() {
+      *
+      * @throws ResourceResolverException
+      */
+-    public XMLSignatureInput resolve(Attr uri, String baseURI)
++    public XMLSignatureInput resolve(Attr uri, String baseURI, boolean secureValidation)
+         throws ResourceResolverException {
+-        return resolverSpi.engineResolve(uri, baseURI);
++        ResourceResolverContext context = new ResourceResolverContext(uri, baseURI, secureValidation);
++        return resolverSpi.engineResolveURI(context);
+     }
+ 
+     /**
+@@ -334,7 +350,7 @@ public boolean understandsProperty(String propertyToTest) {
+      * @param baseURI
+      * @return true if it can resolve the uri
+      */
+-    private boolean canResolve(Attr uri, String baseURI) {
+-        return resolverSpi.engineCanResolve(uri, baseURI);
++    private boolean canResolve(ResourceResolverContext context) {
++        return this.resolverSpi.engineCanResolveURI(context);
+     }
+ }
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverContext.java b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverContext.java
+new file mode 100644
+index 0000000000..4961131f33
+--- /dev/null
++++ b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverContext.java
+@@ -0,0 +1,39 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.xml.security.utils.resolver;
++
++import org.w3c.dom.Attr;
++
++public class ResourceResolverContext {
++
++    public ResourceResolverContext(Attr attr, String baseUri, boolean secureValidation) {
++        this.attr = attr;
++        this.baseUri = baseUri;
++        this.secureValidation = secureValidation;
++        this.uriToResolve = attr != null ? attr.getValue() : null;
++    }
++    
++    public final String uriToResolve;
++    
++    public final boolean secureValidation;
++    
++    public final String baseUri;
++    
++    public final Attr attr;
++}
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverException.java b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverException.java
+index 1fd33d3148..397ac5fe7e 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverException.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverException.java
+@@ -31,7 +31,7 @@ public class ResourceResolverException extends XMLSecurityException {
+ 
+     private static final long serialVersionUID = 1L;
+     
+-    private Attr uri = null;
++    private String uri = null;
+     
+     private String baseURI = null;
+     
+@@ -42,7 +42,7 @@ public class ResourceResolverException extends XMLSecurityException {
+      * @param uri
+      * @param baseURI
+      */
+-    public ResourceResolverException(String msgID, Attr uri, String baseURI) {
++    public ResourceResolverException(String msgID, String uri, String baseURI) {
+         super(msgID);
+ 
+         this.uri = uri;
+@@ -57,7 +57,7 @@ public ResourceResolverException(String msgID, Attr uri, String baseURI) {
+      * @param uri
+      * @param baseURI
+      */
+-    public ResourceResolverException(String msgID, Object exArgs[], Attr uri,
++    public ResourceResolverException(String msgID, Object exArgs[], String uri,
+                                      String baseURI) {
+         super(msgID, exArgs);
+ 
+@@ -74,7 +74,7 @@ public ResourceResolverException(String msgID, Object exArgs[], Attr uri,
+      * @param baseURI
+      */
+     public ResourceResolverException(String msgID, Exception originalException,
+-                                     Attr uri, String baseURI) {
++                                     String uri, String baseURI) {
+         super(msgID, originalException);
+ 
+         this.uri = uri;
+@@ -91,7 +91,7 @@ public ResourceResolverException(String msgID, Exception originalException,
+      * @param baseURI
+      */
+     public ResourceResolverException(String msgID, Object exArgs[],
+-                                     Exception originalException, Attr uri,
++                                     Exception originalException, String uri,
+                                      String baseURI) {
+         super(msgID, exArgs, originalException);
+ 
+@@ -99,11 +99,39 @@ public ResourceResolverException(String msgID, Object exArgs[],
+         this.baseURI = baseURI;
+     }
+ 
++    /**
++     * @deprecated New clients should use {@link #ResourceResolverException(String, Object[], Exception, String, String)}
++     */
++    public ResourceResolverException(String msgID, Exception originalException,
++                                     Attr uri, String baseURI) {
++
++        this(msgID, originalException, getNodeValue(uri), baseURI);
++    }
++
++    /**
++     * @deprecated New clients should use {@link #ResourceResolverException(String, String, String)}
++     */
++    public ResourceResolverException(String msgID, Attr uri, String baseURI) {
++        this(msgID, getNodeValue(uri), baseURI);
++    }
++
++    /**
++     * @deprecated New clients should use {@link #ResourceResolverException(String, Object[], String, String)}
++     */
++    public ResourceResolverException(String _msgID, Object exArgs[], Attr uri,
++                                    String BaseURI) {
++        this(_msgID, exArgs, getNodeValue(uri), BaseURI);
++    }
++
++    private static String getNodeValue(Attr uri) {
++        return (uri != null) ? uri.getNodeValue() : null;
++    }
++
+     /**
+      * 
+      * @param uri
+      */
+-    public void setURI(Attr uri) {
++    public void setURI(String uri) {
+         this.uri = uri;
+     }
+ 
+@@ -111,7 +139,7 @@ public void setURI(Attr uri) {
+      * 
+      * @return the uri
+      */
+-    public Attr getURI() {
++    public String getURI() {
+         return this.uri;
+     }
+ 
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverSpi.java b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverSpi.java
+index 5084e60c91..9ecd9abb16 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverSpi.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/ResourceResolverSpi.java
+@@ -38,7 +38,13 @@ public abstract class ResourceResolverSpi {
+     /** Field properties */
+     protected java.util.Map<String, String> properties = null;
+     
+-    protected boolean secureValidation;
++    /**
++     * Deprecated - used to carry state about whether resolution was being done in a secure fashion,
++     * but was not thread safe, so the resolution information is now passed as parameters to methods.
++     * 
++     * @deprecated Secure validation flag is now passed to methods.
++     */
++    protected final boolean secureValidation = true;
+ 
+     /**
+      * This is the workhorse method used to resolve resources.
+@@ -48,9 +54,28 @@ public abstract class ResourceResolverSpi {
+      * @return the resource wrapped around a XMLSignatureInput
+      *
+      * @throws ResourceResolverException
++     * 
++     * @deprecated New clients should override {@link #engineResolveURI(ResourceResolverContext)}
++     */
++    public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
++       throws ResourceResolverException {
++	   throw new UnsupportedOperationException();
++    }
++
++    /**
++     * This is the workhorse method used to resolve resources.
++     * @param context Context to use to resolve resources.
++     * 
++     * @return the resource wrapped around a XMLSignatureInput
++     * 
++     * @throws ResourceResolverException
+      */
+-    public abstract XMLSignatureInput engineResolve(Attr uri, String BaseURI)
+-        throws ResourceResolverException;
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context)
++   		throws ResourceResolverException {
++	    // The default implementation, to preserve backwards compatibility in the
++	    // test cases, calls the old resolver API.
++	    return engineResolve(context.attr, context.baseUri);
++    }
+ 
+     /**
+      * Method engineSetProperty
+@@ -108,8 +133,28 @@ public boolean engineIsThreadSafe() {
+      * @param uri
+      * @param BaseURI
+      * @return true if the engine can resolve the uri
++     * 
++     * @deprecated See {@link #engineCanResolveURI(ResourceResolverContext)}
++     */
++    public boolean engineCanResolve(Attr uri, String BaseURI) {
++        // This method used to be abstract, so any calls to "super" are bogus.
++        throw new UnsupportedOperationException();
++    }
++
++    /**
++     * This method helps the {@link ResourceResolver} to decide whether a
++     * {@link ResourceResolverSpi} is able to perform the requested action.
++     *
++     * <p>New clients should override this method, and not override {@link #engineCanResolve(Attr, String)}
++     * </p>
++     * @param context Context in which to do resolution.
++     * @return true if the engine can resolve the uri
+      */
+-    public abstract boolean engineCanResolve(Attr uri, String BaseURI);
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        // To preserve backward compatibility with existing resolvers that might override the old method,
++        // call the old deprecated API.
++   	    return engineCanResolve( (Attr) context.attr, context.baseUri );
++    }
+ 
+     /**
+      * Method engineGetPropertyKeys
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverAnonymous.java b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverAnonymous.java
+index 5ea264399d..418557f58d 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverAnonymous.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverAnonymous.java
+@@ -25,15 +25,15 @@
+ import java.io.InputStream;
+ 
+ import org.apache.xml.security.signature.XMLSignatureInput;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+-import org.w3c.dom.Attr;
+ 
+ /**
+  * @author $Author$
+  */
+ public class ResolverAnonymous extends ResourceResolverSpi {
+ 
+-    private XMLSignatureInput input = null;
++    private InputStream inStream = null;
+     
+     @Override
+     public boolean engineIsThreadSafe() {
+@@ -46,26 +46,28 @@ public boolean engineIsThreadSafe() {
+      * @throws IOException
+      */
+     public ResolverAnonymous(String filename) throws FileNotFoundException, IOException {
+-        this.input = new XMLSignatureInput(new FileInputStream(filename));
++        inStream = new FileInputStream(filename);
+     }
+ 
+     /**
+      * @param is
+      */
+     public ResolverAnonymous(InputStream is) {
+-        this.input = new XMLSignatureInput(is);
++        inStream = is;
+     }
+ 
+     /** @inheritDoc */
+-    public XMLSignatureInput engineResolve(Attr uri, String baseURI) {
+-        return this.input;
++    @Override
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context) {
++	    return new XMLSignatureInput(inStream);
+     }
+ 
+     /**    
+      * @inheritDoc
+      */
+-    public boolean engineCanResolve(Attr uri, String baseURI) {
+-        if (uri == null) {
++    @Override
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        if (context.uriToResolve == null) {
+             return true;
+         }
+         return false;
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java
+index bbd72382aa..1c7364c63c 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverDirectHTTP.java
+@@ -31,9 +31,9 @@
+ 
+ import org.apache.xml.security.signature.XMLSignatureInput;
+ import org.apache.xml.security.utils.Base64;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+-import org.w3c.dom.Attr;
+ 
+ /**
+  * A simple ResourceResolver for HTTP requests. This class handles only 'pure'
+@@ -51,7 +51,6 @@
+  * resourceResolver.setProperty("http.proxy.password", "secretca");
+  * </PRE>
+  *
+- * @author $Author$
+  * @see <A HREF="http://www.javaworld.com/javaworld/javatips/jw-javatip42_p.html">Java Tip 42: Write Java apps that work with proxy-based firewalls</A>
+  * @see <A HREF="http://java.sun.com/j2se/1.4/docs/guide/net/properties.html">SUN J2SE docs for network properties</A>
+  * @see <A HREF="http://metalab.unc.edu/javafaq/javafaq.html#proxy">The JAVA FAQ Question 9.5: How do I make Java work with a proxy server?</A>
+@@ -102,12 +101,13 @@ public boolean engineIsThreadSafe() {
+      * @return 
+      * $todo$ calculate the correct URI from the attribute and the baseURI
+      */
+-    public XMLSignatureInput engineResolve(Attr uri, String baseURI)
++    @Override
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context)
+         throws ResourceResolverException {
+         try {
+ 
+             // calculate new URI
+-            URI uriNew = getNewURI(uri.getNodeValue(), baseURI);
++            URI uriNew = getNewURI(context.uriToResolve, context.baseUri);
+             URL url = uriNew.toURL();
+             URLConnection urlConnection;
+             urlConnection = openConnection(url);
+@@ -157,13 +157,13 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+ 
+             return result;
+         } catch (URISyntaxException ex) {
+-            throw new ResourceResolverException("generic.EmptyMessage", ex, uri, baseURI);
++            throw new ResourceResolverException("generic.EmptyMessage", ex, context.uriToResolve, context.baseUri);
+         } catch (MalformedURLException ex) {
+-            throw new ResourceResolverException("generic.EmptyMessage", ex, uri, baseURI);
++            throw new ResourceResolverException("generic.EmptyMessage", ex, context.uriToResolve, context.baseUri);
+         } catch (IOException ex) {
+-            throw new ResourceResolverException("generic.EmptyMessage", ex, uri, baseURI);
++            throw new ResourceResolverException("generic.EmptyMessage", ex, context.uriToResolve, context.baseUri);
+         } catch (IllegalArgumentException e) {
+-            throw new ResourceResolverException("generic.EmptyMessage", e, uri, baseURI);
++            throw new ResourceResolverException("generic.EmptyMessage", e, context.uriToResolve, context.baseUri);
+         }
+     }
+ 
+@@ -206,19 +206,17 @@ private URLConnection openConnection(URL url) throws IOException {
+      *
+      * @param uri
+      * @param baseURI
+-     *  @return true if can be resolved
++     * @return true if can be resolved
+      */
+-    public boolean engineCanResolve(Attr uri, String baseURI) {
+-        if (uri == null) {
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        if (context.uriToResolve == null) {
+             if (log.isDebugEnabled()) {
+                 log.debug("quick fail, uri == null");
+             }
+             return false;
+         }
+ 
+-        String uriNodeValue = uri.getNodeValue();
+-
+-        if (uriNodeValue.equals("") || (uriNodeValue.charAt(0)=='#')) {
++        if (context.uriToResolve.equals("") || (context.uriToResolve.charAt(0)=='#')) {
+             if (log.isDebugEnabled()) {
+                 log.debug("quick fail for empty URIs and local ones");
+             }
+@@ -226,19 +224,19 @@ public boolean engineCanResolve(Attr uri, String baseURI) {
+         }
+ 
+         if (log.isDebugEnabled()) {
+-            log.debug("I was asked whether I can resolve " + uriNodeValue);
++            log.debug("I was asked whether I can resolve " + context.uriToResolve);
+         }
+ 
+-        if (uriNodeValue.startsWith("http:") ||
+-            (baseURI != null && baseURI.startsWith("http:") )) {
++        if (context.uriToResolve.startsWith("http:") ||
++            (context.baseUri != null && context.baseUri.startsWith("http:") )) {
+             if (log.isDebugEnabled()) {
+-                log.debug("I state that I can resolve " + uriNodeValue);
++                log.debug("I state that I can resolve " + context.uriToResolve);
+             }
+             return true;
+         }
+ 
+         if (log.isDebugEnabled()) {
+-            log.debug("I state that I can't resolve " + uriNodeValue);
++            log.debug("I state that I can't resolve " + context.uriToResolve);
+         }
+ 
+         return false;
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverFragment.java b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverFragment.java
+index 2b65848d34..fb238984df 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverFragment.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverFragment.java
+@@ -20,9 +20,9 @@
+ 
+ import org.apache.xml.security.signature.XMLSignatureInput;
+ import org.apache.xml.security.utils.XMLUtils;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+-import org.w3c.dom.Attr;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+@@ -53,14 +53,13 @@ public boolean engineIsThreadSafe() {
+      * @param uri
+      * @param baseURI
+      */
+-    public XMLSignatureInput engineResolve(Attr uri, String baseURI) 
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context) 
+         throws ResourceResolverException {
+ 
+-        String uriNodeValue = uri.getNodeValue();
+-        Document doc = uri.getOwnerElement().getOwnerDocument();
++        Document doc = context.attr.getOwnerElement().getOwnerDocument();
+ 
+         Node selectedElem = null;
+-        if (uriNodeValue.equals("")) {
++        if (context.uriToResolve.equals("")) {
+             /*
+              * Identifies the node-set (minus any comment nodes) of the XML
+              * resource containing the signature
+@@ -78,21 +77,21 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+              * include the element plus all descendants including namespaces and
+              * attributes -- but not comments.
+              */
+-            String id = uriNodeValue.substring(1);
++            String id = context.uriToResolve.substring(1);
+ 
+             selectedElem = doc.getElementById(id);
+             if (selectedElem == null) {
+                 Object exArgs[] = { id };
+                 throw new ResourceResolverException(
+-                    "signature.Verification.MissingID", exArgs, uri, baseURI
++                    "signature.Verification.MissingID", exArgs, context.uriToResolve, context.baseUri
+                 );
+             }
+-            if (secureValidation) {
+-                Element start = uri.getOwnerDocument().getDocumentElement();
++            if (context.secureValidation) {
++                Element start = context.attr.getOwnerDocument().getDocumentElement();
+                 if (!XMLUtils.protectAgainstWrappingAttack(start, id)) {
+                     Object exArgs[] = { id };
+                     throw new ResourceResolverException(
+-                        "signature.Verification.MultipleIDs", exArgs, uri, baseURI
++                        "signature.Verification.MultipleIDs", exArgs, context.uriToResolve, context.baseUri
+                     );
+                 }
+             }
+@@ -107,10 +106,10 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+         result.setExcludeComments(true);
+ 
+         result.setMIMEType("text/xml");
+-        if (baseURI != null && baseURI.length() > 0) {
+-            result.setSourceURI(baseURI.concat(uri.getNodeValue()));      
++        if (context.baseUri != null && context.baseUri.length() > 0) {
++            result.setSourceURI(context.baseUri.concat(context.uriToResolve));      
+         } else {
+-            result.setSourceURI(uri.getNodeValue());      
++            result.setSourceURI(context.uriToResolve);      
+         }
+         return result;
+     }
+@@ -121,25 +120,24 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+      * @param uri
+      * @param baseURI
+      */
+-    public boolean engineCanResolve(Attr uri, String baseURI) {
+-        if (uri == null) {
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        if (context.uriToResolve == null) {
+             if (log.isDebugEnabled()) {
+                 log.debug("Quick fail for null uri");
+             }
+             return false;
+         }
+-
+-        String uriNodeValue = uri.getNodeValue();
+-        if (uriNodeValue.equals("") || 
+-            ((uriNodeValue.charAt(0) == '#') && !uriNodeValue.startsWith("#xpointer("))
++        
++        if (context.uriToResolve.equals("") || 
++            ((context.uriToResolve.charAt(0) == '#') && !context.uriToResolve.startsWith("#xpointer("))
+         ) {
+             if (log.isDebugEnabled()) {
+-                log.debug("State I can resolve reference: \"" + uriNodeValue + "\"");
++                log.debug("State I can resolve reference: \"" + context.uriToResolve + "\"");
+             }
+             return true;
+         }
+         if (log.isDebugEnabled()) {
+-            log.debug("Do not seem to be able to resolve reference: \"" + uriNodeValue + "\"");
++            log.debug("Do not seem to be able to resolve reference: \"" + context.uriToResolve + "\"");
+         }
+         return false;
+     }
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverLocalFilesystem.java b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverLocalFilesystem.java
+index de01536c94..2959648801 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverLocalFilesystem.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverLocalFilesystem.java
+@@ -23,14 +23,12 @@
+ import java.net.URISyntaxException;
+ 
+ import org.apache.xml.security.signature.XMLSignatureInput;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+-import org.w3c.dom.Attr;
+ 
+ /**
+  * A simple ResourceResolver for requests into the local filesystem.
+- *
+- * @author $Author$
+  */
+ public class ResolverLocalFilesystem extends ResourceResolverSpi {
+     
+@@ -48,11 +46,12 @@ public boolean engineIsThreadSafe() {
+     /**
+      * @inheritDoc
+      */
+-    public XMLSignatureInput engineResolve(Attr uri, String baseURI)
++    @Override
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context)
+         throws ResourceResolverException {
+         try {
+             // calculate new URI
+-            URI uriNew = getNewURI(uri.getNodeValue(), baseURI);
++            URI uriNew = getNewURI(context.uriToResolve, context.baseUri);
+ 
+             String fileName =
+                 ResolverLocalFilesystem.translateUriToFilename(uriNew.toString());
+@@ -63,7 +62,7 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+ 
+             return result;
+         } catch (Exception e) {
+-            throw new ResourceResolverException("generic.EmptyMessage", e, uri, baseURI);
++            throw new ResourceResolverException("generic.EmptyMessage", e, context.uriToResolve, context.baseUri);
+         }
+     }
+ 
+@@ -105,26 +104,24 @@ private static String translateUriToFilename(String uri) {
+     /**
+      * @inheritDoc
+      */
+-    public boolean engineCanResolve(Attr uri, String baseURI) {
+-        if (uri == null) {
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        if (context.uriToResolve == null) {
+             return false;
+         }
+ 
+-        String uriNodeValue = uri.getNodeValue();
+-
+-        if (uriNodeValue.equals("") || (uriNodeValue.charAt(0)=='#') ||
+-            uriNodeValue.startsWith("http:")) {
++        if (context.uriToResolve.equals("") || (context.uriToResolve.charAt(0)=='#') ||
++            context.uriToResolve.startsWith("http:")) {
+             return false;
+         }
+ 
+         try {
+             if (log.isDebugEnabled()) {
+-                log.debug("I was asked whether I can resolve " + uriNodeValue);
++                log.debug("I was asked whether I can resolve " + context.uriToResolve);
+             }
+ 
+-            if (uriNodeValue.startsWith("file:") || baseURI.startsWith("file:")) {
++            if (context.uriToResolve.startsWith("file:") || context.baseUri.startsWith("file:")) {
+                 if (log.isDebugEnabled()) {
+-                    log.debug("I state that I can resolve " + uriNodeValue);
++                    log.debug("I state that I can resolve " + context.uriToResolve);
+                 }
+                 return true;
+             }
+diff --git a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverXPointer.java b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverXPointer.java
+index 0834c2df55..3cc6eb1d1c 100644
+--- a/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverXPointer.java
++++ b/src/main/java/org/apache/xml/security/utils/resolver/implementations/ResolverXPointer.java
+@@ -20,9 +20,9 @@
+ 
+ import org.apache.xml.security.signature.XMLSignatureInput;
+ import org.apache.xml.security.utils.XMLUtils;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+-import org.w3c.dom.Attr;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+@@ -59,25 +59,25 @@ public boolean engineIsThreadSafe() {
+     /**
+      * @inheritDoc
+      */
+-    public XMLSignatureInput engineResolve(Attr uri, String baseURI)
++    @Override
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context)
+         throws ResourceResolverException {
+ 
+         Node resultNode = null;
+-        Document doc = uri.getOwnerElement().getOwnerDocument();
++        Document doc = context.attr.getOwnerElement().getOwnerDocument();
+ 
+-        String uriStr = uri.getNodeValue();
+-        if (isXPointerSlash(uriStr)) {
++        if (isXPointerSlash(context.uriToResolve)) {
+             resultNode = doc;
+-        } else if (isXPointerId(uriStr)) {
+-            String id = getXPointerId(uriStr);
++        } else if (isXPointerId(context.uriToResolve)) {
++            String id = getXPointerId(context.uriToResolve);
+             resultNode = doc.getElementById(id);
+             
+-            if (secureValidation) {
+-                Element start = uri.getOwnerDocument().getDocumentElement();
++            if (context.secureValidation) {
++                Element start = context.attr.getOwnerDocument().getDocumentElement();
+                 if (!XMLUtils.protectAgainstWrappingAttack(start, id)) {
+                     Object exArgs[] = { id };
+                     throw new ResourceResolverException(
+-                        "signature.Verification.MultipleIDs", exArgs, uri, baseURI
++                        "signature.Verification.MultipleIDs", exArgs, context.uriToResolve, context.baseUri
+                     );
+                 }
+             }
+@@ -86,7 +86,7 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+                 Object exArgs[] = { id };
+ 
+                 throw new ResourceResolverException(
+-                    "signature.Verification.MissingID", exArgs, uri, baseURI
++                    "signature.Verification.MissingID", exArgs, context.uriToResolve, context.baseUri
+                 );
+             }
+         }
+@@ -94,10 +94,10 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+         XMLSignatureInput result = new XMLSignatureInput(resultNode);
+ 
+         result.setMIMEType("text/xml");
+-        if (baseURI != null && baseURI.length() > 0) {
+-            result.setSourceURI(baseURI.concat(uri.getNodeValue()));      
++        if (context.baseUri != null && context.baseUri.length() > 0) {
++            result.setSourceURI(context.baseUri.concat(context.uriToResolve));      
+         } else {
+-            result.setSourceURI(uri.getNodeValue());      
++            result.setSourceURI(context.uriToResolve);      
+         }
+ 
+         return result;
+@@ -106,12 +106,11 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+     /**
+      * @inheritDoc
+      */
+-    public boolean engineCanResolve(Attr uri, String baseURI) {
+-        if (uri == null) {
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        if (context.uriToResolve == null) {
+             return false;
+         }
+-        String uriStr = uri.getNodeValue();
+-        if (isXPointerSlash(uriStr) || isXPointerId(uriStr)) {
++        if (isXPointerSlash(context.uriToResolve) || isXPointerId(context.uriToResolve)) {
+             return true;
+         }
+ 
+diff --git a/src/test/java/org/apache/xml/security/test/dom/signature/ProcessingInstructionTest.java b/src/test/java/org/apache/xml/security/test/dom/signature/ProcessingInstructionTest.java
+index e28a421fad..49acbd2d07 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/signature/ProcessingInstructionTest.java
++++ b/src/test/java/org/apache/xml/security/test/dom/signature/ProcessingInstructionTest.java
+@@ -37,6 +37,7 @@
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+ 
+@@ -115,10 +116,11 @@ public synchronized static ResourceResolverSpi getInstance() {
+         private FileResolver() {
+         }
+     
+-        public XMLSignatureInput engineResolve(Attr uri, String baseURI)
++        @Override
++        public XMLSignatureInput engineResolveURI(ResourceResolverContext context)
+             throws ResourceResolverException {
+             try {
+-                URI uriNew = getNewURI(uri.getNodeValue(), baseURI);
++                URI uriNew = getNewURI(context.uriToResolve, context.baseUri);
+                 
+                 FileInputStream inputStream = 
+                     new FileInputStream(dir + "out.xml");
+@@ -129,13 +131,14 @@ public XMLSignatureInput engineResolve(Attr uri, String baseURI)
+                 return result;
+             } catch (Exception ex) {
+                 throw new ResourceResolverException(
+-                    "generic.EmptyMessage", ex, uri, baseURI
++                    "generic.EmptyMessage", ex, context.uriToResolve, context.baseUri
+                 );
+             }
+         }
+         
+-        public boolean engineCanResolve(Attr uri, String BaseURI) {
+-            if (uri == null || !"out.xml".equals(uri.getNodeValue())) {
++        @Override
++        public boolean engineCanResolveURI(ResourceResolverContext context) {
++            if (context.uriToResolve == null || !"out.xml".equals(context.uriToResolve)) {
+                 return false;
+             }
+             return true;
+diff --git a/src/test/java/org/apache/xml/security/test/dom/signature/XPointerResourceResolver.java b/src/test/java/org/apache/xml/security/test/dom/signature/XPointerResourceResolver.java
+index a7f8bb6a87..f5d1d91148 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/signature/XPointerResourceResolver.java
++++ b/src/test/java/org/apache/xml/security/test/dom/signature/XPointerResourceResolver.java
+@@ -32,9 +32,9 @@
+ 
+ import org.apache.xml.security.signature.XMLSignatureInput;
+ import org.apache.xml.security.test.dom.DSNamespaceContext;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+-import org.w3c.dom.Attr;
+ import org.w3c.dom.Node;
+ import org.w3c.dom.NodeList;
+ 
+@@ -56,8 +56,9 @@ public XPointerResourceResolver(Node baseNode) {
+         this.baseNode = baseNode;
+     }
+ 
+-    public boolean engineCanResolve(Attr uri, String BaseURI) {
+-        String v = uri.getNodeValue();
++    @Override
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        String v = context.uriToResolve;
+ 
+         if (v == null || v.length() <= 0) {
+             return false;
+@@ -94,14 +95,15 @@ public boolean engineCanResolve(Attr uri, String BaseURI) {
+         }
+ 
+         log.debug("xpURI = " + xpURI);
+-        log.debug("BaseURI = " + BaseURI);
++        log.debug("BaseURI = " + context.baseUri);
+ 
+         return true;
+     }
+ 
+-    public XMLSignatureInput engineResolve(Attr uri, String BaseURI) 
++    @Override
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context) 
+         throws ResourceResolverException {
+-        String v = uri.getNodeValue();
++        String v = context.uriToResolve;
+ 
+         if (v.charAt(0) != '#') {
+             return null;
+@@ -133,7 +135,7 @@ public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
+ 
+                 if (pos <= 0 || pos >= mapping.length() - 1) {
+                     throw new ResourceResolverException(
+-                        "malformed namespace part of XPointer expression", uri, BaseURI
++                        "malformed namespace part of XPointer expression", context.uriToResolve, context.baseUri
+                     );
+                 }
+ 
+@@ -160,9 +162,9 @@ public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
+ 
+                 XPathFactory xpf = XPathFactory.newInstance();
+                 XPath xpath = xpf.newXPath();
+-                DSNamespaceContext context = 
++                DSNamespaceContext namespaceContext = 
+                     new DSNamespaceContext(namespaces);
+-                xpath.setNamespaceContext(context);
++                xpath.setNamespaceContext(namespaceContext);
+ 
+                 nodes = 
+                     (NodeList) xpath.evaluate(
+@@ -195,12 +197,12 @@ public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
+ 
+             result.setMIMEType("text/xml");
+             result.setExcludeComments(true);
+-            result.setSourceURI((BaseURI != null) ? BaseURI.concat(v) : v);      
++            result.setSourceURI((context.baseUri != null) ? context.baseUri.concat(v) : v);      
+ 
+             return result;
+         } catch (XPathExpressionException e) {
+             throw new ResourceResolverException(
+-                 "Problem evaluating XPath expression", e, uri, BaseURI
++                 "Problem evaluating XPath expression", e, context.uriToResolve, context.baseUri
+             );
+         }
+     }
+diff --git a/src/test/java/org/apache/xml/security/test/dom/utils/OldApiTest.java b/src/test/java/org/apache/xml/security/test/dom/utils/OldApiTest.java
+index 1adb014555..50c3273667 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/utils/OldApiTest.java
++++ b/src/test/java/org/apache/xml/security/test/dom/utils/OldApiTest.java
+@@ -31,6 +31,7 @@
+ import org.apache.xml.security.keys.storage.StorageResolver;
+ import org.apache.xml.security.signature.XMLSignatureInput;
+ import org.apache.xml.security.utils.resolver.ResourceResolver;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+ import org.w3c.dom.Attr;
+@@ -40,23 +41,25 @@
+ public class OldApiTest extends org.junit.Assert {
+ 
+     public static class OldResourceResolverSpi extends ResourceResolverSpi {
+-        Attr uriCompare;
++        String uriCompare;
+         String baseCompare;
+         
+-        public boolean engineCanResolve(Attr uri, String BaseURI) {
+-            if (uri.getValue().indexOf("!!!test=") != 0) {
++        @Override
++        public boolean engineCanResolveURI(ResourceResolverContext context) {
++            if (context.uriToResolve.indexOf("!!!test=") != 0) {
+                 return false;
+             }
+-            uriCompare = uri;
+-            baseCompare = BaseURI;
++            uriCompare = context.uriToResolve;
++            baseCompare = context.baseUri;
+             return true;
+         }
+ 
+-        public XMLSignatureInput engineResolve(
+-            Attr uri, String BaseURI
++        @Override
++        public XMLSignatureInput engineResolveURI(
++            ResourceResolverContext context
+         ) throws ResourceResolverException {
+-            assertEquals(uriCompare, uri);
+-            assertEquals(baseCompare,BaseURI);
++            assertEquals(uriCompare, context.uriToResolve);
++            assertEquals(baseCompare, context.baseUri);
+             return null;
+         }
+     }
+@@ -144,9 +147,9 @@ public void testOldResourceResolverSpi() throws Exception {
+         ResourceResolver resolver1 = ResourceResolver.getInstance(uri1, "test1");
+         ResourceResolver resolver2 = ResourceResolver.getInstance(uri1, "test2");
+ 
+-        resolver2.resolve(uri1, "test2");		
+-        resolver.resolve(uri, "test");
+-        resolver1.resolve(uri1, "test1");
++        resolver2.resolve(uri1, "test2", true);		
++        resolver.resolve(uri, "test", true);
++        resolver1.resolve(uri1, "test1", true);
+     }
+     
+     @org.junit.Test
+diff --git a/src/test/java/org/apache/xml/security/test/dom/utils/resolver/OfflineResolver.java b/src/test/java/org/apache/xml/security/test/dom/utils/resolver/OfflineResolver.java
+index 04615a22e6..a0a7638186 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/utils/resolver/OfflineResolver.java
++++ b/src/test/java/org/apache/xml/security/test/dom/utils/resolver/OfflineResolver.java
+@@ -27,9 +27,9 @@
+ import java.util.Map;
+ 
+ import org.apache.xml.security.signature.XMLSignatureInput;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.ResourceResolverSpi;
+-import org.w3c.dom.Attr;
+ 
+ /**
+  * This class helps us home users to resolve http URIs without a network
+@@ -93,15 +93,15 @@ public class OfflineResolver extends ResourceResolverSpi {
+     /**
+      * Method engineResolve
+      *
+-     * @param uri
+-     * @param BaseURI
++     * @param context
+      *
+      * @throws ResourceResolverException
+      */
+-    public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
++    @Override
++    public XMLSignatureInput engineResolveURI(ResourceResolverContext context)
+         throws ResourceResolverException {
+         try {
+-            String URI = uri.getNodeValue();
++            String URI = context.uriToResolve;
+ 
+             if (OfflineResolver._uriMap.containsKey(URI)) {
+                 String newURI = (String) OfflineResolver._uriMap.get(URI);
+@@ -123,29 +123,31 @@ public XMLSignatureInput engineResolve(Attr uri, String BaseURI)
+                 Object exArgs[] = {"The URI " + URI + " is not configured for offline work" };
+ 
+                 throw new ResourceResolverException(
+-                    "generic.EmptyMessage", exArgs, uri, BaseURI
++                    "generic.EmptyMessage", exArgs, context.uriToResolve, context.baseUri
+                 );
+             }
+         } catch (IOException ex) {
+-            throw new ResourceResolverException("generic.EmptyMessage", ex, uri, BaseURI);
++            throw new ResourceResolverException(
++                "generic.EmptyMessage", ex, context.uriToResolve, context.baseUri
++            );
+         }
+     }
+ 
+     /**
+      * We resolve http URIs <I>without</I> fragment...
+      *
+-     * @param uri
+-     * @param BaseURI
++     * @param context
+      */
+-    public boolean engineCanResolve(Attr uri, String BaseURI) {
+-        String uriNodeValue = uri.getNodeValue();
++    @Override
++    public boolean engineCanResolveURI(ResourceResolverContext context) {
++        String uriNodeValue = context.uriToResolve;
+         if (uriNodeValue.equals("") || uriNodeValue.startsWith("#")) {
+             return false;
+         }
+ 
+         URI uriNew = null;
+         try {
+-            uriNew = getNewURI(uri.getNodeValue(), BaseURI);
++            uriNew = getNewURI(context.uriToResolve, context.baseUri);
+             if (uriNew.getScheme().equals("http")) {
+                 log.debug("I state that I can resolve " + uriNew.toString());
+                 return true;
+diff --git a/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResolverDirectHTTPTest.java b/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResolverDirectHTTPTest.java
+index bd1585b9fd..f2cac9ad84 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResolverDirectHTTPTest.java
++++ b/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResolverDirectHTTPTest.java
+@@ -22,6 +22,7 @@
+ 
+ import org.apache.xml.security.Init;
+ import org.apache.xml.security.utils.resolver.ResourceResolver;
++import org.apache.xml.security.utils.resolver.ResourceResolverContext;
+ import org.apache.xml.security.utils.resolver.ResourceResolverException;
+ import org.apache.xml.security.utils.resolver.implementations.ResolverDirectHTTP;
+ import org.junit.Assert;
+@@ -75,7 +76,9 @@ public void testProxyAuth() throws Exception {
+         resolverDirectHTTP.engineSetProperty("http.proxy.port", proxyPort);
+         resolverDirectHTTP.engineSetProperty("http.proxy.username", proxyUsername);
+         resolverDirectHTTP.engineSetProperty("http.proxy.password", proxyPassword);
+-        resolverDirectHTTP.engineResolve(uri, url);
++        ResourceResolverContext context = 
++            new ResourceResolverContext(uri, url, true);
++        resolverDirectHTTP.engineResolveURI(context);
+     }
+ 
+     @Test
+@@ -90,8 +93,10 @@ public void testProxyAuthWithWrongPassword() throws Exception {
+         resolverDirectHTTP.engineSetProperty("http.proxy.port", proxyPort);
+         resolverDirectHTTP.engineSetProperty("http.proxy.username", proxyUsername);
+         resolverDirectHTTP.engineSetProperty("http.proxy.password", "wrongPassword");
++        ResourceResolverContext context = 
++            new ResourceResolverContext(uri, url, true);
+         try {
+-            resolverDirectHTTP.engineResolve(uri, url);
++            resolverDirectHTTP.engineResolveURI(context);
+             Assert.fail("Expected ResourceResolverException");
+         } catch (ResourceResolverException e) {
+             Assert.assertEquals("Server returned HTTP response code: 407 for URL: " + url, e.getMessage());
+@@ -108,7 +113,9 @@ public void testServerAuth() throws Exception {
+         ResolverDirectHTTP resolverDirectHTTP = new ResolverDirectHTTP();
+         resolverDirectHTTP.engineSetProperty("http.basic.username", serverUsername);
+         resolverDirectHTTP.engineSetProperty("http.basic.password", serverPassword);
+-        resolverDirectHTTP.engineResolve(uri, url);
++        ResourceResolverContext context = 
++            new ResourceResolverContext(uri, url, true);
++        resolverDirectHTTP.engineResolveURI(context);
+     }
+ 
+     @Test
+@@ -121,8 +128,10 @@ public void testServerAuthWithWrongPassword() throws Exception {
+         ResolverDirectHTTP resolverDirectHTTP = new ResolverDirectHTTP();
+         resolverDirectHTTP.engineSetProperty("http.basic.username", serverUsername);
+         resolverDirectHTTP.engineSetProperty("http.basic.password", "wrongPassword");
++        ResourceResolverContext context = 
++            new ResourceResolverContext(uri, url, true);
+         try {
+-            resolverDirectHTTP.engineResolve(uri, url);
++            resolverDirectHTTP.engineResolveURI(context);
+             Assert.fail("Expected ResourceResolverException");
+         } catch (ResourceResolverException e) {
+             Assert.assertEquals("Server returned HTTP response code: 401 for URL: " + url, e.getMessage());
+@@ -143,6 +152,8 @@ public void testProxyAndServerAuth() throws Exception {
+         resolverDirectHTTP.engineSetProperty("http.proxy.password", proxyPassword);
+         resolverDirectHTTP.engineSetProperty("http.basic.username", serverUsername);
+         resolverDirectHTTP.engineSetProperty("http.basic.password", serverPassword);
+-        resolverDirectHTTP.engineResolve(uri, url);
++        ResourceResolverContext context = 
++            new ResourceResolverContext(uri, url, true);
++        resolverDirectHTTP.engineResolveURI(context);
+     }
+ }
+diff --git a/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResourceResolverTest.java b/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResourceResolverTest.java
+index 4b5f7d6cc3..2a4feb2899 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResourceResolverTest.java
++++ b/src/test/java/org/apache/xml/security/test/dom/utils/resolver/ResourceResolverTest.java
+@@ -57,7 +57,7 @@ public void testCustomResolver() throws Exception {
+             ResourceResolver.getInstance(uriAttr, "http://www.apache.org");
+         try {
+             uriAttr.setValue("http://xmldsig.pothole.com/xml-stylesheet.txt");
+-            res.resolve(uriAttr, null);
++            res.resolve(uriAttr, null, true);
+         } catch (Exception e) {
+             e.printStackTrace();
+             fail(uriAttr.getValue() 
+@@ -65,7 +65,7 @@ public void testCustomResolver() throws Exception {
+         }
+         try {
+             uriAttr.setValue("http://www.apache.org");
+-            res.resolve(uriAttr, null);
++            res.resolve(uriAttr, null, true);
+             fail(uriAttr.getValue() + " should not be resolvable by the OfflineResolver");
+         } catch (Exception e) {
+             //
+@@ -82,7 +82,7 @@ public void testLocalFileWithEmptyBaseURI() throws Exception {
+         uriAttr.setValue(file);
+         ResourceResolver res = ResourceResolver.getInstance(uriAttr, file);
+         try {
+-            res.resolve(uriAttr, "");
++            res.resolve(uriAttr, "", true);
+         } catch (Exception e) {
+             fail(e.getMessage());
+         }

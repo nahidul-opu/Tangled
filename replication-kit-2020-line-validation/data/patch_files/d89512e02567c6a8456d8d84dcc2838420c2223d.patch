@@ -1,0 +1,94 @@
+From d89512e02567c6a8456d8d84dcc2838420c2223d Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sat, 22 Aug 2009 15:37:23 +0000
+Subject: [PATCH] [CONFIGURATION-393] Special treatment of collection
+ properties when cloning a BaseConfiguration. Copied the fix from trunk.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@806863 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration2/flat/BaseConfiguration.java | 18 ++++++++++++++++--
+ .../flat/TestBaseConfiguration.java            | 14 ++++++++++++++
+ xdocs/changes.xml                              |  4 ++++
+ 3 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/flat/BaseConfiguration.java b/src/main/java/org/apache/commons/configuration2/flat/BaseConfiguration.java
+index 3fddbd88cd..f31c78f743 100644
+--- a/src/main/java/org/apache/commons/configuration2/flat/BaseConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/flat/BaseConfiguration.java
+@@ -18,6 +18,7 @@
+ package org.apache.commons.configuration2.flat;
+ 
+ import java.util.ArrayList;
++import java.util.Collection;
+ import java.util.Iterator;
+ import java.util.LinkedHashMap;
+ import java.util.List;
+@@ -206,13 +207,26 @@ public Iterator<String> getKeys()
+      * @since 1.3
+      */
+     @Override
+-    @SuppressWarnings("unchecked")
+     public Object clone()
+     {
+         try
+         {
+             BaseConfiguration copy = (BaseConfiguration) super.clone();
+-            copy.store = (Map<String, Object>) ConfigurationUtils.clone(store);
++            @SuppressWarnings("unchecked")
++            Map<String, Object> clonedStore = (Map<String, Object>) ConfigurationUtils
++                    .clone(store);
++
++            // Handle collections in the map; they have to be cloned, too
++            for (Map.Entry<String, Object> e : store.entrySet())
++            {
++                if (e.getValue() instanceof Collection<?>)
++                {
++                    clonedStore.put(e.getKey(), new ArrayList<Object>(
++                            (Collection<?>) e.getValue()));
++                }
++            }
++
++            copy.store = clonedStore;
+             return copy;
+         }
+         catch (CloneNotSupportedException cex)
+diff --git a/src/test/java/org/apache/commons/configuration2/flat/TestBaseConfiguration.java b/src/test/java/org/apache/commons/configuration2/flat/TestBaseConfiguration.java
+index ba9b5d41c7..568c2095f2 100644
+--- a/src/test/java/org/apache/commons/configuration2/flat/TestBaseConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/flat/TestBaseConfiguration.java
+@@ -763,6 +763,20 @@ public void configurationChanged(ConfigurationEvent event)
+                 .getConfigurationListeners().size());
+     }
+ 
++    /**
++     * Tests the clone() method if a list property is involved.
++     */
++    public void testCloneListProperty()
++    {
++        final String key = "list";
++        config.addProperty(key, "value1");
++        config.addProperty(key, "value2");
++        BaseConfiguration config2 = (BaseConfiguration) config.clone();
++        config2.addProperty(key, "value3");
++        assertEquals("Wrong number of original properties", 2, config.getList(
++                key).size());
++    }
++
+     /**
+      * Tests the getMaxIndex() method for a non existing property.
+      */
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index b9f8d2463e..5e206970d4 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -85,6 +85,10 @@
+     </release>
+ 
+     <release version="1.7" date="in SVN" description="">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-393">
++        BaseConfiguration.clone() now also clones collections stored in the
++        internal map. This causes list properties to be handled correctly.
++      </action>
+       <action dev="rgoers" type="fix" issue="CONFIGURATION-388">
+         Attribute or element values will not be escaped when attribute or element splitting are disabled.
+       </action>      

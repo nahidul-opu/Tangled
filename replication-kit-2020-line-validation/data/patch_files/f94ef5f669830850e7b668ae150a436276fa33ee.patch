@@ -1,0 +1,461 @@
+From f94ef5f669830850e7b668ae150a436276fa33ee Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 9 Jul 2008 14:23:22 +0000
+Subject: [PATCH] FIX: dynamic revision resolve does not throw error when
+ configuration is missing (IVY-861)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@675186 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/resolve/IvyNode.java  | 83 ++++++++++---------
+ .../apache/ivy/core/resolve/IvyNodeUsage.java | 28 ++++++-
+ .../ivy/core/resolve/ResolveEngine.java       | 22 ++---
+ .../apache/ivy/core/resolve/VisitNode.java    | 35 ++++++--
+ .../apache/ivy/core/resolve/ResolveTest.java  | 11 +++
+ test/repositories/2/mod6.1/ivy-1.5.xml        | 29 +++++++
+ 7 files changed, 153 insertions(+), 56 deletions(-)
+ create mode 100644 test/repositories/2/mod6.1/ivy-1.5.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 8b7f120b2..da532eecf 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -95,6 +95,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: dynamic revision resolve does not throw error when configuration is missing (IVY-861)
+ - FIX: Referenced resolver not found in macro (IVY-860)
+ - FIX: Ivy files are not retrieved when using useOrigin=true (IVY-713)
+ - FIX: NPE in Ivy:install task if the repository cache dir has been cleared (IVY-843)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 88e54c459..d6734553a 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -133,7 +133,7 @@ private void init(ResolveData data) {
+      * real node after the call IvyNode node = ... node.loadData(); node = node.getRealNode(); ...
+      */
+     public boolean loadData(String rootModuleConf, IvyNode parent, String parentConf, String conf,
+-            boolean shouldBePublic) {
++            boolean shouldBePublic, IvyNodeUsage usage) {
+         Message.debug("loadData of " + this.toString() + " of rootConf=" + rootModuleConf);
+         if (!isRoot() && (data.getReport() != null)) {
+             data.getReport().addDependency(this);
+@@ -203,7 +203,7 @@ public boolean loadData(String rootModuleConf, IvyNode parent, String parentConf
+                                 // => update it and discard this node
+                                 md = module.getDescriptor(); // needed for handleConfiguration
+                                 if (!handleConfiguration(loaded, rootModuleConf, parent,
+-                                    parentConf, conf, shouldBePublic)) {
++                                    parentConf, conf, shouldBePublic, usage)) {
+                                     return false;
+                                 }
+ 
+@@ -246,7 +246,8 @@ public boolean loadData(String rootModuleConf, IvyNode parent, String parentConf
+                 loaded = true;
+             }
+         }
+-        handleConfiguration(loaded, rootModuleConf, parent, parentConf, conf, shouldBePublic);
++        handleConfiguration(
++            loaded, rootModuleConf, parent, parentConf, conf, shouldBePublic, usage);
+         if (hasProblem()) {
+             Message.debug("problem : " + problem.getMessage());
+             return false;
+@@ -271,11 +272,10 @@ private void moveToRealNode(String rootModuleConf, IvyNode parent, String parent
+         resolved.searched |= module.getReport().isSearched();
+         resolved.dds.putAll(dds);
+         resolved.updateDataFrom(this, rootModuleConf, true);
+-        resolved.loadData(rootModuleConf, parent, parentConf, conf, shouldBePublic);
++        resolved.loadData(rootModuleConf, parent, parentConf, conf, shouldBePublic, usage);
+         DependencyDescriptor dd = getDependencyDescriptor(parent);
+-        if (dd != null) {
+-            resolved.usage.addUsage(rootModuleConf, dd, parentConf);
+-        }
++        resolved.usage.updateDataFrom(getAllUsages(), rootModuleConf);
++        usage = resolved.usage;
+         
+         data.replaceNode(getId(), resolved, rootModuleConf); // this actually discards the node
+ 
+@@ -336,9 +336,11 @@ public Collection getDependencies(String rootModuleConf, String conf, String req
+                 }
+ 
+             }
+-            Collection confs = Arrays.asList(resolveSpecialConfigurations(dependencyConfigurations,
+-                depNode));
++            String[] confsArray = resolveSpecialConfigurations(dependencyConfigurations,
++                depNode);
++            Collection confs = Arrays.asList(confsArray);
+             depNode.updateConfsToFetch(confs);
++            depNode.addRootModuleConfigurations(depNode.usage, rootModuleConf, confsArray);
+             depNode.usage.setRequiredConfs(this, conf, confs);
+ 
+             depNode.addCaller(rootModuleConf, this, conf, dependencyConfigurations, dd);
+@@ -374,24 +376,25 @@ private boolean isRootModuleConfLoaded(String rootModuleConf) {
+     }
+ 
+     private boolean handleConfiguration(boolean loaded, String rootModuleConf, IvyNode parent,
+-            String parentConf, String conf, boolean shouldBePublic) {
++            String parentConf, String conf, boolean shouldBePublic, IvyNodeUsage usage) {
+         if (md != null) {
+             String[] confs = getRealConfs(conf);
++            addRootModuleConfigurations(usage, rootModuleConf, confs);
+             for (int i = 0; i < confs.length; i++) {
+                 Configuration c = md.getConfiguration(confs[i]);
+                 if (c == null) {
+                     confsToFetch.remove(conf);
+                     if (isConfRequiredByMergedUsageOnly(rootModuleConf, conf)) {
+-                        Message.verbose(
++                        Message.info(
+                             "configuration required by evicted revision is not available in "
+                             + "selected revision. skipping " + conf + " in " + this);
+                     } else if (!conf.equals(confs[i])) {
+-                        problem = new RuntimeException("configuration(s) not found in " + this
+-                                + ": " + conf + ". Missing configuration: " + confs[i]
+-                                + ". It was required from " + parent + " " + parentConf);
++                        problem = new RuntimeException("configuration not found in " + this
++                                + ": '" + conf + "'. Missing configuration: '" + confs[i]
++                                + "'. It was required from " + parent + " " + parentConf);
+                     } else {
+-                        problem = new RuntimeException("configuration(s) not found in " + this
+-                                + ": " + confs[i] + ". It was required from " + parent + " "
++                        problem = new RuntimeException("configuration not found in " + this
++                                + ": '" + confs[i] + "'. It was required from " + parent + " "
+                                 + parentConf);
+                     }
+                     return false;
+@@ -399,21 +402,20 @@ private boolean handleConfiguration(boolean loaded, String rootModuleConf, IvyNo
+                         && c.getVisibility() != Configuration.Visibility.PUBLIC) {
+                     confsToFetch.remove(conf);
+                     if (isConfRequiredByMergedUsageOnly(rootModuleConf, conf)) {
+-                        Message.verbose(
++                        Message.info(
+                             "configuration required by evicted revision is not visible in "
+                             + "selected revision. skipping " + conf + " in " + this);
+                     } else {
+-                        problem = new RuntimeException("configuration not public in " + this + ": " 
+-                            + c + ". It was required from " + parent + " " + parentConf);
++                        problem = new RuntimeException("configuration not public in " + this + ": '"
++                            + c + "'. It was required from " + parent + " " + parentConf);
+                     }
+                     return false;
+                 }
+-                if (loaded) {
+-                    fetchedConfigurations.add(conf);
+-                    confsToFetch.removeAll(Arrays.asList(confs));
+-                    confsToFetch.remove(conf);
+-                }
+-                addRootModuleConfigurations(rootModuleConf, confs);
++            }
++            if (loaded) {
++                fetchedConfigurations.add(conf);
++                confsToFetch.removeAll(Arrays.asList(confs));
++                confsToFetch.remove(conf);
+             }
+         }
+         return true;
+@@ -554,19 +556,18 @@ public void discardConf(String rootModuleConf, String conf) {
+         }
+     }
+ 
+-    private void addRootModuleConfigurations(String rootModuleConf, String[] dependencyConfs) {
++    private void addRootModuleConfigurations(
++            IvyNodeUsage usage, String rootModuleConf, String[] dependencyConfs) {
+         Set depConfs = usage.addAndGetConfigurations(rootModuleConf);
+         if (md != null) {
+             // add all given dependency configurations to the set + extended ones
+             for (int i = 0; i < dependencyConfs.length; i++) {
++                depConfs.add(dependencyConfs[i]);
+                 Configuration conf = md.getConfiguration(dependencyConfs[i]);
+                 if (conf != null) {
+                     String[] exts = conf.getExtends();
+-                    addRootModuleConfigurations(rootModuleConf, exts); // recursive add of extended
+-                    // configurations
+-                    depConfs.add(conf.getName());
+-                } else {
+-                    Message.warn("unknown configuration in " + getId() + ": " + dependencyConfs[i]);
++                    // recursive add of extended
++                    addRootModuleConfigurations(usage, rootModuleConf, exts); 
+                 }
+             }
+         } else {
+@@ -679,7 +680,7 @@ private void updateDataFrom(IvyNode node, String rootModuleConf, boolean real) {
+         callers.updateFrom(node.callers, rootModuleConf, real);
+ 
+         if (real) {
+-            usage.updateDataFrom(node.usage, rootModuleConf);
++            usage.updateDataFrom(node.getAllUsages(), rootModuleConf);
+         } else {
+             // let's copy usage information for the given rootModuleConf, into a separate usage
+             // object to keep detailed data about where usage comes from
+@@ -688,13 +689,20 @@ private void updateDataFrom(IvyNode node, String rootModuleConf, boolean real) {
+                 mergedUsage = new IvyNodeUsage(node);
+                 mergedUsages.put(node.getId(), mergedUsage);
+             }
+-            mergedUsage.updateDataFrom(node.usage, rootModuleConf);
++            mergedUsage.updateDataFrom(node.getAllUsages(), rootModuleConf);
+         }
+ 
+         // update confsToFetch
+         updateConfsToFetch(node.fetchedConfigurations);
+         updateConfsToFetch(node.confsToFetch);
+     }
++    
++    private Collection/*<IvyNodeUsage>*/ getAllUsages() {
++        Collection usages = new ArrayList();
++        usages.add(usage);
++        usages.addAll(mergedUsages.values());
++        return usages;
++    }
+ 
+     /**
+      * Returns all the artifacts of this dependency required in all the root module configurations
+@@ -1048,11 +1056,6 @@ public Collection getResolvedRevisions(ModuleId moduleId, String rootModuleConf)
+     public void markEvicted(EvictionData evictionData) {
+         eviction.markEvicted(evictionData);
+         String rootModuleConf = evictionData.getRootModuleConf();
+-        usage.removeRootModuleConf(rootModuleConf);
+-        for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
+-            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
+-            usage.removeRootModuleConf(rootModuleConf);
+-        }
+ 
+         // bug 105: update selected data with evicted one
+         if (evictionData.getSelected() != null) {
+@@ -1252,4 +1255,8 @@ public IvyNodeBlacklist getBlacklistData(String rootModuleConf) {
+         return usage.getBlacklistData(rootModuleConf);
+     }
+ 
++    public IvyNodeUsage getMainUsage() {
++        return usage;
++    }
++
+ }
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+index 35633e69e..bbe183247 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+@@ -94,6 +94,24 @@ public Depender(DependencyDescriptor dd, String dependerConf) {
+             this.dd = dd;
+             this.dependerConf = dependerConf;
+         }
++        
++        public String toString() {
++            return dd + " [" + dependerConf + "]";
++        }
++        
++        public boolean equals(Object obj) {
++            if (! (obj  instanceof Depender)) {
++                return false;
++            }
++            Depender other = (Depender) obj;
++            return other.dd == dd && other.dependerConf.equals(dependerConf);
++        }
++        public int hashCode() {
++            int hash = 33;
++            hash += dd.hashCode() * 13;
++            hash += dependerConf.hashCode() * 13;
++            return hash;
++        }
+     }
+     
+     private IvyNode node;
+@@ -146,7 +164,15 @@ protected Set addAndGetConfigurations(String rootModuleConf) {
+         return rootModuleConfs.keySet();
+     }
+ 
+-    public void updateDataFrom(IvyNodeUsage usage, String rootModuleConf) {
++
++    public void updateDataFrom(Collection/*<IvyNodeUsage>*/ usages, String rootModuleConf) {
++        for (Iterator iterator = usages.iterator(); iterator.hasNext();) {
++            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++            updateDataFrom(usage, rootModuleConf);
++        }
++    }
++    
++    private void updateDataFrom(IvyNodeUsage usage, String rootModuleConf) {
+         // update requiredConfs
+         updateMapOfSet(usage.requiredConfs, requiredConfs);
+ 
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 5c9e1113d..69267eb4d 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -694,16 +694,18 @@ private void doFetchDependencies(VisitNode node, String conf) {
+                 for (int i = 0; i < confs.length; i++) {
+                     fetchDependencies(dep, confs[i], true);
+                 }
+-                // if there are still confs to fetch (usually because they have
+-                // been updated when evicting another module), we fetch them now
+-                confs = dep.getConfsToFetch();
+-                for (int i = 0; i < confs.length; i++) {
+-                    //shouldBeFixed=false to because some of those dependencies might
+-                    //be private when they were actually extending public conf.
+-                    //Should we keep two list of confs to fetch (private&public)?
+-                    //I don't think, visibility is already checked, and a change in the 
+-                    //configuration between version might anyway have worse problems.
+-                    fetchDependencies(dep, confs[i], false);
++                if (!dep.isEvicted() && !dep.hasProblem()) {
++                    // if there are still confs to fetch (usually because they have
++                    // been updated when evicting another module), we fetch them now
++                    confs = dep.getConfsToFetch();
++                    for (int i = 0; i < confs.length; i++) {
++                        //shouldBeFixed=false to because some of those dependencies might
++                        //be private when they were actually extending public conf.
++                        //Should we keep two list of confs to fetch (private&public)?
++                        //I don't think, visibility is already checked, and a change in the 
++                        //configuration between version might anyway have worse problems.
++                        fetchDependencies(dep, confs[i], false);
++                    }
+                 }
+             }
+             markDependenciesFetched(node.getNode(), conf);
+diff --git a/src/java/org/apache/ivy/core/resolve/VisitNode.java b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+index 1c64dc9df..32bb72dfd 100644
+--- a/src/java/org/apache/ivy/core/resolve/VisitNode.java
++++ b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+@@ -98,9 +98,21 @@ public class VisitNode {
+      * the current path. null if not computed yet Boolean.FALSE otherwise
+      */
+     private Boolean isCircular;
++    
++    /**
++     * IvyNode usage information to update when visiting the underlying IvyNode.
++     * This is usually the main IvyNodeUsage of the underlying node, except when we are visiting it
++     * coming from an evicted node replaced by the other one.
++     */
++    private IvyNodeUsage usage;
+ 
+     public VisitNode(ResolveData data, IvyNode node, VisitNode parent, String rootModuleConf,
+             String parentConf) {
++        this(data, node, parent, rootModuleConf, parentConf, null);
++    }
++
++    public VisitNode(ResolveData data, IvyNode node, VisitNode parent, String rootModuleConf,
++            String parentConf, IvyNodeUsage usage) {
+         Checks.checkNotNull(data, "data");
+         Checks.checkNotNull(node, "node");
+         Checks.checkNotNull(rootModuleConf, "rootModuleConf");
+@@ -110,6 +122,7 @@ public VisitNode(ResolveData data, IvyNode node, VisitNode parent, String rootMo
+         this.parent = parent;
+         this.rootModuleConf = rootModuleConf;
+         this.parentConf = parentConf;
++        this.usage = usage;
+ 
+         this.data.register(this);
+     }
+@@ -254,8 +267,8 @@ public void useRealNode() {
+     }
+ 
+     public boolean loadData(String conf, boolean shouldBePublic) {
+-        boolean loaded = node.loadData(rootModuleConf, getParentNode(), parentConf, conf,
+-            shouldBePublic);
++        boolean loaded = node.loadData(
++            rootModuleConf, getParentNode(), parentConf, conf, shouldBePublic, getUsage());
+         if (loaded) {
+             useRealNode();
+ 
+@@ -265,7 +278,8 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+             // - the id refers to a dynamic revision, which has been resolved by loadData
+             // - the loaded module descriptor has extra attributes in his info tag which are not 
+             //   used when declaring the dependency
+-            if (!getId().equals(node.getResolvedId())) {
++            if (data.getNode(node.getResolvedId()) == null 
++                    || !data.getNode(node.getResolvedId()).getId().equals(node.getResolvedId())) {
+                 data.register(node.getResolvedId(), this);
+             }
+         }
+@@ -309,19 +323,26 @@ VisitNode gotoNode(IvyNode node) {
+             VisitNode vnode = (VisitNode) iter.next();
+             if ((parent == null && vnode.getParent() == null)
+                     || (parent != null && parent.getId().equals(vnode.getParent().getId()))) {
++                vnode.parentConf = parentConf;
++                vnode.usage = getUsage();
+                 return vnode;
+             }
+         }
+         // the node has not yet been visited from the current parent, we create a new visit node
+-        return traverse(parent, parentConf, node);
++        return traverse(parent, parentConf, node, getUsage());
++    }
++
++    private IvyNodeUsage getUsage() {
++        return usage == null ? node.getMainUsage() : usage;
+     }
+ 
+     private VisitNode traverseChild(String parentConf, IvyNode child) {
+         VisitNode parent = this;
+-        return traverse(parent, parentConf, child);
++        return traverse(parent, parentConf, child, null);
+     }
+ 
+-    private VisitNode traverse(VisitNode parent, String parentConf, IvyNode node) {
++    private VisitNode traverse(
++            VisitNode parent, String parentConf, IvyNode node, IvyNodeUsage usage) {
+         if (getPath().contains(node)) {
+             IvyContext.getContext().getCircularDependencyStrategy().handleCircularDependency(
+                 toMrids(getPath(), node.getId()));
+@@ -329,7 +350,7 @@ private VisitNode traverse(VisitNode parent, String parentConf, IvyNode node) {
+             // root
+             // parent = getVisitNode(depNode).getParent();
+         }
+-        return new VisitNode(data, node, parent, rootModuleConf, parentConf);
++        return new VisitNode(data, node, parent, rootModuleConf, parentConf, usage);
+     }
+ 
+     private ModuleRevisionId[] toMrids(Collection path, ModuleRevisionId last) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 81f2e926e..ba0695af5 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -2096,6 +2096,17 @@ public void testEvictWithConf3() throws Exception {
+         assertFalse(getArchiveFileInCache("org5", "mod5.1", "4.0", "art51B", "jar", "jar").exists());
+     }
+ 
++    public void testFailWithMissingConf() throws Exception {
++        // test case for IVY-861
++
++        // mod6.1 r1.5 depends on
++        // mod5.1 [1.0,4.3] conf unknown which doesn't exist in mod5.1;4.3
++        ResolveReport report = ivy.resolve(new File("test/repositories/2/mod6.1/ivy-1.5.xml")
++                .toURL(), getResolveOptions(new String[] {"*"}));
++        assertTrue("missing conf should have raised an error in report", report.hasError());
++        assertTrue(StringUtils.join(report.getAllProblemMessages().toArray(), "\n").indexOf("'unknown'") != -1);
++    }
++
+     public void testEvictWithConfInMultiConf() throws Exception {
+         // same as preceding ones but the conflict appears in several root confs
+         // bug 105 - test #3
+diff --git a/test/repositories/2/mod6.1/ivy-1.5.xml b/test/repositories/2/mod6.1/ivy-1.5.xml
+new file mode 100644
+index 000000000..679689043
+--- /dev/null
++++ b/test/repositories/2/mod6.1/ivy-1.5.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org6"
++	       module="mod6.1"
++	       revision="1.5"
++	       status="integration"
++	       publication="20080401110000"
++	/>
++	<dependencies>
++		<dependency org="org5" name="mod5.1" rev="[1.0,4.3]" conf="default->unknown"/>
++	</dependencies>
++</ivy-module>

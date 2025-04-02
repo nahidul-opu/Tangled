@@ -1,0 +1,159 @@
+From 27170b5ef294fc8c639249d74bb5b27776a445d6 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 6 Dec 2007 23:17:05 +0000
+Subject: [PATCH] FIX: Strict conflictmanager seems to not support dynamic
+ revisions (IVY-474)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@601906 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  5 ++++
+ .../conflict/StrictConflictManager.java       |  8 ++++++
+ .../conflict/StrictConflictManagerTest.java   | 16 ++++++++++++
+ .../plugins/conflict/ivy-conflict-dynamic.xml | 25 +++++++++++++++++++
+ .../conflict/ivy-noconflict-dynamic.xml       | 25 +++++++++++++++++++
+ 5 files changed, 79 insertions(+)
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivy-conflict-dynamic.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivy-noconflict-dynamic.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2e2414045..7f2364667 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -54,6 +54,11 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	John Williams
+ 	Jaroslaw Wypychowski
+ 
++   version in SVN
++=====================================
++- FIX: Strict conflictmanager seems to not support dynamic revisions (IVY-474)
++
++
+    2.0.0-beta1
+ =====================================
+ - NEW: Share cache with locking (IVY-654)
+diff --git a/src/java/org/apache/ivy/plugins/conflict/StrictConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/StrictConflictManager.java
+index 7712202ec..5335b5ac3 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/StrictConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/StrictConflictManager.java
+@@ -22,6 +22,7 @@
+ import java.util.Iterator;
+ 
+ import org.apache.ivy.core.resolve.IvyNode;
++import org.apache.ivy.plugins.version.VersionMatcher;
+ 
+ public class StrictConflictManager extends AbstractConflictManager {
+ 
+@@ -29,10 +30,17 @@ public StrictConflictManager() {
+     }
+ 
+     public Collection resolveConflicts(IvyNode parent, Collection conflicts) {
++        VersionMatcher versionMatcher = getSettings().getVersionMatcher();
++        
+         IvyNode lastNode = null;
+         for (Iterator iter = conflicts.iterator(); iter.hasNext();) {
+             IvyNode node = (IvyNode) iter.next();
+ 
++            if (versionMatcher.isDynamic(node.getResolvedId())) {
++                // dynamic revision, not enough information to resolve conflict
++                return null;
++            }
++            
+             if (lastNode != null && !lastNode.equals(node)) {
+                 throw new StrictConflictException(lastNode, node);
+             }
+diff --git a/test/java/org/apache/ivy/plugins/conflict/StrictConflictManagerTest.java b/test/java/org/apache/ivy/plugins/conflict/StrictConflictManagerTest.java
+index a45ae26fa..d419880ab 100644
+--- a/test/java/org/apache/ivy/plugins/conflict/StrictConflictManagerTest.java
++++ b/test/java/org/apache/ivy/plugins/conflict/StrictConflictManagerTest.java
+@@ -52,6 +52,11 @@ public void testNoConflictResolve() throws Exception {
+             getResolveOptions());
+     }
+ 
++    public void testNoConflictWithDynamicRevisionResolve() throws Exception {
++        ivy.resolve(StrictConflictManagerTest.class.getResource("ivy-noconflict-dynamic.xml"),
++            getResolveOptions());
++    }
++
+     public void testConflictResolve() throws Exception {
+         try {
+             ivy.resolve(StrictConflictManagerTest.class.getResource("ivy-conflict.xml"),
+@@ -63,6 +68,17 @@ public void testConflictResolve() throws Exception {
+         }
+     }
+ 
++    public void testConflictWithDynamicRevisionResolve() throws Exception {
++        try {
++            ivy.resolve(StrictConflictManagerTest.class.getResource("ivy-conflict-dynamic.xml"),
++                getResolveOptions());
++
++            fail("Resolve should have failed with a conflict");
++        } catch (StrictConflictException e) {
++            // this is expected
++        }
++    }
++
+     private ResolveOptions getResolveOptions() {
+         return new ResolveOptions().setCache(CacheManager.getInstance(ivy.getSettings()))
+                 .setValidate(false);
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivy-conflict-dynamic.xml b/test/java/org/apache/ivy/plugins/conflict/ivy-conflict-dynamic.xml
+new file mode 100644
+index 000000000..d8355e1e9
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivy-conflict-dynamic.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0"> 
++        <info organisation="apache" module="resolve-noconflict" revision="1.0" status="release"/>
++        <dependencies>
++            <dependency org="org1" name="mod1.2" rev="2.+"/>
++            <dependency org="org2" name="mod2.1" rev="0.3"/>
++        </dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivy-noconflict-dynamic.xml b/test/java/org/apache/ivy/plugins/conflict/ivy-noconflict-dynamic.xml
+new file mode 100644
+index 000000000..c05541ebe
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivy-noconflict-dynamic.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0"> 
++        <info organisation="apache" module="resolve-noconflict" revision="1.0" status="release"/>
++        <dependencies>
++            <dependency org="org1" name="mod1.2" rev="[2.0,2.1["/>
++            <dependency org="org2" name="mod2.1" rev="0.3"/>
++        </dependencies>
++</ivy-module>

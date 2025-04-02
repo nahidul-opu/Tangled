@@ -1,0 +1,123 @@
+From 4f90aabb2e16bc3ac2daf5da1356a64ab0742ebf Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 13 Sep 2006 10:55:58 +0000
+Subject: [PATCH] FIX: better use of VFS, preventing a warning accessing a
+ directory as a file + modify dependency declaration for webdav (IVY-293)
+ (thanks to Antoine Levy-Lambert)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484514 13f79535-47bb-0310-9956-ffa450edef68
+---
+ ivy.xml                                       |  6 ++--
+ ivyconf.xml                                   |  4 +--
+ .../ivy/repository/vfs/VfsRepository.java     | 29 ++++++++++++++-----
+ .../ivy/repository/vfs/VfsResource.java       |  2 +-
+ 4 files changed, 26 insertions(+), 15 deletions(-)
+
+diff --git a/ivy.xml b/ivy.xml
+index a209c0de0..71f9ac1aa 100644
+--- a/ivy.xml
++++ b/ivy.xml
+@@ -8,6 +8,7 @@
+ 		<conf name="httpclient" extends="core" description="core + optional httpclient for better http handling"/>
+ 		<conf name="oro" extends="core" description="to use optional glob matcher"/>
+ 		<conf name="vfs" extends="core" description="core + optional VirtualFileSystem(VFS) support" />
++		<conf name="webdav" extends="core" description="core + optional VirtualFileSystem(VFS) with webdav support" />
+ 		<conf name="sftp" extends="core" description="core + optional SFTP support" />
+ 		<conf name="standalone" extends="core" description="to launch in standalone mode (from command line)"/>
+ 		<conf name="default" description="full ivy with all dependencies"/>
+@@ -20,10 +21,7 @@
+ 		<dependency org="apache" name="commons-httpclient" rev="3.0" conf="default,httpclient->default"/>
+ 		<dependency org="apache" name="commons-cli" rev="1.0" conf="default,standalone->default"/>
+ 		<dependency org="apache" name="oro" rev="2.0.8" conf="default,oro->default"/>
+-		<dependency org="apache" name="commons-vfs" rev="20060405" conf="default,vfs->default" />
+-		<dependency org="apache" name="slide" rev="2.1" conf="default,vfs->default">
+-			<artifact name="slide-webdavlib" type="jar" />
+-		</dependency>
++		<dependency org="apache" name="commons-vfs" rev="20060405" conf="vfs->default;default,webdav->webdav" />
+ 		<dependency org="jcraft" name="jsch" rev="0.1.25" conf="default,sftp->default" />
+ 	</dependencies>
+ </ivy-module>
+diff --git a/ivyconf.xml b/ivyconf.xml
+index fee39f484..096d5ba24 100644
+--- a/ivyconf.xml
++++ b/ivyconf.xml
+@@ -1,5 +1,5 @@
+ <ivyconf>
+-	<conf defaultResolver="public"/>
++	<conf defaultResolver="public" />
+ 	<resolvers>
+ 		<!--  
+ 			we use ivyrep for ivy and some artifacts, and ibiblio for other artifacts
+@@ -7,7 +7,7 @@
+ 			version only available on ivyrep, but not on ivyrep
+ 			As soon as vfs will be available on ibiblio, the default configuration could be used again
+ 			-->
+-		<url name="public">
++		<url name="public" checkmodified="true">
+ 			<ivy pattern="http://ivyrep.jayasoft.org/[organisation]/[module]/ivy-[revision].xml"/>
+ 			<artifact pattern="http://ivyrep.jayasoft.org/[organisation]/[module]/[revision]/[artifact].[ext]"/>
+ 			<artifact pattern="http://www.ibiblio.org/maven/[module]/[type]s/[artifact]-[revision].[ext]"/>
+diff --git a/src/java/fr/jayasoft/ivy/repository/vfs/VfsRepository.java b/src/java/fr/jayasoft/ivy/repository/vfs/VfsRepository.java
+index c2958b05f..b9339b7a5 100644
+--- a/src/java/fr/jayasoft/ivy/repository/vfs/VfsRepository.java
++++ b/src/java/fr/jayasoft/ivy/repository/vfs/VfsRepository.java
+@@ -17,10 +17,9 @@
+ import java.io.IOException;
+ import java.util.Arrays;
+ import java.util.List;
++import java.util.ArrayList;
+ 
+-import org.apache.commons.vfs.FileContent;
+-import org.apache.commons.vfs.FileSystemException;
+-import org.apache.commons.vfs.FileSystemManager;
++import org.apache.commons.vfs.*;
+ import org.apache.commons.vfs.impl.StandardFileSystemManager;
+ 
+ import fr.jayasoft.ivy.repository.AbstractRepository;
+@@ -143,14 +142,28 @@ public void get(String srcVfsURI, File destination) throws IOException {
+ 	 * Return a listing of the contents of a parent directory. Listing is a set
+ 	 * of strings representing VFS URIs.
+ 	 * 
+-	 * @param a <code>String</code> providing identifyiong a VFS provided resource
+-	 * @throws <code>IOException</code> on failure.
++	 * @param vfsURI providing identifying a VFS provided resource
++	 * @throws IOException on failure.
+ 	 * @see "Supported File Systems in the jakarta-commons-vfs documentation"
+ 	 */
+ 	public List list(String vfsURI) throws IOException {
+-		VfsResource res = new VfsResource(vfsURI, getVFSManager());
+-		return res.getChildren();
+-	}
++        ArrayList list = new ArrayList();
++        Message.debug("list called for URI" + vfsURI);
++        FileObject resourceImpl = getVFSManager().resolveFile(vfsURI);
++        Message.debug("resourceImpl=" + resourceImpl.toString());
++        Message.debug("resourceImpl.exists()" + resourceImpl.exists());
++        Message.debug("resourceImpl.getType()" + resourceImpl.getType());
++        Message.debug("FileType.FOLDER" + FileType.FOLDER);
++        if ((resourceImpl != null) && resourceImpl.exists() && (resourceImpl.getType() == FileType.FOLDER)) {
++            FileObject[] children = resourceImpl.getChildren();
++            for (int i = 0; i < children.length; i++) {
++                FileObject child = children[i];
++                Message.debug("child " + i + child.getName().getURI());
++                list.add(VfsResource.normalize(child.getName().getURI()));
++            }
++        }
++        return list;
++    }
+ 	
+ 	
+ 	
+diff --git a/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java b/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java
+index c3f39ea45..9ff7a9264 100644
+--- a/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java
++++ b/src/java/fr/jayasoft/ivy/repository/vfs/VfsResource.java
+@@ -115,7 +115,7 @@ public Resource clone(String cloneName) {
+      * @param vfsURI
+      * @return a normalized <class>String</class> representing the VFS URI
+      */
+-    private String normalize(String vfsURI) {
++    public static String normalize(String vfsURI) {
+     	if (vfsURI == null) {
+     		return "";
+     	}

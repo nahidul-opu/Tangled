@@ -1,0 +1,258 @@
+From 7b465048de85cbf398741bb420b2a6900524f686 Mon Sep 17 00:00:00 2001
+From: Niall Pemberton <niallp@apache.org>
+Date: Sun, 23 Aug 2009 00:50:23 +0000
+Subject: [PATCH] BEANUTILS-347 MappedPropertyDescriptor throws an exception
+ after method reference has been garbage collected - thanks to Eickvonder for
+ the analysis and test case
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/beanutils/trunk@806915 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../beanutils/MappedPropertyDescriptor.java   |  39 ++++-
+ .../beanutils/bugs/Jira347TestCase.java       | 154 ++++++++++++++++++
+ 2 files changed, 187 insertions(+), 6 deletions(-)
+ create mode 100644 src/test/org/apache/commons/beanutils/bugs/Jira347TestCase.java
+
+diff --git a/src/java/org/apache/commons/beanutils/MappedPropertyDescriptor.java b/src/java/org/apache/commons/beanutils/MappedPropertyDescriptor.java
+index a8c65af49..cbdb08027 100644
+--- a/src/java/org/apache/commons/beanutils/MappedPropertyDescriptor.java
++++ b/src/java/org/apache/commons/beanutils/MappedPropertyDescriptor.java
+@@ -431,7 +431,9 @@ private static class MappedMethodReference {
+         private String methodName;
+         private Reference methodRef;
+         private Reference classRef;
+-        private Reference writeParamTypeRef;
++        private Reference writeParamTypeRef0;
++        private Reference writeParamTypeRef1;
++        private String[] writeParamClassNames;
+         MappedMethodReference(Method m) {
+             if (m != null) {
+                 className = m.getDeclaringClass().getName();
+@@ -440,7 +442,11 @@ private static class MappedMethodReference {
+                 classRef = new WeakReference(m.getDeclaringClass());
+                 Class[] types = m.getParameterTypes();
+                 if (types.length == 2) {
+-                    writeParamTypeRef = new WeakReference(types[1]);
++                    writeParamTypeRef0 = new WeakReference(types[0]);
++                    writeParamTypeRef1 = new WeakReference(types[1]);
++                    writeParamClassNames = new String[2];
++                    writeParamClassNames[0] = types[0].getName();
++                    writeParamClassNames[1] = types[1].getName();
+                 }
+             }
+         }
+@@ -462,8 +468,22 @@ private Method get() {
+                             className + " could not be reconstructed - class reference has gone");
+                 }
+                 Class[] paramTypes = null;
+-                if (writeParamTypeRef != null) {
+-                    paramTypes = new Class[] {String.class, (Class)writeParamTypeRef.get()};
++                if (writeParamClassNames != null) {
++                    paramTypes = new Class[2];
++                    paramTypes[0] = (Class)writeParamTypeRef0.get();
++                    if (paramTypes[0] == null) {
++                        paramTypes[0] = reLoadClass(writeParamClassNames[0]);
++                        if (paramTypes[0] != null) {
++                            writeParamTypeRef0 = new WeakReference(paramTypes[0]);
++                        }
++                    }
++                    paramTypes[1] = (Class)writeParamTypeRef1.get();
++                    if (paramTypes[1] == null) {
++                        paramTypes[1] = reLoadClass(writeParamClassNames[1]);
++                        if (paramTypes[1] != null) {
++                            writeParamTypeRef1 = new WeakReference(paramTypes[1]);
++                        }
++                    }
+                 } else {
+                     paramTypes = STRING_CLASS_PARAMETER;
+                 }
+@@ -484,13 +504,20 @@ private Method get() {
+          * Try to re-load the class
+          */
+         private Class reLoadClass() {
++            return reLoadClass(className);
++        }
++
++        /**
++         * Try to re-load the class
++         */
++        private Class reLoadClass(String name) {
+ 
+             ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
+ 
+             // Try the context class loader
+             if (classLoader != null) {
+                 try {
+-                    return classLoader.loadClass(className);
++                    return classLoader.loadClass(name);
+                 } catch (ClassNotFoundException e) {
+                     // ignore
+                 }
+@@ -499,7 +526,7 @@ private Class reLoadClass() {
+             // Try this class's class loader
+             classLoader = MappedPropertyDescriptor.class.getClassLoader();
+             try {
+-                return classLoader.loadClass(className);
++                return classLoader.loadClass(name);
+             } catch (ClassNotFoundException e) {
+                 return null;
+             }
+diff --git a/src/test/org/apache/commons/beanutils/bugs/Jira347TestCase.java b/src/test/org/apache/commons/beanutils/bugs/Jira347TestCase.java
+new file mode 100644
+index 000000000..c4d13c05e
+--- /dev/null
++++ b/src/test/org/apache/commons/beanutils/bugs/Jira347TestCase.java
+@@ -0,0 +1,154 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.beanutils.bugs;
++
++import java.beans.IntrospectionException;
++import java.lang.ref.SoftReference;
++import java.lang.reflect.Method;
++import java.net.MalformedURLException;
++import java.net.URL;
++import java.net.URLClassLoader;
++
++import junit.framework.TestCase;
++
++import org.apache.commons.beanutils.MappedPropertyDescriptor;
++import org.apache.commons.beanutils.memoryleaktests.MemoryLeakTestCase;
++
++/**
++ * Test case for Jira issue# BEANUTILS-347.
++ * <br/>
++ * See https://issues.apache.org/jira/browse/BEANUTILS-347
++ *
++ * @version $Revision$ $Date$
++ */
++public class Jira347TestCase extends TestCase {
++    
++    /**
++     * Tests that MappedPropertyDescriptor does not throw an exception while re-creating a Method reference after it
++     * has been garbage collected under the following circumstances.
++     * - a class has a property 'mappedProperty'
++     * - there is no getter for this property
++     * - there is method setMappedProperty(MappedPropertyTestBean,MappedPropertyTestBean)
++     * 
++     * In this case getMappedWriteMethod should not throw an exception after the method reference has been garbage collected.
++     * It is essential that in both cases the same method is returned or in both cases null. 
++     * If the constructor of the MappedPropertyDescriptor would recognize the situation (of the first param not being of type String)
++     * this would be fine as well.          
++     */
++    public void testMappedPropertyDescriptor_AnyArgsProperty() throws Exception {
++        String className = "org.apache.commons.beanutils.MappedPropertyTestBean";
++        ClassLoader loader = newClassLoader();
++        Class beanClass    = loader.loadClass(className);
++        Object bean        = beanClass.newInstance();
++        // -----------------------------------------------------------------------------
++
++        // Sanity checks only
++        assertNotNull("ClassLoader is null", loader);
++        assertNotNull("BeanClass is null", beanClass);
++        assertNotSame("ClassLoaders should be different..", getClass().getClassLoader(), beanClass.getClassLoader());
++        assertSame("BeanClass ClassLoader incorrect", beanClass.getClassLoader(), loader);
++
++        // now start the test
++        MappedPropertyDescriptor descriptor = null;
++        try {
++          descriptor = new MappedPropertyDescriptor("anyMapped", beanClass);
++        }
++        catch (IntrospectionException e) {
++          // this would be fine as well
++        }
++        
++        if (descriptor != null) {
++            String m1 = getMappedWriteMethod(descriptor);
++             forceGarbageCollection();
++             try {
++                 String m2 = getMappedWriteMethod(descriptor);
++                 assertEquals("Method returned post garbage collection differs from Method returned prior to gc", m1, m2);
++             }
++             catch (RuntimeException e) {
++                 fail("getMappedWriteMethod threw an exception after garbage collection " + e);
++             }
++        }
++    }
++    
++    /**
++     * Retrieves the string representation of the mapped write method
++     * for the given descriptor.
++     * This conversion is needed as there must not be strong reference to the 
++     * Method object outside of this method as otherwise the garbage collector will not
++     * clean up the soft reference within the MappedPropertyDescriptor. 
++     * 
++     * @return the string representation or null if mapped write method does not exist
++     */
++    private String getMappedWriteMethod(MappedPropertyDescriptor descriptor) {
++        Method m = descriptor.getMappedWriteMethod();
++        return m == null ? null : m.toString();
++    }
++    
++    /**
++     * Try to force the garbage collector to run by filling up memory and calling System.gc().
++     */
++    private void forceGarbageCollection() throws Exception {
++        // Fill up memory
++        SoftReference ref = new SoftReference(new Object());
++        int count = 0;
++        while(ref.get() != null && count++ < 5) {
++            java.util.ArrayList list = new java.util.ArrayList();
++            try {
++                long i = 0;
++                while (true && ref.get() != null) {
++                    list.add("A Big String A Big String A Big String A Big String A Big String A Big String A Big String A Big String A Big String A Big String " + (i++));
++                }
++            } catch (Throwable ignored) {
++            }
++            list.clear();
++            list = null;
++            // System.out.println("Count " + count + " : " + getMemoryStats());
++            System.gc(); 
++            Thread.sleep(1000);
++        }
++        // System.out.println("After GC: " + getMemoryStats());
++        
++        if (ref.get() != null) {
++            throw new IllegalStateException("Your JVM is not releasing SoftReference, try running the testcase with less memory (-Xmx)");
++        }
++    }
++    
++    /**
++     * Create a new class loader instance.
++     */
++    private static URLClassLoader newClassLoader() throws MalformedURLException {
++
++        String dataFilePath = MemoryLeakTestCase.class.getResource("pojotests").getFile();
++        //System.out.println("dataFilePath: " + dataFilePath);
++        String location = "file://" + dataFilePath.substring(0,dataFilePath.length()-"org.apache.commons.beanutils.memoryleaktests.pojotests".length());
++        //System.out.println("location: " + location);
++
++        StringBuffer newString = new StringBuffer();
++        for (int i=0;i<location.length();i++) {
++            if (location.charAt(i)=='\\') {
++                newString.append("/");
++            } else {
++                newString.append(location.charAt(i));
++            }
++        }
++        String classLocation = newString.toString();
++        //System.out.println("classlocation: " + classLocation);
++
++        URLClassLoader theLoader = URLClassLoader.newInstance(new URL[]{new URL(classLocation)},null);
++        return theLoader;
++    }
++}

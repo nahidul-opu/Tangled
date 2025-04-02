@@ -1,0 +1,174 @@
+From 9b632c5e1a951fbf06126063a3cee9ed65bea9a9 Mon Sep 17 00:00:00 2001
+From: madhawa-gunasekara <madhawag@wso2.com>
+Date: Wed, 10 May 2017 16:17:36 +0530
+Subject: [PATCH] GORA-310: Fix partial field delete in solr
+
+---
+ .../org/apache/gora/solr/store/SolrStore.java | 44 ++++++++---
+ .../apache/gora/solr/store/TestSolrStore.java | 76 +++++++++++++++++--
+ 2 files changed, 105 insertions(+), 15 deletions(-)
+
+diff --git a/gora-solr-5/src/main/java/org/apache/gora/solr/store/SolrStore.java b/gora-solr-5/src/main/java/org/apache/gora/solr/store/SolrStore.java
+index 5d34cf09b..9303f76f3 100644
+--- a/gora-solr-5/src/main/java/org/apache/gora/solr/store/SolrStore.java
++++ b/gora-solr-5/src/main/java/org/apache/gora/solr/store/SolrStore.java
+@@ -17,11 +17,7 @@
+ import java.io.IOException;
+ import java.net.MalformedURLException;
+ import java.nio.ByteBuffer;
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.Locale;
+-import java.util.Map;
+-import java.util.Properties;
++import java.util.*;
+ import java.util.concurrent.ConcurrentHashMap;
+ 
+ import org.apache.avro.Schema;
+@@ -741,11 +737,41 @@ public boolean delete(K key) {
+ 
+   @Override
+   public long deleteByQuery(Query<K, T> query) {
+-    String q = ((SolrQuery<K, T>) query).toSolrQuery();
++    UpdateResponse rsp;
+     try {
+-      UpdateResponse rsp = server.deleteByQuery(q);
+-      server.commit();
+-      LOG.info(rsp.toString());
++      /*
++        In this If block we check whether, user needs to delete full document or some fields in the document. We can't delete fields in a document by using solr deleteByQuery method.
++        therefore what we have done here is setting the particular fields values into null.
++       */
++      if (query.getFields() != null && query.getFields().length < mapping.mapping.size() && !(Arrays.asList(query.getFields()).contains(mapping.getPrimaryKey()))) {
++        Result<K, T> result = query.execute();
++        Map<String, String> partialUpdateNull = new HashMap<>();
++        partialUpdateNull.put("set", null);
++        while (result.next()) {
++          SolrInputDocument inputDoc = new SolrInputDocument();
++          inputDoc.setField(mapping.getPrimaryKey(), result.getKey());
++          for (String field : query.getFields()) {
++            inputDoc.setField(field, partialUpdateNull);
++          }
++          batch.add(inputDoc);
++        }
++        if (commitWithin == 0) {
++          rsp = server.add(batch);
++          server.commit(false, true, true);
++          batch.clear();
++          LOG.info(rsp.toString());
++        } else {
++          rsp = server.add(batch, commitWithin);
++          batch.clear();
++          LOG.info(rsp.toString());
++        }
++      } else {
++        SolrQuery<K, T> solrQuery = (SolrQuery<K, T>) query;
++        String q = solrQuery.toSolrQuery();
++        rsp = server.deleteByQuery(q);
++        server.commit();
++        LOG.info(rsp.toString());
++      }
+     } catch (Exception e) {
+       LOG.error(e.getMessage(), e);
+     }
+diff --git a/gora-solr-5/src/test/java/org/apache/gora/solr/store/TestSolrStore.java b/gora-solr-5/src/test/java/org/apache/gora/solr/store/TestSolrStore.java
+index da33e6b37..4c86e1c5c 100644
+--- a/gora-solr-5/src/test/java/org/apache/gora/solr/store/TestSolrStore.java
++++ b/gora-solr-5/src/test/java/org/apache/gora/solr/store/TestSolrStore.java
+@@ -17,17 +17,30 @@
+  */
+ package org.apache.gora.solr.store;
+ 
+-import java.io.IOException;
+-
++import org.apache.gora.examples.WebPageDataCreator;
+ import org.apache.gora.examples.generated.Employee;
+ import org.apache.gora.examples.generated.WebPage;
++import org.apache.gora.query.Query;
+ import org.apache.gora.solr.GoraSolrTestDriver;
+ import org.apache.gora.store.DataStore;
+ import org.apache.gora.store.DataStoreFactory;
+ import org.apache.gora.store.DataStoreTestBase;
+-import org.junit.Ignore;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++import java.io.IOException;
++
++import static junit.framework.Assert.assertNull;
++import static org.apache.gora.examples.WebPageDataCreator.SORTED_URLS;
++import static org.apache.gora.examples.WebPageDataCreator.URLS;
++import static org.apache.gora.store.DataStoreTestUtil.assertNumResults;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
+ 
+ public class TestSolrStore extends DataStoreTestBase {
++
++  private static final Logger LOG = LoggerFactory.getLogger(TestSolrStore.class);
++  private static final int NUM_KEYS = 4;
+   
+   static {
+     setTestDriver(new GoraSolrTestDriver());
+@@ -49,8 +62,59 @@ protected DataStore<String, WebPage> createWebPageDataStore()
+     return store;
+   }
+ 
+-
+-  @Ignore("GORA-310 and GORA-311 issues are not fixed at SolrStore")
+   @Override
+-  public void testDeleteByQueryFields() throws IOException {}
++  public void testDeleteByQueryFields()
++          throws Exception {
++    Query<String, WebPage> query;
++
++    //test 5 - delete all with some fields
++    WebPageDataCreator.createWebPageData(this.webPageStore);
++
++    query = this.webPageStore.newQuery();
++    query.setFields("outlinks"
++            , "parsedContent", "content");
++
++    assertNumResults(this.webPageStore.newQuery(), URLS.length);
++    this.webPageStore.deleteByQuery(query);
++
++    this.webPageStore.flush();
++
++    assertNumResults(this.webPageStore.newQuery(), URLS.length);
++
++    //assert that data is deleted
++    for (String SORTED_URL : SORTED_URLS) {
++      WebPage page = this.webPageStore.get(SORTED_URL);
++      assertNotNull(page);
++
++      assertNotNull(page.getUrl());
++      assertEquals(page.getUrl().toString(), SORTED_URL);
++      assertEquals("Map of Outlinks should have a size of '0' as the deleteByQuery "
++              + "not only removes the data but also the data structure.", 0, page.getOutlinks().size());
++      assertEquals(0, page.getParsedContent().size());
++      if (page.getContent() != null) {
++        LOG.info("url:" + page.getUrl().toString());
++        LOG.info("limit:" + page.getContent().limit());
++      } else {
++        assertNull(page.getContent());
++      }
++    }
++
++    //test 6 - delete some with some fields
++    WebPageDataCreator.createWebPageData(this.webPageStore);
++
++    query = this.webPageStore.newQuery();
++    query.setFields("url");
++    String startKey = SORTED_URLS[NUM_KEYS];
++    String endKey = SORTED_URLS[SORTED_URLS.length - NUM_KEYS];
++    query.setStartKey(startKey);
++    query.setEndKey(endKey);
++
++    assertNumResults(this.webPageStore.newQuery(), URLS.length);
++    this.webPageStore.deleteByQuery(query);
++
++    this.webPageStore.flush();
++
++    assertNumResults(query,0);
++
++  }
+ }

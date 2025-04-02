@@ -1,0 +1,122 @@
+From 9fc99ec59cd3cc24d7ffce8ed562cdbf87c71e2a Mon Sep 17 00:00:00 2001
+From: Mario Ivankovits <imario@apache.org>
+Date: Tue, 3 Oct 2006 19:49:25 +0000
+Subject: [PATCH] VFS-76: implemented retry operation.
+
+Due to the limitation of the used webdavlib only a handful of operations are restartable yet.
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/vfs/trunk@452605 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../vfs/provider/webdav/WebdavFileObject.java | 11 ++++-
+ .../webdav/WebdavMethodRetryHandler.java      | 43 +++++++++++++++++++
+ 2 files changed, 53 insertions(+), 1 deletion(-)
+ create mode 100644 src/java/org/apache/commons/vfs/provider/webdav/WebdavMethodRetryHandler.java
+
+diff --git a/src/java/org/apache/commons/vfs/provider/webdav/WebdavFileObject.java b/src/java/org/apache/commons/vfs/provider/webdav/WebdavFileObject.java
+index 59dfb6fc17..f5a0a1a3f3 100644
+--- a/src/java/org/apache/commons/vfs/provider/webdav/WebdavFileObject.java
++++ b/src/java/org/apache/commons/vfs/provider/webdav/WebdavFileObject.java
+@@ -16,6 +16,7 @@
+ package org.apache.commons.vfs.provider.webdav;
+ 
+ import org.apache.commons.httpclient.HttpException;
++import org.apache.commons.httpclient.HttpMethodBase;
+ import org.apache.commons.httpclient.HttpStatus;
+ import org.apache.commons.httpclient.HttpURL;
+ import org.apache.commons.vfs.FileObject;
+@@ -27,9 +28,9 @@
+ import org.apache.commons.vfs.provider.AbstractRandomAccessContent;
+ import org.apache.commons.vfs.provider.GenericFileName;
+ import org.apache.commons.vfs.provider.URLFileName;
++import org.apache.commons.vfs.util.FileObjectUtils;
+ import org.apache.commons.vfs.util.MonitorOutputStream;
+ import org.apache.commons.vfs.util.RandomAccessMode;
+-import org.apache.commons.vfs.util.FileObjectUtils;
+ import org.apache.webdav.lib.BaseProperty;
+ import org.apache.webdav.lib.WebdavResource;
+ import org.apache.webdav.lib.methods.DepthSupport;
+@@ -134,6 +135,7 @@ private void setDavResource(WebdavResource resource) throws Exception
+             /* now fill the dav properties */
+             String pathEncoded = name.getPathQueryEncoded(urlCharset);
+             final OptionsMethod optionsMethod = new OptionsMethod(pathEncoded);
++            configureMethod(optionsMethod);
+             try
+             {
+                 optionsMethod.setFollowRedirects(true);
+@@ -203,6 +205,11 @@ private void setDavResource(WebdavResource resource) throws Exception
+         }
+     }
+ 
++    protected void configureMethod(HttpMethodBase httpMethod)
++    {
++        httpMethod.setMethodRetryHandler(WebdavMethodRetryHandler.getInstance());
++    }
++
+     private void setAllowedMethods(Enumeration allowedMethods)
+     {
+         this.allowedMethods = new TreeSet();
+@@ -236,6 +243,7 @@ private void resolveRedirection() throws IOException, FileSystemException
+         }
+ 
+         final OptionsMethod optionsMethod = new OptionsMethod(getName().getPath());
++        configureMethod(optionsMethod);
+         try
+         {
+             optionsMethod.setFollowRedirects(true);
+@@ -549,6 +557,7 @@ private void getAllowedMethods() throws IOException
+         }
+ 
+         final OptionsMethod optionsMethod = new OptionsMethod(getName().getPath());
++        configureMethod(optionsMethod);
+         try
+         {
+             optionsMethod.setFollowRedirects(true);
+diff --git a/src/java/org/apache/commons/vfs/provider/webdav/WebdavMethodRetryHandler.java b/src/java/org/apache/commons/vfs/provider/webdav/WebdavMethodRetryHandler.java
+new file mode 100644
+index 0000000000..6cbd5b4435
+--- /dev/null
++++ b/src/java/org/apache/commons/vfs/provider/webdav/WebdavMethodRetryHandler.java
+@@ -0,0 +1,43 @@
++package org.apache.commons.vfs.provider.webdav;
++
++import org.apache.commons.httpclient.HttpClient;
++import org.apache.commons.httpclient.HttpURL;
++import org.apache.commons.httpclient.UsernamePasswordCredentials;
++import org.apache.commons.httpclient.MethodRetryHandler;
++import org.apache.commons.httpclient.HttpMethod;
++import org.apache.commons.httpclient.HttpConnection;
++import org.apache.commons.httpclient.HttpRecoverableException;
++import org.apache.commons.vfs.FileSystemOptions;
++import org.apache.commons.vfs.FileSystemException;
++import org.apache.commons.vfs.UserAuthenticator;
++import org.apache.commons.vfs.UserAuthenticationData;
++import org.apache.commons.vfs.util.UserAuthenticatorUtils;
++import org.apache.webdav.lib.WebdavResource;
++
++import java.io.IOException;
++
++/**
++ * A retry handler which will retry a failed webdav method one time.<br />
++ * Now that webdavlib didnt support adding a MethodRetryHandler only a few operations are restartable yet.
++ *
++ * @author <a href="mailto:imario@apache.org">Mario Ivankovits</a>
++ * @version $Revision$ $Date$
++ */
++public class WebdavMethodRetryHandler implements MethodRetryHandler
++{
++    private final static WebdavMethodRetryHandler INSTANCE = new WebdavMethodRetryHandler();
++
++    private WebdavMethodRetryHandler()
++    {
++    }
++
++    public static WebdavMethodRetryHandler getInstance()
++    {
++        return INSTANCE;
++    }
++
++    public boolean retryMethod(HttpMethod method, HttpConnection connection, HttpRecoverableException recoverableException, int executionCount, boolean requestSent)
++    {
++        return executionCount < 2;
++    }
++}

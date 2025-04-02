@@ -1,0 +1,242 @@
+From 53e9483cc70cd351e3de884f3e6da6cb34233dfb Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Mon, 18 Apr 2011 12:12:18 +0000
+Subject: [PATCH] [SANTUARIO-263] - Canonicalizer can't handle dynamical
+ created DOM correctly  - Patch applied, thanks.
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/branches/1.4.x-fixes@1094513 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG.txt                                 |  1 +
+ .../xml/security/c14n/inExcl/example2_4.xml   |  1 +
+ .../c14n/inExcl/example2_4_c14nized.xml       |  1 +
+ .../c14n/implementations/Canonicalizer11.java | 20 ++++-
+ .../Canonicalizer20010315.java                | 16 +++-
+ .../implementations/CanonicalizerBase.java    | 18 ++++-
+ .../Canonicalizer20010315ExclusiveTest.java   | 77 +++++++++++++++++++
+ 7 files changed, 128 insertions(+), 6 deletions(-)
+ create mode 100644 data/org/apache/xml/security/c14n/inExcl/example2_4.xml
+ create mode 100644 data/org/apache/xml/security/c14n/inExcl/example2_4_c14nized.xml
+
+diff --git a/CHANGELOG.txt b/CHANGELOG.txt
+index 9573ebf252..25d1fd7c5b 100644
+--- a/CHANGELOG.txt
++++ b/CHANGELOG.txt
+@@ -1,5 +1,6 @@
+ Changelog for "Apache xml-security" <http://santuario.apache.org/>
+ New in v1.4.5-SNAPSHOT
++    Fixed SANTUARIO-263: Canonicalizer can't handle dynamical created DOM correctly. Thanks to Martin Koegler.
+     Fixed SANTUARIO-262: Invalid use of String.getBytes(). Thanks to Martin Koegler.
+ 
+ New in v1.4.4
+diff --git a/data/org/apache/xml/security/c14n/inExcl/example2_4.xml b/data/org/apache/xml/security/c14n/inExcl/example2_4.xml
+new file mode 100644
+index 0000000000..8b19151156
+--- /dev/null
++++ b/data/org/apache/xml/security/c14n/inExcl/example2_4.xml
+@@ -0,0 +1 @@
++<?xml version="1.0" encoding="UTF-8"?><dsig:local xmlns:dsig="foo:bar"><etsi:test xmlns:etsi="http://example.net"><etsi:elem2><dsig:stuff/></etsi:elem2></etsi:test></dsig:local>
+\ No newline at end of file
+diff --git a/data/org/apache/xml/security/c14n/inExcl/example2_4_c14nized.xml b/data/org/apache/xml/security/c14n/inExcl/example2_4_c14nized.xml
+new file mode 100644
+index 0000000000..096ce49306
+--- /dev/null
++++ b/data/org/apache/xml/security/c14n/inExcl/example2_4_c14nized.xml
+@@ -0,0 +1 @@
++<etsi:elem2 xmlns:etsi="http://example.net"><dsig:stuff xmlns:dsig="foo:bar"></dsig:stuff></etsi:elem2>
+\ No newline at end of file
+diff --git a/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java b/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java
+index 801edc2dce..530f285afe 100644
+--- a/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java
++++ b/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java
+@@ -412,9 +412,9 @@ void circumventBugIfNeeded(XMLSignatureInput input)
+     }
+    
+     void handleParent(Element e, NameSpaceSymbTable ns) {
+-	if (!e.hasAttributes()) {
+-	    return;
+-	}
++        if (!e.hasAttributes() && e.getNamespaceURI() == null) {
++            return;
++        }
+ 	xmlattrStack.push(-1);
+ 	NamedNodeMap attrs = e.getAttributes();
+ 	int attrsLength = attrs.getLength();
+@@ -436,6 +436,20 @@ void handleParent(Element e, NameSpaceSymbTable ns) {
+ 	    }            
+ 	    ns.addMapping(NName,NValue,N);             
+ 	}
++	if (e.getNamespaceURI() != null) {
++	    String NName = e.getPrefix();
++	    String NValue = e.getNamespaceURI();
++	    String Name;
++	    if (NName == null || NName.equals("")) {
++	        NName = "xmlns";
++	        Name = "xmlns";
++	    } else {
++	        Name = "xmlns:" + NName;
++	    }
++	    Attr n = e.getOwnerDocument().createAttributeNS("http://www.w3.org/2000/xmlns/", Name);
++	    n.setValue(NValue);
++	    ns.addMapping(NName, NValue, n);
++	}
+     }
+ 
+     private static String joinURI(String baseURI, String relativeURI) 
+diff --git a/src/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java b/src/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java
+index da2c22717a..796d75bbb6 100644
+--- a/src/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java
++++ b/src/org/apache/xml/security/c14n/implementations/Canonicalizer20010315.java
+@@ -359,7 +359,7 @@ void circumventBugIfNeeded(XMLSignatureInput input) throws CanonicalizationExcep
+    }
+    
+    void handleParent(Element e, NameSpaceSymbTable ns) {
+-	   if (!e.hasAttributes()) {
++       if (!e.hasAttributes() && e.getNamespaceURI() == null) {
+ 			return;
+ 	   }
+ 	   xmlattrStack.push(-1);
+@@ -383,5 +383,19 @@ void handleParent(Element e, NameSpaceSymbTable ns) {
+ 		   }            
+ 		   ns.addMapping(NName,NValue,N);             
+ 	   }
++	   if (e.getNamespaceURI() != null) {
++	       String NName = e.getPrefix();
++	       String NValue = e.getNamespaceURI();
++	       String Name;
++	       if (NName == null || NName.equals("")) {
++	           NName = "xmlns";
++	           Name = "xmlns";
++	       } else {
++	           Name = "xmlns:" + NName;
++	       }
++	       Attr n = e.getOwnerDocument().createAttributeNS("http://www.w3.org/2000/xmlns/", Name);
++	       n.setValue(NValue);
++	       ns.addMapping(NName, NValue, n);
++	   }
+    }
+ }
+diff --git a/src/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java b/src/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
+index f774fbe937..b13b5fcfc3 100644
+--- a/src/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
++++ b/src/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
+@@ -557,7 +557,7 @@ boolean isVisible(Node currentNode) {
+    	}
+ 
+ 	void handleParent(Element e,NameSpaceSymbTable ns) {
+-	   if (!e.hasAttributes()) {
++	    if (!e.hasAttributes() && e.getNamespaceURI() == null) {
+ 				return;
+ 		}
+ 		NamedNodeMap attrs = e.getAttributes();
+@@ -576,7 +576,21 @@ void handleParent(Element e,NameSpaceSymbTable ns) {
+ 					continue;
+ 			}            
+ 			ns.addMapping(NName,NValue,N);             
+-		}   			
++		}   		
++		if (e.getNamespaceURI() != null) {
++		    String NName = e.getPrefix();
++		    String NValue = e.getNamespaceURI();
++		    String Name;
++		    if (NName == null || NName.equals("")) {
++		        NName = "xmlns";
++		        Name = "xmlns";
++		    } else {
++		        Name = "xmlns:" + NName;
++		    }
++		    Attr n = e.getOwnerDocument().createAttributeNS("http://www.w3.org/2000/xmlns/", Name);
++		    n.setValue(NValue);
++		    ns.addMapping(NName, NValue, n);
++		}
+    }
+ 
+ 	/**
+diff --git a/src_unitTests/org/apache/xml/security/test/c14n/implementations/Canonicalizer20010315ExclusiveTest.java b/src_unitTests/org/apache/xml/security/test/c14n/implementations/Canonicalizer20010315ExclusiveTest.java
+index eba8ffb9e5..2d8d5fd78b 100644
+--- a/src_unitTests/org/apache/xml/security/test/c14n/implementations/Canonicalizer20010315ExclusiveTest.java
++++ b/src_unitTests/org/apache/xml/security/test/c14n/implementations/Canonicalizer20010315ExclusiveTest.java
+@@ -390,7 +390,84 @@ public void testNodeSet() throws Exception {
+         byte[] bytes = c14n.engineCanonicalize(input, "env ns0 xsi wsu");
+         assertEquals(c14nXML,new String(bytes));
+     }
++    
++    /**
++     * Method test24excl - a testcase for SANTUARIO-263 
++     * "Canonicalizer can't handle dynamical created DOM correctly"
++     * https://issues.apache.org/jira/browse/SANTUARIO-263
++     *
++     * @throws CanonicalizationException
++     * @throws FileNotFoundException
++     * @throws IOException
++     * @throws InvalidCanonicalizerException
++     * @throws ParserConfigurationException
++     * @throws SAXException
++     * @throws TransformerException
++     * @throws XMLSecurityException
++     * @throws XMLSignatureException
++     */
++    public void test24excl()
++        throws IOException, FileNotFoundException, SAXException,
++        ParserConfigurationException, CanonicalizationException,
++        InvalidCanonicalizerException, TransformerException,
++        XMLSignatureException, XMLSecurityException {
++
++        Document doc =
++            this.db.parse(getAbsolutePath("data/org/apache/xml/security/c14n/inExcl/example2_4.xml"));
++        Node root = 
++            doc.getElementsByTagNameNS("http://example.net", "elem2").item(0);
++        Canonicalizer20010315Excl c = new Canonicalizer20010315ExclWithComments();
++        byte[] reference = 
++            JavaUtils.getBytesFromFile(getAbsolutePath(
++                "data/org/apache/xml/security/c14n/inExcl/example2_4_c14nized.xml"));
++        byte[] result = c.engineCanonicalizeSubTree(root);
++        boolean equals = java.security.MessageDigest.isEqual(reference, result);
++
++        assertTrue(equals);
++    }
+ 
++    /**
++     * Method test24Aexcl - a testcase for SANTUARIO-263 
++     * "Canonicalizer can't handle dynamical created DOM correctly"
++     * https://issues.apache.org/jira/browse/SANTUARIO-263
++     *
++     * @throws CanonicalizationException
++     * @throws FileNotFoundException
++     * @throws IOException
++     * @throws InvalidCanonicalizerException
++     * @throws ParserConfigurationException
++     * @throws SAXException
++     * @throws TransformerException
++     * @throws XMLSecurityException
++     * @throws XMLSignatureException
++     */
++    public void test24Aexcl()
++        throws IOException, FileNotFoundException, SAXException,
++        ParserConfigurationException, CanonicalizationException,
++        InvalidCanonicalizerException, TransformerException,
++        XMLSignatureException, XMLSecurityException {
++
++        Document doc = dbf.newDocumentBuilder ().newDocument ();
++        Element local = doc.createElementNS("foo:bar", "dsig:local");
++        Element test = doc.createElementNS("http://example.net", "etsi:test");
++        Element elem2 = doc.createElementNS("http://example.net", "etsi:elem2");
++        Element stuff = doc.createElementNS("foo:bar", "dsig:stuff");
++        elem2.appendChild(stuff);
++        test.appendChild(elem2);
++        local.appendChild(test);
++        doc.appendChild(local);
++
++        Node root = doc.getElementsByTagNameNS("http://example.net", "elem2").item(0);
++        Canonicalizer20010315Excl c = new Canonicalizer20010315ExclWithComments();
++        byte[] reference = 
++            JavaUtils.getBytesFromFile(getAbsolutePath(
++                "data/org/apache/xml/security/c14n/inExcl/example2_4_c14nized.xml"));
++        byte[] result = c.engineCanonicalizeSubTree(root);
++        boolean equals = java.security.MessageDigest.isEqual(reference, result);
++
++        assertTrue(equals);
++    }
++    
+    private String getAbsolutePath(String path)
+    {
+    	  String basedir = System.getProperty("basedir");

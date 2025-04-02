@@ -1,0 +1,528 @@
+From da3bc9faef80e45273992c4c6ac3abc04503cf13 Mon Sep 17 00:00:00 2001
+From: Jason Baldridge <jbaldrid@apache.org>
+Date: Thu, 14 Apr 2011 03:38:36 +0000
+Subject: [PATCH] Fixes to Perceptron (OPENNLP-154 improved normalization,
+ OPENNLP-155 improved checking of training accuracy); OPENNLP-156 improved
+ command line trainer so that a Perceptron model is actually stored, so that
+ options are passed to Perceptron training, and so that output of ModelApplier
+ is one line per test event.
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/opennlp/trunk@1091994 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../java/opennlp/maxent/DoubleStringPair.java |  35 ++++
+ .../java/opennlp/maxent/ModelApplier.java     |  38 ++--
+ .../java/opennlp/maxent/ModelTrainer.java     |  33 ++--
+ .../opennlp/perceptron/PerceptronModel.java   |  31 +--
+ .../opennlp/perceptron/PerceptronTrainer.java | 185 +++++++++---------
+ 5 files changed, 174 insertions(+), 148 deletions(-)
+ create mode 100644 opennlp-maxent/src/main/java/opennlp/maxent/DoubleStringPair.java
+
+diff --git a/opennlp-maxent/src/main/java/opennlp/maxent/DoubleStringPair.java b/opennlp-maxent/src/main/java/opennlp/maxent/DoubleStringPair.java
+new file mode 100644
+index 000000000..b54034988
+--- /dev/null
++++ b/opennlp-maxent/src/main/java/opennlp/maxent/DoubleStringPair.java
+@@ -0,0 +1,35 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ * 
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package opennlp.maxent;
++
++public class DoubleStringPair implements Comparable<DoubleStringPair> {
++
++    final public String stringValue;
++    final public double doubleValue;
++
++    public DoubleStringPair (double d, String s) {
++      doubleValue = d;
++      stringValue = s;
++    }
++
++    public int compareTo(DoubleStringPair p) {
++      return Double.compare(doubleValue,p.doubleValue);
++    }
++
++}
+diff --git a/opennlp-maxent/src/main/java/opennlp/maxent/ModelApplier.java b/opennlp-maxent/src/main/java/opennlp/maxent/ModelApplier.java
+index e701b0b6e..d65ab953b 100644
+--- a/opennlp-maxent/src/main/java/opennlp/maxent/ModelApplier.java
++++ b/opennlp-maxent/src/main/java/opennlp/maxent/ModelApplier.java
+@@ -50,7 +50,7 @@ private void eval(Event event) {
+ 
+   private void eval(Event event, boolean real) {
+ 
+-    String outcome = event.getOutcome();
++    String outcome = event.getOutcome(); // Is ignored
+     String[] context = event.getContext();
+ 
+     double[] ocs;
+@@ -61,20 +61,17 @@ private void eval(Event event, boolean real) {
+       ocs = _model.eval(context, values);
+     }
+ 
+-    int best = 0;
+-    for (int i = 1; i < ocs.length; i++)
+-      if (ocs[i] > ocs[best])
+-        best = i;
++    int numOutcomes = ocs.length;
++    DoubleStringPair[] result = new DoubleStringPair[numOutcomes];
++    for (int i=0; i<numOutcomes; i++)
++      result[i] = new DoubleStringPair(ocs[i], _model.getOutcome(i));
+ 
+-    String predictedLabel = _model.getOutcome(best);
+-    String madeError = "+";
+-    if (predictedLabel.equals(outcome))
+-      madeError = "";
++    java.util.Arrays.sort(result);
+ 
+-    System.out.println(counter + "\t0:" + outcome + "\t0:"
+-        + _model.getOutcome(best) + "\t" + madeError + "\t"
+-        + ROUNDED_FORMAT.format(ocs[best]));
+-    counter++;
++    // Print the most likely outcome first, down to the least likely.
++    for (int i=numOutcomes-1; i>=0; i--)
++      System.out.print(result[i].stringValue + " " + result[i].doubleValue + " ");
++    System.out.println();
+ 
+   }
+ 
+@@ -89,10 +86,16 @@ private static void usage() {
+    * java ModelApplier modelFile dataFile
+    */
+   public static void main(String[] args) {
++
+     String dataFileName, modelFileName;
+     boolean real = false;
+     String type = "maxent";
+     int ai = 0;
++
++    if (args.length == 0) {
++      usage();
++    }
++
+     if (args.length > 0) {
+       while (args[ai].startsWith("-")) {
+         if (args[ai].equals("-real")) {
+@@ -104,28 +107,25 @@ public static void main(String[] args) {
+         }
+         ai++;
+       }
++
+       modelFileName = args[ai++];
+       dataFileName = args[ai++];
+ 
+       ModelApplier predictor = null;
+       try {
+-        MaxentModel m = new GenericModelReader(new File(modelFileName))
+-            .getModel();
++        MaxentModel m = new GenericModelReader(new File(modelFileName)).getModel();
+         predictor = new ModelApplier(m);
+       } catch (Exception e) {
+         e.printStackTrace();
+         System.exit(0);
+       }
+ 
+-      System.out.println("=== Predictions on test data ===\n");
+-      System.out.println(" inst#     actual  predicted error prediction");
+       try {
+         EventStream es = new BasicEventStream(new PlainTextByLineDataStream(
+             new FileReader(new File(dataFileName))), ",");
+ 
+-        while (es.hasNext()) {
++        while (es.hasNext())
+           predictor.eval(es.next(), real);
+-        }
+ 
+         return;
+       } catch (Exception e) {
+diff --git a/opennlp-maxent/src/main/java/opennlp/maxent/ModelTrainer.java b/opennlp-maxent/src/main/java/opennlp/maxent/ModelTrainer.java
+index 5f7934766..9720eaa5f 100644
+--- a/opennlp-maxent/src/main/java/opennlp/maxent/ModelTrainer.java
++++ b/opennlp-maxent/src/main/java/opennlp/maxent/ModelTrainer.java
+@@ -25,10 +25,12 @@
+ import opennlp.maxent.io.GISModelWriter;
+ import opennlp.maxent.io.SuffixSensitiveGISModelWriter;
+ import opennlp.model.AbstractModel;
++import opennlp.model.AbstractModelWriter;
+ import opennlp.model.EventStream;
+ import opennlp.model.OnePassDataIndexer;
+ import opennlp.model.OnePassRealValueDataIndexer;
+ import opennlp.perceptron.PerceptronTrainer;
++import opennlp.perceptron.SuffixSensitivePerceptronModelWriter;
+ 
+ /**
+  * Main class which calls the GIS procedure after building the EventStream from
+@@ -93,29 +95,38 @@ public static void main(String[] args) {
+       } else {
+         es = new RealBasicEventStream(new PlainTextByLineDataStream(datafr));
+       }
+-      GIS.SMOOTHING_OBSERVATION = SMOOTHING_OBSERVATION;
++
++      File outputFile = new File(modelFileName);
++
++      AbstractModelWriter writer;
++
+       AbstractModel model;
+       if (type.equals("maxent")) {
++	GIS.SMOOTHING_OBSERVATION = SMOOTHING_OBSERVATION;
+ 
+         if (!real) {
+           model = GIS.trainModel(es, maxit, cutoff, sigma);
+         } else {
+-          model = GIS.trainModel(maxit, new OnePassRealValueDataIndexer(es, 0),
+-              USE_SMOOTHING);
++          model = GIS.trainModel(maxit, 
++				 new OnePassRealValueDataIndexer(es, cutoff),              
++				 USE_SMOOTHING);
+         }
++
++	writer = new SuffixSensitiveGISModelWriter(model, outputFile);
++
+       } else if (type.equals("perceptron")) {
+-        System.err.println("Perceptron training");
+-        model = new PerceptronTrainer().trainModel(10, new OnePassDataIndexer(
+-            es, 0), 0);
++        //System.err.println("Perceptron training");
++        model = new PerceptronTrainer().trainModel(maxit, new OnePassDataIndexer(es, cutoff), cutoff);
++
++	writer = new SuffixSensitivePerceptronModelWriter(model, outputFile);
++
+       } else {
+-        System.err.println("Unknown model type: " + type);
+-        model = null;
++        throw new RuntimeException("Unknown model type: " + type);
+       }
+ 
+-      File outputFile = new File(modelFileName);
+-      GISModelWriter writer = new SuffixSensitiveGISModelWriter(model,
+-          outputFile);
+       writer.persist();
++
++
+     } catch (Exception e) {
+       System.out.print("Unable to create model due to exception: ");
+       System.out.println(e);
+diff --git a/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronModel.java b/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronModel.java
+index 0c1188950..feb4bc929 100644
+--- a/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronModel.java
++++ b/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronModel.java
+@@ -87,29 +87,16 @@ public static double[] eval(int[] context, float[] values, double[] prior, EvalP
+       }
+     }    
+     if (normalize) {
++      int numOutcomes = model.getNumOutcomes();
++      for (int oid = 0; oid < numOutcomes; oid++)
++	prior[oid] = Math.exp(prior[oid]);
++
+       double normal = 0.0;
+-      double min = prior[0];
+-      for (int oid = 0; oid < model.getNumOutcomes(); oid++) {
+-        if (prior[oid] < min) {
+-          min = prior[oid];
+-        }
+-      }
+-      for (int oid = 0; oid < model.getNumOutcomes(); oid++) {
+-        if (min < 0) {
+-          prior[oid]+=(-1*min);
+-        }
+-        normal += prior[oid];
+-      }
+-      if (normal == 0.0) {
+-        for (int oid = 0; oid < model.getNumOutcomes(); oid++) {
+-          prior[oid] = (double) 1/model.getNumOutcomes();
+-        }
+-      }
+-      else {
+-        for (int oid = 0; oid < model.getNumOutcomes(); oid++) {
+-          prior[oid] /= normal;
+-        }
+-      }
++      for (int oid = 0; oid < numOutcomes; oid++)
++	normal += prior[oid];
++
++      for (int oid = 0; oid < numOutcomes; oid++)
++	prior[oid] /= normal;
+     }
+     return prior;
+   }
+diff --git a/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronTrainer.java b/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronTrainer.java
+index bfa9b1e16..5321c295e 100644
+--- a/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronTrainer.java
++++ b/opennlp-maxent/src/main/java/opennlp/perceptron/PerceptronTrainer.java
+@@ -128,10 +128,13 @@ public AbstractModel trainModel(int iterations, DataIndexer di, int cutoff, bool
+     
+     for (int pi = 0; pi < numPreds; pi++) {
+       params[pi] = new MutableContext(allOutcomesPattern,new double[numOutcomes]);
+-      if (useAverage) averageParams[pi] = new MutableContext(allOutcomesPattern,new double[numOutcomes]);
++      if (useAverage) 
++	averageParams[pi] = 
++	  new MutableContext(allOutcomesPattern,new double[numOutcomes]);
+       for (int aoi=0;aoi<numOutcomes;aoi++) {
+         params[pi].setParameter(aoi, 0.0);
+-        if (useAverage) averageParams[pi].setParameter(aoi, 0.0);
++        if (useAverage) 
++	  averageParams[pi].setParameter(aoi, 0.0);
+       }
+     }
+     modelDistribution = new double[numOutcomes];
+@@ -141,12 +144,10 @@ public AbstractModel trainModel(int iterations, DataIndexer di, int cutoff, bool
+     display("...done.\n");
+ 
+     /*************** Create and return the model ******************/
+-    if (useAverage) {
++    if (useAverage)
+       return new PerceptronModel(averageParams, predLabels, outcomeLabels);
+-    }
+-    else {
++    else
+       return new PerceptronModel(params, predLabels, outcomeLabels);
+-    }
+   }
+ 
+   private void display(String s) {
+@@ -155,7 +156,11 @@ private void display(String s) {
+   }
+   
+   private void findParameters(int iterations) {
++
+     display("Performing " + iterations + " iterations.\n");
++
++    int numTimesSameAccuracy = 0;
++    double prevAccuracy = 0.0;
+     for (int i = 1; i <= iterations; i++) {
+       if (i < 10)
+         display("  " + i + ":  ");
+@@ -164,140 +169,128 @@ else if (i < 100)
+       else
+         display(i + ":  ");
+       nextIteration(i);
++
++      // Need to do this for the full set to get a representative
++      // accuracy -- doing it while training is biased because the
++      // events are ordered according to their outcomes.
++      double currAccuracy = trainingStats(averageParams);
++      
++      if (currAccuracy == prevAccuracy) {
++	numTimesSameAccuracy++;
++      } else {
++	prevAccuracy = currAccuracy;
++	numTimesSameAccuracy = 0;
++      }
++
++      // If the accuracy hasn't changed for four iterations, stop training.
++      if (numTimesSameAccuracy == 4) {
++	display("Accuracy repeated 4 times, stopping training.\n");
++	break;
++      }
+     }
+-    if (useAverage) {
++    if (useAverage)
+       trainingStats(averageParams);
+-    }
+-    else {
++    else
+       trainingStats(params);
+-    }
++
+     // kill a bunch of these big objects now that we don't need them
+     numTimesEventsSeen = null;
+     contexts = null;
+   }
+   
+-  /* Compute one iteration of Perceptron and return log-likelihood.*/
++  /* Compute one iteration of Perceptron.*/
+   private void nextIteration(int iteration) {
+     iteration--; //move to 0-based index
+-    int numCorrect = 0;
+     int oei = 0;
+-    for (int ei = 0; ei < numUniqueEvents; ei++,oei++) {
+-      //Arrays.sort(contexts[ei]); only needed for debugging
++    for (int ei = 0; ei < numUniqueEvents; ei++, oei++) {
+       for (int ni=0;ni<this.numTimesEventsSeen[ei];ni++) {
+-        //System.err.print("contexts["+ei+"]=");for (int ci=0;ci<contexts[ei].length;ci++) { System.err.print(" "+contexts[ei][ci]+" ");} System.err.println();
+-        for (int oi = 0; oi < numOutcomes; oi++) {
++
++        for (int oi = 0; oi < numOutcomes; oi++)
+           modelDistribution[oi] = 0;
+-        }
+-        if (values != null) {
++
++        if (values != null)
+           PerceptronModel.eval(contexts[ei], values[ei], modelDistribution, evalParams,false);
+-        }
+-        else {
++        else
+           PerceptronModel.eval(contexts[ei], null, modelDistribution, evalParams, false);
+-        }
++
+         int max = 0;
+-        for (int oi = 1; oi < numOutcomes; oi++) {
+-          if (modelDistribution[oi] > modelDistribution[max]) {
++        for (int oi = 1; oi < numOutcomes; oi++) 
++          if (modelDistribution[oi] > modelDistribution[max]) 
+             max = oi;
+-          }
+-        }
+-        boolean correct = max == outcomeList[oei]; 
+-        if (correct) {
+-          numCorrect ++;
+-        }
++
+         for (int oi = 0;oi<numOutcomes;oi++) {
+-          if (oi == outcomeList[oei]) {
+-            if (modelDistribution[oi] <= 0) {
+-              for (int ci = 0; ci < contexts[ei].length; ci++) {
+-                int pi = contexts[ei][ci];
+-                if (values == null) {
+-                  params[pi].updateParameter(oi, 1);
+-                }
+-                else {
+-                  params[pi].updateParameter(oi, values[ei][ci]);
+-                }
+-                if (useAverage) {
+-                  if (updates[pi][oi][VALUE] != 0) {
+-                    averageParams[pi].updateParameter(oi,updates[pi][oi][VALUE]*(numEvents*(iteration-updates[pi][oi][ITER])+(ei-updates[pi][oi][EVENT])));
+-                    //System.err.println("p avp["+pi+"]."+oi+"="+averageParams[pi].getParameters()[oi]);
+-                  }
+-                  //System.err.println("p updates["+pi+"]["+oi+"]=("+updates[pi][oi][ITER]+","+updates[pi][oi][EVENT]+","+updates[pi][oi][VALUE]+") + ("+iteration+","+ei+","+params[pi].getParameters()[oi]+") -> "+averageParams[pi].getParameters()[oi]);
+-                  updates[pi][oi][VALUE] = (int) params[pi].getParameters()[oi];
+-                  updates[pi][oi][ITER] = iteration;
+-                  updates[pi][oi][EVENT] = ei;
+-                }
+-              }
+-            }
+-          }
+-          else {
+-            if (modelDistribution[oi] > 0) {
+-              for (int ci = 0; ci < contexts[ei].length; ci++) {
+-                int pi = contexts[ei][ci];
+-                if (values == null) {
+-                  params[pi].updateParameter(oi, -1);
+-                }
+-                else {
+-                  params[pi].updateParameter(oi, -1*values[ei][ci]);
+-                }
+-                if (useAverage) {
+-                  if (updates[pi][oi][VALUE] != 0) {
+-                    averageParams[pi].updateParameter(oi,updates[pi][oi][VALUE]*(numEvents*(iteration-updates[pi][oi][ITER])+(ei-updates[pi][oi][EVENT])));
+-                    //System.err.println("d avp["+pi+"]."+oi+"="+averageParams[pi].getParameters()[oi]);
+-                  }
+-                  //System.err.println(ei+" d updates["+pi+"]["+oi+"]=("+updates[pi][oi][ITER]+","+updates[pi][oi][EVENT]+","+updates[pi][oi][VALUE]+") + ("+iteration+","+ei+","+params[pi].getParameters()[oi]+") -> "+averageParams[pi].getParameters()[oi]);
+-                  updates[pi][oi][VALUE] = (int) params[pi].getParameters()[oi];
+-                  updates[pi][oi][ITER] = iteration;
+-                  updates[pi][oi][EVENT] = ei;
+-                }
+-              }
+-            }
+-          }
+-        }
++	  int updateValue = -1;
++          if (oi == outcomeList[oei])
++	    updateValue = 1;
++
++	  if (modelDistribution[oi]*updateValue <= 0) {
++	    for (int ci = 0; ci < contexts[ei].length; ci++) {
++	      int pi = contexts[ei][ci];
++	      if (values == null)
++		params[pi].updateParameter(oi, updateValue);
++	      else
++		params[pi].updateParameter(oi, updateValue*values[ei][ci]);
++
++	      if (useAverage) {
++
++		if (updates[pi][oi][VALUE] != 0)
++		  averageParams[pi].updateParameter(oi,
++		     updates[pi][oi][VALUE] *
++		     (numEvents * (iteration-updates[pi][oi][ITER])
++		      + (ei-updates[pi][oi][EVENT])));
++
++		updates[pi][oi][VALUE] = (int) params[pi].getParameters()[oi];
++		updates[pi][oi][ITER] = iteration;
++		updates[pi][oi][EVENT] = ei;
++	      }
++	    }
++	  }
++	}
+       }
+     }
++
+     //finish average computation
+     double totIterations = (double) iterations*numEvents;
+     if (useAverage && iteration == iterations-1) {
+       for (int pi = 0; pi < numPreds; pi++) {
+         double[] predParams = averageParams[pi].getParameters();
+         for (int oi = 0;oi<numOutcomes;oi++) {
+-          if (updates[pi][oi][VALUE] != 0) {
+-            predParams[oi] +=  updates[pi][oi][VALUE]*(numEvents*(iterations-updates[pi][oi][ITER])-updates[pi][oi][EVENT]);
+-          }
++          if (updates[pi][oi][VALUE] != 0) 
++            predParams[oi] +=  
++	      updates[pi][oi][VALUE] *
++	      (numEvents * (iterations-updates[pi][oi][ITER])
++	       - updates[pi][oi][EVENT]);
++
+           if (predParams[oi] != 0) {
+             predParams[oi] /=totIterations;  
+             averageParams[pi].setParameter(oi, predParams[oi]);
+-            //System.err.println("updates["+pi+"]["+oi+"]=("+updates[pi][oi][ITER]+","+updates[pi][oi][EVENT]+","+updates[pi][oi][VALUE]+") + ("+iterations+","+0+","+params[pi].getParameters()[oi]+") -> "+averageParams[pi].getParameters()[oi]);
+           }
+         }
+       }
+     }
+-    display(". ("+numCorrect+"/"+numEvents+") "+((double) numCorrect / numEvents) + "\n");
+   }  
+   
+-  private void trainingStats(MutableContext[] params) {
++  private double trainingStats(MutableContext[] params) {
+     int numCorrect = 0;
+-    for (int ei = 0; ei < numUniqueEvents; ei++) {
++    int oei = 0;
++    for (int ei = 0; ei < numUniqueEvents; ei++, oei++) {
+       for (int ni=0;ni<this.numTimesEventsSeen[ei];ni++) {
+-        for (int oi = 0; oi < numOutcomes; oi++) {
++        for (int oi = 0; oi < numOutcomes; oi++)
+           modelDistribution[oi] = 0;
+-        }
+-        if (values != null) {
++        if (values != null)
+           PerceptronModel.eval(contexts[ei], values[ei], modelDistribution, evalParams,false);
+-        }
+-        else {
++        else
+           PerceptronModel.eval(contexts[ei], null, modelDistribution, evalParams, false);
+-        }
+         int max = 0;
+-        for (int oi = 1; oi < numOutcomes; oi++) {
+-          if (modelDistribution[oi] > modelDistribution[max]) {
++        for (int oi = 1; oi < numOutcomes; oi++)
++          if (modelDistribution[oi] > modelDistribution[max])
+             max = oi;
+-          }
+-        }
+-        if (max == outcomeList[ei]) {
++        if (max == outcomeList[oei])
+           numCorrect ++;
+-        }
+       }
+     }
+-    display(". ("+numCorrect+"/"+numEvents+") "+((double) numCorrect / numEvents) + "\n");
++    double trainingAccuracy = (double) numCorrect / numEvents;
++    display(". ("+numCorrect+"/"+numEvents+") "+ trainingAccuracy + "\n");
++    return trainingAccuracy;
+   }
+ }

@@ -1,0 +1,96 @@
+From 0b5ba610445af6ac4e7570fd6da475874ce4db01 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 26 Dec 2005 11:09:35 +0000
+Subject: [PATCH] FIX: publish now doesn't call deliver when not necessary
+ (IVY-119)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484076 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/fr/jayasoft/ivy/ant/IvyPublish.java  |  2 +-
+ .../fr/jayasoft/ivy/ant/IvyPublishTest.java   | 29 +++++++++++++++++++
+ test/java/fr/jayasoft/ivy/ant/ivy-latest.xml  | 10 +++++++
+ 4 files changed, 41 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/ivy-latest.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2324f780e..cdd767b47 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -12,6 +12,7 @@
+ - IMPROVE: import system properties as ivy variables in standalone mode
+ - IMPROVE: string identifying a module is now clearly different from a path
+ - IMPROVE: better error message when publish fails due to readonly destination (IVY-83)
++- FIX: publish now doesn't call deliver when not necessary (IVY-119)
+ - FIX: cachefileset was returning all artifacts for empty configuration (IVY-108)
+ - FIX: transitive and changing attribute were not copied in ivy files in cache (IVY-94)
+ - FIX: chain resolver now support latest strategy configuration (IVY-90)
+diff --git a/src/java/fr/jayasoft/ivy/ant/IvyPublish.java b/src/java/fr/jayasoft/ivy/ant/IvyPublish.java
+index 11ca535f4..62dfae7da 100644
+--- a/src/java/fr/jayasoft/ivy/ant/IvyPublish.java
++++ b/src/java/fr/jayasoft/ivy/ant/IvyPublish.java
+@@ -165,7 +165,7 @@ public void execute() throws BuildException {
+         }
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance(_organisation, _module, _revision);
+         try {
+-            File ivyFile = new File(_cache, IvyPatternHelper.substitute(_srcivypattern, _organisation, _module, _pubRevision, "ivy", "ivy", "xml"));
++            File ivyFile = new File(IvyPatternHelper.substitute(_srcivypattern, _organisation, _module, _pubRevision, "ivy", "ivy", "xml"));
+             if (_publishivy && !ivyFile.exists()) {
+                 IvyDeliver deliver = new IvyDeliver();
+                 deliver.setProject(getProject());
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java b/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java
+index fa7b17893..6082e904d 100644
+--- a/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java
++++ b/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java
+@@ -94,6 +94,35 @@ public void testSimple() throws Exception {
+         assertEquals("1.2", md.getModuleRevisionId().getRevision());
+     }
+ 
++    public void testNoDeliver() throws Exception {
++        _project.setProperty("ivy.dep.file", "test/java/fr/jayasoft/ivy/ant/ivy-latest.xml");
++        IvyResolve res = new IvyResolve();
++        res.setProject(_project);
++        res.execute();
++        
++        
++        _publish.setPubrevision("1.3");
++        _publish.setResolver("1");
++        _publish.setSrcivypattern("build/test/publish/ivy-1.3.xml");
++
++        FileUtil.copy(new File("test/java/fr/jayasoft/ivy/ant/ivy-latest.xml"), new File("build/test/publish/ivy-1.3.xml"), null);
++
++        File art = new File("build/test/publish/resolve-latest-1.3.jar");
++        FileUtil.copy(new File("test/repositories/1/org1/mod1.1/jars/mod1.1-1.0.jar"), art, null);
++        _publish.execute();
++        
++        // should have published the files with "1" resolver
++        assertTrue(new File("test/repositories/1/jayasoft/resolve-latest/ivys/ivy-1.3.xml").exists()); 
++        assertTrue(new File("test/repositories/1/jayasoft/resolve-latest/jars/resolve-latest-1.3.jar").exists());
++        
++        // should not have updated published ivy version
++        ModuleDescriptor md = XmlModuleDescriptorParser.parseDescriptor(new Ivy(), new File("test/repositories/1/jayasoft/resolve-latest/ivys/ivy-1.3.xml").toURL(), false);
++        assertEquals("1.0", md.getModuleRevisionId().getRevision());
++        
++        // should not have done delivery (replace dynamic revisions with static ones)
++        assertEquals("latest.integration", md.getDependencies()[0].getDependencyRevisionId().getRevision());
++    }
++
+     public void testReadonly() throws Exception {
+         _project.setProperty("ivy.dep.file", "test/java/fr/jayasoft/ivy/ant/ivy-simple.xml");
+         IvyResolve res = new IvyResolve();
+diff --git a/test/java/fr/jayasoft/ivy/ant/ivy-latest.xml b/test/java/fr/jayasoft/ivy/ant/ivy-latest.xml
+new file mode 100644
+index 000000000..efbd026ed
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/ivy-latest.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0"> 
++	<info organisation="jayasoft"
++	       module="resolve-latest"
++	       revision="1.0"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="latest.integration"/>
++	</dependencies>
++</ivy-module>

@@ -1,0 +1,272 @@
+From f4064fe62826d2312f4c9c8890faa2e6e822e367 Mon Sep 17 00:00:00 2001
+From: Sean Joseph Mullan <mullan@apache.org>
+Date: Thu, 19 Jan 2012 14:58:58 +0000
+Subject: [PATCH] Fixed SANTUARIO-295: XMLDSig XPathFilter2Transform bug
+ involving intersect filter
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1233410 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG.txt                                 |   1 +
+ .../TransformXPath2Filter.java                | 128 +++++++++---------
+ .../test/dsig/ValidateSignatureTest.java      |  11 ++
+ .../xml/crypto/dsig/xmldsig-xfilter2.xml      |   7 +
+ 4 files changed, 83 insertions(+), 64 deletions(-)
+ create mode 100644 src/test/resources/javax/xml/crypto/dsig/xmldsig-xfilter2.xml
+
+diff --git a/CHANGELOG.txt b/CHANGELOG.txt
+index 8fa27868ca..1399f8bbbc 100644
+--- a/CHANGELOG.txt
++++ b/CHANGELOG.txt
+@@ -1,6 +1,7 @@
+ Changelog for "Apache xml-security" <http://santuario.apache.org/>
+ 
+ New in v1.5.0-SNAPSHOT
++    Fixed SANTUARIO-295: XMLDSig XPathFilter2Transform bug involving intersect filter
+     Fixed SANTUARIO-282: RSA-OAEP key transport is limited to SHA-1 digests.
+     Fixed SANTUARIO-293: Support XML Encryption 1.1 Key Wrapping test-cases.
+     Fixed SANTUARIO-292: Add the ability to access the dereferenced Elements after signature validation in the non-JSR-105 API.
+diff --git a/src/main/java/org/apache/xml/security/transforms/implementations/TransformXPath2Filter.java b/src/main/java/org/apache/xml/security/transforms/implementations/TransformXPath2Filter.java
+index d8ca57839e..4fee6f8833 100644
+--- a/src/main/java/org/apache/xml/security/transforms/implementations/TransformXPath2Filter.java
++++ b/src/main/java/org/apache/xml/security/transforms/implementations/TransformXPath2Filter.java
+@@ -81,7 +81,7 @@ protected XMLSignatureInput enginePerformTransform(
+     ) throws TransformationException {
+         try {
+             List<NodeList> unionNodes = new ArrayList<NodeList>();
+-            List<NodeList> substractNodes = new ArrayList<NodeList>();
++            List<NodeList> subtractNodes = new ArrayList<NodeList>();
+             List<NodeList> intersectNodes = new ArrayList<NodeList>();
+ 
+             Element[] xpathElements =
+@@ -126,18 +126,14 @@ protected XMLSignatureInput enginePerformTransform(
+                 if (xpathContainer.isIntersect()) {
+                     intersectNodes.add(subtreeRoots);
+                 } else if (xpathContainer.isSubtract()) {
+-                    substractNodes.add(subtreeRoots);
++                    subtractNodes.add(subtreeRoots);
+                 } else if (xpathContainer.isUnion()) {
+                     unionNodes.add(subtreeRoots);
+                 } 
+             }
+ 
+             input.addNodeFilter(
+-                new XPath2NodeFilter(
+-                    convertNodeListToSet(unionNodes),
+-                    convertNodeListToSet(substractNodes),
+-                    convertNodeListToSet(intersectNodes)
+-                )
++                new XPath2NodeFilter(unionNodes, subtractNodes, intersectNodes)
+             );
+             input.setNodeSet(true);
+             return input;
+@@ -159,40 +155,28 @@ protected XMLSignatureInput enginePerformTransform(
+             throw new TransformationException("empty", ex);
+         }
+     }
+-    
+-    static Set<Node> convertNodeListToSet(List<NodeList> l) {
+-        Set<Node> result = new HashSet<Node>();
+-        for (NodeList rootNodes : l) {
+-            int length = rootNodes.getLength();
+-
+-            for (int i = 0; i < length; i++) {
+-                Node rootNode = rootNodes.item(i);
+-                result.add(rootNode);
+-            }
+-        }
+-        return result;
+-    }
+ }
+ 
+ class XPath2NodeFilter implements NodeFilter {
+     
+-    boolean hasUnionNodes;
+-    boolean hasSubstractNodes;
+-    boolean hasIntersectNodes;
++    boolean hasUnionFilter;
++    boolean hasSubtractFilter;
++    boolean hasIntersectFilter;
+     Set<Node> unionNodes;
+-    Set<Node> substractNodes;
++    Set<Node> subtractNodes;
+     Set<Node> intersectNodes;
+-    int inSubstract = -1;
++    int inSubtract = -1;
+     int inIntersect = -1;
+     int inUnion = -1;
+     
+-    XPath2NodeFilter(Set<Node> unionNodes, Set<Node> substractNodes, Set<Node> intersectNodes) {
+-        this.unionNodes = unionNodes;
+-        hasUnionNodes = !unionNodes.isEmpty();
+-        this.substractNodes = substractNodes;
+-        hasSubstractNodes = !substractNodes.isEmpty();
+-        this.intersectNodes = intersectNodes;
+-        hasIntersectNodes = !intersectNodes.isEmpty();
++    XPath2NodeFilter(List<NodeList> unionNodes, List<NodeList> subtractNodes,
++                     List<NodeList> intersectNodes) {
++        hasUnionFilter = !unionNodes.isEmpty();
++        this.unionNodes = convertNodeListToSet(unionNodes);
++        hasSubtractFilter = !subtractNodes.isEmpty();
++        this.subtractNodes = convertNodeListToSet(subtractNodes);
++        hasIntersectFilter = !intersectNodes.isEmpty();
++        this.intersectNodes = convertNodeListToSet(intersectNodes);
+     }
+ 
+     /**
+@@ -201,9 +185,9 @@ class XPath2NodeFilter implements NodeFilter {
+     public int isNodeInclude(Node currentNode) {	 
+         int result = 1;
+ 
+-        if (hasSubstractNodes && rooted(currentNode, substractNodes)) {
++        if (hasSubtractFilter && rooted(currentNode, subtractNodes)) {
+             result = -1;
+-        } else if (hasIntersectNodes && !rooted(currentNode, intersectNodes)) {
++        } else if (hasIntersectFilter && !rooted(currentNode, intersectNodes)) {
+             result = 0;
+         }
+ 
+@@ -211,7 +195,7 @@ public int isNodeInclude(Node currentNode) {
+         if (result == 1) {     	        
+             return 1;
+         }
+-        if (hasUnionNodes) { 
++        if (hasUnionFilter) { 
+             if (rooted(currentNode, unionNodes)) {
+                 return 1;
+             }
+@@ -222,19 +206,19 @@ public int isNodeInclude(Node currentNode) {
+     
+     public int isNodeIncludeDO(Node n, int level) {
+         int result = 1;
+-        if (hasSubstractNodes) {
+-            if ((inSubstract == -1) || (level <= inSubstract)) {
+-                if (inList(n, substractNodes)) {
+-                    inSubstract = level;
++        if (hasSubtractFilter) {
++            if ((inSubtract == -1) || (level <= inSubtract)) {
++                if (inList(n, subtractNodes)) {
++                    inSubtract = level;
+                 } else {
+-                    inSubstract = -1;   			   
++                    inSubtract = -1;   			   
+                 }		   
+             } 
+-            if (inSubstract != -1){
++            if (inSubtract != -1){
+                 result = -1;
+             }
+         } 
+-        if (result != -1 && hasIntersectNodes 
++        if (result != -1 && hasIntersectFilter 
+             && ((inIntersect == -1) || (level <= inIntersect))) { 
+             if (!inList(n, intersectNodes)) {
+                 inIntersect = -1;
+@@ -250,7 +234,7 @@ public int isNodeIncludeDO(Node n, int level) {
+         if (result == 1) {     	        
+             return 1;
+         }
+-        if (hasUnionNodes) {
++        if (hasUnionFilter) {
+             if ((inUnion == -1) && inList(n, unionNodes)) {
+                 inUnion = level;
+             }
+@@ -270,26 +254,42 @@ public int isNodeIncludeDO(Node n, int level) {
+      *
+      * @return if rooted bye the rootnodes
+      */
+-     static boolean rooted(Node currentNode, Set<Node> nodeList ) {
+-         if (nodeList.contains(currentNode)) {
+-             return true;
+-         }
+-         for (Node rootNode : nodeList) {
+-             if (XMLUtils.isDescendantOrSelf(rootNode, currentNode)) {
+-                 return true;
+-             }
+-         }
+-         return false;
+-     }
++    static boolean rooted(Node currentNode, Set<Node> nodeList) {
++        if (nodeList.isEmpty()) {
++            return false;
++        }
++        if (nodeList.contains(currentNode)) {
++            return true;
++        }
++        for (Node rootNode : nodeList) {
++            if (XMLUtils.isDescendantOrSelf(rootNode, currentNode)) {
++                return true;
++            }
++        }
++        return false;
++    }
+ 
+-     /**
+-      * Method rooted
+-      * @param currentNode 
+-      * @param nodeList 
+-      *
+-      * @return if rooted bye the rootnodes
+-      */
+-     static boolean inList(Node currentNode, Set<Node> nodeList) {
+-         return nodeList.contains(currentNode);
+-     }
++    /**
++     * Method rooted
++     * @param currentNode 
++     * @param nodeList 
++     *
++     * @return if rooted bye the rootnodes
++     */
++    static boolean inList(Node currentNode, Set<Node> nodeList) {
++        return nodeList.contains(currentNode);
++    }
++    
++    private static Set<Node> convertNodeListToSet(List<NodeList> l) {
++        Set<Node> result = new HashSet<Node>();
++        for (NodeList rootNodes : l) {
++            int length = rootNodes.getLength();
++
++            for (int i = 0; i < length; i++) {
++                Node rootNode = rootNodes.item(i);
++                result.add(rootNode);
++            }
++        }
++        return result;
++    }
+ }
+diff --git a/src/test/java/javax/xml/crypto/test/dsig/ValidateSignatureTest.java b/src/test/java/javax/xml/crypto/test/dsig/ValidateSignatureTest.java
+index 0753c1330c..d875188f42 100644
+--- a/src/test/java/javax/xml/crypto/test/dsig/ValidateSignatureTest.java
++++ b/src/test/java/javax/xml/crypto/test/dsig/ValidateSignatureTest.java
+@@ -134,6 +134,17 @@ public void test_signature_exclc14n_xmlnamespace() throws Exception {
+         assertTrue("Signature failed core validation", coreValidity);
+     }
+ 
++    // Bug https://issues.apache.org/jira/browse/SANTUARIO-295
++    // Validates a signature with an XPathFilter2 Transform with an intersect
++    // filter that produces an empty node-set.
++    @org.junit.Test
++    public void test_signature_xpathfilter2() throws Exception {
++        String file = "xmldsig-xfilter2.xml";
++        boolean coreValidity = validator.validate
++            (file, new KeySelectors.KeyValueKeySelector());
++        assertTrue("Signature failed core validation", coreValidity);
++    }
++
+     /**
+      * Set flag if called.
+      */
+diff --git a/src/test/resources/javax/xml/crypto/dsig/xmldsig-xfilter2.xml b/src/test/resources/javax/xml/crypto/dsig/xmldsig-xfilter2.xml
+new file mode 100644
+index 0000000000..7e0f63ef40
+--- /dev/null
++++ b/src/test/resources/javax/xml/crypto/dsig/xmldsig-xfilter2.xml
+@@ -0,0 +1,7 @@
++<?xml version="1.0" encoding="UTF-8"?><Document><ToBeSigned><!-- comment --><Data/><NotToBeSigned><ReallyToBeSigned><!-- comment --><Data/></ReallyToBeSigned></NotToBeSigned></ToBeSigned><ToBeSigned><Data/><NotToBeSigned><Data/></NotToBeSigned></ToBeSigned><Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><SignedInfo><CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/><SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#dsa-sha1"/><Reference URI=""><Transforms><Transform Algorithm="http://www.w3.org/2002/06/xmldsig-filter2"><XPath xmlns="http://www.w3.org/2002/06/xmldsig-filter2" Filter="intersect"> //FooBar </XPath><XPath xmlns="http://www.w3.org/2002/06/xmldsig-filter2" Filter="subtract"> //NotToBeSigned </XPath><XPath xmlns="http://www.w3.org/2002/06/xmldsig-filter2" Filter="union"> //ReallyToBeSigned </XPath></Transform></Transforms><DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/><DigestValue>6S7pEM13ZCDvVUbP9XB8iRWFbAI=</DigestValue></Reference><Reference URI="#signature-value"><Transforms><Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"/><Transform Algorithm="http://www.w3.org/2002/06/xmldsig-filter2"><XPath xmlns="http://www.w3.org/2002/06/xmldsig-filter2" Filter="union"> / </XPath></Transform></Transforms><DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1"/><DigestValue>2jmj7l5rSw0yVb/vlWAYkK/YBwk=</DigestValue></Reference></SignedInfo><SignatureValue Id="signature-value">cJBwfPGWSI9CiuFinTvWJLbF8bGVK5SRB/N/NjCM5IMxakBjra+KSg==</SignatureValue><KeyInfo><KeyValue><DSAKeyValue><P>/X9TgR11EilS30qcLuzk5/YRt1I870QAwx4/gLZRJmlFXUAiUftZPY1Y+r/F9bow9subVWzXgTuA
++HTRv8mZgt2uZUKWkn5/oBHsQIsJPu6nX/rfGG/g7V+fGqKYVDwT7g/bTxR7DAjVUE1oWkTL2dfOu
++K2HXKu/yIgMZndFIAcc=</P><Q>l2BQjxUjC8yykrmCouuEC/BYHPU=</Q><G>9+GghdabPd7LvKtcNrhXuXmUr7v6OuqC+VdMCz0HgmdRWVeOutRZT+ZxBxCBgLRJFnEj6EwoFhO3
++zwkyjMim4TwWeotUfI0o4KOuHiuzpnWRbqN/C/ohNWLx+2J6ASQ7zKTxvqhRkImog9/hWuWfBpKL
++Zl6Ae1UlZAFMO/7PSSo=</G><Y>5LRac3QkDCDOPaeNF5dJQ2r0hgIWZomZV7Z9pHrRqMoepJD5xnJpJY7aA4eUSS+AHS1qOm5I6VTZ
++68hsOdPZCDFF/DiR38BzTxi4ZD0PhtmOjBh32lSNG1nhEq6e9RsyzhUw5FVYHAPnCx2bX4/8Rz8i
++EMuG0IcCiAbbzsCfGBw=</Y></DSAKeyValue></KeyValue></KeyInfo></Signature></Document>
+\ No newline at end of file

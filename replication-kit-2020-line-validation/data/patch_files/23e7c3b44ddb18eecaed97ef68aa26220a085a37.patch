@@ -1,0 +1,220 @@
+From 23e7c3b44ddb18eecaed97ef68aa26220a085a37 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 12 Jan 2006 10:00:06 +0000
+Subject: [PATCH] FIX: conflict badly solved in some complex cases (IVY-130)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484094 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                |  1 +
+ src/java/fr/jayasoft/ivy/Ivy.java          | 20 ++++++++-
+ src/java/fr/jayasoft/ivy/IvyNode.java      | 49 +++++++++++++++++++---
+ test/java/fr/jayasoft/ivy/ResolveTest.java | 21 +++++++++-
+ test/repositories/2/mod10.1/ivy-1.1.xml    | 12 ++++++
+ test/repositories/2/mod4.1/ivy-4.3.xml     | 12 ++++++
+ test/repositories/2/mod4.1/mod4.1-4.3.jar  |  1 +
+ 7 files changed, 108 insertions(+), 8 deletions(-)
+ create mode 100644 test/repositories/2/mod10.1/ivy-1.1.xml
+ create mode 100644 test/repositories/2/mod4.1/ivy-4.3.xml
+ create mode 100644 test/repositories/2/mod4.1/mod4.1-4.3.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 08a714195..e7ad19c4f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -17,6 +17,7 @@
+ - IMPROVE: import system properties as ivy variables in standalone mode
+ - IMPROVE: string identifying a module is now clearly different from a path
+ - IMPROVE: better error message when publish fails due to readonly destination (IVY-83)
++- FIX: conflict badly solved in some complex cases (IVY-130)
+ - FIX: mapping on conf * now only takes public configurations (IVY-126)
+ - FIX: bad dependency ivy files now causes failure (IVY-112)
+ - FIX: stack overflow error in contradictory conflict cases (IVY-117)
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index 8d706baf9..40f2f507c 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -38,6 +38,7 @@
+ 
+ import org.xml.sax.SAXException;
+ 
++import fr.jayasoft.ivy.IvyNode.EvictionData;
+ import fr.jayasoft.ivy.conflict.LatestConflictManager;
+ import fr.jayasoft.ivy.conflict.NoConflictManager;
+ import fr.jayasoft.ivy.conflict.StrictConflictManager;
+@@ -953,7 +954,24 @@ private void resolveConflict(IvyNode node, IvyNode parent, Collection toevict) {
+         }
+         if (parent.getResolvedRevisions(node.getModuleId(), node.getRootModuleConf()).contains(node.getResolvedId())) {
+             // resolve conflict has already be done with node with the same id
+-            // => job already done
++            // => job already done, we just have to check if the node wasn't previously evicted in root ancestor
++            EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), parent);
++            if (evictionData != null) {
++                // node has been previously evicted in an ancestor: we mark it as evicted and ensure selected are selected
++                if (evictionData.getSelected() != null) {
++                    for (Iterator iter = evictionData.getSelected().iterator(); iter.hasNext();) {
++                        IvyNode selected = (IvyNode)iter.next();
++                        if (selected.isEvicted(node.getRootModuleConf())) {
++                            selected.markSelected(node.getRootModuleConf());
++                            Message.debug("selecting "+selected+" in "+parent+" due to eviction of "+node);
++                        }
++                    }
++                }
++
++
++                node.markEvicted(evictionData);                
++                Message.debug("evicting "+node+" by "+evictionData);                
++            }
+             return;
+         }
+         Collection conflicts = new HashSet();
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 0574d593c..6b5ad8b89 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -330,16 +330,21 @@ public void markSelected(String rootModuleConf) {
+     }
+ 
+     public void markEvicted(String rootModuleConf, IvyNode node, ConflictManager conflictManager, Collection resolved) {
+-        _evicted.put(rootModuleConf, new EvictionData(rootModuleConf, node, conflictManager, resolved));
+-        if (!_rootModuleConfs.keySet().contains(rootModuleConf)) {
+-            _rootModuleConfs.put(rootModuleConf, null);
++        EvictionData evictionData = new EvictionData(rootModuleConf, node, conflictManager, resolved);
++        markEvicted(evictionData);
++    }
++
++    public void markEvicted(EvictionData evictionData) {
++        _evicted.put(evictionData.getRootModuleConf(), evictionData);
++        if (!_rootModuleConfs.keySet().contains(evictionData.getRootModuleConf())) {
++            _rootModuleConfs.put(evictionData.getRootModuleConf(), null);
+         }
+         
+         // bug 105: update selected data with evicted one
+-        if (resolved != null) {
+-            for (Iterator iter = resolved.iterator(); iter.hasNext();) {
++        if (evictionData.getSelected() != null) {
++            for (Iterator iter = evictionData.getSelected().iterator(); iter.hasNext();) {
+                 IvyNode selected = (IvyNode)iter.next();
+-                selected.updateDataFrom(this, rootModuleConf);
++                selected.updateDataFrom(this, evictionData.getRootModuleConf());
+             }
+         }
+     }
+@@ -1099,4 +1104,36 @@ public boolean isFetched(String conf) {
+         return _fetchedConfigurations.contains(conf);
+     }
+ 
++    /**
++     * Returns the eviction data for this node if it has been previously evicted in the most far parent
++     * of the given node, null otherwise (if it hasn't been evicted in root) for the 
++     * given rootModuleConf.
++     * Note that this method only works if conflict resolution has already be done in all the ancestors.
++     * 
++     * @param rootModuleConf
++     * @param parent
++     * @return
++     */
++    public EvictionData getEvictionDataInRoot(String rootModuleConf, IvyNode parent) {
++        IvyNode root = getRoot(parent);
++        Collection selectedNodes = root.getResolvedNodes(getModuleId(), rootModuleConf);
++        for (Iterator iter = selectedNodes.iterator(); iter.hasNext();) {
++            IvyNode node = (IvyNode)iter.next();
++            if (node.getResolvedId().equals(getResolvedId())) {
++                // the node is part of the selected ones for the root: no eviction data to return
++                return null;
++            }
++        }
++        // we didn't find this mrid in the selected ones for the root: it has been previously evicted
++        return new EvictionData(rootModuleConf, this, root.getConflictManager(getModuleId()), selectedNodes);
++    }
++
++    public static IvyNode getRoot(IvyNode parent) {
++        IvyNode root = parent;
++        while (root.getParent() != null) {
++            root = root.getParent();
++        }
++        return root;
++    }
++
+ }
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 9354dbf50..5d8763464 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -608,7 +608,7 @@ public void testResolveForce() throws Exception {
+     }
+     
+     public void testResolveContradictoryConflictResolution() throws Exception {
+-        // mod9.1 v 1.0 depends on 
++        // mod10.1 v 1.0 depends on 
+         //   - mod1.2 v 2.0 and forces it 
+         //   - mod4.1 v 4.1 (which selects mod1.2 v 2.1 and evicts mod1.2 v 2.0)
+         // mod4.1 v 4.1 depends on 
+@@ -632,6 +632,25 @@ public void testResolveContradictoryConflictResolution() throws Exception {
+         assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
+     }
+     
++    public void testResolveContradictoryConflictResolution2() throws Exception {
++        // BUG IVY-130 : only mod1.2 v2.0 should resolved and not v2.1 (because of force)
++        // mod10.1 v 1.1 depends on 
++        //   - mod1.2 v 2.0 and forces it 
++        //   - mod4.1 v 4.3
++        // mod4.1 v 4.3 depends on 
++        //   - mod1.2 v 2.1
++        //   - mod3.1 v 1.1 which depends on mod1.2 v 2.1
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod10.1/ivy-1.1.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        
++        // conflicting dependencies
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++
++        assertFalse(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.1")).exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++    
+     public void testExtends() throws Exception {
+         // mod 5.2 depends on mod5.1 conf B
+         // mod5.1 conf B publishes art51B
+diff --git a/test/repositories/2/mod10.1/ivy-1.1.xml b/test/repositories/2/mod10.1/ivy-1.1.xml
+new file mode 100644
+index 000000000..6d60bbc5f
+--- /dev/null
++++ b/test/repositories/2/mod10.1/ivy-1.1.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org10"
++	       module="mod10.1"
++	       revision="1.1"
++	       status="integration"
++	       publication="20051025110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" force="true" rev="2.0"/>
++		<dependency org="org4" name="mod4.1" rev="4.3"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod4.1/ivy-4.3.xml b/test/repositories/2/mod4.1/ivy-4.3.xml
+new file mode 100644
+index 000000000..57227cfdd
+--- /dev/null
++++ b/test/repositories/2/mod4.1/ivy-4.3.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org4"
++	       module="mod4.1"
++	       revision="4.3"
++	       status="integration"
++	       publication="20041202110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.1"/>
++		<dependency org="org3" name="mod3.1" rev="1.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod4.1/mod4.1-4.3.jar b/test/repositories/2/mod4.1/mod4.1-4.3.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod4.1/mod4.1-4.3.jar
+@@ -0,0 +1 @@
++ 

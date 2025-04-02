@@ -1,0 +1,110 @@
+From c0da312f34de79f90ea44de52c250e0d6d88b0b0 Mon Sep 17 00:00:00 2001
+From: Thomas Neidhart <tn@apache.org>
+Date: Sun, 8 Nov 2015 15:05:59 +0000
+Subject: [PATCH] [COLLECTIONS-538] Use AccessController to read system
+ properties in ExtendedProperties, use File.separator in case of a security
+ exception.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/collections/branches/COLLECTIONS_3_2_X@1713233 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  6 +++++
+ .../collections/ExtendedProperties.java       | 17 ++++++++++--
+ .../collections/TestExtendedProperties.java   | 26 +++++++++++++++++++
+ 3 files changed, 47 insertions(+), 2 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 66cee6864d..683723be76 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -23,6 +23,12 @@
+ 
+   <release version="3.2.2" date="20XX-XX-XX" description="This is a bugfix release.">
+ 
++    <action issue="COLLECTIONS-538" dev="tn" type="fix" due-to="Trejkaz">
++      "ExtendedProperties" will now use a privileged action to access the
++      "file.separator" system property. In case the class does not have
++      permission to read system properties, the "File#separator" field will
++      be used instead.
++    </action>
+     <action issue="COLLECTIONS-350" dev="bayard" type="fix" due-to="Michael Akerman">
+       Removed debug output in "MapUtils#getNumber(Map)".
+     </action>
+diff --git a/src/java/org/apache/commons/collections/ExtendedProperties.java b/src/java/org/apache/commons/collections/ExtendedProperties.java
+index da420bcb06..194670e5b1 100644
+--- a/src/java/org/apache/commons/collections/ExtendedProperties.java
++++ b/src/java/org/apache/commons/collections/ExtendedProperties.java
+@@ -26,6 +26,7 @@
+ import java.io.PrintWriter;
+ import java.io.Reader;
+ import java.io.UnsupportedEncodingException;
++import java.security.AccessController;
+ import java.util.ArrayList;
+ import java.util.Enumeration;
+ import java.util.Hashtable;
+@@ -165,10 +166,22 @@ public class ExtendedProperties extends Hashtable {
+     /**
+      * File separator.
+      */
+-    protected String fileSeparator = System.getProperty("file.separator");
++    protected String fileSeparator;
++    {
++        try {
++            fileSeparator = (String) AccessController.doPrivileged(
++                new java.security.PrivilegedAction() {
++                    public Object run() {
++                        return System.getProperty("file.separator");
++                    }
++                });
++        } catch (SecurityException ex) {
++            fileSeparator = File.separator;
++        }
++    }
+ 
+     /**
+-     * Has this configuration been intialized.
++     * Has this configuration been initialized.
+      */
+     protected boolean isInitialized = false;
+ 
+diff --git a/src/test/org/apache/commons/collections/TestExtendedProperties.java b/src/test/org/apache/commons/collections/TestExtendedProperties.java
+index 856c0ddb32..1fd21950c5 100644
+--- a/src/test/org/apache/commons/collections/TestExtendedProperties.java
++++ b/src/test/org/apache/commons/collections/TestExtendedProperties.java
+@@ -19,6 +19,7 @@
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.IOException;
++import java.security.Permission;
+ import java.util.Properties;
+ 
+ import junit.framework.Test;
+@@ -314,4 +315,29 @@ public void testInheritDefaultProperties() {
+         assertEquals("class", extended.getString("resource.loader"));
+     }
+ 
++    public void testActiveSecurityManager() {
++        SecurityManager manager = new SecurityManager() {
++
++            public void checkPropertyAccess(String key) {
++                throw new SecurityException();
++            }
++
++            public void checkPermission(Permission perm) {
++            }
++            
++        };
++
++        System.setSecurityManager(manager);
++
++        try {
++            ExtendedProperties properties = new ExtendedProperties();
++            assertNotNull(properties);
++        } catch (Exception ex) {
++            ex.printStackTrace();
++            fail("failed to instantiate ExtendedProperties");
++        } finally {
++            System.setSecurityManager(null);
++        }
++    }
++
+ }

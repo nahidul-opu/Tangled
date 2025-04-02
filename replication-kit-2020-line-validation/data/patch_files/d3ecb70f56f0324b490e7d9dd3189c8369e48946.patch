@@ -1,0 +1,362 @@
+From d3ecb70f56f0324b490e7d9dd3189c8369e48946 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 1 Oct 2009 21:31:46 +0000
+Subject: [PATCH] FIX: Ivy deliver fails to replace dynamic revision when using
+ extra attributes (IVY-1111) (thanks to Michael Scheetz)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@820806 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   4 +-
+ .../ivy/core/module/id/ModuleRevisionId.java  |   5 +-
+ .../apache/ivy/core/deliver/DeliverTest.java  | 102 ++++++++++++++++++
+ .../org/apache/ivy/core/deliver/ivy-1111.xml  |  26 +++++
+ test/repositories/IVY-1111/ivysettings.xml    |  27 +++++
+ .../IVY-1111/junit/junit/ivy-3.8.xml          |  22 ++++
+ .../IVY-1111/junit/junit/ivy-4.4.xml          |  22 ++++
+ test/repositories/IVY-1111/test/a/ivy-1.xml   |  25 +++++
+ test/repositories/IVY-1111/test/b/ivy-1.5.xml |  26 +++++
+ 9 files changed, 257 insertions(+), 2 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/deliver/DeliverTest.java
+ create mode 100644 test/java/org/apache/ivy/core/deliver/ivy-1111.xml
+ create mode 100644 test/repositories/IVY-1111/ivysettings.xml
+ create mode 100644 test/repositories/IVY-1111/junit/junit/ivy-3.8.xml
+ create mode 100644 test/repositories/IVY-1111/junit/junit/ivy-4.4.xml
+ create mode 100644 test/repositories/IVY-1111/test/a/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1111/test/b/ivy-1.5.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index be92daedb..ebc1b39ca 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -76,6 +76,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Andreas Sahlbach
+ 	Brian Sanders
+ 	Adrian Sandor
++	Michael Scheetz
+ 	Jon Schneider
+ 	Ruslan Shevchenko
+ 	John Shields
+@@ -86,13 +87,14 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	James P. White
+ 	Tom Widmer
+ 	John Williams
+-  Chris Wood
++    Chris Wood
+ 	Patrick Woodworth
+ 	Jaroslaw Wypychowski
+ 	Aleksey Zhukov
+ 	
+    trunk
+ =====================================
++- FIX: Ivy deliver fails to replace dynamic revision when using extra attributes (IVY-1111) (thanks to Michael Scheetz)
+ - FIX: IbiblioResolver not always correctly configured when using JRE 1.5 (IVY-1124) (thanks to Flavio Coutinho da Costa)
+ - FIX: VstfpRepository.readResponse uses bad compare logic (IVY-1119) (thanks to Dave Brosius)
+ - FIX: URLResource does not properly support authentication (IVY-1106) (thanks to Heschi Kreinick)
+diff --git a/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java b/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java
+index ebfe3f395..8707b31c9 100644
+--- a/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java
++++ b/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java
+@@ -274,7 +274,10 @@ public String toString() {
+ 
+     public String encodeToString() {
+         StringBuffer buf = new StringBuffer();
+-        Map attributes = getAttributes();
++        Map attributes = new HashMap(getAttributes());
++        attributes.keySet().removeAll(getExtraAttributes().keySet());
++        attributes.putAll(getQualifiedExtraAttributes());
++
+         for (Iterator iter = attributes.keySet().iterator(); iter.hasNext();) {
+             String attName = (String) iter.next();
+             String value = (String) attributes.get(attName);
+diff --git a/test/java/org/apache/ivy/core/deliver/DeliverTest.java b/test/java/org/apache/ivy/core/deliver/DeliverTest.java
+new file mode 100644
+index 000000000..1eba6c981
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/deliver/DeliverTest.java
+@@ -0,0 +1,102 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.core.deliver;
++
++import java.io.BufferedReader;
++import java.io.File;
++import java.io.FileReader;
++import java.io.IOException;
++
++import junit.framework.TestCase;
++
++import org.apache.ivy.ant.IvyDeliver;
++import org.apache.ivy.ant.IvyResolve;
++import org.apache.ivy.util.FileUtil;
++import org.apache.tools.ant.Project;
++import org.apache.tools.ant.taskdefs.Delete;
++
++public class DeliverTest extends TestCase {
++    private File cache;
++
++    private IvyDeliver ivyDeliver;
++
++    protected void setUp() throws Exception {
++        FileUtil.forceDelete(new File("build/test/publish"));
++        createCache("build/test/publish/cache");
++        System.setProperty("ivy.cache.dir", cache.getAbsolutePath());
++
++        Project project = new Project();
++        ivyDeliver = new IvyDeliver();
++        ivyDeliver.setProject(project);
++    }
++
++    private void createCache(String filename) {
++        cache = new File(filename);
++        cache.mkdirs();
++    }
++
++    protected void tearDown() throws Exception {
++        cleanCache();
++        FileUtil.forceDelete(new File("build/test/publish"));
++    }
++
++    private void cleanCache() {
++        Delete del = new Delete();
++        del.setProject(new Project());
++        del.setDir(cache);
++        del.execute();
++    }
++
++    public void testIVY1111() throws Exception {
++        Project project = ivyDeliver.getProject();
++        project.setProperty("ivy.settings.file", "test/repositories/IVY-1111/ivysettings.xml");
++        String ivyFileName = DeliverTest.class.getResource("ivy-1111.xml").getFile();
++        File ivyFile = new File(ivyFileName);
++
++        resolve(ivyFile);
++
++        ivyDeliver.setReplacedynamicrev(true);
++        ivyDeliver.doExecute();
++
++        String deliverContent = readFile("distrib/ivys/ivy-1.0.xml");
++        assertTrue(deliverContent.indexOf("rev=\"latest.integration\"") == -1);
++        assertTrue(deliverContent.indexOf("name=\"b\" rev=\"1.5\"") >= 0);
++    }
++
++    private void resolve(File ivyFile) {
++        IvyResolve ivyResolve = new IvyResolve();
++        ivyResolve.setProject(ivyDeliver.getProject());
++        ivyResolve.setFile(ivyFile);
++        ivyResolve.doExecute();
++    }
++
++    private String readFile(String fileName) throws IOException {
++        StringBuffer retval = new StringBuffer();
++
++        File ivyFile = new File(fileName);
++        BufferedReader reader = new BufferedReader(new FileReader(ivyFile));
++
++        String line = null;
++        while ((line = reader.readLine()) != null) {
++            retval.append(line + "\n");
++        }
++
++        reader.close();
++        return retval.toString();
++    }
++}
+diff --git a/test/java/org/apache/ivy/core/deliver/ivy-1111.xml b/test/java/org/apache/ivy/core/deliver/ivy-1111.xml
+new file mode 100644
+index 000000000..98ad18a91
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/deliver/ivy-1111.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0" xmlns:e="http://ant.apache.org/ivy/extra">
++    <info organisation="apache" module="IVY-1111" revision="1.0" e:att="att"/>
++	<dependencies>
++        <dependency org="test" name="a" rev="latest.integration"/>
++        <dependency org="test" name="b" rev="latest.integration" e:att="att"/>
++        <dependency org="junit" name="junit" rev="latest.integration"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1111/ivysettings.xml b/test/repositories/IVY-1111/ivysettings.xml
+new file mode 100644
+index 000000000..1619f597f
+--- /dev/null
++++ b/test/repositories/IVY-1111/ivysettings.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivysettings>
++   <settings defaultResolver="local" />
++   <resolvers>
++            <filesystem name="local" >
++            <ivy pattern="${ivy.settings.dir}/[organisation]/[module]/ivy-[revision].xml"/>
++            <artifact pattern="${ivy.settings.dir}/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++        </filesystem>
++    </resolvers>
++</ivysettings>
+diff --git a/test/repositories/IVY-1111/junit/junit/ivy-3.8.xml b/test/repositories/IVY-1111/junit/junit/ivy-3.8.xml
+new file mode 100644
+index 000000000..cb911aed1
+--- /dev/null
++++ b/test/repositories/IVY-1111/junit/junit/ivy-3.8.xml
+@@ -0,0 +1,22 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="junit" module="junit" revision="3.8" status="integration" publication="20090108103716"/>
++    <publications/>
++</ivy-module>
+diff --git a/test/repositories/IVY-1111/junit/junit/ivy-4.4.xml b/test/repositories/IVY-1111/junit/junit/ivy-4.4.xml
+new file mode 100644
+index 000000000..1383c5462
+--- /dev/null
++++ b/test/repositories/IVY-1111/junit/junit/ivy-4.4.xml
+@@ -0,0 +1,22 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="junit" module="junit" revision="4.4" status="integration" publication="20090108103715"/>
++    <publications/>
++</ivy-module>
+diff --git a/test/repositories/IVY-1111/test/a/ivy-1.xml b/test/repositories/IVY-1111/test/a/ivy-1.xml
+new file mode 100644
+index 000000000..a3f9e0108
+--- /dev/null
++++ b/test/repositories/IVY-1111/test/a/ivy-1.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.4">
++   <info organisation="test" module="a" revision="1" status="integration" publication="20090108103716"/>
++   <publications/>
++   <dependencies>
++      <dependency org="junit" name="junit" rev="4.4"/>
++   </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1111/test/b/ivy-1.5.xml b/test/repositories/IVY-1111/test/b/ivy-1.5.xml
+new file mode 100644
+index 000000000..35996b3fa
+--- /dev/null
++++ b/test/repositories/IVY-1111/test/b/ivy-1.5.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0" xmlns:e="http://ant.apache.org/ivy/extra">
++	<info organisation="test" module="b" revision="1.5" status="integration" publication="20090108103716" e:att="att"/>
++    <!-- uispec4j -->
++	<publications/>
++	<dependencies>
++		<dependency org="junit" name="junit" rev="3.8+" conf="default"/>
++	</dependencies>
++</ivy-module>

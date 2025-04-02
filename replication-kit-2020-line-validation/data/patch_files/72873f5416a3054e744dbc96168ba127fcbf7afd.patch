@@ -1,0 +1,2361 @@
+From 72873f5416a3054e744dbc96168ba127fcbf7afd Mon Sep 17 00:00:00 2001
+From: Aaron Smuts <asmuts@apache.org>
+Date: Sun, 20 Aug 2006 05:00:28 +0000
+Subject: [PATCH] Fixed JCS-8 http://issues.apache.org/jira/browse/JCS-8
+
+I registered the RemoteCacheManager as a shutdown observer with the CompositeCacheManager.  When the maanger shutdown method is called, it will release all the caches, un export the listiners, and tell the remote cache to deregister the listener.
+
+I also fixed the status indicator on the remote cache no wait facade.  This wasn't strictly necessary with the manager shutdown observer in place.
+
+I also set the daemon status on the thread pool managed pools to true by default.
+
+The remote cache client will now shutdown properly.
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/jcs/trunk@432936 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/conf/cacheRCSimple.ccf                    | 202 +++++++++++++++++
+ src/conf/remote.cache.ccf                     |   2 +-
+ .../behavior/ILateralCacheService.java        |   1 -
+ .../lateral/socket/tcp/LateralTCPService.java |  44 ++--
+ .../jcs/auxiliary/remote/RemoteCache.java     | 206 ++++++------------
+ .../remote/RemoteCacheFailoverRunner.java     |   3 -
+ .../auxiliary/remote/RemoteCacheListener.java | 139 ++++++------
+ .../auxiliary/remote/RemoteCacheManager.java  | 177 ++++++++-------
+ .../auxiliary/remote/RemoteCacheNoWait.java   |   8 +-
+ .../remote/RemoteCacheNoWaitFacade.java       |  85 +++-----
+ .../remote/behavior/IRemoteCacheListener.java |  54 +++--
+ .../remote/server/RemoteCacheServer.java      |  34 ++-
+ .../apache/jcs/engine/CacheEventQueue.java    |   4 +-
+ .../jcs/engine/CacheWatchRepairable.java      |  11 +
+ .../jcs/engine/PooledCacheEventQueue.java     |   2 +-
+ .../jcs/engine/behavior/ICacheService.java    |  62 +++---
+ .../engine/behavior/IShutdownObservable.java  |   2 +-
+ .../jcs/engine/control/CompositeCache.java    |  28 ++-
+ .../engine/control/CompositeCacheManager.java |   2 +-
+ .../utils/threadpool/ThreadPoolManager.java   |  23 ++
+ .../remote/RemoteCacheClientTester.java       |  10 +
+ 21 files changed, 645 insertions(+), 454 deletions(-)
+ create mode 100644 src/conf/cacheRCSimple.ccf
+
+diff --git a/src/conf/cacheRCSimple.ccf b/src/conf/cacheRCSimple.ccf
+new file mode 100644
+index 000000000..d72dc6203
+--- /dev/null
++++ b/src/conf/cacheRCSimple.ccf
+@@ -0,0 +1,202 @@
++##############################################################
++################## DEFAULT CACHE REGION  #####################
++# sets the default aux value for any non configured caches
++jcs.default=RC
++jcs.default.cacheattributes=org.apache.jcs.engine.CompositeCacheAttributes
++jcs.default.cacheattributes.MaxObjects=200001
++jcs.default.cacheattributes.MemoryCacheName=org.apache.jcs.engine.memory.lru.LRUMemoryCache
++jcs.default.cacheattributes.UseMemoryShrinker=true
++jcs.default.cacheattributes.MaxMemoryIdleTimeSeconds=3600
++jcs.default.cacheattributes.ShrinkerIntervalSeconds=60
++jcs.default.elementattributes=org.apache.jcs.engine.ElementAttributes
++jcs.default.elementattributes.IsEternal=false
++jcs.default.elementattributes.MaxLifeSeconds=700
++jcs.default.elementattributes.IdleTime=1800
++jcs.default.elementattributes.IsSpool=true
++jcs.default.elementattributes.IsRemote=true
++jcs.default.elementattributes.IsLateral=true
++
++
++##############################################################
++################## CACHE REGIONS AVAILABLE ###################
++# Regions preconfirgured for caching
++jcs.region.testCache1=RC
++jcs.region.testCache1.cacheattributes=org.apache.jcs.engine.CompositeCacheAttributes
++jcs.region.testCache1.cacheattributes.MaxObjects=1000000
++jcs.region.testCache1.cacheattributes.MemoryCacheName=org.apache.jcs.engine.memory.lru.LRUMemoryCache
++jcs.region.testCache1.cacheattributes.UseMemoryShrinker=true
++jcs.region.testCache1.cacheattributes.ShrinkerIntervalSeconds=30
++jcs.region.testCache1.cacheattributes.MaxMemoryIdleTimeSeconds=300
++jcs.region.testCache1.cacheattributes.MaxSpoolPerRun=100
++jcs.region.testCache1.elementattributes=org.apache.jcs.engine.ElementAttributes
++jcs.region.testCache1.elementattributes.IsEternal=false
++jcs.region.testCache1.elementattributes.MaxLifeSeconds=60000
++jcs.region.testCache1.elementattributes.IsLateral=true
++jcs.region.testCache1.elementattributes.IsRemote=true
++
++##############################################################
++################## AUXILIARY CACHES AVAILABLE ################
++
++# Remote RMI cache without failover
++jcs.auxiliary.RGroup=org.apache.jcs.auxiliary.remote.RemoteCacheFactory
++jcs.auxiliary.RGroup.attributes=org.apache.jcs.auxiliary.remote.RemoteCacheAttributes
++jcs.auxiliary.RGroup.attributes.RemoteTypeName=LOCAL
++jcs.auxiliary.RGroup.attributes.RemoteHost=localhost
++jcs.auxiliary.RGroup.attributes.RemotePort=1102
++jcs.auxiliary.RGroup.attributes.GetOnly=true
++
++# Remote RMI Cache set up to failover
++jcs.auxiliary.RFailover=org.apache.jcs.auxiliary.remote.RemoteCacheFactory
++jcs.auxiliary.RFailover.attributes=org.apache.jcs.auxiliary.remote.RemoteCacheAttributes
++jcs.auxiliary.RFailover.attributes.RemoteTypeName=LOCAL
++jcs.auxiliary.RFailover.attributes.FailoverServers=localhost:1102
++jcs.auxiliary.RFailover.attributes.GetOnly=false
++
++# Primary Disk Cache-- faster than the rest because of memory key storage
++jcs.auxiliary.DC=org.apache.jcs.auxiliary.disk.indexed.IndexedDiskCacheFactory
++jcs.auxiliary.DC.attributes=org.apache.jcs.auxiliary.disk.indexed.IndexedDiskCacheAttributes
++jcs.auxiliary.DC.attributes.DiskPath=target/test-sandbox/raf
++jcs.auxiliary.DC.attributes.MaxPurgatorySize=10000000
++jcs.auxiliary.DC.attributes.MaxKeySize=1000000
++jcs.auxiliary.DC.attributes.MaxRecycleBinSize=5000
++jcs.auxiliary.DC.attributes.OptimizeAtRemoveCount=300000
++jcs.auxiliary.DC.attributes.ShutdownSpoolTimeLimit=60
++
++# Disk Cache Using a Pooled Event Queue -- this allows you
++# to control the maximum number of threads it will use.
++# Each region uses 1 thread by default in the SINGLE model.
++# adding more threads does not help.
++# If you want to use a separate pool for each disk cache, either use
++# the single model or define a different auxiliary for each region and use the Pooled.
++# SINGLE is best unless you ahve a huge # of regions.
++jcs.auxiliary.DC2=org.apache.jcs.auxiliary.disk.indexed.IndexedDiskCacheFactory
++jcs.auxiliary.DC2.attributes=org.apache.jcs.auxiliary.disk.indexed.IndexedDiskCacheAttributes
++jcs.auxiliary.DC2.attributes.DiskPath=target/test-sandbox/raf
++jcs.auxiliary.DC2.attributes.MaxPurgatorySize=10000
++jcs.auxiliary.DC2.attributes.MaxKeySize=10000
++jcs.auxiliary.DC2.attributes.MaxRecycleBinSize=5000
++jcs.auxiliary.DC2.attributes.OptimizeAtRemoveCount=300000
++jcs.auxiliary.DC2.attributes.EventQueueType=POOLED
++jcs.auxiliary.DC2.attributes.EventQueuePoolName=disk_cache_event_queue
++
++# Berkeley DB JE
++jcs.auxiliary.JE=org.apache.jcs.auxiliary.disk.bdbje.BDBJECacheFactory
++jcs.auxiliary.JE.attributes=org.apache.jcs.auxiliary.disk.bdbje.BDBJECacheAttributes
++jcs.auxiliary.JE.attributes.DiskPath=target/test-sandbox/bdbje-disk-cache-conc
++#the minimum cache size is 1024
++jcs.auxiliary.indexedDiskCache.attributes.CacheSize=1024
++#jcs.auxiliary.indexedDiskCache.attributes.CachePercent=0
++
++# HSQL Disk Cache -- too slow as is
++jcs.auxiliary.HDC=org.apache.jcs.auxiliary.disk.hsql.HSQLCacheFactory
++jcs.auxiliary.HDC.attributes=org.apache.jcs.auxiliary.disk.hsql.HSQLCacheAttributes
++jcs.auxiliary.HDC.attributes.DiskPath=@project_home_f@hsql
++
++# JISP Disk Cache -- save memory with disk key storage
++jcs.auxiliary.JDC=org.apache.jcs.auxiliary.disk.jisp.JISPCacheFactory
++jcs.auxiliary.JDC.attributes=org.apache.jcs.auxiliary.disk.jisp.JISPCacheAttributes
++jcs.auxiliary.JDC.attributes.DiskPath=@project_home_f@raf
++jcs.auxiliary.JDC.attributes.ClearOnStart=false
++
++# need to make put or invalidate an option
++# just a remove lock to add
++jcs.auxiliary.RC=org.apache.jcs.auxiliary.remote.RemoteCacheFactory
++jcs.auxiliary.RC.attributes=org.apache.jcs.auxiliary.remote.RemoteCacheAttributes
++jcs.auxiliary.RC.attributes.FailoverServers=localhost:1101
++#,localhost:1102
++jcs.auxiliary.RC.attributes.LocalPort=1201
++jcs.auxiliary.RC.attributes.RemoveUponRemotePut=false
++#jcs.auxiliary.RC.attributes.RemoteServiceName=RemoteCache
++#-1 means no timeout, this is the default
++# if the timeout is -1, no threadpool will be used.
++jcs.auxiliary.RC.attributes.GetTimeoutMillis=500
++jcs.auxiliary.RC.attributes.ThreadPoolName=remote_cache_client
++jcs.auxiliary.RC.attributes.GetOnly=false
++
++# unreliable
++jcs.auxiliary.LUDP=org.apache.jcs.auxiliary.lateral.LateralCacheFactory
++jcs.auxiliary.LUDP.attributes=org.apache.jcs.auxiliary.lateral.LateralCacheAttributes
++jcs.auxiliary.LUDP.attributes.TransmissionTypeName=UDP
++jcs.auxiliary.LUDP.attributes.UdpMulticastAddr=228.5.6.7
++jcs.auxiliary.LUDP.attributes.UdpMulticastPort=6789
++
++jcs.auxiliary.LJG=org.apache.jcs.auxiliary.lateral.LateralCacheFactory
++jcs.auxiliary.LJG.attributes=org.apache.jcs.auxiliary.lateral.LateralCacheAttributes
++jcs.auxiliary.LJG.attributes.TransmissionTypeName=JAVAGROUPS
++jcs.auxiliary.LJG.attributes.PutOnlyMode=true
++jcs.auxiliary.LJG.attributes.JGChannelProperties = UDP(mcast_addr=224.0.0.100;mcast_port=751):PING(timeout=3000):FD:STABLE:NAKACK:UNICAST:FRAG:FLUSH:GMS:VIEW_ENFORCER:QUEUE
++
++
++jcs.auxiliary.JG = org.apache.jcs.auxiliary.javagroups.JavaGroupsCacheFactory
++jcs.auxiliary.JG.attributes = org.apache.jcs.auxiliary.javagroups.JavaGroupsCacheAttributes
++jcs.auxiliary.JG.attributes.ChannelFactoryClassName = org.javagroups.JChannelFactory
++jcs.auxiliary.JG.attributes.ChannelProperties = UDP(mcast_addr=224.0.0.100;mcast_port=7501):PING:FD:STABLE:NAKACK:UNICAST:FRAG:FLUSH:GMS:VIEW_ENFORCER:QUEUE
++
++
++# almost complete
++jcs.auxiliary.LTCP=org.apache.jcs.auxiliary.lateral.LateralCacheFactory
++jcs.auxiliary.LTCP.attributes=org.apache.jcs.auxiliary.lateral.LateralCacheAttributes
++jcs.auxiliary.LTCP.attributes.TransmissionTypeName=TCP
++jcs.auxiliary.LTCP.attributes.TcpServers=localhost:1112
++jcs.auxiliary.LTCP.attributes.TcpListenerPort=1111
++jcs.auxiliary.LTCP.attributes.PutOnlyMode=true
++
++jcs.auxiliary.LTCP2=org.apache.jcs.auxiliary.lateral.LateralCacheFactory
++jcs.auxiliary.LTCP2.attributes=org.apache.jcs.auxiliary.lateral.LateralCacheAttributes
++jcs.auxiliary.LTCP2.attributes.TransmissionTypeName=TCP
++jcs.auxiliary.LTCP2.attributes.TcpServers=localhost:1112
++jcs.auxiliary.LTCP2.attributes.TcpListenerPort=1111
++jcs.auxiliary.LTCP2.attributes.PutOnlyMode=true
++
++jcs.auxiliary.XMLRPC=org.apache.jcs.auxiliary.lateral.LateralCacheFactory
++jcs.auxiliary.XMLRPC.attributes=org.apache.jcs.auxiliary.lateral.LateralCacheAttributes
++jcs.auxiliary.XMLRPC.attributes.TransmissionTypeName=XMLRPC
++jcs.auxiliary.XMLRPC.attributes.HttpServers=localhost:8182
++jcs.auxiliary.XMLRPC.attributes.HttpListenerPort=8181
++jcs.auxiliary.XMLRPC.attributes.PutOnlyMode=false
++
++
++# example of how to configure the http version of the lateral cache
++# not converteed to new cache
++jcs.auxiliary.LCHTTP=org.apache.jcs.auxiliary.lateral.LateralCacheFactory
++jcs.auxiliary.LCHTTP.attributes=org.apache.jcs.auxiliary.lateral.LateralCacheAttributes
++jcs.auxiliary.LCHTTP.attributes.TransmissionType=HTTP
++jcs.auxiliary.LCHTTP.attributes.httpServers=localhost:8080,localhost:7001,localhost:80
++jcs.auxiliary.LCHTTP.attributes.httpReceiveServlet=/cache/LateralCacheReceiverServlet
++jcs.auxiliary.LCHTTP.attributes.httpDeleteServlet=/cache/DeleteCacheServlet
++
++
++##############################################################
++################## OPTIONAL THREAD POOL CONFIGURATION ###################
++# Default thread pool config
++thread_pool.default.boundarySize=2000
++thread_pool.default.maximumPoolSize=150
++thread_pool.default.minimumPoolSize=4
++thread_pool.default.keepAliveTime=350000
++#RUN ABORT WAIT BLOCK DISCARDOLDEST
++thread_pool.default.whenBlockedPolicy=RUN
++thread_pool.default.startUpSize=4
++
++# Default Cache Event Queue thread pool config, used by auxiliaries
++# since it doesn't use a boundary, some of the options are unnecessary
++thread_pool.cache_event_queue.useBoundary=false
++thread_pool.cache_event_queue.minimumPoolSize=5
++thread_pool.cache_event_queue.keepAliveTime=3500
++thread_pool.cache_event_queue.startUpSize=5
++
++# Disk Cache pool
++thread_pool.disk_cache_event_queue.useBoundary=false
++thread_pool.remote_cache_client.maximumPoolSize=15
++thread_pool.disk_cache_event_queue.minimumPoolSize=1
++thread_pool.disk_cache_event_queue.keepAliveTime=3500
++thread_pool.disk_cache_event_queue.startUpSize=1
++
++# Remote cache client thread pool config
++thread_pool.remote_cache_client.boundarySize=75
++thread_pool.remote_cache_client.maximumPoolSize=150
++thread_pool.remote_cache_client.minimumPoolSize=4
++thread_pool.remote_cache_client.keepAliveTime=350000
++thread_pool.remote_cache_client.whenBlockedPolicy=RUN
++thread_pool.remote_cache_client.startUpSize=4
++
++
+diff --git a/src/conf/remote.cache.ccf b/src/conf/remote.cache.ccf
+index ff4c605ea..9ef309e30 100644
+--- a/src/conf/remote.cache.ccf
++++ b/src/conf/remote.cache.ccf
+@@ -42,7 +42,7 @@ jcs.auxiliary.RCluster=org.apache.jcs.auxiliary.remote.RemoteCacheFactory
+ jcs.auxiliary.RCluster.attributes=org.apache.jcs.auxiliary.remote.RemoteCacheAttributes
+ jcs.auxiliary.RCluster.attributes.RemoteTypeName=CLUSTER
+ jcs.auxiliary.RCluster.attributes.RemoveUponRemotePut=false
+-jcs.auxiliary.RCluster.attributes.ClusterServers=localhost:1102
++#jcs.auxiliary.RCluster.attributes.ClusterServers=localhost:1102
+ jcs.auxiliary.RCluster.attributes.GetOnly=false
+ jcs.auxiliary.RCluster.attributes.LocalClusterConsistency=true
+ 
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/behavior/ILateralCacheService.java b/src/java/org/apache/jcs/auxiliary/lateral/behavior/ILateralCacheService.java
+index eadb55bb7..499d26db0 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/behavior/ILateralCacheService.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/behavior/ILateralCacheService.java
+@@ -24,7 +24,6 @@
+ public interface ILateralCacheService
+     extends ICacheService
+ {
+-
+     /**
+      * Puts a cache item to the cache.
+      * <p>
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java
+index 6e2b5c228..ad8e860b4 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java
+@@ -1,14 +1,12 @@
+ package org.apache.jcs.auxiliary.lateral.socket.tcp;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache
+- * License, Version 2.0 (the "License") you may not use this file except in
+- * compliance with the License. You may obtain a copy of the License at
+- * http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable law
+- * or agreed to in writing, software distributed under the License is
+- * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+- * KIND, either express or implied. See the License for the specific language
+- * governing permissions and limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.BufferedReader;
+@@ -50,8 +48,7 @@ public class LateralTCPService
+     /**
+      * Constructor for the LateralTCPService object
+      * <p>
+-     * @param lca
+-     *            ITCPLateralCacheAttributes
++     * @param lca ITCPLateralCacheAttributes
+      * @exception IOException
+      */
+     public LateralTCPService( ITCPLateralCacheAttributes lca )
+@@ -66,7 +63,7 @@ public LateralTCPService( ITCPLateralCacheAttributes lca )
+ 
+             if ( log.isInfoEnabled() )
+             {
+-                log.debug( "Created sender to [" + lca.getTcpServer() + "]" );                
++                log.debug( "Created sender to [" + lca.getTcpServer() + "]" );
+             }
+         }
+         catch ( IOException e )
+@@ -91,10 +88,9 @@ public void update( ICacheElement item )
+     }
+ 
+     /**
+-     * If put is allowed, we will issue a put. If issue put on remove
+-     * is configured, we will issue a remove. Either way, we create a lateral
+-     * element descriptor, which is essentially a JCS TCP packet. It describes
+-     * what operation the receiver should take when it gets the packet.
++     * If put is allowed, we will issue a put. If issue put on remove is configured, we will issue a
++     * remove. Either way, we create a lateral element descriptor, which is essentially a JCS TCP
++     * packet. It describes what operation the receiver should take when it gets the packet.
+      * <p>
+      * @see org.apache.jcs.auxiliary.lateral.behavior.ILateralCacheService#update(org.apache.jcs.engine.behavior.ICacheElement,
+      *      long)
+@@ -179,13 +175,13 @@ public void release()
+     /**
+      * Will close the connection.
+      * <p>
+-     * @param cache
++     * @param cacheName
+      * @throws IOException
+      */
+-    public void dispose( String cache )
++    public void dispose( String cacheName )
+         throws IOException
+     {
+-        sender.dispose( cache );
++        sender.dispose( cacheName );
+     }
+ 
+     /**
+@@ -210,8 +206,7 @@ public Serializable get( String key )
+ 
+     /*
+      * (non-Javadoc)
+-     * @see org.apache.jcs.engine.behavior.ICacheService#get(java.lang.String,
+-     *      java.io.Serializable)
++     * @see org.apache.jcs.engine.behavior.ICacheService#get(java.lang.String, java.io.Serializable)
+      */
+     public ICacheElement get( String cacheName, Serializable key )
+         throws IOException
+@@ -233,8 +228,7 @@ public ICacheElement get( String cacheName, Serializable key )
+     }
+ 
+     /**
+-     * Gets the set of keys of objects currently in the group throws
+-     * UnsupportedOperationException
++     * Gets the set of keys of objects currently in the group throws UnsupportedOperationException
+      * <p>
+      * @param cacheName
+      * @param group
+@@ -351,8 +345,7 @@ public void removeCacheListener( ICacheListener obj )
+     }
+ 
+     /**
+-     * @param listernId
+-     *            The listernId to set.
++     * @param listernId The listernId to set.
+      */
+     protected void setListenerId( long listernId )
+     {
+@@ -368,8 +361,7 @@ protected long getListenerId()
+     }
+ 
+     /**
+-     * @param tcpLateralCacheAttributes
+-     *            The tcpLateralCacheAttributes to set.
++     * @param tcpLateralCacheAttributes The tcpLateralCacheAttributes to set.
+      */
+     public void setTcpLateralCacheAttributes( ITCPLateralCacheAttributes tcpLateralCacheAttributes )
+     {
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java
+index 254aaaf77..c9f6a6775 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCache.java
+@@ -1,19 +1,12 @@
+ package org.apache.jcs.auxiliary.remote;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License")
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.IOException;
+@@ -49,13 +42,11 @@
+ 
+ import EDU.oswego.cs.dl.util.concurrent.Callable;
+ import EDU.oswego.cs.dl.util.concurrent.FutureResult;
+-import EDU.oswego.cs.dl.util.concurrent.ThreadFactory;
+ import EDU.oswego.cs.dl.util.concurrent.TimeoutException;
+ 
+ /**
+- * Client proxy for an RMI remote cache. This handles gets, updates, and
+- * removes. It also initiates failover recovery when an error is encountered.
+- * 
++ * Client proxy for an RMI remote cache. This handles gets, updates, and removes. It also initiates
++ * failover recovery when an error is encountered.
+  */
+ public class RemoteCache
+     implements ICache
+@@ -72,7 +63,7 @@ public class RemoteCache
+ 
+     private IRemoteCacheListener listener;
+ 
+-    IElementAttributes attr = null;
++    private IElementAttributes attr = null;
+ 
+     private ThreadPool pool = null;
+ 
+@@ -81,12 +72,11 @@ public class RemoteCache
+     private IElementSerializer elementSerializer = new StandardSerializer();
+ 
+     /**
+-     * Constructor for the RemoteCache object. This object communicates with a
+-     * remote cache server. One of these exists for each region. This also holds
+-     * a reference to a listener. The same listener is used for all regions for
+-     * one remote server. Holding a reference to the listener allows this object
+-     * to know the listener id assigned by the remote cache.
+-     * 
++     * Constructor for the RemoteCache object. This object communicates with a remote cache server.
++     * One of these exists for each region. This also holds a reference to a listener. The same
++     * listener is used for all regions for one remote server. Holding a reference to the listener
++     * allows this object to know the listener id assigned by the remote cache.
++     * <p>
+      * @param cattr
+      * @param remote
+      * @param listener
+@@ -122,7 +112,6 @@ public RemoteCache( IRemoteCacheAttributes cattr, IRemoteCacheService remote, IR
+             if ( pool != null )
+             {
+                 usePoolForGet = true;
+-                pool.getPool().setThreadFactory( new MyThreadFactory() );
+             }
+         }
+ 
+@@ -161,10 +150,9 @@ public ServerSocket createServerSocket( int port )
+     }
+ 
+     /**
+-     * Sets the attributes attribute of the RemoteCache object
+-     * 
+-     * @param attr
+-     *            The new attributes value
++     * Sets the attributes attribute of the RemoteCache object.
++     * <p>
++     * @param attr The new attributes value
+      */
+     public void setElementAttributes( IElementAttributes attr )
+     {
+@@ -172,8 +160,8 @@ public void setElementAttributes( IElementAttributes attr )
+     }
+ 
+     /**
+-     * Gets the attributes attribute of the RemoteCache object
+-     * 
++     * Gets the attributes attribute of the RemoteCache object.
++     * <p>
+      * @return The attributes value
+      */
+     public IElementAttributes getElementAttributes()
+@@ -181,9 +169,12 @@ public IElementAttributes getElementAttributes()
+         return this.attr;
+     }
+ 
+-    /*
++    /**
++     * Serializes the object and then calls update on the remote server with the byte array. The
++     * byte array is wrapped in a ICacheElementSerialized. This allows the remote server to operate
++     * without any knowledge of caches classes.
++     * <p>
+      * (non-Javadoc)
+-     * 
+      * @see org.apache.jcs.engine.behavior.ICache#update(org.apache.jcs.engine.behavior.ICacheElement)
+      */
+     public void update( ICacheElement ce )
+@@ -214,7 +205,7 @@ public void update( ICacheElement ce )
+                 }
+                 catch ( Exception ex )
+                 {
+-                    handleException( ex, "Failed to put " + ce.getKey() + " to " + ce.getCacheName() );
++                    handleException( ex, "Failed to put [" + ce.getKey() + "] to " + ce.getCacheName() );
+                 }
+             }
+             else
+@@ -228,11 +219,14 @@ public void update( ICacheElement ce )
+     }
+ 
+     /**
+-     * Synchronously get from the remote cache; if failed, replace the remote
+-     * handle with a zombie.
+-     * 
++     * Synchronously get from the remote cache; if failed, replace the remote handle with a zombie.
++     * <p>
+      * Use threadpool to timeout is a value is set for GetTimeoutMillis
+-     * 
++     * <p>
++     * If we are a cluster client, we need to leave the Element in its serilaized form. Cluster
++     * cients cannot deserialize objects. Cluster clients get ICacheElementSerialized objects from
++     * other remote servers.
++     * <p>
+      * @param key
+      * @return ICacheElement, a wrapper around the key, value, and attributes
+      * @throws IOException
+@@ -246,21 +240,19 @@ public ICacheElement get( Serializable key )
+         {
+             if ( usePoolForGet )
+             {
+-                retVal = getUsingPool( sanitized( key ) );
++                retVal = getUsingPool( key );
+             }
+             else
+             {
+-                retVal = remote.get( cacheName, sanitized( key ), getListenerId() );
++                retVal = remote.get( cacheName, key, getListenerId() );
+             }
+ 
+             // Eventually the instance of will not be necessary.
+             if ( retVal != null && retVal instanceof ICacheElementSerialized )
+             {
+                 // Never try to deserialize if you are a cluster client. Cluster
+-                // clients
+-                // intra-remote cache communicators. Remote caches are assumed
+-                // to have no
+-                // ability to deserialze the objects.
++                // clients are merely intra-remote cache communicators. Remote caches are assumed
++                // to have no ability to deserialze the objects.
+                 if ( this.irca.getRemoteType() != IRemoteCacheAttributes.CLUSTER )
+                 {
+                     retVal = SerializationConversionUtil.getDeSerializedCacheElement( (ICacheElementSerialized) retVal,
+@@ -270,7 +262,7 @@ public ICacheElement get( Serializable key )
+         }
+         catch ( Exception ex )
+         {
+-            handleException( ex, "Failed to get " + key + " from " + cacheName );
++            handleException( ex, "Failed to get [" + key + "] from [" + cacheName + "]" );
+         }
+ 
+         return retVal;
+@@ -278,7 +270,7 @@ public ICacheElement get( Serializable key )
+ 
+     /**
+      * This allows gets to timeout in case of remote server machine shutdown.
+-     * 
++     * <p>
+      * @param key
+      * @return
+      * @throws IOException
+@@ -338,7 +330,7 @@ public Object call()
+ 
+     /**
+      * Returns all the keys for a group.
+-     * 
++     * <p>
+      * @param groupName
+      * @return
+      * @throws java.rmi.RemoteException
+@@ -350,33 +342,9 @@ public Set getGroupKeys( String groupName )
+     }
+ 
+     /**
+-     * Wraps a non JDK object into a MarshalledObject, so that we can avoid
+-     * unmarshalling the real object on the remote side. This technique offers
+-     * the benefit of surviving incompatible class versions without the need to
+-     * restart the remote cache server.
+-     * 
+-     * @param s
+-     * @return A sanitized version of the key.
+-     * @throws IOException
+-     */
+-    private Serializable sanitized( Serializable s )
+-        throws IOException
+-    {
+-        // In the unlikely case when the passed in object is a MarshalledObjct,
+-        // we again wrap
+-        // it into a new MarsahlledObject for "escape" purposes during the get
+-        // operation.
+-        // return s.getClass().getName().startsWith("java.") && !(s instanceof
+-        // MarshalledObject) ? s : new MarshalledObject(s);
+-
+-        // avoid this step for now, [problem with group id wrapper]
+-        return s;
+-    }
+-
+-    /**
+-     * Synchronously remove from the remote cache; if failed, replace the remote
+-     * handle with a zombie.
+-     * 
++     * Synchronously remove from the remote cache; if failed, replace the remote handle with a
++     * zombie.
++     * <p>
+      * @param key
+      * @return boolean, whether or not the item was removed
+      * @throws IOException
+@@ -386,7 +354,6 @@ public boolean remove( Serializable key )
+     {
+         if ( true )
+         {
+-
+             if ( !this.irca.getGetOnly() )
+             {
+                 if ( log.isDebugEnabled() )
+@@ -395,7 +362,7 @@ public boolean remove( Serializable key )
+                 }
+                 try
+                 {
+-                    remote.remove( cacheName, sanitized( key ), getListenerId() );
++                    remote.remove( cacheName, key, getListenerId() );
+                 }
+                 catch ( Exception ex )
+                 {
+@@ -407,9 +374,9 @@ public boolean remove( Serializable key )
+     }
+ 
+     /**
+-     * Synchronously removeAll from the remote cache; if failed, replace the
+-     * remote handle with a zombie.
+-     * 
++     * Synchronously removeAll from the remote cache; if failed, replace the remote handle with a
++     * zombie.
++     * <p>
+      * @throws IOException
+      */
+     public void removeAll()
+@@ -432,9 +399,8 @@ public void removeAll()
+     }
+ 
+     /**
+-     * Synchronously dispose the remote cache; if failed, replace the remote
+-     * handle with a zombie.
+-     * 
++     * Synchronously dispose the remote cache; if failed, replace the remote handle with a zombie.
++     * <p>
+      * @throws IOException
+      */
+     public void dispose()
+@@ -446,19 +412,18 @@ public void dispose()
+         }
+         try
+         {
+-            remote.dispose( cacheName );
++            listener.dispose();
+         }
+         catch ( Exception ex )
+         {
+-            log.error( "couldn't dispose", ex );
+-            handleException( ex, "Failed to dispose " + cacheName );
++            log.error( "Couldn't dispose", ex );
++            handleException( ex, "Failed to dispose [" + cacheName + "]" );
+         }
+     }
+ 
+     /**
+-     * Returns the cache status. An error status indicates the remote connection
+-     * is not available.
+-     * 
++     * Returns the cache status. An error status indicates the remote connection is not available.
++     * <p>
+      * @return The status value
+      */
+     public int getStatus()
+@@ -467,8 +432,8 @@ public int getStatus()
+     }
+ 
+     /**
+-     * Gets the stats attribute of the RemoteCache object
+-     * 
++     * Gets the stats attribute of the RemoteCache object.
++     * <p>
+      * @return The stats value
+      */
+     public String getStats()
+@@ -477,7 +442,6 @@ public String getStats()
+     }
+ 
+     /**
+-     * 
+      * @return IStats object
+      */
+     public IStats getStatistics()
+@@ -533,7 +497,6 @@ public IStats getStatistics()
+ 
+     /**
+      * Returns the current cache size.
+-     * 
+      * @return The size value
+      */
+     public int getSize()
+@@ -543,7 +506,6 @@ public int getSize()
+ 
+     /**
+      * Gets the cacheType attribute of the RemoteCache object
+-     * 
+      * @return The cacheType value
+      */
+     public int getCacheType()
+@@ -552,8 +514,8 @@ public int getCacheType()
+     }
+ 
+     /**
+-     * Gets the cacheName attribute of the RemoteCache object
+-     * 
++     * Gets the cacheName attribute of the RemoteCache object.
++     * <p>
+      * @return The cacheName value
+      */
+     public String getCacheName()
+@@ -563,10 +525,8 @@ public String getCacheName()
+ 
+     /**
+      * Replaces the current remote cache service handle with the given handle.
+-     * 
+-     * @param remote
+-     *            IRemoteCacheService -- the remote server or proxy to the
+-     *            remote server
++     * <p>
++     * @param remote IRemoteCacheService -- the remote server or proxy to the remote server
+      */
+     public void fixCache( IRemoteCacheService remote )
+     {
+@@ -575,9 +535,9 @@ public void fixCache( IRemoteCacheService remote )
+     }
+ 
+     /**
+-     * Handles exception by disabling the remote cache service before
+-     * re-throwing the exception in the form of an IOException.
+-     * 
++     * Handles exception by disabling the remote cache service before re-throwing the exception in
++     * the form of an IOException.
++     * <p>
+      * @param ex
+      * @param msg
+      * @throws IOException
+@@ -630,12 +590,10 @@ public AuxiliaryCacheAttributes getAuxiliaryCacheAttributes()
+     }
+ 
+     /**
+-     * let the remote cache set a listener_id. Since there is only one listerenr
+-     * for all the regions and every region gets registered? the id shouldn't be
+-     * set if it isn't zero. If it is we assume that it is a reconnect.
+-     * 
+-     * @param id
+-     *            The new listenerId value
++     * let the remote cache set a listener_id. Since there is only one listerenr for all the regions
++     * and every region gets registered? the id shouldn't be set if it isn't zero. If it is we
++     * assume that it is a reconnect.
++     * @param id The new listenerId value
+      */
+     public void setListenerId( long id )
+     {
+@@ -656,7 +614,6 @@ public void setListenerId( long id )
+ 
+     /**
+      * Gets the listenerId attribute of the RemoteCacheListener object
+-     * 
+      * @return The listenerId value
+      */
+     public long getListenerId()
+@@ -677,9 +634,8 @@ public long getListenerId()
+     }
+ 
+     /**
+-     * Allows other member of this package to access the listerner. This is
+-     * mainly needed for deregistering alistener.
+-     * 
++     * Allows other member of this package to access the listerner. This is mainly needed for
++     * deregistering alistener.
+      * @return IRemoteCacheListener, the listener for this remote server
+      */
+     protected IRemoteCacheListener getListener()
+@@ -688,8 +644,7 @@ protected IRemoteCacheListener getListener()
+     }
+ 
+     /**
+-     * @param elementSerializer
+-     *            The elementSerializer to set.
++     * @param elementSerializer The elementSerializer to set.
+      */
+     public void setElementSerializer( IElementSerializer elementSerializer )
+     {
+@@ -706,33 +661,10 @@ public IElementSerializer getElementSerializer()
+ 
+     /**
+      * Debugging info.
+-     * 
+      * @return basic info about the RemoteCache
+      */
+     public String toString()
+     {
+         return "RemoteCache: " + cacheName + " attributes = " + irca;
+     }
+-
+-    /**
+-     * Allows us to set the daemon status on the clockdaemon
+-     * 
+-     * @author aaronsm
+-     * 
+-     */
+-    class MyThreadFactory
+-        implements ThreadFactory
+-    {
+-        /*
+-         * (non-Javadoc)
+-         * 
+-         * @see EDU.oswego.cs.dl.util.concurrent.ThreadFactory#newThread(java.lang.Runnable)
+-         */
+-        public Thread newThread( Runnable runner )
+-        {
+-            Thread t = new Thread( runner );
+-            t.setDaemon( true );
+-            return t;
+-        }
+-    }
+ }
+\ No newline at end of file
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheFailoverRunner.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheFailoverRunner.java
+index f1d8734c9..c6324a2fb 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheFailoverRunner.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheFailoverRunner.java
+@@ -93,11 +93,9 @@ public void notifyError()
+      * <p>
+      * The primary server is the first server defines in the FailoverServers
+      * list.
+-     * 
+      */
+     public void run()
+     {
+-
+         // start the main work of connecting to a failover and then restoring
+         // the primary.
+         connectAndRestore();
+@@ -122,7 +120,6 @@ else if ( facade.rca.getFailoverIndex() > 0 )
+      * This is the main loop. If there are failovers define, then this will
+      * continue until the primary is re-connected. If no failovers are defined,
+      * this will exit automatically.
+-     * 
+      */
+     private void connectAndRestore()
+     {
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheListener.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheListener.java
+index 2f2af7f2e..5cd23800f 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheListener.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheListener.java
+@@ -1,19 +1,12 @@
+ package org.apache.jcs.auxiliary.remote;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License")
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.IOException;
+@@ -37,12 +30,11 @@
+ import org.apache.jcs.utils.serialization.StandardSerializer;
+ 
+ /**
+- * Registered with RemoteCache server. The server updates the local caches via
+- * this listener. Each server asings a unique listener id for a listener.
++ * Registered with RemoteCache server. The server updates the local caches via this listener. Each
++ * server asings a unique listener id for a listener.
+  * <p>
+- * One listener is used per remote cache server. The same listener is used for
+- * all the regions that talk to a particular server.
+- * 
++ * One listener is used per remote cache server. The same listener is used for all the regions that
++ * talk to a particular server.
+  */
+ public class RemoteCacheListener
+     implements IRemoteCacheListener, IRemoteCacheConstants, Serializable
+@@ -53,9 +45,11 @@ public class RemoteCacheListener
+ 
+     private static String localHostName = HostNameUtil.getLocalHostAddress();
+ 
++    boolean disposed = false;
++
+     /**
+-     * The cache manager used to put items in differnt regions. This is set
+-     * lazily and should not be sent to the remote server.
++     * The cache manager used to put items in differnt regions. This is set lazily and should not be
++     * sent to the remote server.
+      */
+     protected transient ICompositeCacheManager cacheMgr;
+ 
+@@ -74,13 +68,10 @@ public class RemoteCacheListener
+     private transient IElementSerializer elementSerializer = new StandardSerializer();
+ 
+     /**
+-     * Only need one since it does work for all regions, just reference by
+-     * multiple region names.
++     * Only need one since it does work for all regions, just reference by multiple region names.
+      * <p>
+-     * The constructor exports this object, making it available to receive
+-     * incoming calls. The calback port is anonymous unless a local port vlaue
+-     * was specified in the configurtion.
+-     * 
++     * The constructor exports this object, making it available to receive incoming calls. The
++     * calback port is anonymous unless a local port vlaue was specified in the configurtion.
+      * @param irca
+      * @param cacheMgr
+      */
+@@ -91,8 +82,7 @@ public RemoteCacheListener( IRemoteCacheAttributes irca, ICompositeCacheManager
+         this.cacheMgr = cacheMgr;
+ 
+         // Export this remote object to make it available to receive incoming
+-        // calls,
+-        // using an anonymous port unless the local port is specified.
++        // calls, using an anonymous port unless the local port is specified.
+         try
+         {
+             if ( irca.getLocalPort() != 0 )
+@@ -106,37 +96,59 @@ public RemoteCacheListener( IRemoteCacheAttributes irca, ICompositeCacheManager
+         }
+         catch ( RemoteException ex )
+         {
+-            log.error( ex );
++            log.error( "Problem exporting object.", ex );
+             throw new IllegalStateException( ex.getMessage() );
+         }
++    }
+ 
++    /**
++     * Deregisters itself.
++     * <p>
++     * @throws IOException
++     */
++    public synchronized void dispose()
++        throws IOException
++    {
++        if ( !disposed )
++        {
++            if ( log.isInfoEnabled() )
++            {
++                log.info( "Unexporting listener." );
++            }
++            try
++            {
++                UnicastRemoteObject.unexportObject( this, true );
++            }
++            catch ( RemoteException ex )
++            {
++                log.error( "Problem unexporting the listener.", ex );
++                throw new IllegalStateException( ex.getMessage() );
++            }
++            disposed = true;
++        }
+     }
+ 
+     /**
+-     * let the remote cache set a listener_id. Since there is only one listerenr
+-     * for all the regions and every region gets registered? the id shouldn't be
+-     * set if it isn't zero. If it is we assume that it is a reconnect.
+-     * 
+-     * @param id
+-     *            The new listenerId value
++     * Let the remote cache set a listener_id. Since there is only one listerenr for all the regions
++     * and every region gets registered? the id shouldn't be set if it isn't zero. If it is we
++     * assume that it is a reconnect.
++     * <p>
++     * @param id The new listenerId value
+      * @throws IOException
+      */
+     public void setListenerId( long id )
+         throws IOException
+     {
+-
+         listenerId = id;
+         if ( log.isDebugEnabled() )
+         {
+-            log.debug( "set listenerId = " + id );
++            log.debug( "set listenerId = [" + id + "]" );
+         }
+     }
+ 
+     /**
+-     * Gets the listenerId attribute of the RemoteCacheListener object. This is
+-     * stored int he object. The RemoteCache object contains a reference to the
+-     * listener and get the id this way.
+-     * 
++     * Gets the listenerId attribute of the RemoteCacheListener object. This is stored int he
++     * object. The RemoteCache object contains a reference to the listener and get the id this way.
+      * @return The listenerId value
+      * @throws IOException
+      */
+@@ -145,7 +157,7 @@ public long getListenerId()
+     {
+         if ( log.isDebugEnabled() )
+         {
+-            log.debug( "get listenerId = " + listenerId );
++            log.debug( "get listenerId = [" + listenerId + "]" );
+         }
+         return listenerId;
+ 
+@@ -153,7 +165,6 @@ public long getListenerId()
+ 
+     /**
+      * Gets the remoteType attribute of the RemoteCacheListener object
+-     * 
+      * @return The remoteType value
+      * @throws IOException
+      */
+@@ -162,35 +173,31 @@ public int getRemoteType()
+     {
+         if ( log.isDebugEnabled() )
+         {
+-            log.debug( "getRemoteType = " + irca.getRemoteType() );
++            log.debug( "getRemoteType = [" + irca.getRemoteType() + "]" );
+         }
+         return irca.getRemoteType();
+     }
+ 
+-    // ////////////////////////// implements the IRemoteCacheListener interface.
+-    // //////////////
+     /**
+-     * If this is configured to remove on put, then remove the element since it
+-     * has been updated elsewhere. cd should be incomplete for faster
+-     * transmission. We don't want to pass data only invalidation. The next time
+-     * it is used the local cache will get the new version from the remote
+-     * store.
++     * If this is configured to remove on put, then remove the element since it has been updated
++     * elsewhere. cd should be incomplete for faster transmission. We don't want to pass data only
++     * invalidation. The next time it is used the local cache will get the new version from the
++     * remote store.
+      * <p>
+      * If remove on put is not ocnfigured, then update the item.
+-     * 
+      * @param cb
+      * @throws IOException
+      */
+     public void handlePut( ICacheElement cb )
+         throws IOException
+     {
+-
+         if ( irca.getRemoveUponRemotePut() )
+         {
+-            log.debug( "PUTTING ELEMENT FROM REMOTE, (  invalidating ) " );
+-
++            if ( log.isDebugEnabled() )
++            {
++                log.debug( "PUTTING ELEMENT FROM REMOTE, (  invalidating ) " );
++            }
+             handleRemove( cb.getCacheName(), cb.getKey() );
+-
+         }
+         else
+         {
+@@ -241,9 +248,10 @@ public void handlePut( ICacheElement cb )
+         return;
+     }
+ 
+-    /*
++    /**
++     * Calls localRemove on the CompositeCache.
++     * <p>
+      * (non-Javadoc)
+-     * 
+      * @see org.apache.jcs.engine.behavior.ICacheListener#handleRemove(java.lang.String,
+      *      java.io.Serializable)
+      */
+@@ -267,9 +275,10 @@ public void handleRemove( String cacheName, Serializable key )
+         cache.localRemove( key );
+     }
+ 
+-    /*
++    /**
++     * Calls localRemoveAll on the CompositeCache.
++     * <p>
+      * (non-Javadoc)
+-     * 
+      * @see org.apache.jcs.engine.behavior.ICacheListener#handleRemoveAll(java.lang.String)
+      */
+     public void handleRemoveAll( String cacheName )
+@@ -286,7 +295,6 @@ public void handleRemoveAll( String cacheName )
+ 
+     /*
+      * (non-Javadoc)
+-     * 
+      * @see org.apache.jcs.engine.behavior.ICacheListener#handleDispose(java.lang.String)
+      */
+     public void handleDispose( String cacheName )
+@@ -303,8 +311,8 @@ public void handleDispose( String cacheName )
+     }
+ 
+     /**
+-     * Gets the cacheManager attribute of the RemoteCacheListener object. This
+-     * is one of the few places that force the cache to be a singleton.
++     * Gets the cacheManager attribute of the RemoteCacheListener object. This is one of the few
++     * places that force the cache to be a singleton.
+      */
+     protected void ensureCacheManager()
+     {
+@@ -327,8 +335,7 @@ protected void ensureCacheManager()
+     }
+ 
+     /**
+-     * This is for debugging. It allows the remote server to log the address of
+-     * clients.
++     * This is for debugging. It allows the remote server to log the address of clients.
+      */
+     public String getLocalHostAddress()
+         throws IOException
+@@ -338,7 +345,7 @@ public String getLocalHostAddress()
+ 
+     /**
+      * For easier debugging.
+-     * 
++     * <p>
+      * @return Basic info on this listener.
+      */
+     public String toString()
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheManager.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheManager.java
+index 6deb43f2e..14e3fb148 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheManager.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheManager.java
+@@ -1,19 +1,12 @@
+ package org.apache.jcs.auxiliary.remote;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License")
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.IOException;
+@@ -33,16 +26,16 @@
+ import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheService;
+ import org.apache.jcs.engine.behavior.ICache;
+ import org.apache.jcs.engine.behavior.ICompositeCacheManager;
++import org.apache.jcs.engine.behavior.IShutdownObserver;
++import org.apache.jcs.engine.control.CompositeCacheManager;
+ 
+ /**
+- * An instance of RemoteCacheManager corresponds to one remote connection of a
+- * specific host and port. All RemoteCacheManager instances are monitored by the
+- * singleton RemoteCacheMonitor monitoring daemon for error detection and
+- * recovery.
+- * 
++ * An instance of RemoteCacheManager corresponds to one remote connection of a specific host and
++ * port. All RemoteCacheManager instances are monitored by the singleton RemoteCacheMonitor
++ * monitoring daemon for error detection and recovery.
+  */
+ public class RemoteCacheManager
+-    implements AuxiliaryCacheManager
++    implements AuxiliaryCacheManager, IShutdownObserver
+ {
+     private static final long serialVersionUID = 798077557166389498L;
+ 
+@@ -68,14 +61,13 @@ public class RemoteCacheManager
+     private IRemoteCacheAttributes irca;
+ 
+     /**
+-     * Handle to the remote cache service; or a zombie handle if failed to
+-     * connect.
++     * Handle to the remote cache service; or a zombie handle if failed to connect.
+      */
+     private IRemoteCacheService remoteService;
+ 
+     /**
+-     * Wrapper of the remote cache watch service; or wrapper of a zombie service
+-     * if failed to connect.
++     * Wrapper of the remote cache watch service; or wrapper of a zombie service if failed to
++     * connect.
+      */
+     private RemoteCacheWatchRepairable remoteWatch;
+ 
+@@ -84,11 +76,12 @@ public class RemoteCacheManager
+      */
+     private ICompositeCacheManager cacheMgr;
+ 
++    private String registry;
++
+     /**
+-     * Constructs an instance to with the given remote connection parameters. If
+-     * the connection cannot be made, "zombie" services will be temporarily used
+-     * until a successful re-connection is made by the monitoring daemon.
+-     * 
++     * Constructs an instance to with the given remote connection parameters. If the connection
++     * cannot be made, "zombie" services will be temporarily used until a successful re-connection
++     * is made by the monitoring daemon.
+      * @param host
+      * @param port
+      * @param service
+@@ -101,7 +94,10 @@ private RemoteCacheManager( String host, int port, String service, ICompositeCac
+         this.service = service;
+         this.cacheMgr = cacheMgr;
+ 
+-        String registry = "//" + host + ":" + port + "/" + service;
++        // register shutdown observer
++        ( (CompositeCacheManager) this.cacheMgr ).registerShutdownObserver( this );
++
++        this.registry = "//" + host + ":" + port + "/" + service;
+         if ( log.isDebugEnabled() )
+         {
+             log.debug( "looking up server " + registry );
+@@ -140,7 +136,6 @@ private RemoteCacheManager( String host, int port, String service, ICompositeCac
+ 
+     /**
+      * Gets the defaultCattr attribute of the RemoteCacheManager object
+-     * 
+      * @return The defaultCattr value
+      */
+     public IRemoteCacheAttributes getDefaultCattr()
+@@ -150,11 +145,8 @@ public IRemoteCacheAttributes getDefaultCattr()
+ 
+     /**
+      * Adds the remote cache listener to the underlying cache-watch service.
+-     * 
+-     * @param cattr
+-     *            The feature to be added to the RemoteCacheListener attribute
+-     * @param listener
+-     *            The feature to be added to the RemoteCacheListener attribute
++     * @param cattr The feature to be added to the RemoteCacheListener attribute
++     * @param listener The feature to be added to the RemoteCacheListener attribute
+      * @throws IOException
+      */
+     public void addRemoteCacheListener( IRemoteCacheAttributes cattr, IRemoteCacheListener listener )
+@@ -185,13 +177,11 @@ public void addRemoteCacheListener( IRemoteCacheAttributes cattr, IRemoteCacheLi
+     }
+ 
+     /**
+-     * Removes a listener. When the primary recovers the failover must
+-     * deregister itself for a region. The failover runner will call this method
+-     * to de-register. We do not want to dergister all listeners to a remote
+-     * server, in case a failover is a primary of another region. Having one
+-     * regions failover act as another servers primary is not currently
+-     * supported.
+-     * 
++     * Removes a listener. When the primary recovers the failover must deregister itself for a
++     * region. The failover runner will call this method to de-register. We do not want to dergister
++     * all listeners to a remote server, in case a failover is a primary of another region. Having
++     * one regions failover act as another servers primary is not currently supported.
++     * <p>
+      * @param cattr
+      * @param listener
+      * @throws IOException
+@@ -207,7 +197,8 @@ public void removeRemoteCacheListener( IRemoteCacheAttributes cattr, IRemoteCach
+     }
+ 
+     /**
+-     * 
++     * Stops a listener. This is used to deregister a failover after primary reconnection.
++     * <p>
+      * @param cattr
+      * @throws IOException
+      */
+@@ -222,7 +213,7 @@ public void removeRemoteCacheListener( IRemoteCacheAttributes cattr )
+                 RemoteCache rc = cache.getRemoteCache();
+                 if ( log.isDebugEnabled() )
+                 {
+-                    log.debug( "Found cache for " + cattr.getCacheName() + ", deregistering listener." );
++                    log.debug( "Found cache for[ " + cattr.getCacheName() + "], deregistering listener." );
+                 }
+                 // could also store the listener for a server in the manager.
+                 IRemoteCacheListener listener = rc.getListener();
+@@ -248,26 +239,49 @@ public void removeRemoteCacheListener( IRemoteCacheAttributes cattr )
+     }
+ 
+     /**
+-     * Returns an instance of RemoteCacheManager for the given connection
+-     * parameters.
+-     * 
++     * Stops a listener. This is used to deregister a failover after primary reconnection.
++     * <p>
++     * @param cacheName
++     * @throws IOException
++     */
++    public void removeRemoteCacheListener( String cacheName )
++        throws IOException
++    {
++        synchronized ( caches )
++        {
++            RemoteCacheNoWait cache = (RemoteCacheNoWait) caches.get( cacheName );
++            if ( cache != null )
++            {
++                RemoteCache rc = cache.getRemoteCache();
++                if ( log.isDebugEnabled() )
++                {
++                    log.debug( "Found cache for [" + cacheName + "], deregistering listener." );
++                }
++                // could also store the listener for a server in the manager.
++                IRemoteCacheListener listener = rc.getListener();
++                remoteWatch.removeCacheListener( cacheName, listener );
++            }
++        }
++        return;
++    }
++
++    /**
++     * Returns an instance of RemoteCacheManager for the given connection parameters.
++     * <p>
+      * Host and Port uniquely identify a manager instance.
+-     * 
++     * <p>
+      * Also starts up the monitoring daemon, if not already started.
+-     * 
+-     * 
+-     * If the connection cannot be established, zombie objects will be used for
+-     * future recovery purposes.
+-     * 
++     * <p>
++     * If the connection cannot be established, zombie objects will be used for future recovery
++     * purposes.
++     * <p>
+      * @param cattr
+      * @param cacheMgr
+-     * 
+      * @return The instance value
+      * @parma port port of the registry.
+      */
+     public static RemoteCacheManager getInstance( IRemoteCacheAttributes cattr, ICompositeCacheManager cacheMgr )
+     {
+-
+         String host = cattr.getRemoteHost();
+         int port = cattr.getRemotePort();
+         String service = cattr.getRemoteServiceName();
+@@ -316,9 +330,8 @@ public static RemoteCacheManager getInstance( IRemoteCacheAttributes cattr, ICom
+ 
+     /**
+      * Returns a remote cache for the given cache name.
+-     * 
++     * <p>
+      * @param cacheName
+-     * 
+      * @return The cache value
+      */
+     public AuxiliaryCache getCache( String cacheName )
+@@ -329,12 +342,9 @@ public AuxiliaryCache getCache( String cacheName )
+     }
+ 
+     /**
+-     * Gets a RemoteCacheNoWait from the RemoteCacheManager. The
+-     * RemoteCacheNoWait objects are identified by the cache name value of the
+-     * RemoteCacheAttributes object.
+-     * 
++     * Gets a RemoteCacheNoWait from the RemoteCacheManager. The RemoteCacheNoWait objects are
++     * identified by the cache name value of the RemoteCacheAttributes object.
+      * @param cattr
+-     * 
+      * @return The cache value
+      */
+     public AuxiliaryCache getCache( IRemoteCacheAttributes cattr )
+@@ -374,29 +384,33 @@ public AuxiliaryCache getCache( IRemoteCacheAttributes cattr )
+     }
+ 
+     /**
+-     * Description of the Method
+-     * 
++     * Releases.
++     * <p>
+      * @param name
+      * @throws IOException
+      */
+     public void freeCache( String name )
+         throws IOException
+     {
++        if ( log.isInfoEnabled() )
++        {
++            log.info( "freeCache [" + name + "]" );
++        }
+         ICache c = null;
+-
+         synchronized ( caches )
+         {
+             c = (ICache) caches.get( name );
+         }
+         if ( c != null )
+         {
++            this.removeRemoteCacheListener( name );
+             c.dispose();
+         }
+     }
+ 
+     /**
+      * Gets the stats attribute of the RemoteCacheManager object
+-     * 
++     * <p>
+      * @return The stats value
+      */
+     public String getStats()
+@@ -408,15 +422,13 @@ public String getStats()
+             ICache c = (ICache) allCaches.next();
+             if ( c != null )
+             {
+-                // need to add getStats to ICache
+-                // stats.append( "<br>&nbsp;&nbsp;&nbsp;" + c.getStats() );
+                 stats.append( c.getCacheName() );
+             }
+         }
+         return stats.toString();
+     }
+ 
+-    /** Description of the Method */
++    /** Shutdown all. */
+     public void release()
+     {
+         // Wait until called by the last client
+@@ -434,22 +446,21 @@ public void release()
+                 {
+                     try
+                     {
+-                        c.dispose();
++                        // c.dispose();
++                        freeCache( c.getCacheName() );
+                     }
+                     catch ( IOException ex )
+                     {
+-                        log.error( ex );
++                        log.error( "Problem in release.", ex );
+                     }
+                 }
+             }
+         }
+     }
+ 
+-    // end release()
+-
+     /**
+      * Fixes up all the caches managed by this cache manager.
+-     * 
++     * <p>
+      * @param remoteService
+      * @param remoteWatch
+      */
+@@ -469,7 +480,6 @@ public void fixCaches( IRemoteCacheService remoteService, IRemoteCacheObserver r
+ 
+     /**
+      * Gets the cacheType attribute of the RemoteCacheManager object
+-     * 
+      * @return The cacheType value
+      */
+     public int getCacheType()
+@@ -479,7 +489,6 @@ public int getCacheType()
+ 
+     /**
+      * Location of the RMI registry.
+-     * 
+      */
+     private final static class Location
+     {
+@@ -491,7 +500,7 @@ private final static class Location
+ 
+         /**
+          * Constructor for the Location object
+-         * 
++         * <p>
+          * @param host
+          * @param port
+          */
+@@ -503,7 +512,6 @@ public Location( String host, int port )
+ 
+         /*
+          * (non-Javadoc)
+-         * 
+          * @see java.lang.Object#equals(java.lang.Object)
+          */
+         public boolean equals( Object obj )
+@@ -525,14 +533,27 @@ public boolean equals( Object obj )
+         }
+ 
+         /**
+-         * 
+          * @return int
+          */
+         public int hashCode()
+         {
+             return host == null ? port : host.hashCode() ^ port;
+         }
++    }
+ 
++    /**
++     * Shutdown callback from composite cache manager.
++     * <p>
++     * (non-Javadoc)
++     * @see org.apache.jcs.engine.behavior.IShutdownObserver#shutdown()
++     */
++    public void shutdown()
++    {
++        if ( log.isInfoEnabled() )
++        {
++            log.info( "Observed shutdown request." );
++        }
++        release();
+     }
+ 
+ }
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWait.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWait.java
+index 717e1cd3a..66b0f883c 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWait.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWait.java
+@@ -217,8 +217,8 @@ public int getCacheType()
+     /**
+      * Returns the asyn cache status. An error status indicates either the
+      * remote connection is not available, or the asyn queue has been
+-     * unexpectedly destroyed. No remote invokation.
+-     * 
++     * unexpectedly destroyed. No remote invocation.
++     * <p>
+      * @return The status value
+      */
+     public int getStatus()
+@@ -228,7 +228,7 @@ public int getStatus()
+ 
+     /**
+      * Gets the cacheName attribute of the RemoteCacheNoWait object
+-     * 
++     * <p>
+      * @return The cacheName value
+      */
+     public String getCacheName()
+@@ -239,7 +239,7 @@ public String getCacheName()
+     /**
+      * Replaces the remote cache service handle with the given handle and reset
+      * the event queue by starting up a new instance.
+-     * 
++     * <p>
+      * @param remote
+      */
+     public void fixCache( IRemoteCacheService remote )
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java
+index f5b2b7412..9c1a47471 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java
+@@ -1,28 +1,21 @@
+ package org.apache.jcs.auxiliary.remote;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License")
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.IOException;
+ import java.io.Serializable;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
+-import java.util.HashSet;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+@@ -37,10 +30,9 @@
+ import org.apache.jcs.engine.stats.behavior.IStats;
+ 
+ /**
+- * Used to provide access to multiple services under nowait protection. factory
+- * should construct NoWaitFacade to give to the composite cache out of caches it
+- * constructs from the varies manager to lateral services.
+- *  
++ * Used to provide access to multiple services under nowait protection. factory should construct
++ * NoWaitFacade to give to the composite cache out of caches it constructs from the varies manager
++ * to lateral services.
+  */
+ public class RemoteCacheNoWaitFacade
+     implements AuxiliaryCache
+@@ -58,11 +50,9 @@ public class RemoteCacheNoWaitFacade
+     protected RemoteCacheAttributes rca;
+ 
+     private ICompositeCacheManager cacheMgr;
+-    
++
+     /**
+-     * Gets the remoteCacheAttributes attribute of the RemoteCacheNoWaitFacade
+-     * object
+-     * 
++     * Gets the remoteCacheAttributes attribute of the RemoteCacheNoWaitFacade object
+      * @return The remoteCacheAttributes value
+      */
+     public RemoteCacheAttributes getRemoteCacheAttributes()
+@@ -71,11 +61,8 @@ public RemoteCacheAttributes getRemoteCacheAttributes()
+     }
+ 
+     /**
+-     * Sets the remoteCacheAttributes attribute of the RemoteCacheNoWaitFacade
+-     * object
+-     * 
+-     * @param rca
+-     *            The new remoteCacheAttributes value
++     * Sets the remoteCacheAttributes attribute of the RemoteCacheNoWaitFacade object
++     * @param rca The new remoteCacheAttributes value
+      */
+     public void setRemoteCacheAttributes( RemoteCacheAttributes rca )
+     {
+@@ -83,14 +70,14 @@ public void setRemoteCacheAttributes( RemoteCacheAttributes rca )
+     }
+ 
+     /**
+-     * Constructs with the given remote cache, and fires events to any
+-     * listeners.
+-     * 
++     * Constructs with the given remote cache, and fires events to any listeners.
++     * <p>
+      * @param noWaits
+      * @param rca
+      * @param cacheMgr
+      */
+-    public RemoteCacheNoWaitFacade( RemoteCacheNoWait[] noWaits, RemoteCacheAttributes rca, ICompositeCacheManager cacheMgr )
++    public RemoteCacheNoWaitFacade( RemoteCacheNoWait[] noWaits, RemoteCacheAttributes rca,
++                                   ICompositeCacheManager cacheMgr )
+     {
+         if ( log.isDebugEnabled() )
+         {
+@@ -104,7 +91,7 @@ public RemoteCacheNoWaitFacade( RemoteCacheNoWait[] noWaits, RemoteCacheAttribut
+ 
+     /**
+      * Put an element in the cache.
+-     * 
++     * <p>
+      * @param ce
+      * @throws IOException
+      */
+@@ -146,7 +133,6 @@ public void update( ICacheElement ce )
+ 
+     /**
+      * Synchronously reads from the remote cache.
+-     * 
+      * @param key
+      * @return Either an ICacheElement or null if it is not found.
+      */
+@@ -173,7 +159,6 @@ public ICacheElement get( Serializable key )
+ 
+     /**
+      * Gets the set of keys of objects currently in the group.
+-     * 
+      * @param group
+      * @return
+      * @throws IOException
+@@ -195,7 +180,6 @@ public Set getGroupKeys( String group )
+ 
+     /**
+      * Adds a remove request to the remote cache.
+-     * 
+      * @param key
+      * @return wether or not it was removed, right now it return false.
+      */
+@@ -245,24 +229,22 @@ public void dispose()
+         }
+         catch ( Exception ex )
+         {
+-            log.error( ex );
++            log.error( "Problem in dispose.", ex );
+         }
+     }
+ 
+     /**
+      * No lateral invokation.
+-     * 
+      * @return The size value
+      */
+     public int getSize()
+     {
+         return 0;
+-        //cache.getSize();
++        // cache.getSize();
+     }
+ 
+     /**
+      * Gets the cacheType attribute of the RemoteCacheNoWaitFacade object
+-     * 
+      * @return The cacheType value
+      */
+     public int getCacheType()
+@@ -272,7 +254,6 @@ public int getCacheType()
+ 
+     /**
+      * Gets the cacheName attribute of the RemoteCacheNoWaitFacade object
+-     * 
+      * @return The cacheName value
+      */
+     public String getCacheName()
+@@ -282,20 +263,25 @@ public String getCacheName()
+ 
+     /**
+      * Gets the status attribute of the RemoteCacheNoWaitFacade object
+-     * 
+-     * @todo need to do something with this
+-     * 
++     * <p>
++     * Return ALIVE if any are alive.
++     * <p>
+      * @return The status value
+      */
+     public int getStatus()
+     {
++        for ( int i = 0; i < noWaits.length; i++ )
++        {
++            if ( noWaits[i].getStatus() == CacheConstants.STATUS_ALIVE )
++            {
++                return CacheConstants.STATUS_ALIVE;
++            }
++        }
+         return 0;
+-        //q.isAlive() ? cache.getStatus() : cache.STATUS_ERROR;
+     }
+ 
+     /**
+      * String form of some of the configuratin information for the remote cache.
+-     * 
+      * @return Some info for logging.
+      */
+     public String toString()
+@@ -304,11 +290,8 @@ public String toString()
+     }
+ 
+     /**
+-     * Begin the failover process if this is a local cache. Clustered remote
+-     * caches do not failover.
+-     * 
+-     * @param i
+-     *            The no wait in error.
++     * Begin the failover process if this is a local cache. Clustered remote caches do not failover.
++     * @param i The no wait in error.
+      */
+     protected void failover( int i )
+     {
+@@ -345,7 +328,6 @@ protected void failover( int i )
+ 
+     /**
+      * getStats
+-     * 
+      * @return String
+      */
+     public String getStats()
+@@ -355,7 +337,6 @@ public String getStats()
+ 
+     /*
+      * (non-Javadoc)
+-     * 
+      * @see org.apache.jcs.auxiliary.AuxiliaryCache#getStatistics()
+      */
+     public IStats getStatistics()
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheListener.java b/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheListener.java
+index 16815205d..c22785c78 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheListener.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/behavior/IRemoteCacheListener.java
+@@ -1,19 +1,12 @@
+ package org.apache.jcs.auxiliary.remote.behavior;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License")
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.IOException;
+@@ -24,21 +17,19 @@
+ 
+ /**
+  * Listens for remote cache event notification ( rmi callback ).
+- * 
+  */
+ public interface IRemoteCacheListener
+     extends ICacheListener, Remote
+ {
+-
+-    /** Description of the Field */
++    /** SERVER_LISTENER -- for the cluster */
+     public final static int SERVER_LISTENER = 0;
+ 
+-    /** Description of the Field */
+-    public final static int CLIENT_LISTENER = 0;
++    /** CLIENT_LISTENER -- these aren't used any longer.  remove*/
++    public final static int CLIENT_LISTENER = 1;
+ 
+     /**
+      * Get the id to be used by this manager.
+-     * 
++     * <p>
+      * @return long
+      * @throws IOException
+      */
+@@ -46,10 +37,9 @@ public long getListenerId()
+         throws IOException;
+ 
+     /**
+-     * Set the id to be used by this manager. The remote cache server identifies
+-     * clients by this id. The value will be set by the server through the
+-     * remote cache listener.
+-     * 
++     * Set the id to be used by this manager. The remote cache server identifies clients by this id.
++     * The value will be set by the server through the remote cache listener.
++     * <p>
+      * @param id
+      * @throws IOException
+      */
+@@ -58,7 +48,7 @@ public void setListenerId( long id )
+ 
+     /**
+      * Gets the remoteType attribute of the IRemoteCacheListener object
+-     * 
++     * <p>
+      * @return The remoteType value
+      * @throws IOException
+      */
+@@ -66,13 +56,21 @@ public int getRemoteType()
+         throws IOException;
+ 
+     /**
+-     * This is for debugging. It allows the remote cache server to log the
+-     * address of any listeners that regiser.
+-     * 
++     * This is for debugging. It allows the remote cache server to log the address of any listeners
++     * that regiser.
++     * <p>
+      * @return the local host address.
+-     * @throws IOException 
++     * @throws IOException
+      */
+     public String getLocalHostAddress()
+         throws IOException;
+ 
++    /**
++     * Deregisters itself.
++     * <p>
++     * @throws IOException
++     */
++    public void dispose()
++        throws IOException;
++
+ }
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
+index 437f083c6..3eb85b2a3 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
+@@ -751,7 +751,7 @@ public void removeAll( String cacheName, long requesterId )
+ 
+     /**
+      * Frees the specified remote cache.
+-     * 
++     * <p>
+      * @param cacheName
+      * @throws IOException
+      */
+@@ -763,7 +763,7 @@ public void dispose( String cacheName )
+ 
+     /**
+      * Frees the specified remote cache.
+-     * 
++     * <p>
+      * @param cacheName
+      * @param requesterId
+      * @throws IOException
+@@ -925,8 +925,7 @@ public void addCacheListener( String cacheName, ICacheListener listener )
+                             + listenerAddress + "]" );
+                     }
+                     // should confirm the the host is the same as we have on
+-                    // record, just in case
+-                    // a client has made a mistake.
++                    // record, just in case a client has made a mistake.
+                 }
+ 
+                 // relate the type to an id
+@@ -948,13 +947,11 @@ public void addCacheListener( String cacheName, ICacheListener listener )
+                 log.info( "Region " + cacheName + "'s listener size = " + cacheDesc.eventQMap.size() );
+             }
+         }
+-        // end sync
+-        return;
+     }
+ 
+     /**
+      * Subscribes to all remote caches.
+-     * 
++     * <p>
+      * @param listener
+      *            The feature to be added to the CacheListener attribute
+      * @throws IOException
+@@ -972,14 +969,14 @@ public void addCacheListener( ICacheListener listener )
+                 log.debug( "Adding listener for cache [" + cacheName + "]" );
+             }
+         }
+-        return;
+     }
+ 
+-    /*
+-     * (non-Javadoc)
+-     * 
+-     * @see org.apache.jcs.engine.behavior.ICacheObserver#removeCacheListener(java.lang.String,
+-     *      org.apache.jcs.engine.behavior.ICacheListener)
++    /**
++     * Unsibscribe this listener from this region. If the listener is
++     * registered, it will be removed from the event queue map list.
++     * <p>
++     * @param cacheName
++     * @param listenerId
+      */
+     public void removeCacheListener( String cacheName, ICacheListener listener )
+         throws IOException
+@@ -990,13 +987,12 @@ public void removeCacheListener( String cacheName, ICacheListener listener )
+     /**
+      * Unsibscribe this listener from this region. If the listener is
+      * registered, it will be removed from the event queue map list.
+-     * 
++     * <p>
+      * @param cacheName
+      * @param listenerId
+      */
+     public void removeCacheListener( String cacheName, long listenerId )
+     {
+-
+         if ( log.isInfoEnabled() )
+         {
+             log.info( "Removing listener for cache region = [" + cacheName + "] and listenerId [" + listenerId + "]" );
+@@ -1034,7 +1030,7 @@ public void removeCacheListener( String cacheName, long listenerId )
+ 
+     /**
+      * Unsubscribes from all remote caches.
+-     * 
++     * <p>
+      * @param listener
+      * @throws IOException
+      */
+@@ -1046,9 +1042,9 @@ public void removeCacheListener( ICacheListener listener )
+             String cacheName = (String) en.nextElement();
+             removeCacheListener( cacheName, listener );
+ 
+-            if ( log.isDebugEnabled() )
++            if ( log.isInfoEnabled() )
+             {
+-                log.debug( "Removing listener for cache " + cacheName );
++                log.info( "Removing listener for cache [" + cacheName + "]" );
+             }
+         }
+         return;
+@@ -1059,7 +1055,7 @@ public void removeCacheListener( ICacheListener listener )
+ 
+     /**
+      * Shuts down the remote server.
+-     * 
++     * <p>
+      * @throws IOException
+      */
+     public void shutdown()
+diff --git a/src/java/org/apache/jcs/engine/CacheEventQueue.java b/src/java/org/apache/jcs/engine/CacheEventQueue.java
+index 4b53de296..ed5d4997e 100644
+--- a/src/java/org/apache/jcs/engine/CacheEventQueue.java
++++ b/src/java/org/apache/jcs/engine/CacheEventQueue.java
+@@ -541,9 +541,9 @@ public void run()
+                     event.run();
+                 }
+             }
+-            if ( log.isInfoEnabled() )
++            if ( log.isDebugEnabled() )
+             {
+-                log.info( "QProcessor exiting for " + queue );
++                log.debug( "QProcessor exiting for " + queue );
+             }
+         }
+     }
+diff --git a/src/java/org/apache/jcs/engine/CacheWatchRepairable.java b/src/java/org/apache/jcs/engine/CacheWatchRepairable.java
+index fc272726f..88b5d0217 100644
+--- a/src/java/org/apache/jcs/engine/CacheWatchRepairable.java
++++ b/src/java/org/apache/jcs/engine/CacheWatchRepairable.java
+@@ -134,6 +134,8 @@ public void addCacheListener( ICacheListener obj )
+     }
+ 
+     /** 
++     * Tell the server to release us.
++     * <p>
+      * @param cacheName
+      * @param obj
+      * @throws IOException
+@@ -141,6 +143,10 @@ public void addCacheListener( ICacheListener obj )
+     public void removeCacheListener( String cacheName, ICacheListener obj )
+         throws IOException
+     {
++        if ( log.isInfoEnabled() )
++        {
++            log.info( "removeCacheListener, cacheName [" + cacheName + "]" );
++        }
+         // Record the removal locally, regardless of whether the remote
+         // remove-listener
+         // operation succeeds or fails.
+@@ -162,6 +168,11 @@ public void removeCacheListener( String cacheName, ICacheListener obj )
+     public void removeCacheListener( ICacheListener obj )
+         throws IOException
+     {
++        if ( log.isInfoEnabled() )
++        {
++            log.info( "removeCacheListener, ICacheListener [" + obj + "]" );
++        }
++        
+         // Record the removal locally, regardless of whether the remote
+         // remove-listener operation succeeds or fails.
+         synchronized ( cacheMap )
+diff --git a/src/java/org/apache/jcs/engine/PooledCacheEventQueue.java b/src/java/org/apache/jcs/engine/PooledCacheEventQueue.java
+index 4862ceee0..f5eb7f89a 100644
+--- a/src/java/org/apache/jcs/engine/PooledCacheEventQueue.java
++++ b/src/java/org/apache/jcs/engine/PooledCacheEventQueue.java
+@@ -621,5 +621,5 @@ public boolean isEmpty()
+                 return true;
+             }
+         }
+-    }
++    }    
+ }
+diff --git a/src/java/org/apache/jcs/engine/behavior/ICacheService.java b/src/java/org/apache/jcs/engine/behavior/ICacheService.java
+index 0d94a10b4..467345b6d 100644
+--- a/src/java/org/apache/jcs/engine/behavior/ICacheService.java
++++ b/src/java/org/apache/jcs/engine/behavior/ICacheService.java
+@@ -1,19 +1,12 @@
+ package org.apache.jcs.engine.behavior;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License")
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import java.io.IOException;
+@@ -25,23 +18,24 @@
+ /**
+  * Used to retrieve and update the cache. <br>
+  * <br>
+- * Note: server which implements this interface provides a local cache service,
+- * whereas server which implements IRmiCacheService provides a remote cache
+- * service.
+- *  
++ * Note: server which implements this interface provides a local cache service, whereas server which
++ * implements IRmiCacheService provides a remote cache service.
+  */
+ public interface ICacheService
+ {
+-    /** Puts a cache item to the cache. 
++    /**
++     * Puts a cache item to the cache.
++     * <p>
+      * @param item
+      * @throws ObjectExistsException
+-     * @throws IOException*/
++     * @throws IOException
++     */
+     public void update( ICacheElement item )
+         throws ObjectExistsException, IOException;
+ 
+     /**
+-     * Returns a cache bean from the specified cache; or null if the key does
+-     * not exist.
++     * Returns a cache bean from the specified cache; or null if the key does not exist.
++     * <p>
+      * @param cacheName
+      * @param key
+      * @return
+@@ -51,27 +45,37 @@ public void update( ICacheElement item )
+     public ICacheElement get( String cacheName, Serializable key )
+         throws ObjectNotFoundException, IOException;
+ 
+-    /** Removes the given key from the specified cache. 
++    /**
++     * Removes the given key from the specified cache.
++     * <p>
+      * @param cacheName
+      * @param key
+-     * @throws IOException*/
++     * @throws IOException
++     */
+     public void remove( String cacheName, Serializable key )
+         throws IOException;
+ 
+-    /** Remove all keys from the sepcified cache. 
++    /**
++     * Remove all keys from the sepcified cache.
+      * @param cacheName
+-     * @throws IOException*/
++     * @throws IOException
++     */
+     public void removeAll( String cacheName )
+         throws IOException;
+ 
+-    /** Frees the specified cache. 
++    /**
++     * Frees the specified cache.
++     * <p>
+      * @param cacheName
+-     * @throws IOException*/
++     * @throws IOException
++     */
+     public void dispose( String cacheName )
+         throws IOException;
+ 
+-    /** Frees all caches. 
+-     * @throws IOException*/
++    /**
++     * Frees all caches.
++     * @throws IOException
++     */
+     public void release()
+         throws IOException;
+ }
+diff --git a/src/java/org/apache/jcs/engine/behavior/IShutdownObservable.java b/src/java/org/apache/jcs/engine/behavior/IShutdownObservable.java
+index 18761fa37..97a23f845 100644
+--- a/src/java/org/apache/jcs/engine/behavior/IShutdownObservable.java
++++ b/src/java/org/apache/jcs/engine/behavior/IShutdownObservable.java
+@@ -30,7 +30,7 @@
+  * region by region shutdown.  Some auxiliaries are glocal.  They will
+  * need to track when every region has shutdown before doing things like
+  * closing the socket with a lateral.  
+- * 
++ * <p>
+  * @author Aaron Smuts
+  *
+  */
+diff --git a/src/java/org/apache/jcs/engine/control/CompositeCache.java b/src/java/org/apache/jcs/engine/control/CompositeCache.java
+index 78195812a..b3f661811 100644
+--- a/src/java/org/apache/jcs/engine/control/CompositeCache.java
++++ b/src/java/org/apache/jcs/engine/control/CompositeCache.java
+@@ -866,6 +866,11 @@ public void dispose()
+      */
+     public synchronized void dispose( boolean fromRemote )
+     {
++        if ( log.isInfoEnabled() )
++        {
++            log.info( "In DISPOSE, [" + this.cacheName + "] fromRemote [" + fromRemote + "]" );
++        }
++        
+         // If already disposed, return immediately
+         if ( !alive )
+         {
+@@ -887,9 +892,13 @@ public synchronized void dispose( boolean fromRemote )
+                 // - The auxilliary is not alive
+                 // - The auxilliary is remote and the invocation was remote
+ 
+-                if ( aux == null || aux.getStatus() != CacheConstants.STATUS_ALIVE || fromRemote
+-                    && aux.getCacheType() == REMOTE_CACHE )
++                if ( aux == null || aux.getStatus() != CacheConstants.STATUS_ALIVE || ( fromRemote
++                    && aux.getCacheType() == REMOTE_CACHE ) )
+                 {
++                    if ( log.isInfoEnabled() )
++                    {
++                        log.info( "In DISPOSE, [" + this.cacheName + "] SKIPPING auxiliary [" + aux + "] fromRemote [" + fromRemote + "]" );
++                    }
+                     continue;
+                 }
+ 
+@@ -902,7 +911,10 @@ public synchronized void dispose( boolean fromRemote )
+                 {
+                     Iterator itr = memCache.getIterator();
+ 
+-                    log.info( "In dispose, " + this.cacheName + " memCache.size = " + memCache.getSize() );
++                    if ( log.isInfoEnabled() )
++                    {
++                        log.info( "In DISPOSE, [" + this.cacheName + "] memCache.size = " + memCache.getSize() + " auxiliary [" + aux + "]" );
++                    }
+ 
+                     int cnt = 0;
+                     while ( itr.hasNext() )
+@@ -926,7 +938,10 @@ public synchronized void dispose( boolean fromRemote )
+                         }
+                     }
+ 
+-                    log.info( "In dispose, " + this.cacheName + " put " + cnt + " into auxiliary " + aux );
++                    if ( log.isInfoEnabled() )
++                    {
++                        log.info( "In DISPOSE, [" + this.cacheName + "] put " + cnt + " into auxiliary " + aux );
++                    }
+                 }
+ 
+                 // Dispose of the auxiliary
+@@ -938,7 +953,10 @@ public synchronized void dispose( boolean fromRemote )
+             }
+         }
+ 
+-        log.info( "In dispose, " + this.cacheName + " disposing of memory cache." );
++        if ( log.isInfoEnabled() )
++        {
++            log.info( "In DISPOSE, [" + this.cacheName + "] disposing of memory cache." );
++        }
+         try
+         {
+             memCache.dispose();
+diff --git a/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java b/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
+index a5ff33ad2..d6b089310 100644
+--- a/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
++++ b/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
+@@ -669,7 +669,7 @@ public ICacheStats[] getStatistics()
+      * region shutdown. Some auxiliaries are global. They will need to track
+      * when every region has shutdown before doing things like closing the
+      * socket with a lateral.
+-     * 
++     * <p>
+      * @param observer
+      */
+     public void registerShutdownObserver( IShutdownObserver observer )
+diff --git a/src/java/org/apache/jcs/utils/threadpool/ThreadPoolManager.java b/src/java/org/apache/jcs/utils/threadpool/ThreadPoolManager.java
+index 30a194974..93ef8da7f 100644
+--- a/src/java/org/apache/jcs/utils/threadpool/ThreadPoolManager.java
++++ b/src/java/org/apache/jcs/utils/threadpool/ThreadPoolManager.java
+@@ -26,6 +26,7 @@
+ import EDU.oswego.cs.dl.util.concurrent.Channel;
+ import EDU.oswego.cs.dl.util.concurrent.LinkedQueue;
+ import EDU.oswego.cs.dl.util.concurrent.PooledExecutor;
++import EDU.oswego.cs.dl.util.concurrent.ThreadFactory;
+ 
+ /**
+  * This manages threadpools for an application using Doug Lea's Util Concurrent
+@@ -135,6 +136,7 @@ private ThreadPool createPool( PoolConfiguration config )
+             }
+             queue = new BoundedBuffer( config.getBoundarySize() );
+             pool = new PooledExecutor( queue, config.getMaximumPoolSize() );
++            pool.setThreadFactory( new MyThreadFactory() );
+         }
+         else
+         {
+@@ -439,4 +441,25 @@ protected PoolConfiguration loadConfig( String root )
+ 
+         return config;
+     }
++    
++    /**
++     * Allows us to set the daemon status on the threads.
++     * <p>
++     * @author aaronsm
++     */
++    class MyThreadFactory
++        implements ThreadFactory
++    {
++        /*
++         * (non-Javadoc)
++         * 
++         * @see EDU.oswego.cs.dl.util.concurrent.ThreadFactory#newThread(java.lang.Runnable)
++         */
++        public Thread newThread( Runnable runner )
++        {
++            Thread t = new Thread( runner );
++            t.setDaemon( true );
++            return t;
++        }
++    }      
+ }
+diff --git a/src/test/org/apache/jcs/auxiliary/remote/RemoteCacheClientTester.java b/src/test/org/apache/jcs/auxiliary/remote/RemoteCacheClientTester.java
+index bbbc723bd..2af5659bf 100644
+--- a/src/test/org/apache/jcs/auxiliary/remote/RemoteCacheClientTester.java
++++ b/src/test/org/apache/jcs/auxiliary/remote/RemoteCacheClientTester.java
+@@ -306,4 +306,14 @@ public String getLocalHostAddress()
+         // TODO Auto-generated method stub
+         return null;
+     }
++
++    /* (non-Javadoc)
++     * @see org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheListener#dispose()
++     */
++    public void dispose()
++        throws IOException
++    {
++        // TODO Auto-generated method stub
++        
++    }
+ }

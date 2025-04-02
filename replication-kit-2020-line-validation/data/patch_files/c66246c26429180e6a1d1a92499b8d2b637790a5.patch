@@ -1,0 +1,300 @@
+From c66246c26429180e6a1d1a92499b8d2b637790a5 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 22 Feb 2010 22:37:54 +0000
+Subject: [PATCH] FIX: Authentication won't work in some situations (IVY-1168)
+ (thanks to Sven Walter)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@915099 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../apache/ivy/util/url/BasicURLHandler.java  | 21 +++++----
+ .../apache/ivy/util/url/CredentialsStore.java | 15 ++++--
+ .../ivy/util/url/HttpClientHandler.java       | 39 ++++++++++------
+ .../apache/ivy/util/url/IvyAuthenticator.java | 46 +++++++++++++++----
+ 5 files changed, 89 insertions(+), 34 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 8f443b0a0..9069a1b14 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -92,6 +92,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Johan Stuyts
+ 	Jason Trump
+ 	Tjeerd Verhagen
++	Sven Walter
+ 	James P. White
+ 	Tom Widmer
+ 	John Williams
+@@ -114,6 +115,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Trace a message when a property file referenced from the settings doesn't exixts (IVY-1074)
+ - IMPROVEMENT: use defaultconf in combination with defaultconfmapping (IVY-1135) (thanks to Jon Schneider)
+ 
++- FIX: Authentication won't work in some situations (IVY-1168) (thanks to Sven Walter)
+ - FIX: Using SFTP resolver with full pattern URL prevents use of dynamic versions (IVY-1167) (thanks to Gregory Fernandez)
+ - FIX: parent.groupId is not resolved in maven 2 parser (IVY-1169) (thanks to Achim Huegen)
+ - FIX: Creation of symlinks problematic in Windows with Cygwin 1.7 (IVY-1165)
+diff --git a/src/java/org/apache/ivy/util/url/BasicURLHandler.java b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+index 215faed72..d87254ba1 100644
+--- a/src/java/org/apache/ivy/util/url/BasicURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+@@ -50,18 +50,14 @@ private HttpStatus() {
+         }
+     }
+ 
+-    public BasicURLHandler() {
+-        Message.debug("installing " + IvyAuthenticator.INSTANCE.getClass()); // do not remove,
+-        // ensure
+-        // IvyAuthenticator
+-        // class loading!
+-    }
+-
+     public URLInfo getURLInfo(URL url) {
+         return getURLInfo(url, 0);
+     }
+ 
+     public URLInfo getURLInfo(URL url, int timeout) {
++        // Install the IvyAuthenticator
++        IvyAuthenticator.install();
++
+         URLConnection con = null;
+         try {
+             url = normalizeToURL(url);
+@@ -112,6 +108,9 @@ private boolean checkStatusCode(URL url, HttpURLConnection con) throws IOExcepti
+     }
+ 
+     public InputStream openStream(URL url) throws IOException {
++        // Install the IvyAuthenticator
++        IvyAuthenticator.install();
++
+         URLConnection conn = null;
+         try {
+             url = normalizeToURL(url);
+@@ -140,6 +139,9 @@ public InputStream openStream(URL url) throws IOException {
+     }
+     
+     public void download(URL src, File dest, CopyProgressListener l) throws IOException {
++        // Install the IvyAuthenticator
++        IvyAuthenticator.install();
++
+         URLConnection srcConn = null;
+         try {
+             src = normalizeToURL(src);
+@@ -171,6 +173,9 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+     }
+ 
+     public void upload(File source, URL dest, CopyProgressListener l) throws IOException {
++        // Install the IvyAuthenticator
++        IvyAuthenticator.install();
++
+         if (!"http".equals(dest.getProtocol()) && !"https".equals(dest.getProtocol())) {
+             throw new UnsupportedOperationException(
+                     "URL repository only support HTTP PUT at the moment");
+@@ -260,6 +265,4 @@ private void readResponseBody(HttpURLConnection conn) {
+             }
+         }
+     }
+-
+-
+ }
+diff --git a/src/java/org/apache/ivy/util/url/CredentialsStore.java b/src/java/org/apache/ivy/util/url/CredentialsStore.java
+index 385fba910..815024dcf 100644
+--- a/src/java/org/apache/ivy/util/url/CredentialsStore.java
++++ b/src/java/org/apache/ivy/util/url/CredentialsStore.java
+@@ -18,7 +18,9 @@
+ package org.apache.ivy.util.url;
+ 
+ import java.util.HashMap;
++import java.util.HashSet;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import org.apache.ivy.util.Credentials;
+ import org.apache.ivy.util.Message;
+@@ -31,6 +33,7 @@ public final class CredentialsStore {
+      * A Map of Credentials objects keyed by the 'key' of the Credentials.
+      */
+     private static final Map KEYRING = new HashMap();
++    private static final Set SECURED_HOSTS = new HashSet();
+ 
+     public static final CredentialsStore INSTANCE = new CredentialsStore();
+ 
+@@ -44,13 +47,17 @@ public void addCredentials(String realm, String host, String userName, String pa
+         Credentials c = new Credentials(realm, host, userName, passwd);
+         Message.debug("credentials added: " + c);
+         KEYRING.put(c.getKey(), c);
+-        // add also with host only, to be able to find credential with host only
+-        // (useful for httpclient especially)
+-        KEYRING.put(c.getHost(), c);
++        SECURED_HOSTS.add(host);
+     }
+ 
+     public Credentials getCredentials(String realm, String host) {
+-        return (Credentials) KEYRING.get(Credentials.buildKey(realm, host));
++        String key = Credentials.buildKey(realm, host);
++        Message.debug("try to get credentials for: " + key);
++        return (Credentials) KEYRING.get(key);
++    }
++    
++    public boolean hasCredentials(String host) {
++        return SECURED_HOSTS.contains(host);
+     }
+ 
+ }
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index b8d814e84..88c7f2124 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -29,6 +29,7 @@
+ import java.util.List;
+ import java.util.Locale;
+ 
++import org.apache.commons.httpclient.Credentials;
+ import org.apache.commons.httpclient.Header;
+ import org.apache.commons.httpclient.HttpClient;
+ import org.apache.commons.httpclient.HttpException;
+@@ -37,14 +38,16 @@
+ import org.apache.commons.httpclient.MultiThreadedHttpConnectionManager;
+ import org.apache.commons.httpclient.NTCredentials;
+ import org.apache.commons.httpclient.auth.AuthPolicy;
++import org.apache.commons.httpclient.auth.AuthScheme;
+ import org.apache.commons.httpclient.auth.AuthScope;
++import org.apache.commons.httpclient.auth.CredentialsNotAvailableException;
++import org.apache.commons.httpclient.auth.CredentialsProvider;
+ import org.apache.commons.httpclient.methods.GetMethod;
+ import org.apache.commons.httpclient.methods.HeadMethod;
+ import org.apache.commons.httpclient.methods.InputStreamRequestEntity;
+ import org.apache.commons.httpclient.methods.PutMethod;
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.util.CopyProgressListener;
+-import org.apache.ivy.util.Credentials;
+ import org.apache.ivy.util.FileUtil;
+ import org.apache.ivy.util.HostUtil;
+ import org.apache.ivy.util.Message;
+@@ -292,13 +295,9 @@ public void run() {
+                 "Apache Ivy/" + Ivy.getIvyVersion());
+         }
+ 
+-        Credentials c = getCredentials(url);
+-        if (c != null) {
+-            Message.debug("found credentials for " + url + ": " + c);
+-            httpClient.getState().setCredentials(
+-                new AuthScope(c.getHost(), AuthScope.ANY_PORT, c.getRealm()),
+-                new NTCredentials(c.getUserName(), c.getPasswd(), 
+-                    HostUtil.getLocalHostName(), c.getRealm()));
++        if (useAuthentication(url)) {
++            httpClient.getParams().setParameter(CredentialsProvider.PROVIDER, 
++                    new IvyCredentialsProvider()); 
+         }
+ 
+         return httpClient;
+@@ -309,11 +308,7 @@ private boolean useProxy() {
+     }
+ 
+     private boolean useAuthentication(URL url) {
+-        return getCredentials(url) != null;
+-    }
+-
+-    private Credentials getCredentials(URL url) {
+-        return CredentialsStore.INSTANCE.getCredentials(null, url.getHost());
++        return CredentialsStore.INSTANCE.hasCredentials(url.getHost());
+     }
+ 
+     private boolean useProxyAuthentication() {
+@@ -429,4 +424,22 @@ public interface HttpClientHelper {
+ 
+         int getHttpClientMajorVersion();
+     }
++    
++    private static class IvyCredentialsProvider implements CredentialsProvider {
++
++        public Credentials getCredentials(AuthScheme scheme, String host, int port, boolean proxy)
++                throws CredentialsNotAvailableException {
++            String realm = scheme.getRealm();
++            
++            org.apache.ivy.util.Credentials c = (org.apache.ivy.util.Credentials) 
++                    CredentialsStore.INSTANCE.getCredentials(realm, host);
++            if (c != null) {
++                return new NTCredentials(c.getUserName(), c.getPasswd(), 
++                    HostUtil.getLocalHostName(), c.getRealm());
++            }
++            
++            return null;
++        }
++
++    }
+ }
+diff --git a/src/java/org/apache/ivy/util/url/IvyAuthenticator.java b/src/java/org/apache/ivy/util/url/IvyAuthenticator.java
+index 8de88825b..0469ef1e8 100644
+--- a/src/java/org/apache/ivy/util/url/IvyAuthenticator.java
++++ b/src/java/org/apache/ivy/util/url/IvyAuthenticator.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.ivy.util.url;
+ 
++import java.lang.reflect.Field;
+ import java.net.Authenticator;
+ import java.net.PasswordAuthentication;
+ 
+@@ -28,18 +29,36 @@
+  */
+ public final class IvyAuthenticator extends Authenticator {
+ 
++    private Authenticator original;
++    
+     /**
+-     * The sole instance.
++     * Private c'tor to prevent instantiation.
+      */
+-    public static final IvyAuthenticator INSTANCE = new IvyAuthenticator();
+-
++    private IvyAuthenticator(Authenticator original) {
++        this.original = original;
++    }
++    
+     /**
+-     * Private c'tor to prevent instantiation. Also installs this as the default Authenticator to
+-     * use by the JVM.
++     * Installs an <tt>IvyAuthenticator</tt> as default <tt>Authenticator</tt>.
++     * Call this method before opening HTTP(S) connections to enable Ivy
++     * authentication.
+      */
+-    private IvyAuthenticator() {
+-        // Install this as the default Authenticator object.
+-        Authenticator.setDefault(this);
++    public static void install() {
++        // We will try to use the original authenticator as backup authenticator. 
++        // Since there is no getter available, so try to use some reflection to 
++        // obtain it. If that doesn't work, assume there is no original authenticator
++        Authenticator original = null;
++        
++        try {
++            Field f = Authenticator.class.getDeclaredField("theAuthenticator");
++            original = (Authenticator) f.get(null);
++        } catch (Throwable t) {
++            Message.debug("Error occured while getting the original authenticator!");            
++        }
++
++        if (!(original instanceof IvyAuthenticator)) {
++            Authenticator.setDefault(new IvyAuthenticator(original));
++        }
+     }
+ 
+     // API ******************************************************************
+@@ -68,6 +87,17 @@ protected PasswordAuthentication getPasswordAuthentication() {
+             }
+         }
+         
++        if ((result == null) && (original != null)) {
++            Authenticator.setDefault(original);
++            try {
++                result = Authenticator.requestPasswordAuthentication(getRequestingHost(), 
++                        getRequestingSite(), getRequestingPort(), getRequestingProtocol(), 
++                        getRequestingPrompt(), getRequestingScheme());
++            } finally {
++                Authenticator.setDefault(this);
++            }
++        }
++        
+         return result;
+     }
+ 

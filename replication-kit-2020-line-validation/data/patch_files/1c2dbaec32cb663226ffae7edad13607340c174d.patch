@@ -1,0 +1,415 @@
+From 1c2dbaec32cb663226ffae7edad13607340c174d Mon Sep 17 00:00:00 2001
+From: Niall Pemberton <niallp@apache.org>
+Date: Sat, 14 Jul 2007 06:37:06 +0000
+Subject: [PATCH] BEANUTILS-142 - RowSetDynaClass fails to copy ResultSet to
+ DynaBean with Oracle 10g JDBC driver  - remove previous ConvertUtils fix  -
+ Use SQL Type to determine DynaProperty type for Date/Time/Timestamp  - Use
+ getDate() / getTime() / getTimestamp() for appropriate DynaProperty types
+ (and getObject() for the rest)
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/beanutils/trunk@556233 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../commons/beanutils/JDBCDynaClass.java      | 36 +++++++-
+ .../commons/beanutils/RowSetDynaClass.java    |  7 --
+ .../commons/beanutils/DynaRowSetTestCase.java | 89 ++++++++++++++++---
+ .../commons/beanutils/TestResultSet.java      | 50 ++++++-----
+ .../beanutils/TestResultSetMetaData.java      | 44 +++++++--
+ 5 files changed, 179 insertions(+), 47 deletions(-)
+
+diff --git a/src/java/org/apache/commons/beanutils/JDBCDynaClass.java b/src/java/org/apache/commons/beanutils/JDBCDynaClass.java
+index 60b93bdee..347ffac4a 100644
+--- a/src/java/org/apache/commons/beanutils/JDBCDynaClass.java
++++ b/src/java/org/apache/commons/beanutils/JDBCDynaClass.java
+@@ -18,9 +18,12 @@
+ package org.apache.commons.beanutils;
+ 
+ import java.io.Serializable;
++import java.sql.Date;
+ import java.sql.ResultSet;
+ import java.sql.ResultSetMetaData;
+ import java.sql.SQLException;
++import java.sql.Time;
++import java.sql.Timestamp;
+ import java.util.ArrayList;
+ import java.util.HashMap;
+ import java.util.Map;
+@@ -174,7 +177,17 @@ protected DynaProperty createDynaProperty(
+         }
+         String className = null;
+         try {
+-            className = metadata.getColumnClassName(i);
++            int sqlType = metadata.getColumnType(i);
++            switch (sqlType) {
++                case java.sql.Types.DATE:
++                    return new DynaProperty(name, java.sql.Date.class);
++                case java.sql.Types.TIMESTAMP:
++                    return new DynaProperty(name, java.sql.Timestamp.class);
++                case java.sql.Types.TIME:
++                    return new DynaProperty(name, java.sql.Time.class);
++                default:
++                    className = metadata.getColumnClassName(i);
++            }
+         } catch (SQLException e) {
+             // this is a patch for HsqlDb to ignore exceptions
+             // thrown by its metadata implementation
+@@ -233,7 +246,28 @@ protected void introspect(ResultSet resultSet) throws SQLException {
+      */
+     protected Object getObject(ResultSet resultSet, String name) throws SQLException {
+ 
++        DynaProperty property = getDynaProperty(name);
++        if (property == null) {
++            throw new IllegalArgumentException("Invalid name '" + name + "'");
++        }
+         String columnName = getColumnName(name);
++        Class type = property.getType();
++
++        // java.sql.Date
++        if (type.equals(Date.class)) {
++            return resultSet.getDate(columnName);
++        }
++
++        // java.sql.Timestamp
++        if (type.equals(Timestamp.class)) {
++            return resultSet.getTimestamp(columnName);
++        }
++
++        // java.sql.Time
++        if (type.equals(Time.class)) {
++            return resultSet.getTime(columnName);
++        }
++
+         return resultSet.getObject(columnName);
+     }
+ 
+diff --git a/src/java/org/apache/commons/beanutils/RowSetDynaClass.java b/src/java/org/apache/commons/beanutils/RowSetDynaClass.java
+index 8ee3da9c0..b1979053b 100644
+--- a/src/java/org/apache/commons/beanutils/RowSetDynaClass.java
++++ b/src/java/org/apache/commons/beanutils/RowSetDynaClass.java
+@@ -230,13 +230,6 @@ protected void copy(ResultSet resultSet) throws SQLException {
+             for (int i = 0; i < properties.length; i++) {
+                 String name = properties[i].getName();
+                 Object value = getObject(resultSet, name);
+-                if (value != null) {
+-                    Class type = properties[i].getType();
+-                    try {
+-                        value = ConvertUtils.convert(value, type);
+-                    } catch (Throwable t) {
+-                    }
+-                }
+                 bean.set(name, value);
+             }
+             rows.add(bean);
+diff --git a/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java b/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java
+index 377f052b2..b44d4bf8f 100644
+--- a/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java
++++ b/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java
+@@ -20,9 +20,12 @@
+ 
+ 
+ import java.math.BigDecimal;
++import java.sql.Date;
+ import java.sql.ResultSet;
+ import java.sql.ResultSetMetaData;
+ import java.sql.SQLException;
++import java.sql.Timestamp;
++import java.sql.Types;
+ import java.util.List;
+ 
+ import junit.framework.TestCase;
+@@ -300,21 +303,75 @@ public void testLimitedRows() throws Exception {
+         
+     }
+ 
+-    public void testInconsistent() throws Exception {
++    /**
++     * Test issues associated with Oracle JDBC driver.
++     * 
++     * See issue# https://issues.apache.org/jira/browse/BEANUTILS-142
++     * 
++     * @throws Exception if an error occurs
++     */
++    public void testInconsistentOracleDriver() throws Exception {
+ 
+         ResultSetMetaData metaData = TestResultSetMetaData.createProxy(new TestResultSetMetaDataInconsistent());
+-        ResultSet resultSet = TestResultSet.createProxy(metaData);
+-        
++        ResultSet resultSet = TestResultSet.createProxy(new TestResultSetInconsistent(metaData));
++
++        // Date Column returns "java.sql.Timestamp" for the column class name but ResultSet getObject
++        // returns a java.sql.Date value
+         int dateColIdx = 4;
+-        assertEquals("Meta Column Name",       "dateProperty",       metaData.getColumnName(dateColIdx));
+-        assertEquals("Meta Column Class Name", "java.sql.Timestamp", metaData.getColumnClassName(dateColIdx));
+-        assertEquals("ResultSet Value",        java.sql.Date.class,  resultSet.getObject("dateProperty").getClass());
++        assertEquals("Date Meta Name",       "dateProperty",       metaData.getColumnName(dateColIdx));
++        assertEquals("Date Meta Class",      "java.sql.Timestamp", metaData.getColumnClassName(dateColIdx));
++        assertEquals("Date Meta Type",       java.sql.Types.DATE,  metaData.getColumnType(dateColIdx));
++        assertEquals("Date ResultSet Value", java.sql.Date.class,  resultSet.getObject("dateProperty").getClass());
++
++        // Timestamp column class returns a custom Timestamp impl for the column class name and ResultSet getObject
++        int timestampColIdx = 13;
++        assertEquals("Timestamp Meta Name",       "timestampProperty",             metaData.getColumnName(timestampColIdx));
++        assertEquals("Timestamp Meta Class",      CustomTimestamp.class.getName(), metaData.getColumnClassName(timestampColIdx));
++        assertEquals("Timestamp Meta Type",       java.sql.Types.TIMESTAMP,        metaData.getColumnType(timestampColIdx));
++        assertEquals("Timestamp ResultSet Value", CustomTimestamp.class,           resultSet.getObject("timestampProperty").getClass());
+ 
+         RowSetDynaClass inconsistentDynaClass = new RowSetDynaClass(resultSet);
+         DynaBean firstRow = (DynaBean)inconsistentDynaClass.getRows().get(0);
+-        DynaProperty dynaProperty = firstRow.getDynaClass().getDynaProperty("dateproperty");
+-        assertEquals("DynaProperty Class", java.sql.Timestamp.class, dynaProperty.getType());
+-        assertEquals("DynaBean Value",     java.sql.Timestamp.class, firstRow.get("dateproperty").getClass());
++        Class expectedType = null;
++        DynaProperty property = null;
++        
++        // Test Date
++        property = firstRow.getDynaClass().getDynaProperty("dateproperty");
++        expectedType = java.sql.Date.class;
++        assertEquals("Date Class", expectedType, property.getType());
++        assertEquals("Date Value", expectedType, firstRow.get(property.getName()).getClass());
++
++        // Test Timestamp
++        property = firstRow.getDynaClass().getDynaProperty("timestampproperty");
++        expectedType = java.sql.Timestamp.class;
++        assertEquals("Timestamp Class", expectedType, property.getType());
++        assertEquals("Timestamp Value", expectedType, firstRow.get(property.getName()).getClass());
++    }
++
++    /**
++     * A proxy ResultSet implementation that returns Timstamp for a date column.
++     *
++     * See issue# https://issues.apache.org/jira/browse/BEANUTILS-142 
++     */
++    private static class TestResultSetInconsistent extends  TestResultSet {
++
++        public TestResultSetInconsistent(ResultSetMetaData metaData) {
++            super(metaData);
++        }
++        /**
++         * Get an columns's value
++         * @param columnName Name of the column
++         * @return the column value
++         * @throws SQLException if an error occurs
++         */
++        public Object getObject(String columnName) throws SQLException {
++            if ("timestampProperty".equals(columnName)) {
++                return new CustomTimestamp();
++            } else {
++                return super.getObject(columnName);
++            }
++        }
++
+     }
+ 
+     /**
+@@ -334,12 +391,20 @@ private static class TestResultSetMetaDataInconsistent extends  TestResultSetMet
+          * @throws SQLException if an error occurs
+          */
+         public String getColumnClassName(int columnIndex) throws SQLException {
+-            String columnClassName = super.getColumnClassName(columnIndex);
+-            if (java.sql.Date.class.getName().equals(columnClassName)) {
++            String columnName = getColumnName(columnIndex);
++            if (columnName.equals("dateProperty")) {
+                 return java.sql.Timestamp.class.getName();
++            } else if (columnName.equals("timestampProperty")) {
++                return CustomTimestamp.class.getName();
+             } else {
+-                return columnClassName;
++                return super.getColumnClassName(columnIndex);
+             }
+         }
+     }
++    private static class CustomTimestamp {
++        private long timestamp = new java.util.Date().getTime();
++        public String toString() {
++            return "CustomTimestamp[" + timestamp + "]";
++        }
++    }
+ }
+diff --git a/src/test/org/apache/commons/beanutils/TestResultSet.java b/src/test/org/apache/commons/beanutils/TestResultSet.java
+index f72fb2139..ea33f75dc 100644
+--- a/src/test/org/apache/commons/beanutils/TestResultSet.java
++++ b/src/test/org/apache/commons/beanutils/TestResultSet.java
+@@ -78,19 +78,18 @@ public class TestResultSet implements InvocationHandler {
+      * @return A result set proxy
+      */
+     public static ResultSet createProxy() {
+-        return TestResultSet.createProxy(TestResultSetMetaData.createProxy());
++        return TestResultSet.createProxy(new TestResultSet());
+     }
+ 
+     /**
+      * Factory method for creating {@link ResultSet} proxies.
+      *
+-     * @param resultSetMetaData The result set meta data
++     * @param invocationHandler Invocation Handler
+      * @return A result set proxy
+      */
+-    public static ResultSet createProxy(ResultSetMetaData resultSetMetaData) {
++    public static ResultSet createProxy(InvocationHandler invocationHandler) {
+         ClassLoader classLoader = ResultSet.class.getClassLoader();
+         Class[] interfaces = new Class[] { ResultSet.class };
+-        InvocationHandler invocationHandler = new TestResultSet(resultSetMetaData);
+         return (ResultSet)Proxy.newProxyInstance(classLoader, interfaces, invocationHandler);
+     }
+     
+@@ -126,13 +125,13 @@ public Object invoke(Object proxy, Method method, Object[] args) throws Throwabl
+         } if ("getMetaData".equals(methodName)) {
+             return getMetaData();
+         } if ("getObject".equals(methodName)) {
+-            String columnName = null;
+-            if (args[0] instanceof Integer) {
+-                columnName = resultSetMetaData.getColumnName(((Integer)args[0]).intValue());
+-            } else {
+-                columnName = (String)args[0];
+-            }
+-            return getObject(columnName);
++            return getObject(columnName(args[0]));
++        } if ("getDate".equals(methodName)) {
++            return getDate(columnName(args[0]));
++        } if ("getTime".equals(methodName)) {
++            return getTime(columnName(args[0]));
++        } if ("getTimestamp".equals(methodName)) {
++            return getTimestamp(columnName(args[0]));
+         } if ("next".equals(methodName)) {
+             return (next() ? Boolean.TRUE : Boolean.FALSE);
+         } if ("updateObject".equals(methodName)) {
+@@ -143,6 +142,13 @@ public Object invoke(Object proxy, Method method, Object[] args) throws Throwabl
+         throw new UnsupportedOperationException(methodName + " not implemented");
+     }
+ 
++    private String columnName(Object arg) throws SQLException {
++        if (arg instanceof Integer) {
++            return resultSetMetaData.getColumnName(((Integer)arg).intValue());
++        } else {
++            return (String)arg;
++        }
++    }
+ 
+     // ---------------------------------------------------- Implemented Methods
+ 
+@@ -196,6 +202,17 @@ public Object getObject(String columnName) throws SQLException {
+         }
+     }
+ 
++    public Date getDate(String columnName) throws SQLException {
++        return (new Date(timestamp));
++    }
++
++    public Time getTime(String columnName) throws SQLException {
++        return (new Time(timestamp));
++    }
++
++    public Timestamp getTimestamp(String columnName) throws SQLException {
++        return (new Timestamp(timestamp));
++    }
+ 
+     public boolean next() throws SQLException {
+         if (row++ < 5) {
+@@ -392,9 +409,6 @@ public Date getDate(int columnIndex, Calendar cal) throws SQLException {
+     }
+ 
+ 
+-    public Date getDate(String columnName) throws SQLException {
+-        throw new UnsupportedOperationException();
+-    }
+ 
+ 
+     public Date getDate(String columnName, Calendar cal) throws SQLException {
+@@ -517,10 +531,6 @@ public Time getTime(int columnIndex, Calendar cal) throws SQLException {
+     }
+ 
+ 
+-    public Time getTime(String columnName) throws SQLException {
+-        throw new UnsupportedOperationException();
+-    }
+-
+ 
+     public Time getTime(String columnName, Calendar cal) throws SQLException {
+         throw new UnsupportedOperationException();
+@@ -538,10 +548,6 @@ public Timestamp getTimestamp(int columnIndex, Calendar cal)
+     }
+ 
+ 
+-    public Timestamp getTimestamp(String columnName) throws SQLException {
+-        throw new UnsupportedOperationException();
+-    }
+-
+ 
+     public Timestamp getTimestamp(String columnName, Calendar cal)
+         throws SQLException {
+diff --git a/src/test/org/apache/commons/beanutils/TestResultSetMetaData.java b/src/test/org/apache/commons/beanutils/TestResultSetMetaData.java
+index cc297a842..98e141925 100644
+--- a/src/test/org/apache/commons/beanutils/TestResultSetMetaData.java
++++ b/src/test/org/apache/commons/beanutils/TestResultSetMetaData.java
+@@ -24,6 +24,7 @@
+ import java.lang.reflect.Proxy;
+ import java.sql.ResultSetMetaData;
+ import java.sql.SQLException;
++import java.sql.Types;
+ 
+ 
+ /**
+@@ -98,6 +99,8 @@ public Object invoke(Object proxy, Method method, Object[] args) throws Throwabl
+             return new Integer(getColumnCount());
+         } if ("getColumnName".equals(methodName)) {
+             return getColumnName(((Integer)args[0]).intValue());
++        } if ("getColumnType".equals(methodName)) {
++            return getColumnType(((Integer)args[0]).intValue());
+         }
+         
+         throw new UnsupportedOperationException(methodName + " not implemented");
+@@ -120,6 +123,42 @@ public String getColumnName(int columnIndex) throws SQLException {
+     }
+ 
+ 
++    public Integer getColumnType(int columnIndex) throws SQLException {
++        String columnName = getColumnName(columnIndex);
++        int sqlType = Types.OTHER;
++        if (columnName.equals("bigDecimalProperty")) {
++            sqlType = Types.DECIMAL;
++        } else if (columnName.equals("booleanProperty")) {
++            sqlType = Types.BOOLEAN;
++        } else if (columnName.equals("byteProperty")) {
++            sqlType = Types.TINYINT;
++        } else if (columnName.equals("dateProperty")) {
++            sqlType = Types.DATE;
++        } else if (columnName.equals("doubleProperty")) {
++            sqlType = Types.DOUBLE;
++        } else if (columnName.equals("floatProperty")) {
++            sqlType = Types.FLOAT;
++        } else if (columnName.equals("intProperty")) {
++            sqlType = Types.INTEGER;
++        } else if (columnName.equals("longProperty")) {
++            sqlType = Types.BIGINT;
++        } else if (columnName.equals("nullProperty")) {
++            sqlType = Types.VARCHAR;
++        } else if (columnName.equals("shortProperty")) {
++            sqlType = Types.SMALLINT;
++        } else if (columnName.equals("stringProperty")) {
++            sqlType = Types.VARCHAR;
++        } else if (columnName.equals("timeProperty")) {
++            sqlType = Types.TIME;
++        } else if (columnName.equals("timestampProperty")) {
++            sqlType = Types.TIMESTAMP;
++        } else {
++            sqlType = Types.OTHER;
++        }
++        return new Integer(sqlType);
++    }
++
++
+     // -------------------------------------------------- Unimplemented Methods
+ 
+ 
+@@ -138,11 +177,6 @@ public String getColumnLabel(int columnIndex) throws SQLException {
+     }
+ 
+ 
+-    public int getColumnType(int columnIndex) throws SQLException {
+-        throw new UnsupportedOperationException();
+-    }
+-
+-
+     public String getColumnTypeName(int columnIndex) throws SQLException {
+         throw new UnsupportedOperationException();
+     }

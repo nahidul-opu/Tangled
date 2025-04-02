@@ -1,0 +1,57 @@
+From 46dfe7cc1ff66c11968c704d153c5752ac9fbee1 Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <maja@apache.org>
+Date: Tue, 6 Nov 2012 04:51:54 +0000
+Subject: [PATCH] GIRAPH-403: GraphMapper.notiftySentMessages need to be
+ thread-safe
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1406041 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                            |  3 +++
+ .../java/org/apache/giraph/graph/GraphMapper.java    | 12 +++++++++---
+ 2 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 02620cf56..cc1f80bc7 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++  GIRAPH-403: GraphMapper.notiftySentMessages need to be thread-safe 
++  (nitay via majakabiljo)
++
+   GIRAPH-397: We should have copies of aggregators per thread
+   to avoid synchronizing on aggregate() (majakabiljo)
+ 
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/GraphMapper.java b/giraph/src/main/java/org/apache/giraph/graph/GraphMapper.java
+index 87054c6ec..fc9a50c20 100644
+--- a/giraph/src/main/java/org/apache/giraph/graph/GraphMapper.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/GraphMapper.java
+@@ -117,6 +117,8 @@ public class GraphMapper<I extends WritableComparable, V extends Writable,
+   private Timer communicationTimer;
+   /** Timer context for communication timer. */
+   private TimerContext communicationTimerContext;
++  /** Lock for notifySentMessages() to make it thread safe */
++  private Object notifySentMsgLock = new Object();
+ 
+   /** What kinds of functions to run on this mapper */
+   public enum MapFunctions {
+@@ -442,10 +444,14 @@ public void notifySentMessages() {
+     // We are tracking the time between when the compute started and the first
+     // message get sent. We use null to flag that we have already recorded it.
+     if (timeToFirstMessageContext != null) {
+-      timeToFirstMessageContext.stop();
+-      timeToFirstMessageContext = null;
++      synchronized (notifySentMsgLock) {
++        if (timeToFirstMessageContext != null) {
++          timeToFirstMessageContext.stop();
++          timeToFirstMessageContext = null;
++          communicationTimerContext = communicationTimer.time();
++        }
++      }
+     }
+-    communicationTimerContext = communicationTimer.time();
+   }
+ 
+   /**

@@ -1,0 +1,232 @@
+From 7de83722fc38ed3456a6825ba721d38eba19f1aa Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Fri, 7 Dec 2007 23:25:36 +0000
+Subject: [PATCH] FIX: XMLModuleDescriptorWriter does not write extra
+ attributes (IVY-471) (thanks to Mikkel Bjerg)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@602266 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../core/module/id/ArtifactRevisionId.java    | 10 +-----
+ .../parser/xml/XmlModuleDescriptorWriter.java | 36 ++++++++++++++++---
+ .../plugins/parser/xml/test-write-full.xml    | 11 +++---
+ .../apache/ivy/plugins/parser/xml/test.xml    | 13 +++----
+ 5 files changed, 46 insertions(+), 25 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 63265bb6b..80a07ab20 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -61,6 +61,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+ - IMPROVEMENT: Decrease memory footprint (IVY-662)
+ 
++- FIX: XMLModuleDescriptorWriter does not write extra attributes (IVY-471) (thanks to Mikkel Bjerg)
+ - FIX: latest compatible conflict manager fails with circular dependencies and dynamic revision (IVY-663)
+ - FIX: Strict conflictmanager seems to not support dynamic revisions (IVY-474)
+ - FIX: NPE in namespace transformation during the ivy:findrevision and ivy:resolve task execution (IVY-659) (thanks to Andrea Bernardo Ciddio)
+diff --git a/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java b/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java
+index 9ec615801..1db3797a3 100644
+--- a/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java
++++ b/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java
+@@ -17,7 +17,6 @@
+  */
+ package org.apache.ivy.core.module.id;
+ 
+-import java.util.HashMap;
+ import java.util.Map;
+ 
+ import org.apache.ivy.core.IvyPatternHelper;
+@@ -34,15 +33,8 @@ public static ArtifactRevisionId newInstance(ModuleRevisionId mrid, String name,
+ 
+     public static ArtifactRevisionId newInstance(ModuleRevisionId mrid, String name, String type,
+             String ext, Map extraAttributes) {
+-        // we inject module extra attributes as extra attributes for the artifacts too
+-        if (extraAttributes == null) {
+-            extraAttributes = mrid.getExtraAttributes();
+-        } else {
+-            extraAttributes = new HashMap(extraAttributes);
+-            extraAttributes.putAll(mrid.getExtraAttributes());
+-        }
+         return new ArtifactRevisionId(new ArtifactId(mrid.getModuleId(), name, type, ext), mrid,
+-                extraAttributes);
++            extraAttributes);
+     }
+ 
+     private ArtifactId artifactId;
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+index 3fdbb3a60..a7ce396dd 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+@@ -109,6 +109,8 @@ private static void printDependencies(ModuleDescriptor md, PrintWriter out) {
+                 }
+                 out.print("\"");
+                 
++                printExtraAttributes(dds[i].getExtraAttributes(), out, " ");
++                
+                 DependencyArtifactDescriptor[] depArtifacts = dds[i].getAllDependencyArtifacts();
+                 if (depArtifacts.length > 0) {
+                     out.println(">");
+@@ -243,16 +245,33 @@ private static void printDependencyArtefacts(ModuleDescriptor md, PrintWriter ou
+                     }
+                     out.print("\"");
+                 }
+-                Map extra = depArtifacts[j].getExtraAttributes();
+-                for (Iterator iter = extra.entrySet().iterator(); iter.hasNext();) {
+-                    Map.Entry entry = (Map.Entry) iter.next();
+-                    out.print(" " + entry.getKey() + "=\"" + XMLHelper.escape(entry.getValue().toString()) + "\"");
+-                }
++                printExtraAttributes(depArtifacts[j].getExtraAttributes(), out, " ");
+                 out.println("/>");
+             }
+         }
+     }
+ 
++    /**
++     * Writes the specified <tt>Map</tt> containing the extra attributes to the
++     * given <tt>PrintWriter</tt>.
++     * 
++     * @param extra the extra attributes, can be <tt>null</tt>
++     * @param out the writer to use
++     * @param indent the string to write before writing the attributes (if any)
++     */
++    private static void printExtraAttributes(Map extra, PrintWriter out, String prefix) {
++        if (extra == null) {
++            return;
++        }
++        
++        String delim = prefix;
++        for (Iterator iter = extra.entrySet().iterator(); iter.hasNext();) {
++            Map.Entry entry = (Map.Entry) iter.next();
++            out.print(delim + entry.getKey() + "=\"" + XMLHelper.escape(entry.getValue().toString()) + "\"");
++            delim = " ";
++        }
++    }
++
+     private static void printPublications(ModuleDescriptor md, PrintWriter out) {
+         out.println("\t<publications>");
+         Artifact[] artifacts = md.getAllArtifacts();
+@@ -262,6 +281,7 @@ private static void printPublications(ModuleDescriptor md, PrintWriter out) {
+             out.print(" type=\"" + XMLHelper.escape(artifacts[i].getType()) + "\"");
+             out.print(" ext=\"" + XMLHelper.escape(artifacts[i].getExt()) + "\"");
+             out.print(" conf=\"" + XMLHelper.escape(getConfs(md, artifacts[i])) + "\"");
++            printExtraAttributes(artifacts[i].getExtraAttributes(), out, " ");
+             out.println("/>");
+         }
+         out.println("\t</publications>");
+@@ -289,6 +309,7 @@ private static void printConfigurations(ModuleDescriptor md, PrintWriter out) {
+                     }
+                     out.print("\"");
+                 }
++                printExtraAttributes(confs[i].getExtraAttributes(), out, " ");
+                 out.println("/>");
+             }
+             out.println("\t</configurations>");
+@@ -319,6 +340,11 @@ private static void printInfoTag(ModuleDescriptor md, PrintWriter out) {
+                 out.println("\t\tnamespace=\"" + XMLHelper.escape(dmd.getNamespace().getName()) + "\"");
+             }
+         }
++        if (!md.getExtraAttributes().isEmpty()) {
++            out.print("\t\t");
++            printExtraAttributes(md.getExtraAttributes(), out, "");
++            out.println();
++        }
+         out.println("\t/>");
+     }
+ 
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
+index d15ed797d..70f0e58b1 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-write-full.xml
+@@ -23,22 +23,23 @@
+ 		revision="myrev"
+ 		status="integration"
+ 		publication="20041101110000"
++		attr1="value1"
+ 	/>
+ 	<configurations>
+-		<conf name="myconf1" visibility="public" description="desc 1"/>
++		<conf name="myconf1" visibility="public" description="desc 1" attr2="value2"/>
+ 		<conf name="myconf2" visibility="public" description="desc 2"/>
+ 		<conf name="myconf3" visibility="private" description="desc 3"/>
+ 		<conf name="myconf4" visibility="public" description="desc 4" extends="myconf1,myconf2"/>
+-		<conf name="myoldconf" visibility="public" description="my old desc"/>
++		<conf name="myoldconf" visibility="public" description="my old desc" deprecated="20050115"/>
+ 	</configurations>
+ 	<publications>
+-		<artifact name="myartifact1" type="jar" ext="jar" conf="myconf1,myconf2,myconf3,myconf4,myoldconf"/>
++		<artifact name="myartifact1" type="jar" ext="jar" conf="myconf1,myconf2,myconf3,myconf4,myoldconf" attr3="value3"/>
+ 		<artifact name="myartifact2" type="jar" ext="jar" conf="myconf1"/>
+ 		<artifact name="myartifact3" type="jar" ext="jar" conf="myconf1,myconf2,myconf3"/>
+ 		<artifact name="myartifact4" type="jar" ext="jar" conf="myconf1,myconf3"/>
+ 	</publications>
+ 	<dependencies>
+-		<dependency org="myorg" name="mymodule2" rev="2.0" conf="*->*"/>
++		<dependency org="myorg" name="mymodule2" rev="2.0" conf="*->*" attr4="value4"/>
+ 		<dependency org="myorg" name="mymodule3" rev="2.0" changing="true" transitive="false" conf="*->*"/>
+ 		<dependency org="yourorg" name="yourmodule1" rev="1.1" conf="myconf1->myconf1"/>
+ 		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
+@@ -48,7 +49,7 @@
+ 		<dependency org="yourorg" name="yourmodule6" rev="latest.integration" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule7" rev="7.1" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
+ 		<dependency org="yourorg" name="yourmodule8" rev="8.1" conf="*->*">
+-			<artifact name="yourartifact8-1" type="jar" ext="jar"/>
++			<artifact name="yourartifact8-1" type="jar" ext="jar" attr5="value5"/>
+ 			<artifact name="yourartifact8-2" type="jar" ext="jar"/>
+ 		</dependency>
+ 		<dependency org="yourorg" name="yourmodule9" rev="9.1" conf="myconf1->default;myconf2->default;myconf3->default">
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test.xml b/test/java/org/apache/ivy/plugins/parser/xml/test.xml
+index af567e8fb..f02423d6e 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test.xml
+@@ -17,12 +17,13 @@
+    specific language governing permissions and limitations
+    under the License.    
+ -->
+-<ivy-module version="2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://incubator.apache.org/ivy/schemas/ivy.xsd">
++<ivy-module version="2.0">
+ 	<info organisation="myorg"
+ 	       module="mymodule"
+ 	       revision="myrev"
+ 	       status="integration"
+-	       publication="20041101110000">
++	       publication="20041101110000"
++	       attr1="value1">
+ 	       
+ 		<license name="MyLicense" url="http://www.my.org/mymodule/mylicense.html"/>
+ 		
+@@ -37,14 +38,14 @@
+ 		</description>
+ 	</info>
+ 	<configurations>
+-		<conf name="myconf1" description="desc 1"/>
++		<conf name="myconf1" description="desc 1" attr2="value2"/>
+ 		<conf name="myconf2" description="desc 2" visibility="public"/>
+ 		<conf name="myconf3" description="desc 3" visibility="private"/>
+ 		<conf name="myconf4" description="desc 4" extends="myconf1, myconf2"/>		
+ 		<conf name="myoldconf" description="my old desc" deprecated="20050115"/>
+ 	</configurations>
+ 	<publications>
+-		<artifact name="myartifact1" type="jar"/>
++		<artifact name="myartifact1" type="jar" attr3="value3"/>
+ 		<artifact name="myartifact2" type="jar" conf="myconf1"/>
+ 		<artifact name="myartifact3" type="jar" conf="myconf1, myconf2, myconf3"/>
+ 		<artifact name="myartifact4" type="jar">
+@@ -53,7 +54,7 @@
+ 		</artifact>
+ 	</publications>
+ 	<dependencies>
+-		<dependency name="mymodule2" rev="2.0"/>
++		<dependency name="mymodule2" rev="2.0" attr4="value4"/>
+ 		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
+ 		<dependency org="yourorg" name="yourmodule1" rev="1.1" conf="myconf1"/>
+ 		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
+@@ -77,7 +78,7 @@
+ 		</dependency>
+ 
+ 		<dependency org="yourorg" name="yourmodule8" rev="8.1">
+-			<artifact name="yourartifact8-1" type="jar"/>
++			<artifact name="yourartifact8-1" type="jar" attr5="value5"/>
+ 			<artifact name="yourartifact8-2" type="jar"/>
+ 		</dependency>		
+ 

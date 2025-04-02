@@ -1,0 +1,124 @@
+From c342635a4694995e4eaca74d8e5eff81a7e5d2e7 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 20 Oct 2008 21:47:15 +0000
+Subject: [PATCH] FIX: Extra Attributes specified in the Dependency's Module
+ Descriptor are not available to resolvers (IVY-929) (thanks to Scott Hebert)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@706421 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 ++
+ .../ivy/plugins/resolver/BasicResolver.java   | 19 ++++++++++++-------
+ .../apache/ivy/core/resolve/ResolveTest.java  | 13 +++++++++++++
+ .../mymodule/task1/1854/ivy.xml               |  1 +
+ 4 files changed, 28 insertions(+), 7 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 4a24d56d4..1426d6a7c 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -31,6 +31,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Jacob Grydholt Jensen
+ 	Scott Goldstein
+ 	Pierre Hägnestrand
++	Scott Hebert
+ 	Tobias Himstedt
+ 	Ben Hale
+ 	Peter Hayes
+@@ -106,6 +107,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Unable to resolve snapshot versions depending on xml elements order (IVY-940)
+ - FIX: pre-resolve-dependency event doesn't export branch information (IVY-941) (thanks to Jaroslaw Wypychowski)
+ - FIX: cachefileset produces an empty fileset when the cache refers to libs in directories that only have the root directory in common (IVY-948) (thanks to Chris Wood)
++- FIX: Extra Attributes specified in the Dependency's Module Descriptor are not available to resolvers (IVY-929) (thanks to Scott Hebert)
+ 
+    2.0.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+index 5b5d3e30d..43fbe45b0 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+@@ -472,23 +472,28 @@ private void resolveAndCheckRevision(ModuleDescriptor systemMd,
+ 
+     private ModuleRevisionId getRevision(ResolvedResource ivyRef, ModuleRevisionId askedMrid,
+             ModuleDescriptor md) throws ParseException {
++        Map allAttributes = new HashMap();
++        allAttributes.putAll(md.getQualifiedExtraAttributes());
++        allAttributes.putAll(askedMrid.getQualifiedExtraAttributes());
++        
+         String revision = ivyRef.getRevision();
+         if (revision == null) {
+             Message.debug("no revision found in reference for " + askedMrid);
+             if (getSettings().getVersionMatcher().isDynamic(askedMrid)) {
+                 if (md.getModuleRevisionId().getRevision() == null) {
+-                    return ModuleRevisionId.newInstance(askedMrid, "working@" + getName());
++                    revision = "working@" + getName();
+                 } else {
+-                    Message.debug("using  " + askedMrid);
+-                    return askedMrid;
++                    Message.debug("using " + askedMrid);
++                    revision = askedMrid.getRevision();
+                 }
+             } else {
+-                Message.debug("using  " + askedMrid);
+-                return askedMrid;
++                Message.debug("using " + askedMrid);
++                revision = askedMrid.getRevision();
+             }
+-        } else {
+-            return ModuleRevisionId.newInstance(askedMrid, revision);
+         }
++        
++        return ModuleRevisionId.newInstance(askedMrid.getOrganisation(), askedMrid.getName(),
++                    askedMrid.getBranch(), revision, allAttributes);
+     }
+ 
+     public ResolvedModuleRevision parse(final ResolvedResource mdRef, DependencyDescriptor dd,
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 87b5d9668..806163892 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -27,6 +27,7 @@
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import javax.xml.parsers.SAXParser;
+ import javax.xml.parsers.SAXParserFactory;
+@@ -4148,6 +4149,9 @@ public void testExtraAttributes() throws Exception {
+         Ivy ivy = new Ivy();
+         ivy.configure(new File("test/repositories/extra-attributes/ivysettings.xml"));
+         ivy.getSettings().setDefaultCache(cache);
++        
++        FileSystemResolver fResolver = (FileSystemResolver) ivy.getSettings().getDefaultResolver();
++        fResolver.setCheckconsistency(false); // important for testing IVY-929
+ 
+         ResolveReport report = ivy.resolve(ResolveTest.class.getResource("ivy-extra-att.xml"),
+             getResolveOptions(ivy.getSettings(), new String[] {"*"}).setValidate(false));
+@@ -4156,6 +4160,15 @@ public void testExtraAttributes() throws Exception {
+         assertTrue(new File(cache, "apache/mymodule/task1/1854/ivy.xml").exists());
+         assertTrue(new File(cache, "apache/mymodule/task1/1854/mymodule-windows.jar").exists());
+         assertTrue(new File(cache, "apache/mymodule/task1/1854/mymodule-linux.jar").exists());
++        
++        Set moduleRevisions = report.getConfigurationReport("default").getModuleRevisionIds();
++        assertEquals(1, moduleRevisions.size());
++        ModuleRevisionId resolveModRevId = (ModuleRevisionId) moduleRevisions.iterator().next();
++        assertEquals("apache", resolveModRevId.getOrganisation());
++        assertEquals("mymodule", resolveModRevId.getName());
++        assertEquals("1854", resolveModRevId.getRevision());
++        assertEquals("task1", resolveModRevId.getExtraAttribute("eatt"));
++        assertEquals("another", resolveModRevId.getExtraAttribute("eatt2"));
+     }
+ 
+     public void testExtraAttributes2() throws Exception {
+diff --git a/test/repositories/extra-attributes/mymodule/task1/1854/ivy.xml b/test/repositories/extra-attributes/mymodule/task1/1854/ivy.xml
+index c78ae7bf5..da8595911 100644
+--- a/test/repositories/extra-attributes/mymodule/task1/1854/ivy.xml
++++ b/test/repositories/extra-attributes/mymodule/task1/1854/ivy.xml
+@@ -22,6 +22,7 @@
+         organisation="apache"
+         module="mymodule"
+         eatt="task1"
++        eatt2="another"
+         revision="1854"
+         status="integration">
+ 	</info>

@@ -1,0 +1,1589 @@
+From d65c1e7d27b248ac33f06c2330aaec7ea2f335ea Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <maja@apache.org>
+Date: Tue, 13 Nov 2012 20:03:07 +0000
+Subject: [PATCH] GIRAPH-386: ClassCastException when
+ giraph.SplitMasterWorker=false
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1408926 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                     |   3 +
+ .../giraph/bsp/CentralizedServiceMaster.java  |   8 ++
+ .../giraph/bsp/CentralizedServiceWorker.java  |   3 +-
+ .../org/apache/giraph/comm/WorkerClient.java  |   4 +-
+ .../org/apache/giraph/comm/WorkerServer.java  |   7 +-
+ .../apache/giraph/comm/netty/NettyClient.java |  27 ++--
+ .../giraph/comm/netty/NettyMasterClient.java  |   3 +-
+ .../comm/netty/NettyMasterClientServer.java   |  94 --------------
+ .../giraph/comm/netty/NettyMasterServer.java  |   9 +-
+ .../apache/giraph/comm/netty/NettyServer.java |  16 ++-
+ .../giraph/comm/netty/NettyWorkerClient.java  |  10 +-
+ .../giraph/comm/netty/NettyWorkerServer.java  |   8 +-
+ .../comm/netty/handler/ClientRequestId.java   |  22 ++--
+ .../handler/MasterRequestServerHandler.java   |  15 ++-
+ .../netty/handler/RequestServerHandler.java   |  19 ++-
+ .../handler/WorkerRequestServerHandler.java   |  14 +-
+ .../graph/AddressesAndPartitionsWritable.java |   8 +-
+ .../org/apache/giraph/graph/BspService.java   |   2 +-
+ .../apache/giraph/graph/BspServiceMaster.java |  38 ++++--
+ .../apache/giraph/graph/BspServiceWorker.java |  16 +--
+ .../giraph/graph/MasterAggregatorHandler.java |  14 +-
+ .../MasterInfo.java}                          |  21 ++-
+ .../org/apache/giraph/graph/TaskInfo.java     | 120 ++++++++++++++++++
+ .../org/apache/giraph/graph/WorkerInfo.java   |  85 +++----------
+ .../apache/giraph/zk/ZooKeeperManager.java    |   2 +-
+ .../apache/giraph/comm/ConnectionTest.java    |  45 ++++---
+ .../giraph/comm/RequestFailureTest.java       |  65 ++--------
+ .../org/apache/giraph/comm/RequestTest.java   |  17 ++-
+ .../giraph/comm/SaslConnectionTest.java       |   9 +-
+ 29 files changed, 358 insertions(+), 346 deletions(-)
+ delete mode 100644 giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClientServer.java
+ rename giraph/src/main/java/org/apache/giraph/{comm/MasterClientServer.java => graph/MasterInfo.java} (68%)
+ create mode 100644 giraph/src/main/java/org/apache/giraph/graph/TaskInfo.java
+
+diff --git a/CHANGELOG b/CHANGELOG
+index f453b095e..c4fd3a642 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++  GIRAPH-386: ClassCastException when giraph.SplitMasterWorker=false
++  (majakabiljo)
++
+   GIRAPH-423: Allow overriding addEdge (apresta)
+ 
+   GIRAPH-422: Setting the log level of the root logger to the same level
+diff --git a/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java b/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java
+index 688ce4389..69a73be90 100644
+--- a/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java
++++ b/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java
+@@ -21,6 +21,7 @@
+ import java.io.IOException;
+ 
+ import org.apache.giraph.graph.MasterAggregatorHandler;
++import org.apache.giraph.graph.MasterInfo;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
+ import org.apache.zookeeper.KeeperException;
+@@ -49,6 +50,13 @@ public interface CentralizedServiceMaster<I extends WritableComparable,
+    */
+   boolean becomeMaster();
+ 
++  /**
++   * Get master information
++   *
++   * @return Master information
++   */
++  MasterInfo getMasterInfo();
++
+   /**
+    * Create the {@link InputSplit} objects from the index range based on the
+    * user-defined VertexInputFormat.  The {@link InputSplit} objects will
+diff --git a/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java b/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+index 0eabe00ca..f359bd4ba 100644
+--- a/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
++++ b/giraph/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+@@ -26,6 +26,7 @@
+ import org.apache.giraph.comm.WorkerClient;
+ import org.apache.giraph.graph.FinishedSuperstepStats;
+ import org.apache.giraph.graph.GraphState;
++import org.apache.giraph.graph.MasterInfo;
+ import org.apache.giraph.graph.VertexEdgeCount;
+ import org.apache.giraph.graph.WorkerAggregatorHandler;
+ import org.apache.giraph.graph.partition.PartitionStore;
+@@ -197,7 +198,7 @@ void exchangeVertexPartitions(
+    *
+    * @return Master info
+    */
+-  WorkerInfo getMasterInfo();
++  MasterInfo getMasterInfo();
+ 
+   /**
+    * Get the GraphMapper that this service is using.  Vertices need to know
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/WorkerClient.java b/giraph/src/main/java/org/apache/giraph/comm/WorkerClient.java
+index 7b458409e..6e2dfbd93 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/WorkerClient.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/WorkerClient.java
+@@ -71,10 +71,10 @@ public interface WorkerClient<I extends WritableComparable,
+   /**
+    * Send a request to a remote server (should be already connected)
+    *
+-   * @param destWorkerId Destination worker id
++   * @param destTaskId Destination worker id
+    * @param request Request to send
+    */
+-  void sendWritableRequest(Integer destWorkerId, WritableRequest request);
++  void sendWritableRequest(Integer destTaskId, WritableRequest request);
+ 
+   /**
+    * Wait until all the outstanding requests are completed.
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/WorkerServer.java b/giraph/src/main/java/org/apache/giraph/comm/WorkerServer.java
+index 514b0e489..e60db5529 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/WorkerServer.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/WorkerServer.java
+@@ -23,6 +23,7 @@
+ import org.apache.hadoop.io.WritableComparable;
+ 
+ import java.io.Closeable;
++import java.net.InetSocketAddress;
+ 
+ /**
+  * Interface for message communication server.
+@@ -37,11 +38,11 @@ public interface WorkerServer<I extends WritableComparable,
+     V extends Writable, E extends Writable, M extends Writable>
+     extends Closeable {
+   /**
+-   * Get the port
++   * Get server address
+    *
+-   * @return Port used by this server
++   * @return Address used by this server
+    */
+-  int getPort();
++  InetSocketAddress getMyAddress();
+ 
+   /**
+    * Prepare incoming messages for computation, and resolve mutation requests.
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+index 3814d12ae..4863893f7 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+@@ -48,7 +48,7 @@
+ import org.apache.giraph.comm.requests.SaslTokenMessageRequest;
+ /*end[HADOOP_NON_SECURE]*/
+ import org.apache.giraph.comm.requests.WritableRequest;
+-import org.apache.giraph.graph.WorkerInfo;
++import org.apache.giraph.graph.TaskInfo;
+ import org.apache.giraph.utils.TimedLogger;
+ import org.apache.hadoop.mapreduce.Mapper;
+ import org.apache.log4j.Logger;
+@@ -140,8 +140,8 @@ public class NettyClient {
+   /** Address request id generator */
+   private final AddressRequestIdGenerator addressRequestIdGenerator =
+       new AddressRequestIdGenerator();
+-  /** Client id */
+-  private final int clientId;
++  /** Task info */
++  private final TaskInfo myTaskInfo;
+   /** Maximum thread pool size */
+   private final int maxPoolSize;
+   /** Maximum number of attempts to resolve an address*/
+@@ -156,10 +156,13 @@ public class NettyClient {
+    *
+    * @param context Context for progress
+    * @param conf Configuration
++   * @param myTaskInfo Current task info
+    */
+   public NettyClient(Mapper<?, ?, ?, ?>.Context context,
+-                     final ImmutableClassesGiraphConfiguration conf) {
++                     final ImmutableClassesGiraphConfiguration conf,
++                     TaskInfo myTaskInfo) {
+     this.context = context;
++    this.myTaskInfo = myTaskInfo;
+     this.channelsPerServer = conf.getInt(
+         GiraphConfiguration.CHANNELS_PER_SERVER,
+         GiraphConfiguration.DEFAULT_CHANNELS_PER_SERVER);
+@@ -239,8 +242,6 @@ public NettyClient(Mapper<?, ?, ?, ?>.Context context,
+         new ThreadFactoryBuilder().setNameFormat(
+             "netty-client-worker-%d").build());
+ 
+-    clientId = conf.getInt("mapred.task.partition", -1);
+-
+     // Configure the client.
+     bootstrap = new ClientBootstrap(
+         new NioClientSocketChannelFactory(
+@@ -353,10 +354,10 @@ public String toString() {
+    *
+    * @param tasks Tasks to connect to (if haven't already connected)
+    */
+-  public void connectAllAddresses(Collection<WorkerInfo> tasks) {
++  public void connectAllAddresses(Collection<? extends TaskInfo> tasks) {
+     List<ChannelFutureAddress> waitingConnectionList =
+         Lists.newArrayListWithCapacity(tasks.size() * channelsPerServer);
+-    for (WorkerInfo taskInfo : tasks) {
++    for (TaskInfo taskInfo : tasks) {
+       context.progress();
+       InetSocketAddress address = taskIdAddressMap.get(taskInfo.getTaskId());
+       if (address == null ||
+@@ -622,12 +623,12 @@ private Channel getNextChannel(InetSocketAddress remoteServer) {
+   /**
+    * Send a request to a remote server (should be already connected)
+    *
+-   * @param destWorkerId Destination worker id
++   * @param destTaskId Destination task id
+    * @param request Request to send
+    */
+-  public void sendWritableRequest(Integer destWorkerId,
++  public void sendWritableRequest(Integer destTaskId,
+       WritableRequest request) {
+-    InetSocketAddress remoteServer = taskIdAddressMap.get(destWorkerId);
++    InetSocketAddress remoteServer = taskIdAddressMap.get(destTaskId);
+     if (clientRequestIdRequestInfoMap.isEmpty()) {
+       byteCounter.resetAll();
+     }
+@@ -642,11 +643,11 @@ public void sendWritableRequest(Integer destWorkerId,
+     Channel channel = getNextChannel(remoteServer);
+     RequestInfo newRequestInfo = new RequestInfo(remoteServer, request);
+     if (registerRequest) {
+-      request.setClientId(clientId);
++      request.setClientId(myTaskInfo.getTaskId());
+       request.setRequestId(
+         addressRequestIdGenerator.getNextRequestId(remoteServer));
+       ClientRequestId clientRequestId =
+-        new ClientRequestId(destWorkerId, request.getRequestId());
++        new ClientRequestId(destTaskId, request.getRequestId());
+       RequestInfo oldRequestInfo = clientRequestIdRequestInfoMap.putIfAbsent(
+         clientRequestId, newRequestInfo);
+       if (oldRequestInfo != null) {
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClient.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClient.java
+index fcb6292ce..857e4b9c4 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClient.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClient.java
+@@ -58,7 +58,8 @@ public class NettyMasterClient implements MasterClient {
+   public NettyMasterClient(Mapper<?, ?, ?, ?>.Context context,
+                            ImmutableClassesGiraphConfiguration configuration,
+                            CentralizedServiceMaster<?, ?, ?, ?> service) {
+-    this.nettyClient = new NettyClient(context, configuration);
++    this.nettyClient =
++        new NettyClient(context, configuration, service.getMasterInfo());
+     this.service = service;
+     this.progressable = context;
+     maxBytesPerAggregatorRequest = configuration.getInt(
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClientServer.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClientServer.java
+deleted file mode 100644
+index ac25ec6be..000000000
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterClientServer.java
++++ /dev/null
+@@ -1,94 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.giraph.comm.netty;
+-
+-import org.apache.giraph.ImmutableClassesGiraphConfiguration;
+-import org.apache.giraph.bsp.CentralizedServiceMaster;
+-import org.apache.giraph.comm.MasterClient;
+-import org.apache.giraph.comm.MasterClientServer;
+-import org.apache.giraph.comm.MasterServer;
+-import org.apache.giraph.graph.Aggregator;
+-import org.apache.hadoop.io.Writable;
+-import org.apache.hadoop.mapreduce.Mapper;
+-
+-import java.io.IOException;
+-import java.net.InetSocketAddress;
+-
+-/**
+- * Netty based implementation of the {@link MasterClientServer} interface.
+- */
+-public class NettyMasterClientServer implements MasterClientServer {
+-  /** Client that sends requests */
+-  private final MasterClient client;
+-  /** Server that processes requests */
+-  private final MasterServer server;
+-
+-  /**
+-   * Constructor
+-   *
+-   * @param context Mapper context
+-   * @param configuration Configuration
+-   * @param service Centralized service
+-   */
+-  public NettyMasterClientServer(
+-      Mapper<?, ?, ?, ?>.Context context,
+-      ImmutableClassesGiraphConfiguration configuration,
+-      CentralizedServiceMaster<?, ?, ?, ?> service) {
+-    client = new NettyMasterClient(context, configuration, service);
+-    server = new NettyMasterServer(configuration,
+-        service.getAggregatorHandler());
+-  }
+-
+-  @Override
+-  public void openConnections() {
+-    client.openConnections();
+-  }
+-
+-  @Override
+-  public void sendAggregator(String aggregatorName,
+-      Class<? extends Aggregator> aggregatorClass,
+-      Writable aggregatedValue) throws IOException {
+-    client.sendAggregator(aggregatorName, aggregatorClass, aggregatedValue);
+-  }
+-
+-  @Override
+-  public void finishSendingAggregatedValues() throws IOException {
+-    client.finishSendingAggregatedValues();
+-  }
+-
+-  @Override
+-  public void flush() {
+-    client.flush();
+-  }
+-
+-  @Override
+-  public void closeConnections() {
+-    client.closeConnections();
+-  }
+-
+-  @Override
+-  public InetSocketAddress getMyAddress() {
+-    return server.getMyAddress();
+-  }
+-
+-  @Override
+-  public void close() {
+-    server.close();
+-  }
+-}
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterServer.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterServer.java
+index 308a47c9b..e7b447d8b 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterServer.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyMasterServer.java
+@@ -19,9 +19,9 @@
+ package org.apache.giraph.comm.netty;
+ 
+ import org.apache.giraph.ImmutableClassesGiraphConfiguration;
++import org.apache.giraph.bsp.CentralizedServiceMaster;
+ import org.apache.giraph.comm.netty.handler.MasterRequestServerHandler;
+ import org.apache.giraph.comm.MasterServer;
+-import org.apache.giraph.graph.MasterAggregatorHandler;
+ 
+ import java.net.InetSocketAddress;
+ 
+@@ -36,12 +36,13 @@ public class NettyMasterServer implements MasterServer {
+    * Constructor
+    *
+    * @param conf Hadoop configuration
+-   * @param aggregatorHandler Master aggregator handler
++   * @param service Centralized service
+    */
+   public NettyMasterServer(ImmutableClassesGiraphConfiguration conf,
+-      MasterAggregatorHandler aggregatorHandler) {
++      CentralizedServiceMaster<?, ?, ?, ?> service) {
+     nettyServer = new NettyServer(conf,
+-        new MasterRequestServerHandler.Factory(aggregatorHandler));
++        new MasterRequestServerHandler.Factory(service.getAggregatorHandler()),
++        service.getMasterInfo());
+     nettyServer.start();
+   }
+ 
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
+index fa79a824a..e0692c673 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
+@@ -39,6 +39,7 @@
+ import java.util.concurrent.TimeUnit;
+ import org.apache.giraph.GiraphConfiguration;
+ import org.apache.giraph.ImmutableClassesGiraphConfiguration;
++import org.apache.giraph.graph.TaskInfo;
+ import org.apache.log4j.Logger;
+ import org.jboss.netty.bootstrap.ServerBootstrap;
+ import org.jboss.netty.channel.Channel;
+@@ -87,6 +88,8 @@ public class NettyServer {
+   private final String localHostname;
+   /** Address of the server */
+   private InetSocketAddress myAddress;
++  /** Current task info */
++  private TaskInfo myTaskInfo;
+   /** Maximum number of threads */
+   private final int maxPoolSize;
+   /** TCP backlog */
+@@ -122,15 +125,18 @@ public class NettyServer {
+    *
+    * @param conf Configuration to use
+    * @param requestServerHandlerFactory Factory for request handlers
++   * @param myTaskInfo Current task info
+    */
+   public NettyServer(ImmutableClassesGiraphConfiguration conf,
+-      RequestServerHandler.Factory requestServerHandlerFactory) {
++      RequestServerHandler.Factory requestServerHandlerFactory,
++      TaskInfo myTaskInfo) {
+     this.conf = conf;
+     this.requestServerHandlerFactory = requestServerHandlerFactory;
+     /*if[HADOOP_NON_SECURE]
+     else[HADOOP_NON_SECURE]*/
+     this.saslServerHandlerFactory = new SaslServerHandler.Factory();
+     /*end[HADOOP_NON_SECURE]*/
++    this.myTaskInfo = myTaskInfo;
+     sendBufferSize = conf.getInt(
+         GiraphConfiguration.SERVER_SEND_BUFFER_SIZE,
+         GiraphConfiguration.DEFAULT_SERVER_SEND_BUFFER_SIZE);
+@@ -196,12 +202,14 @@ public NettyServer(ImmutableClassesGiraphConfiguration conf,
+    *
+    * @param conf Configuration to use
+    * @param requestServerHandlerFactory Factory for request handlers
++   * @param myTaskInfo Current task info
+    * @param saslServerHandlerFactory  Factory for SASL handlers
+    */
+   public NettyServer(ImmutableClassesGiraphConfiguration conf,
+                      RequestServerHandler.Factory requestServerHandlerFactory,
++                     TaskInfo myTaskInfo,
+                      SaslServerHandler.Factory saslServerHandlerFactory) {
+-    this(conf, requestServerHandlerFactory);
++    this(conf, requestServerHandlerFactory, myTaskInfo);
+     this.saslServerHandlerFactory = saslServerHandlerFactory;
+   }
+ /*end[HADOOP_NON_SECURE]*/
+@@ -247,7 +255,7 @@ public ChannelPipeline getPipeline() throws Exception {
+               saslServerHandlerFactory.newHandler(conf),
+               new AuthorizeServerHandler(),
+               requestServerHandlerFactory.newHandler(workerRequestReservedMap,
+-                  conf),
++                  conf, myTaskInfo),
+               // Removed after authentication completes:
+               new ResponseEncoder());
+         } else {
+@@ -263,7 +271,7 @@ public ChannelPipeline getPipeline() throws Exception {
+               new RequestDecoder(conf, byteCounter));
+           pipeline.addLast("requestProcessor",
+               requestServerHandlerFactory.newHandler(
+-                  workerRequestReservedMap, conf));
++                  workerRequestReservedMap, conf, myTaskInfo));
+           if (executionHandler != null) {
+             pipeline.addAfter(handlerBeforeExecutionHandler,
+                 "executionHandler", executionHandler);
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClient.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClient.java
+index 0f28421ac..14d8399d4 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClient.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClient.java
+@@ -22,6 +22,7 @@
+ import org.apache.giraph.bsp.CentralizedServiceWorker;
+ import org.apache.giraph.comm.WorkerClient;
+ import org.apache.giraph.comm.requests.WritableRequest;
++import org.apache.giraph.graph.TaskInfo;
+ import org.apache.giraph.graph.WorkerInfo;
+ import org.apache.giraph.graph.partition.PartitionOwner;
+ import org.apache.hadoop.io.Writable;
+@@ -67,7 +68,8 @@ public NettyWorkerClient(
+       Mapper<?, ?, ?, ?>.Context context,
+       ImmutableClassesGiraphConfiguration<I, V, E, M> configuration,
+       CentralizedServiceWorker<I, V, E, M> service) {
+-    this.nettyClient = new NettyClient(context, configuration);
++    this.nettyClient =
++        new NettyClient(context, configuration, service.getWorkerInfo());
+     this.conf = configuration;
+     this.service = service;
+   }
+@@ -78,7 +80,7 @@ public CentralizedServiceWorker<I, V, E, M> getService() {
+ 
+   @Override
+   public void openConnections() {
+-    List<WorkerInfo> addresses = Lists.newArrayListWithCapacity(
++    List<TaskInfo> addresses = Lists.newArrayListWithCapacity(
+         service.getWorkerInfoList().size());
+     for (WorkerInfo info : service.getWorkerInfoList()) {
+       // No need to connect to myself
+@@ -96,9 +98,9 @@ public PartitionOwner getVertexPartitionOwner(I vertexId) {
+   }
+ 
+   @Override
+-  public void sendWritableRequest(Integer destWorkerId,
++  public void sendWritableRequest(Integer destTaskId,
+                                   WritableRequest request) {
+-    nettyClient.sendWritableRequest(destWorkerId, request);
++    nettyClient.sendWritableRequest(destTaskId, request);
+   }
+ 
+   @Override
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
+index ecc1d1f40..bc844d199 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyWorkerServer.java
+@@ -45,6 +45,7 @@
+ 
+ import com.google.common.collect.Sets;
+ 
++import java.net.InetSocketAddress;
+ import java.util.Set;
+ 
+ /**
+@@ -89,7 +90,8 @@ public NettyWorkerServer(ImmutableClassesGiraphConfiguration<I, V, E, M> conf,
+         new ServerData<I, V, E, M>(conf, createMessageStoreFactory(), context);
+ 
+     nettyServer = new NettyServer(conf,
+-        new WorkerRequestServerHandler.Factory<I, V, E, M>(serverData));
++        new WorkerRequestServerHandler.Factory<I, V, E, M>(serverData),
++        service.getWorkerInfo());
+     nettyServer.start();
+   }
+ 
+@@ -138,8 +140,8 @@ public NettyWorkerServer(ImmutableClassesGiraphConfiguration<I, V, E, M> conf,
+   }
+ 
+   @Override
+-  public int getPort() {
+-    return nettyServer.getMyAddress().getPort();
++  public InetSocketAddress getMyAddress() {
++    return nettyServer.getMyAddress();
+   }
+ 
+   @Override
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/ClientRequestId.java b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/ClientRequestId.java
+index 7368465c3..0050eed51 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/ClientRequestId.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/ClientRequestId.java
+@@ -21,27 +21,27 @@
+ /**
+  * Simple immutable object to use for tracking requests uniquely.  This
+  * object is guaranteed to be unique for a given client (based on the
+- * destination worker and the request).
++ * destination task and the request).
+  */
+ public class ClientRequestId {
+-  /** Destination worker id */
+-  private final int destinationWorkerId;
++  /** Destination task id */
++  private final int destinationTaskId;
+   /** Request id */
+   private final long requestId;
+ 
+   /**
+    * Constructor.
+    *
+-   * @param destinationWorkerId Destination worker id
++   * @param destinationTaskId Destination task id
+    * @param requestId Request id
+    */
+-  public ClientRequestId(int destinationWorkerId, long requestId) {
+-    this.destinationWorkerId = destinationWorkerId;
++  public ClientRequestId(int destinationTaskId, long requestId) {
++    this.destinationTaskId = destinationTaskId;
+     this.requestId = requestId;
+   }
+ 
+-  public int getDestinationWorkerId() {
+-    return destinationWorkerId;
++  public int getDestinationTaskId() {
++    return destinationTaskId;
+   }
+ 
+   public long getRequestId() {
+@@ -50,7 +50,7 @@ public long getRequestId() {
+ 
+   @Override
+   public int hashCode() {
+-    return (29 * destinationWorkerId) + (int) (57 * requestId);
++    return (29 * destinationTaskId) + (int) (57 * requestId);
+   }
+ 
+   @Override
+@@ -58,7 +58,7 @@ public boolean equals(Object other) {
+     if (other instanceof ClientRequestId) {
+       ClientRequestId otherObj = (ClientRequestId) other;
+       if (otherObj.getRequestId() == requestId &&
+-          otherObj.getDestinationWorkerId() == destinationWorkerId) {
++          otherObj.getDestinationTaskId() == destinationTaskId) {
+         return true;
+       }
+     }
+@@ -68,6 +68,6 @@ public boolean equals(Object other) {
+ 
+   @Override
+   public String toString() {
+-    return "(destWorker=" + destinationWorkerId + ",reqId=" + requestId + ")";
++    return "(destTask=" + destinationTaskId + ",reqId=" + requestId + ")";
+   }
+ }
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/MasterRequestServerHandler.java b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/MasterRequestServerHandler.java
+index 88387a00e..8038947c8 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/MasterRequestServerHandler.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/MasterRequestServerHandler.java
+@@ -18,9 +18,10 @@
+ 
+ package org.apache.giraph.comm.netty.handler;
+ 
++import org.apache.giraph.ImmutableClassesGiraphConfiguration;
+ import org.apache.giraph.comm.requests.MasterRequest;
+ import org.apache.giraph.graph.MasterAggregatorHandler;
+-import org.apache.hadoop.conf.Configuration;
++import org.apache.giraph.graph.TaskInfo;
+ 
+ /** Handler for requests on master */
+ public class MasterRequestServerHandler extends
+@@ -33,12 +34,15 @@ public class MasterRequestServerHandler extends
+    *
+    * @param workerRequestReservedMap Worker request reservation map
+    * @param conf                     Configuration
++   * @param myTaskInfo               Current task info
+    * @param aggregatorHandler        Master aggregator handler
+    */
+   public MasterRequestServerHandler(
+-      WorkerRequestReservedMap workerRequestReservedMap, Configuration conf,
++      WorkerRequestReservedMap workerRequestReservedMap,
++      ImmutableClassesGiraphConfiguration conf,
++      TaskInfo myTaskInfo,
+       MasterAggregatorHandler aggregatorHandler) {
+-    super(workerRequestReservedMap, conf);
++    super(workerRequestReservedMap, conf, myTaskInfo);
+     this.aggregatorHandler = aggregatorHandler;
+   }
+ 
+@@ -66,9 +70,10 @@ public Factory(MasterAggregatorHandler aggregatorHandler) {
+     @Override
+     public RequestServerHandler newHandler(
+         WorkerRequestReservedMap workerRequestReservedMap,
+-        Configuration conf) {
++        ImmutableClassesGiraphConfiguration conf,
++        TaskInfo myTaskInfo) {
+       return new MasterRequestServerHandler(workerRequestReservedMap, conf,
+-          aggregatorHandler);
++          myTaskInfo, aggregatorHandler);
+     }
+   }
+ }
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/RequestServerHandler.java b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/RequestServerHandler.java
+index 08932edc9..2c027663b 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/RequestServerHandler.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/RequestServerHandler.java
+@@ -19,11 +19,12 @@
+ package org.apache.giraph.comm.netty.handler;
+ 
+ import org.apache.giraph.GiraphConfiguration;
++import org.apache.giraph.ImmutableClassesGiraphConfiguration;
+ import org.apache.giraph.comm.requests.WritableRequest;
++import org.apache.giraph.graph.TaskInfo;
+ import org.apache.giraph.utils.SystemTime;
+ import org.apache.giraph.utils.Time;
+ import org.apache.giraph.utils.Times;
+-import org.apache.hadoop.conf.Configuration;
+ import org.apache.log4j.Logger;
+ import org.jboss.netty.buffer.ChannelBuffer;
+ import org.jboss.netty.buffer.ChannelBuffers;
+@@ -53,8 +54,8 @@ public abstract class RequestServerHandler<R> extends
+   private final boolean closeFirstRequest;
+   /** Request reserved map (for exactly one semantics) */
+   private final WorkerRequestReservedMap workerRequestReservedMap;
+-  /** My worker id */
+-  private final int myWorkerId;
++  /** My task info */
++  private final TaskInfo myTaskInfo;
+   /** Start nanoseconds for the processing time */
+   private long startProcessingNanoseconds = -1;
+ 
+@@ -63,15 +64,17 @@ public abstract class RequestServerHandler<R> extends
+    *
+    * @param workerRequestReservedMap Worker request reservation map
+    * @param conf Configuration
++   * @param myTaskInfo Current task info
+    */
+   public RequestServerHandler(
+       WorkerRequestReservedMap workerRequestReservedMap,
+-      Configuration conf) {
++      ImmutableClassesGiraphConfiguration conf,
++      TaskInfo myTaskInfo) {
+     this.workerRequestReservedMap = workerRequestReservedMap;
+     closeFirstRequest = conf.getBoolean(
+         GiraphConfiguration.NETTY_SIMULATE_FIRST_REQUEST_CLOSED,
+         GiraphConfiguration.NETTY_SIMULATE_FIRST_REQUEST_CLOSED_DEFAULT);
+-    myWorkerId = conf.getInt("mapred.task.partition", -1);
++    this.myTaskInfo = myTaskInfo;
+   }
+ 
+   @Override
+@@ -120,7 +123,7 @@ public void messageReceived(
+ 
+     // Send the response with the request id
+     ChannelBuffer buffer = ChannelBuffers.directBuffer(RESPONSE_BYTES);
+-    buffer.writeInt(myWorkerId);
++    buffer.writeInt(myTaskInfo.getTaskId());
+     buffer.writeLong(writableRequest.getRequestId());
+     buffer.writeByte(alreadyDone);
+     e.getChannel().write(buffer);
+@@ -167,10 +170,12 @@ public interface Factory {
+      *
+      * @param workerRequestReservedMap Worker request reservation map
+      * @param conf Configuration to use
++     * @param myTaskInfo Current task info
+      * @return New {@link RequestServerHandler}
+      */
+     RequestServerHandler newHandler(
+         WorkerRequestReservedMap workerRequestReservedMap,
+-        Configuration conf);
++        ImmutableClassesGiraphConfiguration conf,
++        TaskInfo myTaskInfo);
+   }
+ }
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/WorkerRequestServerHandler.java b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/WorkerRequestServerHandler.java
+index e8b6c54c0..ceafca83d 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/handler/WorkerRequestServerHandler.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/handler/WorkerRequestServerHandler.java
+@@ -18,9 +18,10 @@
+ 
+ package org.apache.giraph.comm.netty.handler;
+ 
++import org.apache.giraph.ImmutableClassesGiraphConfiguration;
+ import org.apache.giraph.comm.ServerData;
+ import org.apache.giraph.comm.requests.WorkerRequest;
+-import org.apache.hadoop.conf.Configuration;
++import org.apache.giraph.graph.TaskInfo;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
+ 
+@@ -44,11 +45,13 @@ public class WorkerRequestServerHandler<I extends WritableComparable,
+    * @param serverData               Data held by the server
+    * @param workerRequestReservedMap Worker request reservation map
+    * @param conf                     Configuration
++   * @param myTaskInfo               Current task info
+    */
+   public WorkerRequestServerHandler(ServerData<I, V, E, M> serverData,
+       WorkerRequestReservedMap workerRequestReservedMap,
+-      Configuration conf) {
+-    super(workerRequestReservedMap, conf);
++      ImmutableClassesGiraphConfiguration conf,
++      TaskInfo myTaskInfo) {
++    super(workerRequestReservedMap, conf, myTaskInfo);
+     this.serverData = serverData;
+   }
+ 
+@@ -76,9 +79,10 @@ public Factory(ServerData<I, V, E, M> serverData) {
+     @Override
+     public RequestServerHandler newHandler(
+         WorkerRequestReservedMap workerRequestReservedMap,
+-        Configuration conf) {
++        ImmutableClassesGiraphConfiguration conf,
++        TaskInfo myTaskInfo) {
+       return new WorkerRequestServerHandler<I, V, E,
+-          M>(serverData, workerRequestReservedMap, conf);
++          M>(serverData, workerRequestReservedMap, conf, myTaskInfo);
+     }
+   }
+ }
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/AddressesAndPartitionsWritable.java b/giraph/src/main/java/org/apache/giraph/graph/AddressesAndPartitionsWritable.java
+index 34d2d0565..d154034ae 100644
+--- a/giraph/src/main/java/org/apache/giraph/graph/AddressesAndPartitionsWritable.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/AddressesAndPartitionsWritable.java
+@@ -34,7 +34,7 @@
+  */
+ public class AddressesAndPartitionsWritable implements Writable {
+   /** Master information */
+-  private WorkerInfo masterInfo;
++  private MasterInfo masterInfo;
+   /** List of all workers */
+   private List<WorkerInfo> workerInfos;
+   /** Collection of partitions */
+@@ -49,7 +49,7 @@ public class AddressesAndPartitionsWritable implements Writable {
+    * @param workerInfos List of all workers
+    * @param partitionOwners Collection of partitions
+    */
+-  public AddressesAndPartitionsWritable(WorkerInfo masterInfo,
++  public AddressesAndPartitionsWritable(MasterInfo masterInfo,
+       List<WorkerInfo> workerInfos,
+       Collection<PartitionOwner> partitionOwners) {
+     this.masterInfo = masterInfo;
+@@ -72,7 +72,7 @@ public AddressesAndPartitionsWritable(
+    *
+    * @return Master information
+    */
+-  public WorkerInfo getMasterInfo() {
++  public MasterInfo getMasterInfo() {
+     return masterInfo;
+   }
+ 
+@@ -111,7 +111,7 @@ public void write(DataOutput output) throws IOException {
+ 
+   @Override
+   public void readFields(DataInput input) throws IOException {
+-    masterInfo = new WorkerInfo();
++    masterInfo = new MasterInfo();
+     masterInfo.readFields(input);
+ 
+     int workerInfosSize = input.readInt();
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/BspService.java b/giraph/src/main/java/org/apache/giraph/graph/BspService.java
+index 12ff881a0..2e4b9c138 100644
+--- a/giraph/src/main/java/org/apache/giraph/graph/BspService.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/BspService.java
+@@ -276,7 +276,7 @@ public BspService(String serverPortList,
+     this.conf = new ImmutableClassesGiraphConfiguration<I, V, E, M>(
+         context.getConfiguration());
+     this.jobId = conf.get("mapred.job.id", "Unknown Job");
+-    this.taskPartition = conf.getInt("mapred.task.partition", -1);
++    this.taskPartition = conf.getTaskPartition();
+     this.restartedSuperstep = conf.getLong(
+         GiraphConfiguration.RESTART_SUPERSTEP,
+         UNSET_SUPERSTEP);
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/BspServiceMaster.java b/giraph/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+index 1f269f190..82dc15537 100644
+--- a/giraph/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+@@ -24,8 +24,10 @@
+ import org.apache.giraph.bsp.BspInputFormat;
+ import org.apache.giraph.bsp.CentralizedServiceMaster;
+ import org.apache.giraph.bsp.SuperstepState;
+-import org.apache.giraph.comm.MasterClientServer;
+-import org.apache.giraph.comm.netty.NettyMasterClientServer;
++import org.apache.giraph.comm.MasterClient;
++import org.apache.giraph.comm.MasterServer;
++import org.apache.giraph.comm.netty.NettyMasterClient;
++import org.apache.giraph.comm.netty.NettyMasterServer;
+ import org.apache.giraph.counters.GiraphStats;
+ import org.apache.giraph.graph.GraphMapper.MapFunctions;
+ import org.apache.giraph.graph.partition.MasterGraphPartitioner;
+@@ -140,10 +142,12 @@ public class BspServiceMaster<I extends WritableComparable,
+   private MasterAggregatorHandler aggregatorHandler;
+   /** Master class */
+   private MasterCompute masterCompute;
+-  /** Communication service */
+-  private MasterClientServer commService;
++  /** IPC Client */
++  private MasterClient masterClient;
++  /** IPC Server */
++  private MasterServer masterServer;
+   /** Master info */
+-  private WorkerInfo masterInfo;
++  private MasterInfo masterInfo;
+   /** List of workers in current superstep */
+   private List<WorkerInfo> chosenWorkerInfoList = Lists.newArrayList();
+   /** Limit locality information added to each InputSplit znode */
+@@ -786,10 +790,11 @@ public boolean becomeMaster() {
+               getContext());
+           aggregatorHandler.initialize(this);
+ 
+-          commService = new NettyMasterClientServer(
+-              getContext(), getConfiguration(), this);
+-          masterInfo = new WorkerInfo(getHostname(), getTaskPartition(),
+-              commService.getMyAddress().getPort());
++          masterInfo = new MasterInfo();
++          masterServer = new NettyMasterServer(getConfiguration(), this);
++          masterInfo.setInetSocketAddress(masterServer.getMyAddress());
++          masterClient =
++              new NettyMasterClient(getContext(), getConfiguration(), this);
+ 
+           if (LOG.isInfoEnabled()) {
+             LOG.info("becomeMaster: I am now the master!");
+@@ -810,6 +815,11 @@ public boolean becomeMaster() {
+     }
+   }
+ 
++  @Override
++  public MasterInfo getMasterInfo() {
++    return masterInfo;
++  }
++
+   /**
+    * Collect and aggregate the worker statistics for a particular superstep.
+    *
+@@ -1350,7 +1360,7 @@ public SuperstepState coordinateSuperstep() throws
+       }
+     }
+ 
+-    commService.openConnections();
++    masterClient.openConnections();
+ 
+     GiraphStats.getInstance().
+         getCurrentWorkers().setValue(chosenWorkerInfoList.size());
+@@ -1361,7 +1371,7 @@ public SuperstepState coordinateSuperstep() throws
+     // We need to finalize aggregators from previous superstep (send them to
+     // worker owners) after new worker assignments
+     if (getSuperstep() >= 0) {
+-      aggregatorHandler.finishSuperstep(commService);
++      aggregatorHandler.finishSuperstep(masterClient);
+     }
+ 
+     // Finalize the valid checkpoint file prefixes and possibly
+@@ -1406,7 +1416,7 @@ public SuperstepState coordinateSuperstep() throws
+ 
+     // Collect aggregator values, then run the master.compute() and
+     // finally save the aggregator values
+-    aggregatorHandler.prepareSuperstep(commService);
++    aggregatorHandler.prepareSuperstep(masterClient);
+     runMasterCompute(getSuperstep());
+ 
+     // If the master is halted or all the vertices voted to halt and there
+@@ -1614,8 +1624,8 @@ public void cleanup() throws IOException {
+       }
+       aggregatorHandler.close();
+ 
+-      commService.closeConnections();
+-      commService.close();
++      masterClient.closeConnections();
++      masterServer.close();
+     }
+ 
+     try {
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/BspServiceWorker.java b/giraph/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+index e17e93547..fd7daf9db 100644
+--- a/giraph/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+@@ -125,7 +125,7 @@ public class BspServiceWorker<I extends WritableComparable,
+   private final WorkerAggregatorRequestProcessor
+   workerAggregatorRequestProcessor;
+   /** Master info */
+-  private WorkerInfo masterInfo = new WorkerInfo();
++  private MasterInfo masterInfo = new MasterInfo();
+   /** List of workers */
+   private List<WorkerInfo> workerInfoList = Lists.newArrayList();
+   /** Have the partition exchange children (workers) changed? */
+@@ -170,17 +170,17 @@ public BspServiceWorker(
+     registerBspEvent(partitionExchangeChildrenChanged);
+     workerGraphPartitioner =
+         getGraphPartitionerFactory().createWorkerGraphPartitioner();
+-    workerServer = new NettyWorkerServer<I, V, E, M>(getConfiguration(),
+-        this, context);
+-    workerClient = new NettyWorkerClient<I, V, E, M>(context,
+-        getConfiguration(), this);
++    workerInfo = new WorkerInfo(getTaskPartition());
++    workerServer =
++        new NettyWorkerServer<I, V, E, M>(getConfiguration(), this, context);
++    workerInfo.setInetSocketAddress(workerServer.getMyAddress());
++    workerClient =
++        new NettyWorkerClient<I, V, E, M>(context, getConfiguration(), this);
+ 
+     workerAggregatorRequestProcessor =
+         new NettyWorkerAggregatorRequestProcessor(getContext(),
+             getConfiguration(), this);
+ 
+-    workerInfo = new WorkerInfo(
+-        getHostname(), getTaskPartition(), workerServer.getPort());
+     this.workerContext = getConfiguration().createWorkerContext(null);
+ 
+     aggregatorHandler =
+@@ -334,7 +334,7 @@ private long loadEdges() throws KeeperException, InterruptedException {
+   }
+ 
+   @Override
+-  public WorkerInfo getMasterInfo() {
++  public MasterInfo getMasterInfo() {
+     return masterInfo;
+   }
+ 
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/MasterAggregatorHandler.java b/giraph/src/main/java/org/apache/giraph/graph/MasterAggregatorHandler.java
+index 9db4667ef..c45417ac1 100644
+--- a/giraph/src/main/java/org/apache/giraph/graph/MasterAggregatorHandler.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/MasterAggregatorHandler.java
+@@ -20,7 +20,7 @@
+ 
+ import org.apache.giraph.ImmutableClassesGiraphConfiguration;
+ import org.apache.giraph.bsp.SuperstepState;
+-import org.apache.giraph.comm.MasterClientServer;
++import org.apache.giraph.comm.MasterClient;
+ import org.apache.giraph.comm.aggregators.AggregatorUtils;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.util.Progressable;
+@@ -145,9 +145,9 @@ private void checkAggregatorName(String name) {
+   /**
+    * Prepare aggregators for current superstep
+    *
+-   * @param commService Communication service
++   * @param masterClient IPC client on master
+    */
+-  public void prepareSuperstep(MasterClientServer commService) {
++  public void prepareSuperstep(MasterClient masterClient) {
+     if (LOG.isDebugEnabled()) {
+       LOG.debug("prepareSuperstep: Start preapring aggregators");
+     }
+@@ -169,9 +169,9 @@ public void prepareSuperstep(MasterClientServer commService) {
+   /**
+    * Finalize aggregators for current superstep and share them with workers
+    *
+-   * @param commService Communication service
++   * @param masterClient IPC client on master
+    */
+-  public void finishSuperstep(MasterClientServer commService) {
++  public void finishSuperstep(MasterClient masterClient) {
+     if (LOG.isDebugEnabled()) {
+       LOG.debug("finishSuperstep: Start finishing aggregators");
+     }
+@@ -192,12 +192,12 @@ public void finishSuperstep(MasterClientServer commService) {
+     try {
+       for (Map.Entry<String, AggregatorWrapper<Writable>> entry :
+           aggregatorMap.entrySet()) {
+-        commService.sendAggregator(entry.getKey(),
++        masterClient.sendAggregator(entry.getKey(),
+             entry.getValue().getAggregatorClass(),
+             entry.getValue().getPreviousAggregatedValue());
+         progressable.progress();
+       }
+-      commService.finishSendingAggregatedValues();
++      masterClient.finishSendingAggregatedValues();
+     } catch (IOException e) {
+       throw new IllegalStateException("finishSuperstep: " +
+           "IOException occurred while sending aggregators", e);
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/MasterClientServer.java b/giraph/src/main/java/org/apache/giraph/graph/MasterInfo.java
+similarity index 68%
+rename from giraph/src/main/java/org/apache/giraph/comm/MasterClientServer.java
+rename to giraph/src/main/java/org/apache/giraph/graph/MasterInfo.java
+index 68900f15b..d38e52a1e 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/MasterClientServer.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/MasterInfo.java
+@@ -16,10 +16,25 @@
+  * limitations under the License.
+  */
+ 
+-package org.apache.giraph.comm;
++package org.apache.giraph.graph;
+ 
+ /**
+- * Interface for both master client and master server
++ * Information about the master that is sent to other workers.
+  */
+-public interface MasterClientServer extends MasterClient, MasterServer {
++public class MasterInfo extends TaskInfo {
++  /**
++   * Constructor
++   */
++  public MasterInfo() {
++  }
++
++  @Override
++  public int getTaskId() {
++    return -1;
++  }
++
++  @Override
++  public String toString() {
++    return "Master(hostname=" + getHostname() + ", port=" + getPort() + ")";
++  }
+ }
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/TaskInfo.java b/giraph/src/main/java/org/apache/giraph/graph/TaskInfo.java
+new file mode 100644
+index 000000000..316e18085
+--- /dev/null
++++ b/giraph/src/main/java/org/apache/giraph/graph/TaskInfo.java
+@@ -0,0 +1,120 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.giraph.graph;
++
++import org.apache.hadoop.io.Writable;
++
++import java.io.DataInput;
++import java.io.DataOutput;
++import java.io.IOException;
++import java.net.InetSocketAddress;
++
++/**
++ * Abstract class for information about any task - worker or master.
++ */
++public abstract class TaskInfo implements Writable {
++  /** Task hostname */
++  private String hostname;
++  /** Port that the IPC server is using */
++  private int port;
++
++  /**
++   * Constructor
++   */
++  public TaskInfo() {
++  }
++
++  /**
++   * Get this task's hostname
++   *
++   * @return Hostname
++   */
++  public String getHostname() {
++    return hostname;
++  }
++
++  /**
++   * Get port that the IPC server of this task is using
++   *
++   * @return Port
++   */
++  public int getPort() {
++    return port;
++  }
++
++  /**
++   * Set address that the IPC server of this task is using
++   *
++   * @param address Address
++   */
++  public void setInetSocketAddress(InetSocketAddress address) {
++    this.port = address.getPort();
++    this.hostname = address.getHostName();
++  }
++
++  /**
++   * Get a new instance of the InetSocketAddress for this hostname and port
++   *
++   * @return InetSocketAddress of the hostname and port.
++   */
++  public InetSocketAddress getInetSocketAddress() {
++    return new InetSocketAddress(hostname, port);
++  }
++
++  /**
++   * Get task partition id of this task
++   *
++   * @return Task partition id of this task
++   */
++  public abstract int getTaskId();
++
++  @Override
++  public boolean equals(Object other) {
++    if (other instanceof TaskInfo) {
++      TaskInfo taskInfo = (TaskInfo) other;
++      if (hostname.equals(taskInfo.getHostname()) &&
++          (getTaskId() == taskInfo.getTaskId()) &&
++          (port == taskInfo.getPort())) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  @Override
++  public void readFields(DataInput input) throws IOException {
++    hostname = input.readUTF();
++    port = input.readInt();
++  }
++
++  @Override
++  public void write(DataOutput output) throws IOException {
++    output.writeUTF(hostname);
++    output.writeInt(port);
++  }
++
++  @Override
++  public int hashCode() {
++    int result = 17;
++    result = 37 * result + getPort();
++    result = 37 * result + hostname.hashCode();
++    result = 37 * result + getTaskId();
++    return result;
++  }
++}
+diff --git a/giraph/src/main/java/org/apache/giraph/graph/WorkerInfo.java b/giraph/src/main/java/org/apache/giraph/graph/WorkerInfo.java
+index fe713ec41..f51fbacf4 100644
+--- a/giraph/src/main/java/org/apache/giraph/graph/WorkerInfo.java
++++ b/giraph/src/main/java/org/apache/giraph/graph/WorkerInfo.java
+@@ -23,18 +23,12 @@
+ import java.io.IOException;
+ import java.net.InetSocketAddress;
+ 
+-import org.apache.hadoop.io.Writable;
+-
+ /**
+  * Information about a worker that is sent to the master and other workers.
+  */
+-public class WorkerInfo implements Writable {
+-  /** Worker hostname */
+-  private String hostname;
+-  /** Task Partition (Worker) ID of this worker */
+-  private int taskId = -1;
+-  /** Port that the IPC server is using */
+-  private int port = -1;
++public class WorkerInfo extends TaskInfo {
++  /** Task Partition (Worker) ID of this task */
++  private int taskId;
+   /** Hostname + "_" + id for easier debugging */
+   private String hostnameId;
+ 
+@@ -47,92 +41,43 @@ public WorkerInfo() {
+   /**
+    * Constructor with parameters.
+    *
+-   * @param hostname Hostname of this worker.
+    * @param taskId the task partition for this worker
+-   * @param port Port of the service.
+    */
+-  public WorkerInfo(String hostname, int taskId, int port) {
+-    this.hostname = hostname;
++  public WorkerInfo(int taskId) {
+     this.taskId = taskId;
+-    this.port = port;
+-    this.hostnameId = hostname + "_" + taskId;
+-  }
+-
+-  /**
+-   * Constructor with InetSocketAddress
+-   *
+-   * @param address Address of this worker
+-   * @param taskId The task partition for this worker
+-   */
+-  public WorkerInfo(InetSocketAddress address, int taskId) {
+-    this(address.getHostName(), taskId, address.getPort());
+-  }
+-
+-  public String getHostname() {
+-    return hostname;
+   }
+ 
++  @Override
+   public int getTaskId() {
+     return taskId;
+   }
+ 
+-  public String getHostnameId() {
+-    return hostnameId;
+-  }
+-
+-  /**
+-   * Get a new instance of the InetSocketAddress for this hostname and port
+-   *
+-   * @return InetSocketAddress of the hostname and port.
+-   */
+-  public InetSocketAddress getInetSocketAddress() {
+-    return new InetSocketAddress(hostname, port);
+-  }
+-
+-  public int getPort() {
+-    return port;
+-  }
+-
+   @Override
+-  public boolean equals(Object other) {
+-    if (other instanceof WorkerInfo) {
+-      WorkerInfo workerInfo = (WorkerInfo) other;
+-      if (hostname.equals(workerInfo.getHostname()) &&
+-          (taskId == workerInfo.getTaskId()) &&
+-          (port == workerInfo.getPort())) {
+-        return true;
+-      }
+-    }
+-    return false;
++  public void setInetSocketAddress(InetSocketAddress address) {
++    super.setInetSocketAddress(address);
++    hostnameId = getHostname() + "_" + getTaskId();
+   }
+ 
+-  @Override
+-  public int hashCode() {
+-    int result = 17;
+-    result = 37 * result + port;
+-    result = 37 * result + hostname.hashCode();
+-    result = 37 * result + taskId;
+-    return result;
++  public String getHostnameId() {
++    return hostnameId;
+   }
+ 
+   @Override
+   public String toString() {
+-    return "Worker(hostname=" + hostname + ", MRtaskID=" +
+-        taskId + ", port=" + port + ")";
++    return "Worker(hostname=" + getHostname() + ", MRtaskID=" +
++        getTaskId() + ", port=" + getPort() + ")";
+   }
+ 
+   @Override
+   public void readFields(DataInput input) throws IOException {
+-    hostname = input.readUTF();
++    super.readFields(input);
+     taskId = input.readInt();
+-    port = input.readInt();
+-    hostnameId = hostname + "_" + taskId;
++    hostnameId = getHostname() + "_" + getTaskId();
+   }
+ 
+   @Override
+   public void write(DataOutput output) throws IOException {
+-    output.writeUTF(hostname);
++    super.write(output);
+     output.writeInt(taskId);
+-    output.writeInt(port);
+   }
+ }
+diff --git a/giraph/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java b/giraph/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java
+index 8719dd8d8..c69b3023c 100644
+--- a/giraph/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java
++++ b/giraph/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java
+@@ -138,7 +138,7 @@ public ZooKeeperManager(Mapper<?, ?, ?, ?>.Context context,
+     throws IOException {
+     this.context = context;
+     this.conf = configuration;
+-    taskPartition = conf.getInt("mapred.task.partition", -1);
++    taskPartition = conf.getTaskPartition();
+     jobId = conf.get("mapred.job.id", "Unknown Job");
+     baseDirectory =
+         new Path(conf.get(GiraphConfiguration.ZOOKEEPER_MANAGER_DIRECTORY,
+diff --git a/giraph/src/test/java/org/apache/giraph/comm/ConnectionTest.java b/giraph/src/test/java/org/apache/giraph/comm/ConnectionTest.java
+index ca522da4c..64404c01a 100644
+--- a/giraph/src/test/java/org/apache/giraph/comm/ConnectionTest.java
++++ b/giraph/src/test/java/org/apache/giraph/comm/ConnectionTest.java
+@@ -74,15 +74,16 @@ public void connectSingleClientServer() throws IOException {
+ 
+     ServerData<IntWritable, IntWritable, IntWritable, IntWritable> serverData =
+         MockUtils.createNewServerData(conf, context);
++    WorkerInfo workerInfo = new WorkerInfo(-1);
+     NettyServer server =
+         new NettyServer(conf,
+-            new WorkerRequestServerHandler.Factory(serverData));
++            new WorkerRequestServerHandler.Factory(serverData), workerInfo);
+     server.start();
++    workerInfo.setInetSocketAddress(server.getMyAddress());
+ 
+-    NettyClient client = new NettyClient(context, conf);
++    NettyClient client = new NettyClient(context, conf, new WorkerInfo());
+     client.connectAllAddresses(
+-        Lists.<WorkerInfo>newArrayList(
+-            new WorkerInfo(server.getMyAddress(), -1)));
++        Lists.<WorkerInfo>newArrayList(workerInfo));
+ 
+     client.stop();
+     server.stop();
+@@ -104,17 +105,25 @@ public void connectOneClientToThreeServers() throws IOException {
+    RequestServerHandler.Factory requestServerHandlerFactory =
+        new WorkerRequestServerHandler.Factory(serverData);
+ 
+-    NettyServer server1 = new NettyServer(conf, requestServerHandlerFactory);
++    WorkerInfo workerInfo1 = new WorkerInfo(1);
++    NettyServer server1 =
++        new NettyServer(conf, requestServerHandlerFactory, workerInfo1);
+     server1.start();
+-    NettyServer server2 = new NettyServer(conf, requestServerHandlerFactory);
++    workerInfo1.setInetSocketAddress(server1.getMyAddress());
++
++    WorkerInfo workerInfo2 = new WorkerInfo(2);
++    NettyServer server2 =
++        new NettyServer(conf, requestServerHandlerFactory, workerInfo2);
+     server2.start();
+-    NettyServer server3 = new NettyServer(conf, requestServerHandlerFactory);
++    workerInfo2.setInetSocketAddress(server2.getMyAddress());
++
++    WorkerInfo workerInfo3 = new WorkerInfo(3);
++    NettyServer server3 =
++        new NettyServer(conf, requestServerHandlerFactory, workerInfo3);
+     server3.start();
++    workerInfo3.setInetSocketAddress(server3.getMyAddress());
+ 
+-    NettyClient client = new NettyClient(context, conf);
+-    WorkerInfo workerInfo1 = new WorkerInfo(server1.getMyAddress(), 1);
+-    WorkerInfo workerInfo2 = new WorkerInfo(server2.getMyAddress(), 2);
+-    WorkerInfo workerInfo3 = new WorkerInfo(server3.getMyAddress(), 3);
++    NettyClient client = new NettyClient(context, conf, new WorkerInfo());
+     List<WorkerInfo> addresses = Lists.<WorkerInfo>newArrayList(workerInfo1,
+         workerInfo2, workerInfo3);
+     client.connectAllAddresses(addresses);
+@@ -138,18 +147,18 @@ public void connectThreeClientsToOneServer() throws IOException {
+ 
+     ServerData<IntWritable, IntWritable, IntWritable, IntWritable> serverData =
+         MockUtils.createNewServerData(conf, context);
++    WorkerInfo workerInfo = new WorkerInfo(-1);
+     NettyServer server = new NettyServer(conf,
+-        new WorkerRequestServerHandler.Factory(serverData));
++        new WorkerRequestServerHandler.Factory(serverData), workerInfo);
+     server.start();
++    workerInfo.setInetSocketAddress(server.getMyAddress());
+ 
+-    List<WorkerInfo> addresses =
+-        Lists.<WorkerInfo>newArrayList(
+-            new WorkerInfo(server.getMyAddress(), -1));
+-    NettyClient client1 = new NettyClient(context, conf);
++    List<WorkerInfo> addresses = Lists.<WorkerInfo>newArrayList(workerInfo);
++    NettyClient client1 = new NettyClient(context, conf, new WorkerInfo());
+     client1.connectAllAddresses(addresses);
+-    NettyClient client2 = new NettyClient(context, conf);
++    NettyClient client2 = new NettyClient(context, conf, new WorkerInfo());
+     client2.connectAllAddresses(addresses);
+-    NettyClient client3 = new NettyClient(context, conf);
++    NettyClient client3 = new NettyClient(context, conf, new WorkerInfo());
+     client3.connectAllAddresses(addresses);
+ 
+     client1.stop();
+diff --git a/giraph/src/test/java/org/apache/giraph/comm/RequestFailureTest.java b/giraph/src/test/java/org/apache/giraph/comm/RequestFailureTest.java
+index 886a1688e..5133274c3 100644
+--- a/giraph/src/test/java/org/apache/giraph/comm/RequestFailureTest.java
++++ b/giraph/src/test/java/org/apache/giraph/comm/RequestFailureTest.java
+@@ -128,29 +128,7 @@ private void checkResult(int numRequests) throws IOException {
+ 
+   @Test
+   public void send2Requests() throws IOException {
+-    // Start the service
+-    serverData = MockUtils.createNewServerData(conf, context);
+-    server = new NettyServer(conf,
+-        new WorkerRequestServerHandler.Factory(serverData));
+-    server.start();
+-    client = new NettyClient(context, conf);
+-    client.connectAllAddresses(
+-        Lists.<WorkerInfo>newArrayList(
+-            new WorkerInfo(server.getMyAddress(), -1)));
+-
+-    // Send the request 2x
+-    WritableRequest request1 = getRequest();
+-    WritableRequest request2 = getRequest();
+-    client.sendWritableRequest(-1, request1);
+-    client.sendWritableRequest(-1, request2);
+-    client.waitAllRequests();
+-
+-    // Stop the service
+-    client.stop();
+-    server.stop();
+-
+-    // Check the output (should have been only processed once)
+-    checkResult(2);
++    checkSendingTwoRequests();
+   }
+ 
+   @Test
+@@ -162,29 +140,7 @@ public void alreadyProcessedRequest() throws IOException {
+     // Loop every 2 seconds
+     conf.setInt(GiraphConfiguration.WAITING_REQUEST_MSECS, 2000);
+ 
+-    // Start the service
+-    serverData = MockUtils.createNewServerData(conf, context);
+-    server = new NettyServer(conf,
+-        new WorkerRequestServerHandler.Factory(serverData));
+-    server.start();
+-    client = new NettyClient(context, conf);
+-    client.connectAllAddresses(
+-        Lists.<WorkerInfo>newArrayList(
+-            new WorkerInfo(server.getMyAddress(), -1)));
+-
+-    // Send the request 2x, but should only be processed once
+-    WritableRequest request1 = getRequest();
+-    WritableRequest request2 = getRequest();
+-    client.sendWritableRequest(-1, request1);
+-    client.sendWritableRequest(-1, request2);
+-    client.waitAllRequests();
+-
+-    // Stop the service
+-    client.stop();
+-    server.stop();
+-
+-    // Check the output (should have been only processed once)
+-    checkResult(2);
++    checkSendingTwoRequests();
+   }
+ 
+   @Test
+@@ -196,21 +152,26 @@ public void resendRequest() throws IOException {
+     // Loop every 2 seconds
+     conf.setInt(GiraphConfiguration.WAITING_REQUEST_MSECS, 2000);
+ 
++    checkSendingTwoRequests();
++  }
++
++  private void checkSendingTwoRequests() throws IOException {
+     // Start the service
+     serverData = MockUtils.createNewServerData(conf, context);
++    WorkerInfo workerInfo = new WorkerInfo(-1);
+     server = new NettyServer(conf,
+-        new WorkerRequestServerHandler.Factory(serverData));
++        new WorkerRequestServerHandler.Factory(serverData), workerInfo);
+     server.start();
+-    client = new NettyClient(context, conf);
++    workerInfo.setInetSocketAddress(server.getMyAddress());
++    client = new NettyClient(context, conf, new WorkerInfo());
+     client.connectAllAddresses(
+-        Lists.<WorkerInfo>newArrayList(
+-            new WorkerInfo(server.getMyAddress(), -1)));
++        Lists.<WorkerInfo>newArrayList(workerInfo));
+ 
+     // Send the request 2x, but should only be processed once
+     WritableRequest request1 = getRequest();
+     WritableRequest request2 = getRequest();
+-    client.sendWritableRequest(-1, request1);
+-    client.sendWritableRequest(-1, request2);
++    client.sendWritableRequest(workerInfo.getTaskId(), request1);
++    client.sendWritableRequest(workerInfo.getTaskId(), request2);
+     client.waitAllRequests();
+ 
+     // Stop the service
+diff --git a/giraph/src/test/java/org/apache/giraph/comm/RequestTest.java b/giraph/src/test/java/org/apache/giraph/comm/RequestTest.java
+index 05dfcbc7a..9ff50daef 100644
+--- a/giraph/src/test/java/org/apache/giraph/comm/RequestTest.java
++++ b/giraph/src/test/java/org/apache/giraph/comm/RequestTest.java
+@@ -67,6 +67,8 @@ public class RequestTest {
+   private NettyServer server;
+   /** Client */
+   private NettyClient client;
++  /** Worker info */
++  private WorkerInfo workerInfo;
+ 
+   /**
+    * Only for testing.
+@@ -92,13 +94,14 @@ public void setUp() throws IOException {
+ 
+     // Start the service
+     serverData = MockUtils.createNewServerData(conf, context);
++    workerInfo = new WorkerInfo(-1);
+     server = new NettyServer(conf,
+-        new WorkerRequestServerHandler.Factory(serverData));
++        new WorkerRequestServerHandler.Factory(serverData), workerInfo);
+     server.start();
+-    client = new NettyClient(context, conf);
++    workerInfo.setInetSocketAddress(server.getMyAddress());
++    client = new NettyClient(context, conf, new WorkerInfo());
+     client.connectAllAddresses(
+-        Lists.<WorkerInfo>newArrayList(
+-            new WorkerInfo(server.getMyAddress(), -1)));
++        Lists.<WorkerInfo>newArrayList(workerInfo));
+   }
+ 
+   @Test
+@@ -120,7 +123,7 @@ public void sendVertexPartition() throws IOException {
+     IntWritable> request =
+       new SendVertexRequest<IntWritable, IntWritable,
+       IntWritable, IntWritable>(partitionId, vertices);
+-    client.sendWritableRequest(-1, request);
++    client.sendWritableRequest(workerInfo.getTaskId(), request);
+     client.waitAllRequests();
+ 
+     // Stop the service
+@@ -165,7 +168,7 @@ public void sendWorkerMessagesRequest() throws IOException {
+         IntWritable> request =
+       new SendWorkerMessagesRequest<IntWritable, IntWritable,
+             IntWritable, IntWritable>(dataToSend);
+-    client.sendWritableRequest(-1, request);
++    client.sendWritableRequest(workerInfo.getTaskId(), request);
+     client.waitAllRequests();
+ 
+     // Stop the service
+@@ -228,7 +231,7 @@ public void sendPartitionMutationsRequest() throws IOException {
+     IntWritable> request =
+       new SendPartitionMutationsRequest<IntWritable, IntWritable,
+       IntWritable, IntWritable>(partitionId, vertexIdMutations);
+-    client.sendWritableRequest(-1, request);
++    client.sendWritableRequest(workerInfo.getTaskId(), request);
+     client.waitAllRequests();
+ 
+     // Stop the service
+diff --git a/giraph/src/test/java/org/apache/giraph/comm/SaslConnectionTest.java b/giraph/src/test/java/org/apache/giraph/comm/SaslConnectionTest.java
+index fa8bcba09..837a2977e 100644
+--- a/giraph/src/test/java/org/apache/giraph/comm/SaslConnectionTest.java
++++ b/giraph/src/test/java/org/apache/giraph/comm/SaslConnectionTest.java
+@@ -83,16 +83,17 @@ public void connectSingleClientServer() throws IOException {
+     when(mockedSaslServerFactory.newHandler(conf)).
+         thenReturn(mockedSaslServerHandler);
+ 
++    WorkerInfo workerInfo = new WorkerInfo(-1);
+     NettyServer server =
+         new NettyServer(conf,
+             new WorkerRequestServerHandler.Factory(serverData),
++            workerInfo,
+             mockedSaslServerFactory);
+     server.start();
++    workerInfo.setInetSocketAddress(server.getMyAddress());
+ 
+-    NettyClient client = new NettyClient(context, conf);
+-    client.connectAllAddresses(
+-        Lists.<WorkerInfo>newArrayList(
+-            new WorkerInfo(server.getMyAddress(), -1)));
++    NettyClient client = new NettyClient(context, conf, new WorkerInfo());
++    client.connectAllAddresses(Lists.<WorkerInfo>newArrayList(workerInfo));
+ 
+     client.stop();
+     server.stop();

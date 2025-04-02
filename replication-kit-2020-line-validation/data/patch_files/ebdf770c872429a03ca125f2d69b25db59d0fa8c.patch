@@ -1,0 +1,93 @@
+From ebdf770c872429a03ca125f2d69b25db59d0fa8c Mon Sep 17 00:00:00 2001
+From: Matthias Boehm <mboehm7@gmail.com>
+Date: Thu, 4 Jan 2018 17:53:53 -0800
+Subject: [PATCH] [SYSTEMML-2058] Fix sparse-unsafe, sparse-dense unary block
+ operations
+
+This patch fixes a special case of sparse-unsafe unary operations for
+sparse inputs and dense outputs. These operations reset the output to
+the constant value op(0) and subsequently redirect to sparseSafe
+operations which in turn use append to add computed values. However,
+this append rejects computed 0s (as is the case for NOT), leading to
+incorrect results. We now directly update the dense target and also
+ensure that the reset uses the double instead of long function because
+the latter might not be implemented for all function objects.
+---
+ .../runtime/matrix/data/MatrixBlock.java      | 25 +++++++++++--------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/src/main/java/org/apache/sysml/runtime/matrix/data/MatrixBlock.java b/src/main/java/org/apache/sysml/runtime/matrix/data/MatrixBlock.java
+index 233658897e9..ff70cfdb44b 100644
+--- a/src/main/java/org/apache/sysml/runtime/matrix/data/MatrixBlock.java
++++ b/src/main/java/org/apache/sysml/runtime/matrix/data/MatrixBlock.java
+@@ -2599,9 +2599,8 @@ public MatrixValue unaryOperations(UnaryOperator op, MatrixValue result)
+ 		MatrixBlock ret = checkType(result);
+ 		
+ 		// estimate the sparsity structure of result matrix
+-		boolean sp = this.sparse; // by default, we guess result.sparsity=input.sparsity
+-		if (!op.sparseSafe)
+-			sp = false; // if the operation is not sparse safe, then result will be in dense format
++		// by default, we guess result.sparsity=input.sparsity, unless not sparse safe
++		boolean sp = this.sparse && op.sparseSafe;
+ 		
+ 		//allocate output
+ 		if( ret == null )
+@@ -2643,6 +2642,7 @@ private void sparseUnaryOperations(UnaryOperator op, MatrixBlock ret)
+ 			return;
+ 		
+ 		final int m = rlen;
++		final int n = clen;
+ 		
+ 		if( sparse && ret.sparse ) //SPARSE <- SPARSE
+ 		{
+@@ -2671,21 +2671,24 @@ private void sparseUnaryOperations(UnaryOperator op, MatrixBlock ret)
+ 		else if( sparse ) //DENSE <- SPARSE
+ 		{
+ 			SparseBlock a = sparseBlock;
+-			
++			DenseBlock c = ret.denseBlock;
++			long nnz = (ret.nonZeros > 0) ?
++				(long) m*n-a.size() : 0;
+ 			for(int i=0; i<m; i++) {
+ 				if( a.isEmpty(i) ) continue;
+-			
+ 				int apos = a.pos(i);
+ 				int alen = a.size(i);
+ 				int[] aix = a.indexes(i);
+ 				double[] avals = a.values(i);
+-				
++				double[] cvals = c.values(i);
++				int cix = c.pos(i);
+ 				for( int j=apos; j<apos+alen; j++ ) {
+ 					double val = op.fn.execute(avals[j]);
+-					ret.appendValue(i, aix[j], val);
++					cvals[cix + aix[j]] = val; 
++					nnz += (val != 0) ? 1 : 0;
+ 				}
+ 			}
+-			//nnz maintained on appendValue
++			ret.nonZeros = nnz;
+ 		}
+ 		else //DENSE <- DENSE
+ 		{
+@@ -2713,7 +2716,7 @@ private void denseUnaryOperations(UnaryOperator op, MatrixBlock ret)
+ 		throws DMLRuntimeException
+ 	{
+ 		//prepare 0-value init (determine if unnecessarily sparse-unsafe)
+-		double val0 = op.fn.execute(0);
++		double val0 = op.fn.execute(0d);
+ 		
+ 		final int m = rlen;
+ 		final int n = clen;
+@@ -2727,8 +2730,10 @@ private void denseUnaryOperations(UnaryOperator op, MatrixBlock ret)
+ 		}
+ 		
+ 		//redirection to sparse safe operation w/ init by val0
+-		if( sparse && val0 != 0 )
++		if( sparse && val0 != 0 ) {
+ 			ret.reset(m, n, val0);
++			ret.nonZeros = (long)m * n;
++		}
+ 		sparseUnaryOperations(op, ret);
+ 	}
+ 

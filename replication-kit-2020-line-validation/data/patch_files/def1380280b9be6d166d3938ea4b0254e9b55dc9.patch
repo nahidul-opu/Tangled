@@ -1,0 +1,209 @@
+From def1380280b9be6d166d3938ea4b0254e9b55dc9 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 1 Oct 2008 21:52:11 +0000
+Subject: [PATCH] FIX: Can't download files containing space or + in their
+ names by HTTP (IVY-923)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@700941 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/util/url/AbstractURLHandler.java      | 40 +++++++++++++++++++
+ .../apache/ivy/util/url/BasicURLHandler.java  | 34 ++--------------
+ .../ivy/util/url/HttpClientHandler.java       |  6 +--
+ 4 files changed, 48 insertions(+), 33 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 5e139a31f..ca2063058 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -98,6 +98,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Maven Pom reader doesn't handle optional dependencies correctly in some instances (IVY-926) (thanks to Phil Messenger)
+ - FIX: ivy:settings doesn't work if id is a property (IVY-925)
+ - FIX: HttpClientHandler hanging in certain cases (IVY-930) (thanks to Scott Hebert)
++- FIX: Can't download files containing space or + in their names by HTTP (IVY-923)
+ 
+    2.0.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/util/url/AbstractURLHandler.java b/src/java/org/apache/ivy/util/url/AbstractURLHandler.java
+index c7e519088..e8e0090ab 100644
+--- a/src/java/org/apache/ivy/util/url/AbstractURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/AbstractURLHandler.java
+@@ -17,12 +17,18 @@
+  */
+ package org.apache.ivy.util.url;
+ 
++import java.net.MalformedURLException;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.net.URL;
+ import java.net.HttpURLConnection;
++import java.util.regex.Pattern;
+ import java.io.IOException;
+ 
+ public abstract class AbstractURLHandler implements URLHandler {
+     
++    private static final Pattern ESCAPE_PATTERN = Pattern.compile("%25([0-9a-fA-F][0-9a-fA-F])");
++
+     // the request method to use. TODO: don't use a static here
+     private static int requestMethod = REQUEST_METHOD_HEAD;
+ 
+@@ -79,4 +85,38 @@ public void setRequestMethod(int requestMethod) {
+     public int getRequestMethod() {
+         return requestMethod;
+     }
++    
++    protected String normalizeToString(URL url) throws IOException {
++        if (!"http".equals(url.getProtocol()) && !"https".equals(url.getProtocol())) {
++            return url.toExternalForm();
++        }
++        
++        try {
++            URI uri = new URI(url.getProtocol(), url.getUserInfo(), url.getHost(), 
++                    url.getPort(), url.getPath(), url.getQuery(), url.getRef());
++            
++            // it is possible that the original url was already (partial) escaped,
++            // so we must unescape all '%' followed by 2 hexadecimals...
++            String uriString = uri.toString();
++            
++            // manually escape the '+' character
++            uriString = uriString.replaceAll("\\+", "%2B");
++            
++            return ESCAPE_PATTERN.matcher(uriString).replaceAll("%$1");
++        } catch (URISyntaxException e) {
++            IOException ioe = new MalformedURLException("Couldn't convert '" 
++                + url.toString() + "' to a valid URI"); 
++            ioe.initCause(e); 
++            throw ioe;
++        }
++    }
++    
++    protected URL normalizeToURL(URL url) throws IOException {
++        if (!"http".equals(url.getProtocol()) && !"https".equals(url.getProtocol())) {
++            return url;
++        }
++        
++        return new URL(normalizeToString(url));
++    }
++
+ }
+diff --git a/src/java/org/apache/ivy/util/url/BasicURLHandler.java b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+index ea2ad8edd..586488efe 100644
+--- a/src/java/org/apache/ivy/util/url/BasicURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+@@ -25,13 +25,9 @@
+ import java.io.InputStream;
+ import java.io.OutputStream;
+ import java.net.HttpURLConnection;
+-import java.net.MalformedURLException;
+-import java.net.URI;
+-import java.net.URISyntaxException;
+ import java.net.URL;
+ import java.net.URLConnection;
+ import java.net.UnknownHostException;
+-import java.util.regex.Pattern;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.util.CopyProgressListener;
+@@ -42,8 +38,6 @@
+  * 
+  */
+ public class BasicURLHandler extends AbstractURLHandler {
+-    
+-    private static final Pattern ESCAPE_PATTERN = Pattern.compile("%25([0-9a-fA-F][0-9a-fA-F])");
+ 
+     private static final int BUFFER_SIZE = 64 * 1024;
+ 
+@@ -70,7 +64,7 @@ public URLInfo getURLInfo(URL url) {
+     public URLInfo getURLInfo(URL url, int timeout) {
+         URLConnection con = null;
+         try {
+-            url = normalize(url);
++            url = normalizeToURL(url);
+             con = url.openConnection();
+             con.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
+             if (con instanceof HttpURLConnection) {
+@@ -101,26 +95,6 @@ public URLInfo getURLInfo(URL url, int timeout) {
+         return UNAVAILABLE;
+     }
+ 
+-    private URL normalize(URL url) throws IOException {
+-        if ("http".equals(url.getProtocol()) || "https".equals(url.getProtocol())) {
+-            try { 
+-                URI uri = new URI(url.getProtocol(), url.getUserInfo(), url.getHost(), 
+-                        url.getPort(), url.getPath(), url.getQuery(), url.getRef());
+-                
+-                // it is possible that the original url was already (partial) escaped,
+-                // so we must unescape all '%' followed by 2 hexadecimals...
+-                String uriString = uri.toString();
+-                url = new URL(ESCAPE_PATTERN.matcher(uriString).replaceAll("%$1"));
+-            } catch (URISyntaxException e) {
+-                IOException ioe = new MalformedURLException("Couldn't convert '" 
+-                    + url.toString() + "' to a valid URI"); 
+-                ioe.initCause(e); 
+-                throw ioe;
+-            }
+-        }
+-        return url;
+-    }
+-
+     private boolean checkStatusCode(URL url, HttpURLConnection con) throws IOException {
+         int status = con.getResponseCode();
+         if (status == HttpStatus.SC_OK) {
+@@ -143,7 +117,7 @@ public InputStream openStream(URL url) throws IOException {
+         URLConnection conn = null;
+         InputStream inStream = null;
+         try {
+-            url = normalize(url);
++            url = normalizeToURL(url);
+             conn = url.openConnection();
+             conn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
+             if (conn instanceof HttpURLConnection) {
+@@ -175,7 +149,7 @@ public InputStream openStream(URL url) throws IOException {
+     public void download(URL src, File dest, CopyProgressListener l) throws IOException {
+         URLConnection srcConn = null;
+         try {
+-            src = normalize(src);
++            src = normalizeToURL(src);
+             srcConn = src.openConnection();
+             srcConn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
+             if (srcConn instanceof HttpURLConnection) {
+@@ -211,7 +185,7 @@ public void upload(File source, URL dest, CopyProgressListener l) throws IOExcep
+ 
+         HttpURLConnection conn = null;
+         try {
+-            dest = normalize(dest);
++            dest = normalizeToURL(dest);
+             conn = (HttpURLConnection) dest.openConnection();
+             conn.setDoOutput(true);
+             conn.setRequestMethod("PUT");
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index 32e731fde..ed3d58eb0 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -121,7 +121,7 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+     public void upload(File src, URL dest, CopyProgressListener l) throws IOException {
+         HttpClient client = getClient(dest);
+ 
+-        PutMethod put = new PutMethod(dest.toExternalForm());
++        PutMethod put = new PutMethod(normalizeToString(dest));
+         put.setDoAuthentication(useAuthentication(dest) || useProxyAuthentication());
+         FileInputStream fileStream = null;
+         try {
+@@ -243,7 +243,7 @@ private GetMethod doGet(URL url, int timeout) throws IOException {
+         HttpClient client = getClient(url);
+         client.setTimeout(timeout);
+ 
+-        GetMethod get = new GetMethod(url.toExternalForm());
++        GetMethod get = new GetMethod(normalizeToString(url));
+         get.setDoAuthentication(useAuthentication(url) || useProxyAuthentication());
+         client.executeMethod(get);
+         return get;
+@@ -253,7 +253,7 @@ private HeadMethod doHead(URL url, int timeout) throws IOException {
+         HttpClient client = getClient(url);
+         client.setTimeout(timeout);
+ 
+-        HeadMethod head = new HeadMethod(url.toExternalForm());
++        HeadMethod head = new HeadMethod(normalizeToString(url));
+         head.setDoAuthentication(useAuthentication(url) || useProxyAuthentication());
+         client.executeMethod(head);
+         return head;

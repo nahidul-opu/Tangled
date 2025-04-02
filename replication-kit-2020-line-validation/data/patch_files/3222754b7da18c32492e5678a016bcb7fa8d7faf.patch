@@ -1,0 +1,277 @@
+From 3222754b7da18c32492e5678a016bcb7fa8d7faf Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 5 Jan 2011 22:55:07 +0000
+Subject: [PATCH] FIX: Dynamic version resolution result can be incorrect when
+ ivy metadata contains extra attributes (IVY-1236)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1055675 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/IvyNodeEviction.java     | 25 +++++++++++----
+ .../apache/ivy/core/resolve/ResolveTest.java  | 18 +++++++++++
+ test/repositories/IVY-1236/ivy.xml            | 29 +++++++++++++++++
+ test/repositories/IVY-1236/ivysettings.xml    | 28 ++++++++++++++++
+ .../IVY-1236/myorg/modA/1.0/ivy.xml           | 28 ++++++++++++++++
+ .../IVY-1236/myorg/modB/1.0/ivy.xml           | 32 +++++++++++++++++++
+ .../IVY-1236/myorg/modB/1.0/modB-A.jar        |  1 +
+ .../IVY-1236/myorg/modB/1.0/modB.jar          |  1 +
+ 9 files changed, 157 insertions(+), 6 deletions(-)
+ create mode 100644 test/repositories/IVY-1236/ivy.xml
+ create mode 100644 test/repositories/IVY-1236/ivysettings.xml
+ create mode 100644 test/repositories/IVY-1236/myorg/modA/1.0/ivy.xml
+ create mode 100644 test/repositories/IVY-1236/myorg/modB/1.0/ivy.xml
+ create mode 100644 test/repositories/IVY-1236/myorg/modB/1.0/modB-A.jar
+ create mode 100644 test/repositories/IVY-1236/myorg/modB/1.0/modB.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 22d2864e9..6b9a07eca 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -117,6 +117,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - NEW: ivy:resolve and post resole task can now have inlined dependencies declaration.
+ - NEW: Import Bushel into Ivy core (IVY-1241)
+ 
++- FIX: Dynamic version resolution result can be incorrect when ivy metadata contains extra attributes (IVY-1236)
+ - FIX: NullPointerException in FileUtil#forceDelete.
+ - FIX: XmlModuleDescriptorUpdater is a mess that produces broken xmls in many cases (IVY-1010)
+ - FIX: ivy.xml that contains UTF-8 encoded umlauts cannot be bigger than 10000 bytes (IVY-1253)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+index b1f2243c8..d9b7b2d2f 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+@@ -25,6 +25,7 @@
+ import java.util.Set;
+ 
+ import org.apache.ivy.core.module.id.ModuleId;
++import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.plugins.conflict.ConflictManager;
+ 
+ public class IvyNodeEviction {
+@@ -227,8 +228,16 @@ public Collection getResolvedRevisions(ModuleId mid, String rootModuleConf) {
+             Collection resolvedRevs = new HashSet();
+             for (Iterator iter = resolved.iterator(); iter.hasNext();) {
+                 IvyNode node = (IvyNode) iter.next();
++                ModuleRevisionId resolvedId = node.getResolvedId();
+                 resolvedRevs.add(node.getId());
+-                resolvedRevs.add(node.getResolvedId());
++                resolvedRevs.add(resolvedId);
++                
++                // in case there are extra attributes on the resolved module we also add the 
++                // the module without these extra attributes (cfr. IVY-1236)
++                if (!resolvedId.getExtraAttributes().isEmpty()) {
++                    resolvedRevs.add(ModuleRevisionId.newInstance(resolvedId.getOrganisation(), 
++                        resolvedId.getName(), resolvedId.getBranch(), resolvedId.getRevision()));
++                }
+             }
+             return resolvedRevs;
+         }
+@@ -274,14 +283,18 @@ public void setEvictedNodes(ModuleId moduleId, String rootModuleConf, Collection
+ 
+     public boolean isEvicted(String rootModuleConf) {
+         cleanEvicted();
++        if (node.isRoot()) {
++            return false;
++        }
++        EvictionData evictedData = getEvictedData(rootModuleConf);
++        if (evictedData == null) {
++            return false;
++        }
+         IvyNode root = node.getRoot();
+         ModuleId moduleId = node.getId().getModuleId();
+         Collection resolvedRevisions = root.getResolvedRevisions(moduleId, rootModuleConf);
+-        EvictionData evictedData = getEvictedData(rootModuleConf);
+-        return root != node && evictedData != null 
+-            && (!resolvedRevisions.contains(node.getResolvedId())
+-                || evictedData.isTransitivelyEvicted()
+-               );
++        return !resolvedRevisions.contains(node.getResolvedId())
++                       || evictedData.isTransitivelyEvicted();
+     }
+ 
+     public boolean isCompletelyEvicted() {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index b6f468734..8c18ac429 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3347,6 +3347,24 @@ public void testIVY1178() throws Exception {
+         assertFalse(getArchiveFileInCache("myorg", "modE", "1.1", "modE", "jar", "jar").exists());
+     }
+ 
++    public void testIVY1236() throws Exception {
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/IVY-1236/ivysettings.xml"));
++        ResolveReport report = ivy.resolve(new File("test/repositories/IVY-1236/ivy.xml").toURI().toURL(),
++            getResolveOptions(new String[] {"*"}));
++        
++        assertNotNull(report);
++        assertNotNull(report.getUnresolvedDependencies());
++        assertEquals("Number of unresolved dependencies not correct", 0, report
++                .getUnresolvedDependencies().length);
++        
++        // dependencies
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("myorg", "modB", "1.0")).exists());
++        assertTrue(getArchiveFileInCache("myorg", "modB", "1.0", "modB", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache("myorg", "modB", "1.0", "modB-A", "jar", "jar").exists());
++    }
++
+     public void testIVY999() throws Exception {
+         Ivy ivy = new Ivy();
+         ivy.configure(new File("test/repositories/IVY-999/ivysettings.xml"));
+diff --git a/test/repositories/IVY-1236/ivy.xml b/test/repositories/IVY-1236/ivy.xml
+new file mode 100644
+index 000000000..c9f38d7f0
+--- /dev/null
++++ b/test/repositories/IVY-1236/ivy.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="test" />
++    <configurations>
++        <conf name="runtime" />
++        <conf name="test" extends="runtime" />
++    </configurations>
++    <dependencies>
++        <dependency org="myorg" name="modB" rev="[1.0,2.0[" conf="runtime" />
++        <dependency org="myorg" name="modA" rev="[1.0,2.0[" conf="test->runtime" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1236/ivysettings.xml b/test/repositories/IVY-1236/ivysettings.xml
+new file mode 100644
+index 000000000..44d7a8142
+--- /dev/null
++++ b/test/repositories/IVY-1236/ivysettings.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivysettings>
++   <settings defaultResolver="local" />
++   <resolvers>
++        <filesystem name="local" >
++            <ivy pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/ivy.xml"/>
++            <artifact pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/[artifact].[ext]"/>
++        </filesystem>
++    </resolvers>
++    
++</ivysettings>
+diff --git a/test/repositories/IVY-1236/myorg/modA/1.0/ivy.xml b/test/repositories/IVY-1236/myorg/modA/1.0/ivy.xml
+new file mode 100644
+index 000000000..6002ea647
+--- /dev/null
++++ b/test/repositories/IVY-1236/myorg/modA/1.0/ivy.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modA" revision="1.0" />
++    <configurations>
++        <conf name="runtime" />
++    </configurations>
++    <publications />
++    <dependencies>
++        <dependency org="myorg" name="modB" rev="1.0" conf="runtime->all"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1236/myorg/modB/1.0/ivy.xml b/test/repositories/IVY-1236/myorg/modB/1.0/ivy.xml
+new file mode 100644
+index 000000000..781c1ef60
+--- /dev/null
++++ b/test/repositories/IVY-1236/myorg/modB/1.0/ivy.xml
+@@ -0,0 +1,32 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.2" xmlns:extra="http://ant.apache.org/ivy/extra">
++    <info organisation="myorg" module="modB" revision="1.0" extra:foo="bar"/>
++    <configurations>
++        <conf name="runtime" visibility="public" />
++        <conf name="conf1" extends="runtime" />
++        <conf name="conf2" extends="runtime" />
++        <conf name="all" extends="conf1,conf2" visibility="public" />
++    </configurations>
++    <publications>
++        <artifact name="modB" type="jar" ext="jar" conf="runtime"/>
++        <artifact name="modB-A" type="jar" ext="jar" conf="conf1"/>
++    </publications>
++    <dependencies />
++</ivy-module>
+diff --git a/test/repositories/IVY-1236/myorg/modB/1.0/modB-A.jar b/test/repositories/IVY-1236/myorg/modB/1.0/modB-A.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1236/myorg/modB/1.0/modB-A.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1236/myorg/modB/1.0/modB.jar b/test/repositories/IVY-1236/myorg/modB/1.0/modB.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1236/myorg/modB/1.0/modB.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file

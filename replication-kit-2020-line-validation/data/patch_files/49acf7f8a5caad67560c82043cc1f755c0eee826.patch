@@ -1,0 +1,88 @@
+From 49acf7f8a5caad67560c82043cc1f755c0eee826 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Wed, 14 Jun 2017 16:42:50 +0000
+Subject: [PATCH] Approach to fix JCS-177
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1798715 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../jcs/engine/control/CompositeCache.java    | 30 +++++++++++++++----
+ .../control/CompositeCacheConfigurator.java   |  3 ++
+ 2 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
+index a046d50bc..65cb226a7 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
+@@ -111,6 +111,9 @@ public class CompositeCache<K, V>
+     /** Count of misses where element was expired. */
+     private AtomicInteger missCountExpired;
+ 
++    /** Cache manager. */
++    private CompositeCacheManager cacheManager = null;
++
+     /**
+      * The cache hub can only have one memory cache. This could be made more flexible in the future,
+      * but they are tied closely together. More than one doesn't make much sense.
+@@ -158,6 +161,16 @@ public void setElementEventQueue( IElementEventQueue queue )
+         this.elementEventQ = queue;
+     }
+ 
++    /**
++     * Injector for cache manager
++     *
++     * @param manager
++     */
++    public void setCompositeCacheManager( CompositeCacheManager manager )
++    {
++        this.cacheManager = manager;
++    }
++
+     /**
+      * @see org.apache.commons.jcs.engine.behavior.IRequireScheduler#setScheduledExecutorService(java.util.concurrent.ScheduledExecutorService)
+      */
+@@ -1286,19 +1299,26 @@ public void dispose()
+      */
+     public void dispose( boolean fromRemote )
+     {
+-        if ( log.isInfoEnabled() )
++         // If already disposed, return immediately
++        if ( alive.compareAndSet(true, false) == false )
+         {
+-            log.info( "In DISPOSE, [" + this.cacheAttr.getCacheName() + "] fromRemote [" + fromRemote + "]" );
++            return;
+         }
+ 
+-        // If already disposed, return immediately
+-        if ( alive.compareAndSet(true, false) == false )
++        if ( log.isInfoEnabled() )
+         {
+-            return;
++            log.info( "In DISPOSE, [" + this.cacheAttr.getCacheName() + "] fromRemote [" + fromRemote + "]" );
+         }
+ 
+         synchronized (this)
+         {
++            // Remove us from the cache managers list
++            // This will call us back but exit immediately
++            if (cacheManager != null)
++            {
++                cacheManager.freeCache(getCacheName(), fromRemote);
++            }
++
+             // Try to stop shrinker thread
+             if (future != null)
+             {
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java
+index 15937c322..f80efcb9b 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCacheConfigurator.java
+@@ -207,6 +207,9 @@ protected <K, V> CompositeCache<K, V> parseRegion(
+                     ccm.getDefaultCacheAttributes(), regionPrefix ), ea )
+             : new CompositeCache<K, V>( cca, ea );
+ 
++        // Inject cache manager
++        cache.setCompositeCacheManager(ccm);
++
+         // Inject scheduler service
+         cache.setScheduledExecutorService(ccm.getScheduledExecutorService());
+ 

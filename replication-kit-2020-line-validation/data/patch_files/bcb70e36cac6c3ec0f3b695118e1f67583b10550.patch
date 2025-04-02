@@ -1,0 +1,172 @@
+From bcb70e36cac6c3ec0f3b695118e1f67583b10550 Mon Sep 17 00:00:00 2001
+From: Luc Maisonobe <luc@apache.org>
+Date: Thu, 9 Apr 2015 22:16:49 +0200
+Subject: [PATCH] Fixed wrong intersection selection in polyhedrons sets.
+
+Sometimes the selected intersection point was on the wrong side of the
+line (i.e. in the opposite of the direction of the line).
+
+Thanks to Mike Zimmerman for identifying and solving the issue.
+
+JIRA: MATH-1211
+---
+ src/changes/changes.xml                       |  8 ++--
+ .../euclidean/threed/PolyhedronsSet.java      | 14 +++----
+ .../euclidean/threed/PolyhedronsSetTest.java  | 37 +++++++++++++++++++
+ .../geometry/euclidean/threed/issue-1211.bsp  | 15 ++++++++
+ 4 files changed, 63 insertions(+), 11 deletions(-)
+ create mode 100644 src/test/resources/org/apache/commons/math3/geometry/euclidean/threed/issue-1211.bsp
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index f1595c24ac..a3bad914f8 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -50,10 +50,10 @@ If the output is not quite correct, check for invisible trailing spaces!
+     <title>Commons Math Release Notes</title>
+   </properties>
+   <body>
+-    <release version="TBD" date="TBD" description="TBD">
+-    </release>
+-
+-    <release version="3.5" date="2015-01-11" description="">
++    <release version="3.5" date="TBD" description="TBD">
++      <action dev="luc" type="fix" issue="MATH-1211" due-to="Mike Zimmerman">
++        Fixed wrong selection of line/polyhedron intersection point.
++      </action>    
+       <action dev="tn" type="fix" issue="MATH-1209" due-to="Jonathan Ogilvie">
+         Fixed link to algorithm description in "PoissonDistribution#sample()".
+       </action>    
+diff --git a/src/main/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSet.java b/src/main/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSet.java
+index d41d133abc..69d88b5d45 100644
+--- a/src/main/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSet.java
++++ b/src/main/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSet.java
+@@ -305,9 +305,9 @@ private void addContribution(final SubHyperplane<Euclidean3D> facet, final boole
+     /** Get the first sub-hyperplane crossed by a semi-infinite line.
+      * @param point start point of the part of the line considered
+      * @param line line to consider (contains point)
+-     * @return the first sub-hyperplaned crossed by the line after the
++     * @return the first sub-hyperplane crossed by the line after the
+      * given point, or null if the line does not intersect any
+-     * sub-hyperplaned
++     * sub-hyperplane
+      */
+     public SubHyperplane<Euclidean3D> firstIntersection(final Vector3D point, final Line line) {
+         return recurseFirstIntersection(getTree(true), point, line);
+@@ -317,9 +317,9 @@ public SubHyperplane<Euclidean3D> firstIntersection(final Vector3D point, final
+      * @param node current node
+      * @param point start point of the part of the line considered
+      * @param line line to consider (contains point)
+-     * @return the first sub-hyperplaned crossed by the line after the
++     * @return the first sub-hyperplane crossed by the line after the
+      * given point, or null if the line does not intersect any
+-     * sub-hyperplaned
++     * sub-hyperplane
+      */
+     private SubHyperplane<Euclidean3D> recurseFirstIntersection(final BSPTree<Euclidean3D> node,
+                                                                 final Vector3D point,
+@@ -331,11 +331,11 @@ private SubHyperplane<Euclidean3D> recurseFirstIntersection(final BSPTree<Euclid
+         }
+         final BSPTree<Euclidean3D> minus = node.getMinus();
+         final BSPTree<Euclidean3D> plus  = node.getPlus();
+-        final Plane               plane = (Plane) cut.getHyperplane();
++        final Plane                plane = (Plane) cut.getHyperplane();
+ 
+         // establish search order
+         final double offset = plane.getOffset((Point<Euclidean3D>) point);
+-        final boolean in    = FastMath.abs(offset) < 1.0e-10;
++        final boolean in    = FastMath.abs(offset) < getTolerance();
+         final BSPTree<Euclidean3D> near;
+         final BSPTree<Euclidean3D> far;
+         if (offset < 0) {
+@@ -363,7 +363,7 @@ private SubHyperplane<Euclidean3D> recurseFirstIntersection(final BSPTree<Euclid
+         if (!in) {
+             // search in the cut hyperplane
+             final Vector3D hit3D = plane.intersection(line);
+-            if (hit3D != null) {
++            if (hit3D != null && line.getAbscissa(hit3D) > line.getAbscissa(point)) {
+                 final SubHyperplane<Euclidean3D> facet = boundaryFacet(hit3D, node);
+                 if (facet != null) {
+                     return facet;
+diff --git a/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSetTest.java b/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSetTest.java
+index ce7c49dd8d..6927e4282a 100644
+--- a/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSetTest.java
++++ b/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/PolyhedronsSetTest.java
+@@ -17,6 +17,9 @@
+ package org.apache.commons.math3.geometry.euclidean.threed;
+ 
+ import java.io.IOException;
++import java.io.InputStream;
++import java.io.InputStreamReader;
++import java.io.Reader;
+ import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.HashSet;
+@@ -37,6 +40,8 @@
+ import org.apache.commons.math3.geometry.partitioning.RegionFactory;
+ import org.apache.commons.math3.geometry.partitioning.RegionParser;
+ import org.apache.commons.math3.geometry.partitioning.SubHyperplane;
++import org.apache.commons.math3.random.RandomGenerator;
++import org.apache.commons.math3.random.Well1024a;
+ import org.apache.commons.math3.util.FastMath;
+ import org.junit.Assert;
+ import org.junit.Test;
+@@ -364,6 +369,38 @@ public void testDumpParse() throws IOException, ParseException {
+             Assert.assertTrue(new RegionFactory<Euclidean3D>().difference(polyset, parsed).isEmpty());
+     }
+ 
++    @Test
++    public void testIssue1211() throws IOException, ParseException {
++
++        PolyhedronsSet polyset = RegionParser.parsePolyhedronsSet(loadTestData("issue-1211.bsp"));
++        RandomGenerator random = new Well1024a(0xb97c9d1ade21e40al);
++        int nrays = 1000;
++        for (int i = 0; i < nrays; i++) {
++            Vector3D origin    = Vector3D.ZERO;
++            Vector3D direction = new Vector3D(2 * random.nextDouble() - 1,
++                                              2 * random.nextDouble() - 1,
++                                              2 * random.nextDouble() - 1).normalize();
++            Line line = new Line(origin, origin.add(direction), polyset.getTolerance());
++            SubHyperplane<Euclidean3D> plane = polyset.firstIntersection(origin, line);
++            if (plane != null) {
++                Vector3D intersectionPoint = ((Plane)plane.getHyperplane()).intersection(line);
++                double dotProduct = direction.dotProduct(intersectionPoint.subtract(origin));
++                Assert.assertTrue(dotProduct > 0);
++            }
++        }
++    }
++
++    private String loadTestData(final String resourceName)
++            throws IOException {
++            InputStream stream = getClass().getResourceAsStream(resourceName);
++            Reader reader = new InputStreamReader(stream, "UTF-8");
++            StringBuilder builder = new StringBuilder();
++            for (int c = reader.read(); c >= 0; c = reader.read()) {
++                builder.append((char) c);
++            }
++            return builder.toString();
++        }
++
+     private void checkPoints(Region.Location expected, PolyhedronsSet tree, Vector3D[] points) {
+         for (int i = 0; i < points.length; ++i) {
+             Assert.assertEquals(expected, tree.checkPoint(points[i]));
+diff --git a/src/test/resources/org/apache/commons/math3/geometry/euclidean/threed/issue-1211.bsp b/src/test/resources/org/apache/commons/math3/geometry/euclidean/threed/issue-1211.bsp
+new file mode 100644
+index 0000000000..23c2cdb950
+--- /dev/null
++++ b/src/test/resources/org/apache/commons/math3/geometry/euclidean/threed/issue-1211.bsp
+@@ -0,0 +1,15 @@
++PolyhedronsSet
++tolerance  1.0e-8
++ plus  internal -1.0  0.0  0.0 -1.0  0.0  0.0  1.0e-8
++   minus internal  0.0  1.0  0.0  0.0  1.0  0.0  1.0e-8
++     minus internal  0.0  0.0  1.0  0.0  0.0  1.0  1.0e-8
++       minus internal  0.0  0.0 -1.0  0.0  0.0 -1.0  1.0e-8
++         minus internal  0.0 -1.0  0.0  0.0 -1.0  0.0  1.0e-8
++           minus internal  1.0  0.0  0.0  1.0  0.0  0.0  1.0e-8
++             minus leaf true
++             plus  leaf false
++           plus  leaf false
++         plus  leaf false
++       plus  leaf false
++     plus  leaf false
++   plus  leaf false

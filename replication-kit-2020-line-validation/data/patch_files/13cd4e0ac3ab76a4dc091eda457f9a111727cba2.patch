@@ -1,0 +1,75 @@
+From 13cd4e0ac3ab76a4dc091eda457f9a111727cba2 Mon Sep 17 00:00:00 2001
+From: pascalschumacher <pascalschumacher@gmx.net>
+Date: Sun, 29 May 2016 20:30:36 +0200
+Subject: [PATCH] LANG-1190: TypeUtils.isAssignable throws NullPointerException
+ when fromType has type variables and toType generic superclass specifies type
+ variable (closes #158)
+
+---
+ src/changes/changes.xml                         |  1 +
+ .../apache/commons/lang3/reflect/TypeUtils.java |  4 ++++
+ .../commons/lang3/reflect/TypeUtilsTest.java    | 17 +++++++++++++++++
+ 3 files changed, 22 insertions(+)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 224e0343b9c..712fd7e2d13 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -46,6 +46,7 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+ 
+   <release version="3.5" date="tba" description="tba">
++    <action issue="LANG-1190" type="fix" dev="pschumacher" due-to="pschumacher">TypeUtils.isAssignable throws NullPointerException when fromType has type variables and toType generic superclass specifies type variable</action>
+     <action issue="LANG-1226" type="fix" dev="pschumacher" due-to="pschumacher">StringUtils#normalizeSpace does not trim the string anymore</action>
+     <action issue="LANG-1251" type="fix" dev="pschumacher" due-to="Takuya Ueshin">SerializationUtils.ClassLoaderAwareObjectInputStream should use static initializer to initialize primitiveTypes map</action>
+     <action issue="LANG-1253" type="add" dev="ggregory" due-to="adilek">[GitHub issue #170] Add RandomUtils#nextBoolean() method</action>
+diff --git a/src/main/java/org/apache/commons/lang3/reflect/TypeUtils.java b/src/main/java/org/apache/commons/lang3/reflect/TypeUtils.java
+index 6eb286ab93c..30e9940ba22 100644
+--- a/src/main/java/org/apache/commons/lang3/reflect/TypeUtils.java
++++ b/src/main/java/org/apache/commons/lang3/reflect/TypeUtils.java
+@@ -464,6 +464,10 @@ private static boolean isAssignable(final Type type, final ParameterizedType toP
+             final Type toTypeArg = unrollVariableAssignments(var, toTypeVarAssigns);
+             final Type fromTypeArg = unrollVariableAssignments(var, fromTypeVarAssigns);
+ 
++            if (toTypeArg == null && fromTypeArg instanceof Class) {
++                continue;
++            }
++
+             // parameters must either be absent from the subject type, within
+             // the bounds of the wildcard type, or be an exact match to the
+             // parameters of the target type.
+diff --git a/src/test/java/org/apache/commons/lang3/reflect/TypeUtilsTest.java b/src/test/java/org/apache/commons/lang3/reflect/TypeUtilsTest.java
+index 9b6ca9b1d57..66477ea20ba 100644
+--- a/src/test/java/org/apache/commons/lang3/reflect/TypeUtilsTest.java
++++ b/src/test/java/org/apache/commons/lang3/reflect/TypeUtilsTest.java
+@@ -25,6 +25,7 @@
+ import java.lang.reflect.TypeVariable;
+ import java.lang.reflect.WildcardType;
+ import java.net.URI;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.HashMap;
+@@ -755,6 +756,22 @@ public void testWrap() {
+         Assert.assertEquals(String.class, TypeUtils.wrap(String.class).getType());
+     }
+ 
++    public static class ClassWithSuperClassWithGenericType extends ArrayList<Object> {
++        private static final long serialVersionUID = 1L;
++
++        public static <U> Iterable<U> methodWithGenericReturnType() {
++            return null;
++        }
++    }
++
++    @Test
++    public void testLANG1190() throws Exception {
++        Type fromType = ClassWithSuperClassWithGenericType.class.getDeclaredMethod("methodWithGenericReturnType").getGenericReturnType();
++        Type failingToType = TypeUtils.wildcardType().withLowerBounds(ClassWithSuperClassWithGenericType.class).build();
++
++        Assert.assertTrue(TypeUtils.isAssignable(fromType, failingToType));
++    }
++
+     public Iterable<? extends Map<Integer, ? extends Collection<?>>> iterable;
+ 
+     public static <G extends Comparable<G>> G stub() {

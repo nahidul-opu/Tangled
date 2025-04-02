@@ -1,0 +1,90 @@
+From 03bf0d33143ebd13e4f389cd4ecac8aec17c2057 Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Tue, 10 Nov 2015 02:05:59 +0000
+Subject: [PATCH] VALIDATOR-363 UrlValidator rejects path having two or more
+ successive dots
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/validator/trunk@1713573 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  3 +++
+ .../validator/routines/UrlValidator.java      | 19 +++++++++++++------
+ .../validator/routines/UrlValidatorTest.java  | 13 +++++++++++++
+ 3 files changed, 29 insertions(+), 6 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index f96ebac25..39072d8b2 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -90,6 +90,9 @@ The dependencies for Validator have not changed since the 1.4 release.
+ For the current list of dependencies, please see
+ http://commons.apache.org/validator/dependencies.html
+   ">
++    <action issue="VALIDATOR-363" type="fix" dev="sebb">
++    UrlValidator rejects path having two or more successive dots
++    </action>
+     <action issue="VALIDATOR-330" type="fix" dev="sebb">
+     IBANCheckDigit.isValid() returns True for some invalid IBANs
+     </action>
+diff --git a/src/main/java/org/apache/commons/validator/routines/UrlValidator.java b/src/main/java/org/apache/commons/validator/routines/UrlValidator.java
+index 4a28e3713..d9c56f648 100644
+--- a/src/main/java/org/apache/commons/validator/routines/UrlValidator.java
++++ b/src/main/java/org/apache/commons/validator/routines/UrlValidator.java
+@@ -17,6 +17,8 @@
+ package org.apache.commons.validator.routines;
+ 
+ import java.io.Serializable;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.Locale;
+@@ -435,14 +437,19 @@ protected boolean isValidPath(String path) {
+             return false;
+         }
+ 
+-        int slash2Count = countToken("//", path);
+-        if (isOff(ALLOW_2_SLASHES) && (slash2Count > 0)) {
++        try {
++            URI uri = new URI(null,null,path,null);
++            String norm = uri.normalize().getPath();
++            if (norm.startsWith("/../") // Trying to go via the parent dir 
++             || norm.equals("/..")) {   // Trying to go to the parent dir
++                return false;
++            }
++        } catch (URISyntaxException e) {
+             return false;
+         }
+-
+-        int slashCount = countToken("/", path);
+-        int dot2Count = countToken("..", path);
+-        if (dot2Count > 0 && (slashCount - slash2Count - 1) <= dot2Count) {
++        
++        int slash2Count = countToken("//", path);
++        if (isOff(ALLOW_2_SLASHES) && (slash2Count > 0)) {
+             return false;
+         }
+ 
+diff --git a/src/test/java/org/apache/commons/validator/routines/UrlValidatorTest.java b/src/test/java/org/apache/commons/validator/routines/UrlValidatorTest.java
+index 0d96a78e7..b9b691ccc 100644
+--- a/src/test/java/org/apache/commons/validator/routines/UrlValidatorTest.java
++++ b/src/test/java/org/apache/commons/validator/routines/UrlValidatorTest.java
+@@ -414,6 +414,19 @@ public void testValidator361() {
+        assertTrue(validator.isValid("http://hello.tokyo/"));
+     }
+ 
++   public void testValidator363(){
++        UrlValidator urlValidator = new UrlValidator();
++        assertTrue(urlValidator.isValid("http://www.example.org/a/b/hello..world"));
++        assertTrue(urlValidator.isValid("http://www.example.org/a/hello..world"));
++        assertTrue(urlValidator.isValid("http://www.example.org/hello.world/"));
++        assertTrue(urlValidator.isValid("http://www.example.org/hello..world/"));
++        assertTrue(urlValidator.isValid("http://www.example.org/hello.world"));
++        assertTrue(urlValidator.isValid("http://www.example.org/hello..world"));
++        assertTrue(urlValidator.isValid("http://www.example.org/..world"));
++        assertTrue(urlValidator.isValid("http://www.example.org/.../world"));
++        assertFalse(urlValidator.isValid("http://www.example.org/../world"));
++    }
++
+    public void testValidator375() {
+        UrlValidator validator = new UrlValidator();
+        String url = "http://[FEDC:BA98:7654:3210:FEDC:BA98:7654:3210]:80/index.html";

@@ -1,0 +1,319 @@
+From 036f7fc40acfd5a2cb1b6cc7131087d68888a1ca Mon Sep 17 00:00:00 2001
+From: Henning Schmiedehausen <henning@apache.org>
+Date: Mon, 21 Oct 2013 22:35:52 +0000
+Subject: [PATCH] Backport CONFIGURATION-525 from r1457277.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/CONFIGURATION_1_X_MAINTENANCE@1534402 13f79535-47bb-0310-9956-ffa450edef68
+---
+ RELEASE-NOTES.txt                             | 14 +++-
+ src/changes/changes.xml                       |  5 ++
+ .../PropertiesConfiguration.java              | 24 ++++++
+ .../PropertiesConfigurationLayout.java        | 80 ++++++++++++++++---
+ .../TestPropertiesConfiguration.java          | 30 +++++++
+ .../TestPropertiesConfigurationLayout.java    |  8 +-
+ src/test/resources/test.properties            |  2 +
+ 7 files changed, 146 insertions(+), 17 deletions(-)
+
+diff --git a/RELEASE-NOTES.txt b/RELEASE-NOTES.txt
+index 474d6d30ae..84d24a76d7 100644
+--- a/RELEASE-NOTES.txt
++++ b/RELEASE-NOTES.txt
+@@ -74,17 +74,23 @@ BUG FIXES IN 1.10
+ IMPROVEMENTS AND NEW FEATURES IN 1.10
+ =====================================
+ 
+-* [CONFIGURATION-534] PropertyConfiguration's handling of includes depends on the
+-                      existence of a base path
++* [CONFIGURATION-525] PropertiesConfigurationLayout does not preserve comments at bottom of a file
+ 
+-  The includesAllowed property of PropertyConfiguration is now independent
+-  from the existence of a base path.
++  PropertiesConfiguration now keeps a comment at the bottom of a
++  properties file. A new footer property was added for reading and
++  writing this footer comment.
+ 
+ * [CONFIGURATION-526] Support loading from and saving to DOM nodes
+ 
+   XMLPropertiesConfiguration now supports loading from and saving to DOM
+   nodes.
+ 
++* [CONFIGURATION-534] PropertyConfiguration's handling of includes depends on the
++                      existence of a base path
++
++  The includesAllowed property of PropertyConfiguration is now independent
++  from the existence of a base path.
++
+ * [CONFIGURATION-550] Missing conversion to char
+ 
+   Conversion to Character is now supported.
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 384c505916..fa984bb3ff 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -31,6 +31,11 @@
+         XMLConfiguration now adds attributes of elements defining a list to
+         all list nodes.
+       </action>
++      <action dev="oheger" type="add" issue="CONFIGURATION-525">
++        PropertiesConfiguration now keeps a comment at the bottom of a
++        properties file. A new footer property was added for reading and
++        writing this footer comment.
++      </action>
+       <action dev="oheger" type="update" issue="CONFIGURATION-526" due-to="Oliver Kopp">
+         XMLPropertiesConfiguration now supports loading from and saving to DOM
+         nodes.
+diff --git a/src/main/java/org/apache/commons/configuration/PropertiesConfiguration.java b/src/main/java/org/apache/commons/configuration/PropertiesConfiguration.java
+index 00dfd8c410..624faf88dd 100644
+--- a/src/main/java/org/apache/commons/configuration/PropertiesConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration/PropertiesConfiguration.java
+@@ -365,6 +365,30 @@ public void setHeader(String header)
+         getLayout().setHeaderComment(header);
+     }
+ 
++    /**
++     * Returns the footer comment. This is a comment at the very end of the
++     * file.
++     *
++     * @return the footer comment
++     * @since 1.10
++     */
++    public String getFooter()
++    {
++        return getLayout().getFooterComment();
++    }
++
++    /**
++     * Sets the footer comment. If set, this comment is written after all
++     * properties at the end of the file.
++     *
++     * @param footer the footer comment
++     * @since 1.10
++     */
++    public void setFooter(String footer)
++    {
++        getLayout().setFooterComment(footer);
++    }
++
+     /**
+      * Returns the encoding to be used when loading or storing configuration
+      * data. This implementation ensures that the default encoding will be used
+diff --git a/src/main/java/org/apache/commons/configuration/PropertiesConfigurationLayout.java b/src/main/java/org/apache/commons/configuration/PropertiesConfigurationLayout.java
+index 5d33c56792..cdfddf7b66 100644
+--- a/src/main/java/org/apache/commons/configuration/PropertiesConfigurationLayout.java
++++ b/src/main/java/org/apache/commons/configuration/PropertiesConfigurationLayout.java
+@@ -131,6 +131,9 @@ public class PropertiesConfigurationLayout implements ConfigurationListener
+     /** Stores the header comment. */
+     private String headerComment;
+ 
++    /** Stores the footer comment. */
++    private String footerComment;
++
+     /** The global separator that will be used for all properties. */
+     private String globalSeparator;
+ 
+@@ -206,15 +209,7 @@ public PropertiesConfiguration getConfiguration()
+      */
+     public String getCanonicalComment(String key, boolean commentChar)
+     {
+-        String comment = getComment(key);
+-        if (comment == null)
+-        {
+-            return null;
+-        }
+-        else
+-        {
+-            return trimComment(comment, commentChar);
+-        }
++        return constructCanonicalComment(getComment(key), commentChar);
+     }
+ 
+     /**
+@@ -283,8 +278,7 @@ public void setBlancLinesBefore(String key, int number)
+      */
+     public String getCanonicalHeaderComment(boolean commentChar)
+     {
+-        return (getHeaderComment() == null) ? null : trimComment(
+-                getHeaderComment(), commentChar);
++        return constructCanonicalComment(getHeaderComment(), commentChar);
+     }
+ 
+     /**
+@@ -311,6 +305,47 @@ public void setHeaderComment(String comment)
+         headerComment = comment;
+     }
+ 
++    /**
++     * Returns the footer comment of the represented properties file in a
++     * canonical form. This method works like
++     * {@code getCanonicalHeaderComment()}, but reads the footer comment.
++     *
++     * @param commentChar determines the presence of comment characters
++     * @return the footer comment (can be <b>null</b>)
++     * @see #getCanonicalHeaderComment(boolean)
++     * @since 1.10
++     */
++    public String getCanonicalFooterCooment(boolean commentChar)
++    {
++        return constructCanonicalComment(getFooterComment(), commentChar);
++    }
++
++    /**
++     * Returns the footer comment of the represented properties file. This
++     * method returns the footer comment exactly as it was set using
++     * {@code setFooterComment()} or extracted from the loaded properties
++     * file.
++     *
++     * @return the footer comment (can be <b>null</b>)
++     * @since 1.10
++     */
++    public String getFooterComment()
++    {
++        return footerComment;
++    }
++
++    /**
++     * Sets the footer comment for the represented properties file. This comment
++     * will be output at the bottom of the file.
++     *
++     * @param footerComment the footer comment
++     * @since 1.10
++     */
++    public void setFooterComment(String footerComment)
++    {
++        this.footerComment = footerComment;
++    }
++
+     /**
+      * Returns a flag whether the specified property is defined on a single
+      * line. This is meaningful only if this property has multiple values.
+@@ -512,6 +547,9 @@ public void load(Reader in) throws ConfigurationException
+                     }
+                 }
+             }
++
++            setFooterComment(extractComment(reader.getCommentLines(), 0, reader
++                    .getCommentLines().size() - 1));
+         }
+         catch (IOException ioex)
+         {
+@@ -575,6 +613,8 @@ public void save(Writer out) throws ConfigurationException
+                             key), singleLine);
+                 }
+             }
++
++            writeComment(writer, getCanonicalFooterCooment(true));
+             writer.flush();
+         }
+         catch (IOException ioex)
+@@ -821,6 +861,9 @@ private void copyFrom(PropertiesConfigurationLayout c)
+             PropertyLayoutData data = c.layoutData.get(key);
+             layoutData.put(key, data.clone());
+         }
++
++        setHeaderComment(c.getHeaderComment());
++        setFooterComment(c.getFooterComment());
+     }
+ 
+     /**
+@@ -842,6 +885,21 @@ private static void writeComment(
+         }
+     }
+ 
++    /**
++     * Helper method for generating a comment string. Depending on the boolean
++     * argument the resulting string either has no comment characters or a
++     * leading comment character at each line.
++     *
++     * @param comment the comment string to be processed
++     * @param commentChar determines the presence of comment characters
++     * @return the canonical comment string (can be <b>null</b>)
++     */
++    private static String constructCanonicalComment(String comment,
++            boolean commentChar)
++    {
++        return (comment == null) ? null : trimComment(comment, commentChar);
++    }
++
+     /**
+      * A helper class for storing all layout related information for a
+      * configuration property.
+diff --git a/src/test/java/org/apache/commons/configuration/TestPropertiesConfiguration.java b/src/test/java/org/apache/commons/configuration/TestPropertiesConfiguration.java
+index 739b0905e2..8e462cdbc8 100644
+--- a/src/test/java/org/apache/commons/configuration/TestPropertiesConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration/TestPropertiesConfiguration.java
+@@ -1115,6 +1115,36 @@ public void testSetPropertyListWithDelimiterParsingDisabled()
+         assertEquals("Wrong list property", list, conf.getProperty(prop));
+     }
+ 
++    /**
++     * Tests whether a footer comment is correctly read.
++     */
++    @Test
++    public void testReadFooterComment()
++    {
++        assertEquals("Wrong footer comment", "\n# This is a foot comment\n",
++                conf.getFooter());
++        assertEquals("Wrong footer comment from layout",
++                "\nThis is a foot comment\n", conf.getLayout()
++                        .getCanonicalFooterCooment(false));
++    }
++
++    /**
++     * Tests whether a footer comment is correctly written out.
++     */
++    @Test
++    public void testWriteFooterComment() throws ConfigurationException,
++            IOException
++    {
++        final String footer = "my footer";
++        conf.clear();
++        conf.setProperty(PROP_NAME, PROP_VALUE);
++        conf.setFooter(footer);
++        StringWriter out = new StringWriter();
++        conf.save(out);
++        assertEquals("Wrong result", PROP_NAME + " = " + PROP_VALUE + CR + "# "
++                + footer + CR, out.toString());
++    }
++
+     /**
+      * Helper method for testing the content of a list with elements that
+      * contain backslashes.
+diff --git a/src/test/java/org/apache/commons/configuration/TestPropertiesConfigurationLayout.java b/src/test/java/org/apache/commons/configuration/TestPropertiesConfigurationLayout.java
+index bb2a8d25c9..11026fcad7 100644
+--- a/src/test/java/org/apache/commons/configuration/TestPropertiesConfigurationLayout.java
++++ b/src/test/java/org/apache/commons/configuration/TestPropertiesConfigurationLayout.java
+@@ -601,11 +601,14 @@ public void testInitCopy()
+                 config, layout);
+         assertEquals("Wrong number of keys", layout.getKeys().size(), l2
+                 .getKeys().size());
+-        for (Iterator<String> it = layout.getKeys().iterator(); it.hasNext();)
++        for (String key : layout.getKeys())
+         {
+-            Object key = it.next();
+             assertTrue("Key was not found: " + key, l2.getKeys().contains(key));
+         }
++        assertEquals("Wrong header comment", layout.getHeaderComment(),
++                l2.getHeaderComment());
++        assertEquals("Wrong footer comment", layout.getFooterComment(),
++                l2.getFooterComment());
+     }
+ 
+     /**
+@@ -699,6 +702,7 @@ private void fillLayout()
+         builder.addComment(TEST_COMMENT);
+         builder.addProperty(TEST_KEY, TEST_VALUE);
+         builder.addProperty("anotherProp", "anotherValue");
++        builder.addComment("A footer comment");
+         try
+         {
+             layout.load(builder.getReader());
+diff --git a/src/test/resources/test.properties b/src/test/resources/test.properties
+index f578df6ef9..491742fa9a 100644
+--- a/src/test/resources/test.properties
++++ b/src/test/resources/test.properties
+@@ -122,3 +122,5 @@ test.share2 = \\\\share2a
+ test.share2 = \\\\share2b
+ test.share3 = \\\\\\\\share3a\\\\\\\\,\\\\\\\\share3b\\
+ 
++# This is a foot comment
++

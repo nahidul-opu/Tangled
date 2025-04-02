@@ -1,0 +1,181 @@
+From efa756288e712849c78c4230df05c2d1abeba91e Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran.pai@gmail.com>
+Date: Sun, 21 May 2017 17:31:47 +0530
+Subject: [PATCH] IVY-1555 Don't error out if an "optional" file included in
+ ivy settings xml isn't available
+
+---
+ .../ivy/core/settings/XmlSettingsParser.java  | 69 ++++++++++++-------
+ .../org/apache/ivy/ant/IvyConfigureTest.java  | 20 ++++++
+ .../ivysettings-optional-file-include.xml     | 27 ++++++++
+ 3 files changed, 93 insertions(+), 23 deletions(-)
+ create mode 100644 test/repositories/ivysettings-optional-file-include.xml
+
+diff --git a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+index f85c295a2..81d0f9a60 100644
+--- a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
++++ b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+@@ -392,6 +392,7 @@ private void settingsStarted(String qName, Map attributes) {
+     private void includeStarted(Map attributes) throws IOException, ParseException {
+         final IvyVariableContainer variables = ivy.getVariableContainer();
+         ivy.setVariableContainer(new IvyVariableContainerWrapper(variables));
++        final boolean optionalInclude = "true".equals(attributes.get("optional"));
+         try {
+             String propFilePath = (String) attributes.get("file");
+             URL settingsURL = null;
+@@ -402,38 +403,60 @@ private void includeStarted(Map attributes) throws IOException, ParseException {
+                             "bad include tag: specify file or url to include");
+                 } else {
+                     try {
+-                        // First assume that it is an absolute URL
+-                        settingsURL = new URL(propFilePath);
+-                    } catch (MalformedURLException e) {
+-                        // If that fail, it may be because it is a relative one.
+-                        settingsURL = new URL(this.settings, propFilePath);
++                        try {
++                            // First assume that it is an absolute URL
++                            settingsURL = new URL(propFilePath);
++                        } catch (MalformedURLException e) {
++                            // If that fail, it may be because it is a relative one.
++                            settingsURL = new URL(this.settings, propFilePath);
++                        }
++                    } catch (IOException ioe) {
++                        if (!optionalInclude) {
++                            throw ioe;
++                        }
++                        Message.verbose("Skipping inclusion of optional URL " + propFilePath + " due to IOException - " + ioe.getMessage());
++                        return;
+                     }
+                     Message.verbose("including url: " + settingsURL.toString());
+                     ivy.setSettingsVariables(settingsURL);
+                 }
+             } else {
+-                settingsURL = urlFromFileAttribute(propFilePath);
+-                Message.verbose("including file: " + settingsURL);
+-                if ("file".equals(settingsURL.getProtocol())) {
+-                    try {
+-                        File settingsFile = new File(new URI(settingsURL.toExternalForm()));
+-                        String optional = (String) attributes.get("optional");
+-                        if ("true".equals(optional) && !settingsFile.exists()) {
+-                            return;
++                try {
++                    settingsURL = urlFromFileAttribute(propFilePath);
++                    Message.verbose("including file: " + settingsURL);
++                    if ("file".equals(settingsURL.getProtocol())) {
++                        try {
++                            File settingsFile = new File(new URI(settingsURL.toExternalForm()));
++                            if (optionalInclude && !settingsFile.exists()) {
++                                return;
++                            }
++                            ivy.setSettingsVariables(Checks.checkAbsolute(settingsFile,
++                                    "settings include path"));
++                        } catch (URISyntaxException e) {
++                            // try to make the best of it...
++                            ivy.setSettingsVariables(Checks.checkAbsolute(settingsURL.getPath(),
++                                    "settings include path"));
+                         }
+-
+-                        ivy.setSettingsVariables(Checks.checkAbsolute(settingsFile,
+-                            "settings include path"));
+-                    } catch (URISyntaxException e) {
+-                        // try to make the best of it...
+-                        ivy.setSettingsVariables(Checks.checkAbsolute(settingsURL.getPath(),
+-                            "settings include path"));
++                    } else {
++                        ivy.setSettingsVariables(settingsURL);
+                     }
+-                } else {
+-                    ivy.setSettingsVariables(settingsURL);
++                } catch (IOException ioe) {
++                    if (!optionalInclude) {
++                        throw ioe;
++                    }
++                    Message.verbose("Skipping inclusion of optional file " + propFilePath + " due to IOException - " + ioe.getMessage());
++                    return;
++                }
++            }
++            try {
++                new XmlSettingsParser(ivy).parse(configurator, settingsURL);
++            } catch (IOException ioe) {
++                if (!optionalInclude) {
++                    throw ioe;
+                 }
++                Message.verbose("Skipping inclusion of optional settings URL " + settingsURL + " due to IOException - " + ioe.getMessage());
++                return;
+             }
+-            new XmlSettingsParser(ivy).parse(configurator, settingsURL);
+         } finally {
+             ivy.setVariableContainer(variables);
+         }
+diff --git a/test/java/org/apache/ivy/ant/IvyConfigureTest.java b/test/java/org/apache/ivy/ant/IvyConfigureTest.java
+index a781ffe08..8568f625d 100644
+--- a/test/java/org/apache/ivy/ant/IvyConfigureTest.java
++++ b/test/java/org/apache/ivy/ant/IvyConfigureTest.java
+@@ -18,9 +18,11 @@
+ package org.apache.ivy.ant;
+ 
+ import java.io.File;
++import java.util.List;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.TestHelper;
++import org.apache.ivy.core.module.status.Status;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.resolver.DependencyResolver;
+ import org.apache.ivy.plugins.resolver.IBiblioResolver;
+@@ -305,4 +307,22 @@ public void testInvalidOverride() throws Exception {
+         configure.setOverride("unknown");
+     }
+ 
++    /**
++     * Tests that if the Ivy settings file <code>include</code>s another file as <code>optional</code>,
++     * then the absence of that file doesn't lead to failures
++     *
++     * @throws Exception
++     */
++    @Test
++    public void testOptionalFileInclude() throws Exception {
++        final File ivySettingsXml = new File("test/repositories/ivysettings-optional-file-include.xml");
++        final Ivy ivy = new Ivy();
++        ivy.configure(ivySettingsXml);
++        final IvySettings ivySettings = ivy.getSettings();
++        // just test that it indeed parsed fine
++        assertTrue("Unexpected number of resolvers in Ivy settings", ivySettings.getResolvers().isEmpty());
++        final List<Status> statuses =ivySettings.getStatusManager().getStatuses();
++        assertEquals("Unexpected number of custom status in parsed Ivy settings", 1, statuses.size());
++        assertEquals("Custom status not found in the parsed Ivy settings", "ivy-1555", statuses.get(0).getName());
++    }
+ }
+diff --git a/test/repositories/ivysettings-optional-file-include.xml b/test/repositories/ivysettings-optional-file-include.xml
+new file mode 100644
+index 000000000..07d81e5a9
+--- /dev/null
++++ b/test/repositories/ivysettings-optional-file-include.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivysettings>
++    <!-- Include a non-existent file and mark it optional -->
++    <include file="${ivy.settings.dir}/foo/bar/i-am-not-present.xml" optional="true"/>
++    <!-- Same as previous non-existent file, but use an url attribute this time -->
++    <include url="${ivy.settings.dir.url}/foo/bar/i-am-not-present.xml" optional="true"/>
++    <statuses>
++        <status name="ivy-1555" integration="false"/>
++    </statuses>
++</ivysettings>

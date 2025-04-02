@@ -1,0 +1,391 @@
+From 2f757454dc41f4d130234aea68b348da4f12a0fa Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran.pai@gmail.com>
+Date: Tue, 23 May 2017 13:45:39 +0530
+Subject: [PATCH] IVY-1540 Fix infinite loop in dependencytree, caused to due
+ circular dependencies (coming in via Maven module descriptors)
+
+---
+ .../org/apache/ivy/ant/IvyDependencyTree.java | 73 ++++++++++++-------
+ .../apache/ivy/ant/IvyDependencyTreeTest.java | 30 +++++++-
+ .../1/org/foo-bar/ivys/ivy-1.2.3.xml          | 28 +++++++
+ .../1/org/foo-bar/jars/foo-bar-1.2.3.jar      |  0
+ test/repositories/1/org/mod1/ivys/ivy-2.0.xml | 27 +++++++
+ .../repositories/1/org/mod1/jars/mod1-2.0.jar |  0
+ .../org/circular/module1/1.0/module1-1.0.jar  |  1 +
+ .../org/circular/module1/1.0/module1-1.0.pom  | 35 +++++++++
+ .../org/circular/module2/2.0/module2-2.0.jar  |  1 +
+ .../org/circular/module2/2.0/module2-2.0.pom  | 35 +++++++++
+ 10 files changed, 201 insertions(+), 29 deletions(-)
+ create mode 100644 test/repositories/1/org/foo-bar/ivys/ivy-1.2.3.xml
+ create mode 100644 test/repositories/1/org/foo-bar/jars/foo-bar-1.2.3.jar
+ create mode 100644 test/repositories/1/org/mod1/ivys/ivy-2.0.xml
+ create mode 100644 test/repositories/1/org/mod1/jars/mod1-2.0.jar
+ create mode 100644 test/repositories/m2/org/circular/module1/1.0/module1-1.0.jar
+ create mode 100644 test/repositories/m2/org/circular/module1/1.0/module1-1.0.pom
+ create mode 100644 test/repositories/m2/org/circular/module2/2.0/module2-2.0.jar
+ create mode 100644 test/repositories/m2/org/circular/module2/2.0/module2-2.0.pom
+
+diff --git a/src/java/org/apache/ivy/ant/IvyDependencyTree.java b/src/java/org/apache/ivy/ant/IvyDependencyTree.java
+index b95aa9130..5df954878 100644
+--- a/src/java/org/apache/ivy/ant/IvyDependencyTree.java
++++ b/src/java/org/apache/ivy/ant/IvyDependencyTree.java
+@@ -17,12 +17,6 @@
+  */
+ package org.apache.ivy.ant;
+ 
+-import java.util.ArrayList;
+-import java.util.HashMap;
+-import java.util.Iterator;
+-import java.util.List;
+-import java.util.Map;
+-
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.report.ResolveReport;
+ import org.apache.ivy.core.resolve.IvyNode;
+@@ -30,18 +24,26 @@
+ import org.apache.ivy.core.resolve.IvyNodeEviction.EvictionData;
+ import org.apache.tools.ant.BuildException;
+ 
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
+ public class IvyDependencyTree extends IvyPostResolveTask {
+ 
+-    private Map/* <ModuleRevisionId, List<IvyNode>> */dependencies = new HashMap/*
+-                                                                                 * <ModuleRevisionId,
+-                                                                                 * List<IvyNode>>
+-                                                                                 */();
++    private final Map<ModuleRevisionId, List<IvyNode>> dependencies = new HashMap<ModuleRevisionId, List<IvyNode>>();
+ 
+     private boolean showEvicted = false;
+ 
+     public void doExecute() throws BuildException {
+         prepareAndCheck();
+         ResolveReport report = getResolvedReport();
++        if (report == null) {
++            throw new BuildException("No resolution report was available to run the post-resolve task. Make sure resolve was done before this task");
++        }
+         log("Dependency tree for " + report.getResolveId());
+         ModuleRevisionId mrid = report.getModuleDescriptor().getModuleRevisionId();
+         // make dependency tree easier to fetch information
+@@ -49,20 +51,26 @@ public void doExecute() throws BuildException {
+             IvyNode dependency = (IvyNode) iterator.next();
+             populateDependencyTree(dependency, mrid, report);
+         }
+-        List dependencyList = (List) dependencies.get(mrid);
++        final List<IvyNode> dependencyList = dependencies.get(mrid);
+         if (dependencyList != null) {
+-            printDependencies(dependencyList, 0);
++            printDependencies(mrid, dependencyList, 0, new HashSet<ModuleRevisionId>());
+         }
+     }
+ 
+-    private void printDependencies(List/* <IvyNode> */dependencyList, int indent) {
+-        for (Iterator iterator = dependencyList.iterator(); iterator.hasNext();) {
+-            IvyNode dependency = (IvyNode) iterator.next();
+-            boolean evicted = dependency.isEvicted(getConf());
++    private void printDependencies(final ModuleRevisionId mrid, final List<IvyNode> dependencyList, final int indent,
++                                   final Set<ModuleRevisionId> ancestors) {
++        for (final Iterator iterator = dependencyList.iterator(); iterator.hasNext();) {
++            final Set<ModuleRevisionId> ancestorsForCurrentDep = new HashSet<ModuleRevisionId>(ancestors);
++            // previous ancestors plus the module to whom these dependencies belong to
++            ancestorsForCurrentDep.add(mrid);
++            final IvyNode dependency = (IvyNode) iterator.next();
++            final ModuleRevisionId dependencyMrid = dependency.getId();
++            final boolean circular = ancestorsForCurrentDep.contains(dependencyMrid);
++            final boolean evicted = dependency.isEvicted(getConf());
++            final StringBuilder sb = new StringBuilder();
+             if (evicted && !showEvicted) {
+                 continue;
+             }
+-            StringBuffer sb = new StringBuffer();
+             if (indent > 0) {
+                 for (int i = 0; i < indent; i++) {
+                     if (i == indent - 1 && !iterator.hasNext() && !hasDependencies(dependency)) {
+@@ -78,7 +86,15 @@ private void printDependencies(List/* <IvyNode> */dependencyList, int indent) {
+             } else {
+                 sb.append("\\- ");
+             }
+-            sb.append(dependency.getId().toString());
++            if (!evicted && circular) {
++                // log and skip processing the (transitive) dependencies of this dependency
++                sb.append("(circularly depends on) ").append(dependencyMrid);
++                log(sb.toString());
++                continue;
++
++            } else {
++                sb.append(dependencyMrid.toString());
++            }
+             if (evicted && showEvicted) {
+                 EvictionData evictedData = dependency.getEvictedData(getConf());
+                 if (evictedData.isTransitivelyEvicted()) {
+@@ -94,13 +110,16 @@ private void printDependencies(List/* <IvyNode> */dependencyList, int indent) {
+             }
+             log(sb.toString());
+ 
+-            printDependencies((List) dependencies.get(dependency.getId()), indent + 1);
++            printDependencies(dependencyMrid, dependencies.get(dependencyMrid), indent + 1, ancestorsForCurrentDep);
+         }
+     }
+ 
+-    private boolean hasDependencies(IvyNode dependency) {
+-        List dependencyList = (List) dependencies.get(dependency.getId());
+-        return dependencyList.size() > 0;
++    private boolean hasDependencies(final IvyNode module) {
++        if (module == null) {
++            return false;
++        }
++        final List<IvyNode> dependenciesForModule = dependencies.get(module.getId());
++        return dependenciesForModule != null && !dependenciesForModule.isEmpty();
+     }
+ 
+     private void populateDependencyTree(IvyNode dependency, ModuleRevisionId currentMrid,
+@@ -112,16 +131,16 @@ private void populateDependencyTree(IvyNode dependency, ModuleRevisionId current
+         }
+     }
+ 
+-    private void registerNodeIfNecessary(ModuleRevisionId moduleRevisionId) {
++    private void registerNodeIfNecessary(final ModuleRevisionId moduleRevisionId) {
+         if (!dependencies.containsKey(moduleRevisionId)) {
+-            dependencies.put(moduleRevisionId, new ArrayList/* <IvyNode> */());
++            dependencies.put(moduleRevisionId, new ArrayList<IvyNode>());
+         }
+     }
+ 
+-    private void addDependency(ModuleRevisionId moduleRevisionId, IvyNode dependency) {
++    private void addDependency(final ModuleRevisionId moduleRevisionId, final IvyNode dependency) {
+         registerNodeIfNecessary(moduleRevisionId);
+-        List/* <IvyNode> */list = (List) dependencies.get(moduleRevisionId);
+-        list.add(dependency);
++        final List<IvyNode> dependencyList = dependencies.get(moduleRevisionId);
++        dependencyList.add(dependency);
+     }
+ 
+     public boolean isShowEvicted() {
+diff --git a/test/java/org/apache/ivy/ant/IvyDependencyTreeTest.java b/test/java/org/apache/ivy/ant/IvyDependencyTreeTest.java
+index 23c1ed442..14437e942 100644
+--- a/test/java/org/apache/ivy/ant/IvyDependencyTreeTest.java
++++ b/test/java/org/apache/ivy/ant/IvyDependencyTreeTest.java
+@@ -17,8 +17,6 @@
+  */
+ package org.apache.ivy.ant;
+ 
+-import java.io.File;
+-
+ import org.apache.ivy.TestHelper;
+ import org.apache.ivy.ant.testutil.AntTaskTestCase;
+ import org.apache.tools.ant.BuildException;
+@@ -27,6 +25,9 @@
+ import org.junit.Before;
+ import org.junit.Test;
+ 
++import java.io.File;
++
++
+ public class IvyDependencyTreeTest extends AntTaskTestCase {
+ 
+     private IvyDependencyTree dependencyTree;
+@@ -117,4 +118,29 @@ public void testShowEvictedModule() throws Exception {
+         assertLogContaining("\\- org1#mod1.2;2.2");
+     }
+ 
++
++    /**
++     * Tests that dependency tree task doesn't run into an infinite loop due to circular dependencies
++     *
++     * @throws Exception
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1540">IVY-1540</a> for more details
++     */
++    @Test
++    public void testCircularDep() throws Exception {
++        final String resolveId = "circular-dep-tree";
++        // resolve
++        final IvyResolve ivyResolve = new IvyResolve();
++        ivyResolve.setProject(project);
++        ivyResolve.setResolveId(resolveId);
++        ivyResolve.setFile(new File("test/repositories/1/org/foo-bar/ivys/ivy-1.2.3.xml"));
++        ivyResolve.execute();
++        // use the resolveid to fetch the dependency tree from that previous resolution
++        dependencyTree.setResolveId(resolveId);
++        dependencyTree.execute();
++        // check the logged message
++        assertLogContaining("Dependency tree for " + resolveId);
++        assertLogContaining("(circularly depends on) " + "org.circular#module1;1.0");
++        assertLogNotContaining("(circularly depends on) " + "org.circular#module2;2.0");
++    }
++
+ }
+diff --git a/test/repositories/1/org/foo-bar/ivys/ivy-1.2.3.xml b/test/repositories/1/org/foo-bar/ivys/ivy-1.2.3.xml
+new file mode 100644
+index 000000000..ab09e3ec0
+--- /dev/null
++++ b/test/repositories/1/org/foo-bar/ivys/ivy-1.2.3.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivy-module version="1.0">
++    <info organisation="org"
++          module="foo-bar"
++          revision="1.2.3"
++    />
++    <dependencies>
++        <dependency org="org.circular" name="module1" rev="1.0"/>
++        <dependency org="org" name="mod1" rev="2.0" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org/foo-bar/jars/foo-bar-1.2.3.jar b/test/repositories/1/org/foo-bar/jars/foo-bar-1.2.3.jar
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/test/repositories/1/org/mod1/ivys/ivy-2.0.xml b/test/repositories/1/org/mod1/ivys/ivy-2.0.xml
+new file mode 100644
+index 000000000..27a8cb466
+--- /dev/null
++++ b/test/repositories/1/org/mod1/ivys/ivy-2.0.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivy-module version="1.0">
++    <info organisation="org"
++          module="mod1"
++          revision="2.0"
++    />
++    <dependencies>
++        <dependency org="org" name="foo-bar" rev="1.2.3" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org/mod1/jars/mod1-2.0.jar b/test/repositories/1/org/mod1/jars/mod1-2.0.jar
+new file mode 100644
+index 000000000..e69de29bb
+diff --git a/test/repositories/m2/org/circular/module1/1.0/module1-1.0.jar b/test/repositories/m2/org/circular/module1/1.0/module1-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/circular/module1/1.0/module1-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/circular/module1/1.0/module1-1.0.pom b/test/repositories/m2/org/circular/module1/1.0/module1-1.0.pom
+new file mode 100644
+index 000000000..4d7c8ff1b
+--- /dev/null
++++ b/test/repositories/m2/org/circular/module1/1.0/module1-1.0.pom
+@@ -0,0 +1,35 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++    <modelVersion>4.0.0</modelVersion>
++    <groupId>org.circular</groupId>
++    <artifactId>module1</artifactId>
++    <name>Test Module for Ivy tests</name>
++    <version>1.0</version>
++
++    <dependencies>
++        <dependency>
++            <groupId>org.circular</groupId>
++            <artifactId>module2</artifactId>
++            <version>2.0</version>
++        </dependency>
++    </dependencies>
++
++</project>
+diff --git a/test/repositories/m2/org/circular/module2/2.0/module2-2.0.jar b/test/repositories/m2/org/circular/module2/2.0/module2-2.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/circular/module2/2.0/module2-2.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/circular/module2/2.0/module2-2.0.pom b/test/repositories/m2/org/circular/module2/2.0/module2-2.0.pom
+new file mode 100644
+index 000000000..fd751b626
+--- /dev/null
++++ b/test/repositories/m2/org/circular/module2/2.0/module2-2.0.pom
+@@ -0,0 +1,35 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++    <modelVersion>4.0.0</modelVersion>
++    <groupId>org.circular</groupId>
++    <artifactId>module2</artifactId>
++    <name>Test Module for Ivy tests</name>
++    <version>2.0</version>
++
++    <dependencies>
++        <dependency>
++            <groupId>org.circular</groupId>
++            <artifactId>module1</artifactId>
++            <version>1.0</version>
++        </dependency>
++    </dependencies>
++
++</project>

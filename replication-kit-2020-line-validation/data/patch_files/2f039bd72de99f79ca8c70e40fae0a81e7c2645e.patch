@@ -1,0 +1,161 @@
+From 2f039bd72de99f79ca8c70e40fae0a81e7c2645e Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 14 May 2007 10:11:09 +0000
+Subject: [PATCH] FIX: Bug on handling dependency artifacts when a module
+ configuration is specified (IVY-507)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@537769 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../DefaultDependencyDescriptor.java          |  2 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 26 ++++++++++++--
+ .../1/org2/mod2.2/ivys/ivy-0.5.1.xml          | 36 +++++++++++++++++++
+ .../1/org2/mod2.3/ivys/ivy-0.4.xml            |  2 +-
+ .../1/org2/mod2.3/ivys/ivy-0.5.xml            |  2 +-
+ 6 files changed, 63 insertions(+), 6 deletions(-)
+ create mode 100644 test/repositories/1/org2/mod2.2/ivys/ivy-0.5.1.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 0bef1cc63..d3279af05 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -51,6 +51,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+ - IMPROVEMENT: Allow "main" parameters to be passed directly (instead of using -args flag) (IVY-480) (thanks to Archie Cobbs)
+ 
++- FIX: Bug on handling dependency artifacts when a module configuration is specified (IVY-507)
+ - FIX: Configure fails when having httpclient in classpath without commons-logging (IVY-502)
+ - FIX: packaging data not parsed in maven 2 pom (IVY-500) (thanks to Jeffrey Blattman)
+ - FIX: install ant task: requires default resolver in ivy settings (IVY-477)
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java
+index 723c49a3d..8f75b0edb 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyDescriptor.java
+@@ -107,7 +107,7 @@ public static DefaultDependencyDescriptor transformInstance(DependencyDescriptor
+                 newdd._confs.put(moduleConfs[i], new ArrayList(Arrays.asList(dd.getDependencyConfigurations(moduleConfs[i]))));
+                 newdd._excludeRules.put(moduleConfs[i], new ArrayList(Arrays.asList(dd.getExcludeRules(moduleConfs[i]))));
+                 newdd._includeRules.put(moduleConfs[i], new ArrayList(Arrays.asList(dd.getIncludeRules(moduleConfs[i]))));
+-                newdd._dependencyArtifacts.put(moduleConfs[i], new ArrayList(Arrays.asList(dd.getIncludeRules(moduleConfs[i]))));
++                newdd._dependencyArtifacts.put(moduleConfs[i], new ArrayList(Arrays.asList(dd.getDependencyArtifacts(moduleConfs[i]))));
+             }
+         }
+         if (fromSystem) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index b8a098240..f35339519 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -746,7 +746,27 @@ public void testResolveDefaultWithArtifactsConf2() throws Exception {
+         assertTrue(!getArchiveFileInCache("org1", "mod1.3", "3.0", "mod1.3", "jar", "jar").exists());
+     }
+     
+-    public void testResolveWithDependencyArtifactsConf1() throws Exception {
++    public void testResolveDefaultWithArtifactsAndConfMapping() throws Exception {
++        // mod2.2 depends on mod1.3 and specify its artifacts and a conf mapping
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.2/ivys/ivy-0.5.1.xml").toURL(),
++        		getResolveOptions(new String[] {"myconf1"}));
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.2", "0.5.1");
++        assertEquals(mrid, md.getModuleRevisionId());
++        
++        assertTrue(_cacheManager.getResolvedIvyFileInCache(mrid).exists());
++        
++        assertTrue(_cacheManager.getIvyFileInCache(ModuleRevisionId.newInstance("org1", "mod1.3", "3.0")).exists());
++        assertTrue(getArchiveFileInCache("org1", "mod1.3", "3.0", "mod1.3-A", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache("org1", "mod1.3", "3.0", "mod1.3-B", "jar", "jar").exists());
++        assertTrue(!getArchiveFileInCache("org1", "mod1.3", "3.0", "mod1.3", "jar", "jar").exists());
++    }
++    
++    
++    public void testResolveWithIncludeArtifactsConf1() throws Exception {
+         // mod2.3 depends on mod2.1 and selects its artifacts in myconf1
+         ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.3/ivys/ivy-0.4.xml").toURL(),
+         		getResolveOptions(new String[] {"myconf1"}));
+@@ -764,7 +784,7 @@ public void testResolveWithDependencyArtifactsConf1() throws Exception {
+         assertTrue(!getArchiveFileInCache("org2", "mod2.1", "0.3", "mod2.1", "jar", "jar").exists());
+     }
+     
+-    public void testResolveWithDependencyArtifactsConf2() throws Exception {
++    public void testResolveWithIncludeArtifactsConf2() throws Exception {
+         // mod2.3 depends on mod2.1 and selects its artifacts in myconf1
+         ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.3/ivys/ivy-0.4.xml").toURL(),
+         		getResolveOptions(new String[] {"myconf2"}));
+@@ -782,7 +802,7 @@ public void testResolveWithDependencyArtifactsConf2() throws Exception {
+         assertTrue(!getArchiveFileInCache("org2", "mod2.1", "0.3", "mod2.1", "jar", "jar").exists());
+     }
+     
+-    public void testResolveWithDependencyArtifactsWithoutConf() throws Exception {
++    public void testResolveWithIncludeArtifactsWithoutConf() throws Exception {
+         // mod2.3 depends on mod2.1 and selects its artifacts
+         ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.3/ivys/ivy-0.5.xml").toURL(),
+                 getResolveOptions(new String[] {"*"}));
+diff --git a/test/repositories/1/org2/mod2.2/ivys/ivy-0.5.1.xml b/test/repositories/1/org2/mod2.2/ivys/ivy-0.5.1.xml
+new file mode 100644
+index 000000000..2f3730e3c
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.2/ivys/ivy-0.5.1.xml
+@@ -0,0 +1,36 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++	<info organisation="org2"
++	       module="mod2.2"
++	       revision="0.5.1"
++	       status="integration"
++	       publication="20070514110000"
++	/>
++	<configurations>
++		<conf name="myconf1" description="desc 1"/>
++		<conf name="myconf2" description="desc 2"/>
++	</configurations>
++	<dependencies>
++		<dependency org="org1" name="mod1.3" rev="3.0" conf="myconf1,myconf2->default">
++			<artifact name="mod1.3-A" type="jar"/>
++			<artifact name="mod1.3-B" type="jar" conf="myconf1"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.3/ivys/ivy-0.4.xml b/test/repositories/1/org2/mod2.3/ivys/ivy-0.4.xml
+index fb21f2de8..fc3de17e9 100644
+--- a/test/repositories/1/org2/mod2.3/ivys/ivy-0.4.xml
++++ b/test/repositories/1/org2/mod2.3/ivys/ivy-0.4.xml
+@@ -35,7 +35,7 @@
+ 			     you should had conf information on the dependency itself
+ 			     saying you depend on mod2.1 only in myconf1:
+ 			     example: conf="myconf1->*" -->
+-			<artifact name="art21A" type="jar" conf="myconf1"/>
++			<include name="art21A" type="jar" conf="myconf1"/>
+ 		</dependency>
+ 	</dependencies>
+ </ivy-module>
+diff --git a/test/repositories/1/org2/mod2.3/ivys/ivy-0.5.xml b/test/repositories/1/org2/mod2.3/ivys/ivy-0.5.xml
+index e2d1379ab..45fcae2e8 100644
+--- a/test/repositories/1/org2/mod2.3/ivys/ivy-0.5.xml
++++ b/test/repositories/1/org2/mod2.3/ivys/ivy-0.5.xml
+@@ -24,7 +24,7 @@
+ 	/>
+ 	<dependencies>
+ 		<dependency name="mod2.1" rev="0.3">
+-			<artifact name="art21A" type="jar"/>
++			<include name="art21A" type="jar"/>
+ 		</dependency>
+ 	</dependencies>
+ </ivy-module>

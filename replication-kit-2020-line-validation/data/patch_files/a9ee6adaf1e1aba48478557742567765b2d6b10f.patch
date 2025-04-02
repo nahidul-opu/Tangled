@@ -1,0 +1,85 @@
+From a9ee6adaf1e1aba48478557742567765b2d6b10f Mon Sep 17 00:00:00 2001
+From: Mark Thomas <markt@apache.org>
+Date: Fri, 31 Jan 2014 21:08:08 +0000
+Subject: [PATCH] Fix DBCP-391 Ensure that the close state of a pooled
+ connection and the underlying connection is consistent when the underlying
+ connection is closed as a result of an error condition.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/branches/DBCP_1_5_x_BRANCH@1563257 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  5 ++++
+ .../commons/dbcp/PoolableConnection.java      | 28 +++++++++++++++----
+ 2 files changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 45b7afdaf7..791f55310a 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -78,6 +78,11 @@ The <action> type attribute can be add,update,fix,remove.
+         Fix threading issue when using multiple instances of the
+         SharedPoolDataSource concurrently.
+       </action>
++      <action dev="markt" issue="DBCP-391" type="fix">
++        Ensure that the close state of a pooled connection and the underlying
++        connection is consistent when the underlying connection is closed as a
++        result of an error condition.
++      </action>
+     </release>
+     <release version="1.4.1" date="TBD" description="TBD">
+       <action dev="psteitz" issue="DBCP-367" type="fix" due-to="Ken Tatsushita">
+diff --git a/src/main/java/org/apache/commons/dbcp/PoolableConnection.java b/src/main/java/org/apache/commons/dbcp/PoolableConnection.java
+index 880ef1e6a4..582c96a1d6 100644
+--- a/src/main/java/org/apache/commons/dbcp/PoolableConnection.java
++++ b/src/main/java/org/apache/commons/dbcp/PoolableConnection.java
+@@ -5,9 +5,9 @@
+  * The ASF licenses this file to You under the Apache License, Version 2.0
+  * (the "License"); you may not use this file except in compliance with
+  * the License.  You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -58,6 +58,24 @@ public PoolableConnection(Connection conn, ObjectPool pool, AbandonedConfig conf
+     }
+ 
+ 
++    @Override
++    public boolean isClosed() throws SQLException {
++        if (_closed) {
++            return true;
++        }
++
++        if (getDelegateInternal().isClosed()) {
++            // Something has gone wrong. The underlying connection has been
++            // closed without the connection being returned to the pool. Return
++            // it now.
++            close();
++            return true;
++        }
++
++        return false;
++    }
++
++
+     /**
+      * Returns me to my pool.
+      */
+@@ -108,11 +126,11 @@ public synchronized void close() throws SQLException {
+                 // pool is closed, so close the connection
+                 passivate();
+                 getInnermostDelegate().close();
+-            } catch (Exception ie) {
+-                // DO NOTHING, "Already closed" exception thrown below
++            } catch (Exception e) {
++                throw (SQLException) new SQLException("Cannot close connection (invalidating pooled object failed)").initCause(e);
+             }
+-            throw new SQLException("Already closed.");
+         }
++        _closed = true;
+     }
+ 
+     /**

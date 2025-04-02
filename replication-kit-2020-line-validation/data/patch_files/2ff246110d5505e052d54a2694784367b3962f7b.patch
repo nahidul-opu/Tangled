@@ -1,0 +1,528 @@
+From 2ff246110d5505e052d54a2694784367b3962f7b Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 31 Jul 2008 21:41:11 +0000
+Subject: [PATCH] FIX: Config files with # in path can't be read (IVY-868)
+ (thanks to Simon Steiner)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@681508 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  4 +-
+ src/java/org/apache/ivy/Main.java             |  6 +--
+ src/java/org/apache/ivy/ant/IvyBuildList.java |  2 +-
+ src/java/org/apache/ivy/ant/IvyCheck.java     |  4 +-
+ .../org/apache/ivy/ant/IvyConvertPom.java     |  6 +--
+ src/java/org/apache/ivy/ant/IvyInfo.java      |  2 +-
+ src/java/org/apache/ivy/ant/IvyMakePom.java   |  2 +-
+ src/java/org/apache/ivy/ant/IvyResolve.java   |  2 +-
+ .../apache/ivy/core/RelativeUrlResolver.java  |  2 +-
+ .../cache/DefaultRepositoryCacheManager.java  |  4 +-
+ .../ivy/core/deliver/DeliverEngine.java       |  2 +-
+ .../ivy/core/publish/PublishEngine.java       |  4 +-
+ .../ivy/core/resolve/ResolveEngine.java       |  2 +-
+ .../ivy/core/retrieve/RetrieveEngine.java     |  2 +-
+ .../apache/ivy/core/settings/IvySettings.java |  4 +-
+ .../ivy/core/settings/XmlSettingsParser.java  | 19 +++++++-
+ .../xml/XmlModuleDescriptorUpdater.java       |  4 +-
+ .../plugins/repository/ResourceHelper.java    |  2 +-
+ .../plugins/resolver/RepositoryResolver.java  |  2 +-
+ .../core/settings/XmlSettingsParserTest.java  | 41 +++++++++++++++++
+ .../settings/ivysettings-include-special.xml  | 24 ++++++++++
+ .../ivy/core/settings/ivysettings-macro#2.xml | 44 +++++++++++++++++++
+ 22 files changed, 155 insertions(+), 29 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/settings/ivysettings-include-special.xml
+ create mode 100644 test/java/org/apache/ivy/core/settings/ivysettings-macro#2.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 957b9b19f..228b5fd48 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -60,9 +60,10 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Geoff Reedy
+ 	Christian Riege
+ 	Andreas Sahlbach
+-	Adrian Sandor 	
++	Adrian Sandor
+ 	Ruslan Shevchenko
+ 	John Shields
++	Simon Steiner
+ 	Johan Stuyts
+ 	Jason Trump
+ 	Tjeerd Verhagen
+@@ -100,6 +101,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ - IMPROVEMENT: Check branch consistency during resolve (IVY-858)
+ 
++- FIX: Config files with # in path can't be read (IVY-868) (thanks to Simon Steiner)
+ - FIX: Cache can't distinguish artifacts with classifiers (IVY-803) (thanks to James P. White)
+ - FIX: Reports showing double dependencies in certain cases (IVY-578)
+ - FIX: Dynamic revision resolve does not throw error when configuration is missing (IVY-861)
+diff --git a/src/java/org/apache/ivy/Main.java b/src/java/org/apache/ivy/Main.java
+index 2928b89dd..d3de15a9a 100644
+--- a/src/java/org/apache/ivy/Main.java
++++ b/src/java/org/apache/ivy/Main.java
+@@ -228,7 +228,7 @@ static void run(CommandLineParser parser, String[] args) throws Exception {
+             }
+             ResolveOptions resolveOptions = new ResolveOptions().setConfs(confs)
+                 .setValidate(validate);
+-            ResolveReport report = ivy.resolve(ivyfile.toURL(), resolveOptions);
++            ResolveReport report = ivy.resolve(ivyfile.toURI().toURL(), resolveOptions);
+             if (report.hasError()) {
+                 System.exit(1);
+             }
+@@ -416,7 +416,7 @@ private static void invoke(Ivy ivy, File cache, ModuleDescriptor md, String[] co
+             for (Iterator iter = fileList.iterator(); iter.hasNext();) {
+                 File file = (File) iter.next();
+                 try {
+-                    urls.add(file.toURL());
++                    urls.add(file.toURI().toURL());
+                 } catch (MalformedURLException e) {
+                     // Should not happen, just ignore.
+                 } 
+@@ -438,7 +438,7 @@ private static void invoke(Ivy ivy, File cache, ModuleDescriptor md, String[] co
+                 ArtifactDownloadReport artifact = (ArtifactDownloadReport) iter.next();
+ 
+                 if (artifact.getLocalFile() != null) {
+-                    urls.add(artifact.getLocalFile().toURL());
++                    urls.add(artifact.getLocalFile().toURI().toURL());
+                 }
+             }
+         } catch (Exception ex) {
+diff --git a/src/java/org/apache/ivy/ant/IvyBuildList.java b/src/java/org/apache/ivy/ant/IvyBuildList.java
+index c38ff070e..44eff32de 100644
+--- a/src/java/org/apache/ivy/ant/IvyBuildList.java
++++ b/src/java/org/apache/ivy/ant/IvyBuildList.java
+@@ -205,7 +205,7 @@ public void doExecute() throws BuildException {
+                 } else {
+                     try {
+                         ModuleDescriptor md = ModuleDescriptorParserRegistry.getInstance()
+-                                .parseDescriptor(settings, ivyFile.toURL(), doValidate(settings));
++                                .parseDescriptor(settings, ivyFile.toURI().toURL(), doValidate(settings));
+                         buildFiles.put(md, buildFile);
+                         mds.add(md);
+                         Message.debug("Add " + md.getModuleRevisionId().getModuleId());
+diff --git a/src/java/org/apache/ivy/ant/IvyCheck.java b/src/java/org/apache/ivy/ant/IvyCheck.java
+index f973fd44a..c101274ed 100644
+--- a/src/java/org/apache/ivy/ant/IvyCheck.java
++++ b/src/java/org/apache/ivy/ant/IvyCheck.java
+@@ -72,7 +72,7 @@ public void doExecute() throws BuildException {
+         try {
+             Ivy ivy = getIvyInstance();
+             if (file != null) {
+-                if (ivy.check(file.toURL(), resolvername)) {
++                if (ivy.check(file.toURI().toURL(), resolvername)) {
+                     Message.verbose("checked " + file + ": OK");
+                 }
+             }
+@@ -85,7 +85,7 @@ public void doExecute() throws BuildException {
+                 String[] srcFiles = ds.getIncludedFiles();
+                 for (int j = 0; j < srcFiles.length; j++) {
+                     File file = new File(fromDir, srcFiles[j]);
+-                    if (ivy.check(file.toURL(), resolvername)) {
++                    if (ivy.check(file.toURI().toURL(), resolvername)) {
+                         Message.verbose("checked " + file + ": OK");
+                     }
+                 }
+diff --git a/src/java/org/apache/ivy/ant/IvyConvertPom.java b/src/java/org/apache/ivy/ant/IvyConvertPom.java
+index a589c6fa2..cfd220902 100644
+--- a/src/java/org/apache/ivy/ant/IvyConvertPom.java
++++ b/src/java/org/apache/ivy/ant/IvyConvertPom.java
+@@ -60,9 +60,9 @@ public void doExecute() throws BuildException {
+                 throw new BuildException("destination ivy file is required for convertpom task");
+             }
+             ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+-                getSettings(), pomFile.toURL(), false);
+-            PomModuleDescriptorParser.getInstance().toIvyFile(pomFile.toURL().openStream(),
+-                new URLResource(pomFile.toURL()), getIvyFile(), md);
++                getSettings(), pomFile.toURI().toURL(), false);
++            PomModuleDescriptorParser.getInstance().toIvyFile(pomFile.toURI().toURL().openStream(),
++                new URLResource(pomFile.toURI().toURL()), getIvyFile(), md);
+         } catch (MalformedURLException e) {
+             throw new BuildException("unable to convert given pom file to url: " + pomFile + ": "
+                     + e, e);
+diff --git a/src/java/org/apache/ivy/ant/IvyInfo.java b/src/java/org/apache/ivy/ant/IvyInfo.java
+index 6688fe180..dfdfaaf37 100644
+--- a/src/java/org/apache/ivy/ant/IvyInfo.java
++++ b/src/java/org/apache/ivy/ant/IvyInfo.java
+@@ -133,7 +133,7 @@ public void doExecute() throws BuildException {
+                     file = getProject().resolveFile(getProperty(settings, "ivy.dep.file"));
+                 }
+                 ModuleDescriptor md = ModuleDescriptorParserRegistry.getInstance().parseDescriptor(
+-                    settings, file.toURL(), doValidate(settings));
++                    settings, file.toURI().toURL(), doValidate(settings));
+                 ModuleRevisionId mrid = md.getModuleRevisionId();
+                 setProperties(md, mrid);
+             }
+diff --git a/src/java/org/apache/ivy/ant/IvyMakePom.java b/src/java/org/apache/ivy/ant/IvyMakePom.java
+index f5f696c0b..22afa10b1 100644
+--- a/src/java/org/apache/ivy/ant/IvyMakePom.java
++++ b/src/java/org/apache/ivy/ant/IvyMakePom.java
+@@ -102,7 +102,7 @@ public void doExecute() throws BuildException {
+                 throw new BuildException("destination pom file is required for makepom task");
+             }
+             ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
+-                getSettings(), ivyFile.toURL(), false);
++                getSettings(), ivyFile.toURI().toURL(), false);
+             PomModuleDescriptorWriter.write(md,
+                 headerFile == null ? null : FileUtil.readEntirely(getHeaderFile()),
+                 mappings.isEmpty() 
+diff --git a/src/java/org/apache/ivy/ant/IvyResolve.java b/src/java/org/apache/ivy/ant/IvyResolve.java
+index c43736ca1..6af828702 100644
+--- a/src/java/org/apache/ivy/ant/IvyResolve.java
++++ b/src/java/org/apache/ivy/ant/IvyResolve.java
+@@ -229,7 +229,7 @@ public void doExecute() throws BuildException {
+                 if (file == null) {
+                     file = getProject().resolveFile(getProperty(settings, "ivy.dep.file"));
+                 }
+-                report = ivy.resolve(file.toURL(), getResolveOptions(ivy, confs, settings));
++                report = ivy.resolve(file.toURI().toURL(), getResolveOptions(ivy, confs, settings));
+             }
+             if (report.hasError()) {
+                 if (failureProperty != null) {
+diff --git a/src/java/org/apache/ivy/core/RelativeUrlResolver.java b/src/java/org/apache/ivy/core/RelativeUrlResolver.java
+index 677c294d6..edbc162b8 100644
+--- a/src/java/org/apache/ivy/core/RelativeUrlResolver.java
++++ b/src/java/org/apache/ivy/core/RelativeUrlResolver.java
+@@ -47,7 +47,7 @@ public URL getURL(URL context, String file, String url) throws MalformedURLExcep
+         if (file != null) {
+             File f = new File(file);
+             if (f.isAbsolute()) {
+-                return f.toURL();
++                return f.toURI().toURL();
+             } else {
+                 return getURL(context, file);
+             }
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index ee01a0a7e..9f183f7f4 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -543,7 +543,7 @@ private ResolvedModuleRevision doFindModuleInCache(
+                 // found in cache !
+                 try {
+                     ModuleDescriptor depMD = XmlModuleDescriptorParser.getInstance()
+-                    .parseDescriptor(settings, ivyFile.toURL(), options.isValidate());
++                    .parseDescriptor(settings, ivyFile.toURI().toURL(), options.isValidate());
+                     String resolverName = getSavedResolverName(depMD);
+                     String artResolverName = getSavedArtResolverName(depMD);
+                     DependencyResolver resolver = settings.getResolver(resolverName);
+@@ -889,7 +889,7 @@ public ResolvedResource resolve(Artifact artifact) {
+ 
+             URL cachedMDURL = null;
+             try {
+-                cachedMDURL = report.getLocalFile().toURL();
++                cachedMDURL = report.getLocalFile().toURI().toURL();
+             } catch (MalformedURLException ex) {
+                 Message.warn("malformed url exception for original in cache file: " 
+                     + report.getLocalFile() + ": " + ex.getMessage());
+diff --git a/src/java/org/apache/ivy/core/deliver/DeliverEngine.java b/src/java/org/apache/ivy/core/deliver/DeliverEngine.java
+index c9f28a8ab..3bc7eac53 100644
+--- a/src/java/org/apache/ivy/core/deliver/DeliverEngine.java
++++ b/src/java/org/apache/ivy/core/deliver/DeliverEngine.java
+@@ -115,7 +115,7 @@ public void deliver(ModuleRevisionId mrid, String revision, String destIvyPatter
+         ModuleDescriptor md = null;
+         URL ivyFileURL = null;
+         try {
+-            ivyFileURL = ivyFile.toURL();
++            ivyFileURL = ivyFile.toURI().toURL();
+             md = XmlModuleDescriptorParser.getInstance().parseDescriptor(settings, ivyFileURL,
+                 options.isValidate());
+             md.setResolvedModuleRevisionId(ModuleRevisionId.newInstance(mrid, 
+diff --git a/src/java/org/apache/ivy/core/publish/PublishEngine.java b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+index a3c79f3eb..c9cd6c48b 100644
+--- a/src/java/org/apache/ivy/core/publish/PublishEngine.java
++++ b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+@@ -111,7 +111,7 @@ public Collection publish(ModuleRevisionId mrid, Collection srcArtifactPattern,
+         ModuleDescriptor md = null;
+         URL ivyFileURL = null;
+         try {
+-            ivyFileURL = ivyFile.toURL();
++            ivyFileURL = ivyFile.toURI().toURL();
+             md = XmlModuleDescriptorParser.getInstance().parseDescriptor(settings, ivyFileURL,
+                 false);
+             if (options.getSrcIvyPattern() != null) {
+@@ -138,7 +138,7 @@ public Collection publish(ModuleRevisionId mrid, Collection srcArtifactPattern,
+                         ivyFile = tmp;
+                         // we parse the new file to get updated module descriptor
+                         md = XmlModuleDescriptorParser.getInstance().parseDescriptor(settings,
+-                            ivyFile.toURL(), false);
++                            ivyFile.toURI().toURL(), false);
+                         options.setSrcIvyPattern(ivyFile.getAbsolutePath());
+                     } catch (SAXException e) {
+                         throw new IllegalStateException("bad ivy file for " + mrid + ": " + ivyFile
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 69267eb4d..b2ffcaccc 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -128,7 +128,7 @@ public void setDictatorResolver(DependencyResolver dictatorResolver) {
+     }
+ 
+     public ResolveReport resolve(File ivySource) throws ParseException, IOException {
+-        return resolve(ivySource.toURL());
++        return resolve(ivySource.toURI().toURL());
+     }
+ 
+     public ResolveReport resolve(URL ivySource) throws ParseException, IOException {
+diff --git a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+index 5184fd724..8aaca31ca 100644
+--- a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
++++ b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+@@ -202,7 +202,7 @@ private String[] getConfs(ModuleRevisionId mrid, RetrieveOptions options) throws
+             try {
+                 File ivyFile = getCache().getResolvedIvyFileInCache(mrid);
+                 Message.verbose("no explicit confs given for retrieve, using ivy file: " + ivyFile);
+-                URL ivySource = ivyFile.toURL();
++                URL ivySource = ivyFile.toURI().toURL();
+                 URLResource res = new URLResource(ivySource);
+                 ModuleDescriptorParser parser = ModuleDescriptorParserRegistry.getInstance()
+                         .getParser(res);
+diff --git a/src/java/org/apache/ivy/core/settings/IvySettings.java b/src/java/org/apache/ivy/core/settings/IvySettings.java
+index aec57955d..41d5b51fe 100644
+--- a/src/java/org/apache/ivy/core/settings/IvySettings.java
++++ b/src/java/org/apache/ivy/core/settings/IvySettings.java
+@@ -368,7 +368,7 @@ public void load(File settingsFile) throws ParseException, IOException {
+ 
+         loadDefaultProperties();
+         try {
+-            new XmlSettingsParser(this).parse(settingsFile.toURL());
++            new XmlSettingsParser(this).parse(settingsFile.toURI().toURL());
+         } catch (MalformedURLException e) {
+             IllegalArgumentException iae = new IllegalArgumentException(
+                     "given file cannot be transformed to url: " + settingsFile);
+@@ -458,7 +458,7 @@ public void setSettingsVariables(File settingsFile) {
+             setDeprecatedVariable("ivy.conf.dir", "ivy.settings.dir");
+             setVariable("ivy.settings.file", settingsFile.getAbsolutePath());
+             setDeprecatedVariable("ivy.conf.file", "ivy.settings.file");
+-            setVariable("ivy.settings.url", settingsFile.toURL().toExternalForm());
++            setVariable("ivy.settings.url", settingsFile.toURI().toURL().toExternalForm());
+             setDeprecatedVariable("ivy.conf.url", "ivy.settings.url");
+         } catch (MalformedURLException e) {
+             IllegalArgumentException iae = new IllegalArgumentException(
+diff --git a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+index ced2de761..c2d6bb277 100644
+--- a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
++++ b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+@@ -21,6 +21,8 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.net.MalformedURLException;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.net.URL;
+ import java.text.ParseException;
+ import java.util.Arrays;
+@@ -397,12 +399,25 @@ private void includeStarted(Map attributes) throws IOException, ParseException {
+      * to the URL of the current settings file (can be local file or remote URL).
+      */
+     private URL urlFromFileAttribute(String filePath) throws MalformedURLException {
++        try {
++            return new URL(filePath);
++        } catch (MalformedURLException e) {
++            // ignore, we'll try to create a correct URL below
++        }
++        
+         File incFile = new File(filePath);
+         if (incFile.isAbsolute()) {
+             return incFile.toURI().toURL();
++        } else if ("file".equals(this.settings.getProtocol())) {
++            try {
++                File settingsFile = new File(new URI(this.settings.toExternalForm()));
++                return new File(settingsFile.getParentFile(), filePath).toURI().toURL();
++            } catch (URISyntaxException e) {
++                return new URL(this.settings , filePath);
++            }
+         } else {
+             return new URL(this.settings , filePath);
+-        }      
++        }
+     }
+ 
+     private void propertiesStarted(Map attributes) throws IOException {
+@@ -454,7 +469,7 @@ private void classpathStarted(Map attributes) throws MalformedURLException {
+                 throw new IllegalArgumentException(
+                         "either url or file should be given for classpath element");
+             } else {
+-                url = new File(file).toURL();
++                url = new File(file).toURI().toURL();
+             }
+         } else {
+             url = new URL(urlStr);
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index 290508a3f..05f62baa9 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -133,7 +133,7 @@ public static void update(InputStream in, Resource res,
+             if (res instanceof URLResource) {
+                 inputStreamContext = ((URLResource) res).getURL();
+             } else if (res instanceof FileResource) {
+-                inputStreamContext = ((FileResource) res).getFile().toURL();
++                inputStreamContext = ((FileResource) res).getFile().toURI().toURL();
+             }
+             update(inputStreamContext, in, fos, options);
+         } finally {
+@@ -445,7 +445,7 @@ private void includeStarted(Attributes attributes) throws SAXException {
+                         String urlStr = attributes.getValue("url");
+                         url = new URL(urlStr);
+                     } else {
+-                        url = new File(fileName).toURL();
++                        url = new File(fileName).toURI().toURL();
+                     }
+                 }
+                 XMLHelper.parse(url, null, new DefaultHandler() {
+diff --git a/src/java/org/apache/ivy/plugins/repository/ResourceHelper.java b/src/java/org/apache/ivy/plugins/repository/ResourceHelper.java
+index 116c75977..dcece89a9 100644
+--- a/src/java/org/apache/ivy/plugins/repository/ResourceHelper.java
++++ b/src/java/org/apache/ivy/plugins/repository/ResourceHelper.java
+@@ -41,7 +41,7 @@ public static boolean equals(Resource res, File f) {
+             return new File(res.getName()).equals(f);
+         } else if (res instanceof URLResource) {
+             try {
+-                return f.toURL().toExternalForm().equals(res.getName());
++                return f.toURI().toURL().toExternalForm().equals(res.getName());
+             } catch (MalformedURLException e) {
+                 return false;
+             }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+index 6d274172f..bee48536c 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+@@ -100,7 +100,7 @@ protected ResolvedResource findResourceUsingPattern(ModuleRevisionId mrid, Strin
+                             ModuleDescriptorParser parser = 
+                                 ModuleDescriptorParserRegistry.getInstance().getParser(res);
+                             ModuleDescriptor md = 
+-                                parser.parseDescriptor(getSettings(), temp.toURL(), res, false);
++                                parser.parseDescriptor(getSettings(), temp.toURI().toURL(), res, false);
+                             revision = md.getRevision();
+                             if ((revision == null) || (revision.length() == 0)) {
+                                 revision = "working@" + name;
+diff --git a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+index 069887580..4f2465174 100644
+--- a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
++++ b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+@@ -473,7 +473,48 @@ public void testIncludeMissingFile() throws Exception {
+             //An exception must be throwed
+         }
+     }
++    
++    public void testIncludeSpecialCharInName() throws Exception {
++        IvySettings settings = new IvySettings();
++        XmlSettingsParser parser = new XmlSettingsParser(settings);
++        parser.parse(XmlSettingsParserTest.class.getResource("ivysettings-include-special.xml"));
++
++        DependencyResolver def = settings.getResolver("default");
++        assertNotNull(def);
++        assertTrue(def instanceof ChainResolver);
++        ChainResolver chain = (ChainResolver) def;
++        List subresolvers = chain.getResolvers();
++        assertNotNull(subresolvers);
++        assertEquals(2, subresolvers.size());
++        FileSystemResolver fsInt1 = (FileSystemResolver) subresolvers.get(0);
++        assertEquals("default-fs1", fsInt1.getName());
++
++        List ivyPatterns = fsInt1.getIvyPatterns();
++        assertNotNull(ivyPatterns);
++        assertEquals(1, ivyPatterns.size());
++        assertEquals("path/to/myrep/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]",
++            ivyPatterns.get(0));
+ 
++        DependencyResolver inc = settings.getResolver("includeworks");
++        assertNotNull(inc);
++        assertTrue(inc instanceof ChainResolver);
++        chain = (ChainResolver) inc;
++        subresolvers = chain.getResolvers();
++        assertNotNull(subresolvers);
++        assertEquals(2, subresolvers.size());
++
++        fsInt1 = (FileSystemResolver) subresolvers.get(0);
++        assertEquals("includeworks-fs1", fsInt1.getName());
++
++        ivyPatterns = fsInt1.getIvyPatterns();
++        assertNotNull(ivyPatterns);
++        assertEquals(1, ivyPatterns.size());
++        assertEquals("included/myrep/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]",
++            ivyPatterns.get(0));
++        
++        // properties defined in included file should be available to including file (IVY-780)
++        assertEquals("myvalue", settings.getVariable("ivy.test.prop"));
++    }
+     
+     public void testRelativePropertiesFile() throws Exception {
+         IvySettings settings = new IvySettings();
+diff --git a/test/java/org/apache/ivy/core/settings/ivysettings-include-special.xml b/test/java/org/apache/ivy/core/settings/ivysettings-include-special.xml
+new file mode 100644
+index 000000000..7a4ca1c43
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/settings/ivysettings-include-special.xml
+@@ -0,0 +1,24 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<include file="ivysettings-macro#2.xml"/>
++	<resolvers>
++		<mymacro name="includeworks" mymainrep="included/myrep" mysecondrep="included/secondrep"/>
++	</resolvers>
++</ivysettings>
+diff --git a/test/java/org/apache/ivy/core/settings/ivysettings-macro#2.xml b/test/java/org/apache/ivy/core/settings/ivysettings-macro#2.xml
+new file mode 100644
+index 000000000..2c3fa2feb
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/settings/ivysettings-macro#2.xml
+@@ -0,0 +1,44 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<property name="ivy.test.prop" value="myvalue" />
++	<macrodef name="mymacro">
++		<attribute name="mymainrep"/>
++		<attribute name="mysecondrep"/>
++		<attribute name="myseconddirlayout" default="[organisation]/[module]/[type]s"/>
++		<chain>
++			<filesystem name="fs1">
++				<ivy pattern="@{mymainrep}/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]"/>
++				<artifact pattern="@{mymainrep}/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]"/>
++			</filesystem>
++			<filesystem name="fs2" latest="latest-time">
++				<ivy pattern="@{mysecondrep}/@{myseconddirlayout}/ivy-[revision].xml"/>
++				<artifact pattern="@{mysecondrep}/@{myseconddirlayout}/[artifact]-[revision].[ext]"/>
++			</filesystem>
++		</chain>
++	</macrodef>
++	
++	<resolvers>
++		<mymacro name="default" mymainrep="path/to/myrep" mysecondrep="path/to/secondrep"/>
++		<mymacro name="other" 
++					mymainrep="path/to/myrep" 
++					mysecondrep="path/to/secondrep" 
++					myseconddirlayout="[module]/[type]s"/>
++	</resolvers>
++</ivysettings>

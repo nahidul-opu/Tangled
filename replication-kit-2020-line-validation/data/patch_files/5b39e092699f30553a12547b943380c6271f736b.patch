@@ -1,0 +1,364 @@
+From 5b39e092699f30553a12547b943380c6271f736b Mon Sep 17 00:00:00 2001
+From: cduffy <cduffy@unknown>
+Date: Fri, 27 Dec 2013 21:30:33 +0000
+Subject: [PATCH] IVY-1455 Prevent incorrect ivy mediators from being applied
+ during conflict resolution.
+
+Prior to this, the mediators to be applied depended on the location where a
+conflict was detected, rather than the declaration location.
+
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1553745 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../module/descriptor/ModuleDescriptor.java   |  2 +-
+ .../OverrideDependencyDescriptorMediator.java |  6 +++
+ .../ivy/core/resolve/ResolveEngine.java       | 30 ++++++++------
+ .../org/apache/ivy/ant/IvyResolveTest.java    |  9 +++--
+ test/repositories/IVY-1455/ivy.xml            | 39 +++++++++++++++++++
+ test/repositories/IVY-1455/ivysettings.xml    | 28 +++++++++++++
+ .../IVY-1455/repo/conflict/conflict/ivy-1.xml | 23 +++++++++++
+ .../IVY-1455/repo/conflict/conflict/ivy-2.xml | 23 +++++++++++
+ .../repo/empty-module/empty-module/ivy-1.xml  | 25 ++++++++++++
+ .../repo/reproducer/phase-one/ivy-1.xml       | 26 +++++++++++++
+ .../repo/reproducer/phase-two/ivy-1.xml       | 27 +++++++++++++
+ 11 files changed, 223 insertions(+), 15 deletions(-)
+ create mode 100644 test/repositories/IVY-1455/ivy.xml
+ create mode 100644 test/repositories/IVY-1455/ivysettings.xml
+ create mode 100644 test/repositories/IVY-1455/repo/conflict/conflict/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1455/repo/conflict/conflict/ivy-2.xml
+ create mode 100644 test/repositories/IVY-1455/repo/empty-module/empty-module/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1455/repo/reproducer/phase-one/ivy-1.xml
+ create mode 100644 test/repositories/IVY-1455/repo/reproducer/phase-two/ivy-1.xml
+
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java
+index 9504c2a28..3b961f27b 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java
+@@ -35,7 +35,7 @@
+ import org.apache.ivy.util.extendable.ExtendableItem;
+ 
+ /**
+- * Decriptor of a module. This is the Java representation of an ivy.xml
++ * Descriptor of a module. This is the Java representation of an ivy.xml
+  */
+ public interface ModuleDescriptor 
+         extends ExtendableItem, ArtifactInfo, DependencyDescriptorMediator {
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/OverrideDependencyDescriptorMediator.java b/src/java/org/apache/ivy/core/module/descriptor/OverrideDependencyDescriptorMediator.java
+index 9cc6ff358..b365d2a35 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/OverrideDependencyDescriptorMediator.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/OverrideDependencyDescriptorMediator.java
+@@ -71,6 +71,12 @@ public DependencyDescriptor mediate(DependencyDescriptor dd) {
+         
+         String version = this.version == null ? mrid.getRevision() : this.version;
+         String branch = this.branch == null ? mrid.getBranch() : this.branch;
++
++        // if this is a noop, do not construct any new object
++        if(version.equals(dd.getDependencyRevisionId().getRevision())
++            && branch.equals(dd.getDependencyRevisionId().getBranch())) {
++            return dd;
++        }
+         
+         return dd.clone(ModuleRevisionId.newInstance(
+             mrid.getOrganisation(), mrid.getName(), branch, version, 
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 1d2db2bce..c1b1721d7 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -1078,18 +1078,26 @@ private Collection computeConflicts(VisitNode node, VisitNode ancestor, String c
+          */
+         if (evictedInSelected || (selectedNodes.isEmpty() 
+                         && !node.getParent().getNode().equals(ancestor.getNode()))) {
+-            // In this case we need to compute selected nodes again. 
+-            Collection deps = ancestor.getNode().getDependencies(
+-                node.getRootModuleConf(), 
+-                ancestor.getNode().getConfigurations(node.getRootModuleConf()), 
+-                ancestor.getRequestedConf());
+-            for (Iterator iter = deps.iterator(); iter.hasNext();) {
+-                IvyNode dep = (IvyNode) iter.next();
+-                if (dep.getModuleId().equals(node.getModuleId())) {
+-                    conflicts.add(dep);
++            IvyContext context = IvyContext.getContext();
++            ResolveData data = context.getResolveData();
++            VisitNode oldVisitNode = data.getCurrentVisitNode();
++            data.setCurrentVisitNode(ancestor);
++            try {
++                // In this case we need to compute selected nodes again.
++                Collection deps = ancestor.getNode().getDependencies(
++                    node.getRootModuleConf(), 
++                    ancestor.getNode().getConfigurations(node.getRootModuleConf()), 
++                    ancestor.getRequestedConf());
++                for (Iterator iter = deps.iterator(); iter.hasNext();) {
++                    IvyNode dep = (IvyNode) iter.next();
++                    if (dep.getModuleId().equals(node.getModuleId())) {
++                        conflicts.add(dep);
++                    }
++                    conflicts.addAll(
++                        dep.getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
+                 }
+-                conflicts.addAll(
+-                    dep.getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
++            } finally {
++                data.setCurrentVisitNode(oldVisitNode);
+             }
+         } else if (selectedNodes.isEmpty()) {
+             /*
+diff --git a/test/java/org/apache/ivy/ant/IvyResolveTest.java b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+index 4dd0bcfe0..6aec092ed 100644
+--- a/test/java/org/apache/ivy/ant/IvyResolveTest.java
++++ b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+@@ -64,6 +64,12 @@ private void cleanCache() {
+         del.execute();
+     }
+     
++    public void testIVY1455() throws Exception {
++        project.setProperty("ivy.settings.file", "test/repositories/IVY-1455/ivysettings.xml");
++        resolve.setFile(new File("test/repositories/IVY-1455/ivy.xml"));
++        resolve.execute();
++    }
++    
+     public void testIVY1454() throws Exception {
+         // run init in parent thread, then resolve in children
+         project.setProperty("ivy.settings.file", "test/repositories/ivysettings-with-nio.xml");
+@@ -77,9 +83,6 @@ public void testIVY1454() throws Exception {
+         parallel.addTask(resolve);
+         parallel.addTask(resolve);
+         parallel.execute();
+-        
+-        assertTrue(getResolvedIvyFileInCache(
+-            ModuleRevisionId.newInstance("apache", "resolve-simple", "1.0")).exists());
+     }
+     
+     public void testIVY779() throws Exception {
+diff --git a/test/repositories/IVY-1455/ivy.xml b/test/repositories/IVY-1455/ivy.xml
+new file mode 100644
+index 000000000..68eb4377d
+--- /dev/null
++++ b/test/repositories/IVY-1455/ivy.xml
+@@ -0,0 +1,39 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++    <info organisation="reproducer" module="top-level" status="integration"/>
++
++    <configurations>
++        <conf name="master"/>
++        <conf name="with-direct-dep" extends="master"/>
++        <!-- without-direct-dep conf not used, but must exist to repro bug -->
++        <conf name="without-direct-dep" extends="master"/>
++    </configurations>
++
++    <publications>
++    </publications>
++
++    <dependencies>
++        <!-- requires conflict==2 [directly] and phase-two (which overrides to conflict==1) -->
++        <dependency org="reproducer" name="phase-one" rev="1" conf="master->*"/>
++
++        <!-- requires conflict==1 [directly] -->
++        <dependency org="conflict" name="conflict" rev="1" conf="with-direct-dep->default"/>
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1455/ivysettings.xml b/test/repositories/IVY-1455/ivysettings.xml
+new file mode 100644
+index 000000000..196aff42b
+--- /dev/null
++++ b/test/repositories/IVY-1455/ivysettings.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++    <settings defaultResolver="test"/>
++
++    <resolvers>
++        <filesystem name="test">
++            <ivy pattern="${ivy.settings.dir}/repo/[organisation]/[module]/ivy-[revision].xml"/>
++            <artifact pattern="${ivy.settings.dir}/repo/[organisation]/[module]/[revision]/[artifact].[ext]"/>
++        </filesystem>
++    </resolvers>
++</ivysettings>
+diff --git a/test/repositories/IVY-1455/repo/conflict/conflict/ivy-1.xml b/test/repositories/IVY-1455/repo/conflict/conflict/ivy-1.xml
+new file mode 100644
+index 000000000..90765ccbd
+--- /dev/null
++++ b/test/repositories/IVY-1455/repo/conflict/conflict/ivy-1.xml
+@@ -0,0 +1,23 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++  <info organisation="conflict" module="conflict" revision="1" status="release" publication="00000000000000"/>
++  <publications>
++  </publications>
++</ivy-module>
+diff --git a/test/repositories/IVY-1455/repo/conflict/conflict/ivy-2.xml b/test/repositories/IVY-1455/repo/conflict/conflict/ivy-2.xml
+new file mode 100644
+index 000000000..3355b91e2
+--- /dev/null
++++ b/test/repositories/IVY-1455/repo/conflict/conflict/ivy-2.xml
+@@ -0,0 +1,23 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++  <info organisation="conflict" module="conflict" revision="2" status="release" publication="00000000000000"/>
++  <publications>
++  </publications>
++</ivy-module>
+diff --git a/test/repositories/IVY-1455/repo/empty-module/empty-module/ivy-1.xml b/test/repositories/IVY-1455/repo/empty-module/empty-module/ivy-1.xml
+new file mode 100644
+index 000000000..3f94e1cc0
+--- /dev/null
++++ b/test/repositories/IVY-1455/repo/empty-module/empty-module/ivy-1.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++  <info organisation="empty-module" module="empty-module" revision="1" status="release" publication="00000000000000"/>
++  <publications>
++  </publications>
++  <dependencies>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1455/repo/reproducer/phase-one/ivy-1.xml b/test/repositories/IVY-1455/repo/reproducer/phase-one/ivy-1.xml
+new file mode 100644
+index 000000000..acbe85882
+--- /dev/null
++++ b/test/repositories/IVY-1455/repo/reproducer/phase-one/ivy-1.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++  <info organisation="reproducer" module="phase-one" revision="1" status="release" publication="00000000000000"/>
++  <publications/>
++  <dependencies>
++    <dependency org="reproducer" name="phase-two" rev="1"/>
++    <dependency org="conflict" name="conflict" rev="2"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1455/repo/reproducer/phase-two/ivy-1.xml b/test/repositories/IVY-1455/repo/reproducer/phase-two/ivy-1.xml
+new file mode 100644
+index 000000000..9c0e01a51
+--- /dev/null
++++ b/test/repositories/IVY-1455/repo/reproducer/phase-two/ivy-1.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0">
++  <info organisation="reproducer" module="phase-two" revision="1" status="release" publication="00000000000000"/>
++  <publications/>
++  <dependencies>
++    <dependency org="empty-module" name="empty-module" rev="1"/>
++    <!-- empty-module doesn't actually include conflict, so in *theory* this override would be a noop -->
++    <override org="conflict" module="conflict" matcher="exact" rev="1"/>
++  </dependencies>
++</ivy-module>

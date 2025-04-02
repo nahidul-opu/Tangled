@@ -1,0 +1,191 @@
+From 0bea61856040da5f82b48d1279daeaf48a197e0a Mon Sep 17 00:00:00 2001
+From: Rahul Akolkar <rahul@apache.org>
+Date: Tue, 29 May 2007 16:31:02 +0000
+Subject: [PATCH] SCXML-45 Payload of events sent to current scxml session
+ using <send> tag not injected into engine
+
+This has been implemented (with a test case), however note the following caveat --
+
+The spec doesn't clarify how multiple <send> elements that create derived events should be handled, so for example:
+
+<onentry>
+  <send event="ev.foo" namelist="alpha beta"/>
+  <send event="ev.bar" namelist="gamma delta"/>
+</onentry>
+
+I think they should be processed together (this makes sense to leverage parallel regions for example), and due to that '_eventdata' becomes ambiguous in this scenario. The Commons SCXML implementation introduces an implicit variable '_eventdatamap' for such scenarios wherein the event datas are stored keyed by event name.
+
+So, the two <send> events above could be processed by two regions like so:
+
+<parallel>
+
+  <state id="region1">
+
+     <transition event="ev.foo" cond="_eventdatamap['ev.foo'].alpha eq 'somevalue'"
+                 target="..." />
+
+     <!-- ... -->
+
+  </state>
+
+  <state id="region2">
+
+     <transition event="ev.bar" cond="_eventdatamap['ev.bar'].delta eq 'othervalue'"
+                 target="..." />
+
+     <!-- ... -->
+
+  </state>
+
+  <!-- ... -->
+
+</parallel>
+
+To summarize, the _eventdatamap variable needs to be used in association with "derived" (such as <send> being discussed here) events. Also note that this behavior may change if there is clarity in the specification at some point.
+
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/scxml/trunk@542582 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../apache/commons/scxml/SCXMLExecutor.java   |  2 +
+ .../org/apache/commons/scxml/model/Send.java  |  2 +-
+ .../apache/commons/scxml/EventDataTest.java   | 25 +++++++++-
+ .../commons/scxml/env/jexl/eventdata-03.xml   | 48 +++++++++++++++++++
+ 4 files changed, 74 insertions(+), 3 deletions(-)
+ create mode 100644 src/test/java/org/apache/commons/scxml/env/jexl/eventdata-03.xml
+
+diff --git a/src/main/java/org/apache/commons/scxml/SCXMLExecutor.java b/src/main/java/org/apache/commons/scxml/SCXMLExecutor.java
+index f32aaca28..2488d6f18 100644
+--- a/src/main/java/org/apache/commons/scxml/SCXMLExecutor.java
++++ b/src/main/java/org/apache/commons/scxml/SCXMLExecutor.java
+@@ -536,6 +536,8 @@ private void updateStatus(final Step step) {
+         currentStatus = step.getAfterStatus();
+         scInstance.getRootContext().setLocal("_ALL_STATES",
+             SCXMLHelper.getAncestorClosure(currentStatus.getStates(), null));
++        setEventData((TriggerEvent[]) currentStatus.getEvents().
++            toArray(new TriggerEvent[0]));
+     }
+ 
+     /**
+diff --git a/src/main/java/org/apache/commons/scxml/model/Send.java b/src/main/java/org/apache/commons/scxml/model/Send.java
+index eecfb70f3..b61d2ee37 100644
+--- a/src/main/java/org/apache/commons/scxml/model/Send.java
++++ b/src/main/java/org/apache/commons/scxml/model/Send.java
+@@ -328,7 +328,7 @@ public void execute(final EventDispatcher evtDispatcher,
+                             + "' with no delay");
+                     }
+                     derivedEvents.add(new TriggerEvent(event,
+-                        TriggerEvent.SIGNAL_EVENT));
++                        TriggerEvent.SIGNAL_EVENT, params));
+                     return;
+                 }
+             } else {
+diff --git a/src/test/java/org/apache/commons/scxml/EventDataTest.java b/src/test/java/org/apache/commons/scxml/EventDataTest.java
+index 03aced336..3d1e64856 100644
+--- a/src/test/java/org/apache/commons/scxml/EventDataTest.java
++++ b/src/test/java/org/apache/commons/scxml/EventDataTest.java
+@@ -45,7 +45,7 @@ public static Test suite() {
+     }
+ 
+     // Test data
+-    private URL eventdata01, eventdata02;
++    private URL eventdata01, eventdata02, eventdata03;
+     private SCXMLExecutor exec;
+ 
+     /**
+@@ -56,13 +56,15 @@ public void setUp() {
+             getResource("org/apache/commons/scxml/env/jexl/eventdata-01.xml");
+         eventdata02 = this.getClass().getClassLoader().
+             getResource("org/apache/commons/scxml/env/jexl/eventdata-02.xml");
++        eventdata03 = this.getClass().getClassLoader().
++            getResource("org/apache/commons/scxml/env/jexl/eventdata-03.xml");
+     }
+ 
+     /**
+      * Tear down instance variables required by this test case.
+      */
+     public void tearDown() {
+-        eventdata01 = eventdata02 = null;
++        eventdata01 = eventdata02 = eventdata03 = null;
+     }
+ 
+     /**
+@@ -126,6 +128,25 @@ public void testEventdata02Sample() {
+         }
+     }
+ 
++    public void testEventdata03Sample() {
++        exec = SCXMLTestHelper.getExecutor(eventdata03);
++        assertNotNull(exec);
++        try {
++            Set currentStates = exec.getCurrentStatus().getStates();
++            assertEquals(1, currentStates.size());
++            assertEquals("ten", ((State)currentStates.iterator().
++                next()).getId());
++            TriggerEvent te = new TriggerEvent("event.foo",
++                TriggerEvent.SIGNAL_EVENT);
++            currentStates = SCXMLTestHelper.fireEvent(exec, te);
++            assertEquals(1, currentStates.size());
++            assertEquals("thirty", ((State)currentStates.iterator().
++                next()).getId());
++        } catch (Exception e) {
++            fail(e.getMessage());
++        }
++    }
++
+     public static class ConnectionAlertingPayload {
+         private int line;
+         public ConnectionAlertingPayload(int line) {
+diff --git a/src/test/java/org/apache/commons/scxml/env/jexl/eventdata-03.xml b/src/test/java/org/apache/commons/scxml/env/jexl/eventdata-03.xml
+new file mode 100644
+index 000000000..bba7775fd
+--- /dev/null
++++ b/src/test/java/org/apache/commons/scxml/env/jexl/eventdata-03.xml
+@@ -0,0 +1,48 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++-->
++<scxml xmlns="http://www.w3.org/2005/07/scxml"
++      version="1.0"
++      initialstate="ten">
++
++    <datamodel>
++        <data name="rootdata">
++            <root xmlns="">
++                <one>1</one>
++                <two>2</two>
++            </root>
++        </data>
++    </datamodel>
++
++    <state id="ten">
++        <transition event="event.foo" target="twenty"/>
++    </state>
++
++    <state id="twenty">
++        <onentry>
++            <var name="one" expr="Data(rootdata,'root/one')"/>
++            <var name="two" expr="Data(rootdata,'root/two')"/>
++            <send event="event.bar" namelist="one two"/>
++        </onentry>
++        <transition event="event.bar"
++            cond="_eventdatamap['event.bar'].one + _eventdatamap['event.bar'].two eq 3"
++            target="thirty"/>
++    </state>
++
++    <state id="thirty" final="true"/>
++
++</scxml>

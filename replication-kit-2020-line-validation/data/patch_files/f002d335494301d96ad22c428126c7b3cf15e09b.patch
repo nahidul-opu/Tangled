@@ -1,0 +1,212 @@
+From f002d335494301d96ad22c428126c7b3cf15e09b Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 6 Mar 2006 15:04:01 +0000
+Subject: [PATCH] FIX: ivy variable substitution in ivy files (IVY-186)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484236 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/fr/jayasoft/ivy/Ivy.java             | 23 +--------
+ .../ivy/xml/XmlModuleDescriptorParser.java    | 48 +++++++++----------
+ 3 files changed, 26 insertions(+), 46 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e24829757..9b4d1429b 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,6 +1,7 @@
+ - IMPROVE: better performances with complex dependency graphs (thanks to Karl Baum)
+ - IMPROVE: Retrieve task now also optionally do ivy file downloads (IVY-167) (with the contribution of Costin Leau)
+ 
++- FIX: ivy variable substitution in ivy files (IVY-186)
+ - FIX: force attribute is not treated as it should in some cases (IVY-182)
+ - FIX: problem reading 'invalid' POMs (IVY-153)
+ - FIX: cryptic NPE due to spelling error in ivy.xml (IVY-177)
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index 29dd0e547..311aa76f0 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -149,8 +149,6 @@ public class Ivy implements TransferListener {
+ 
+     private File _defaultUserDir;
+     
+-    private Set _fetchedSet = new HashSet();
+-    
+     public Ivy() {
+         setVariable("ivy.default.conf.dir", Ivy.class.getResource("conf").toExternalForm(), true);
+         
+@@ -928,9 +926,6 @@ public IvyNode[] getDependencies(ModuleDescriptor md, String[] confs, File cache
+         IvyNode rootNode = new IvyNode(data, md);
+         
+         for (int i = 0; i < confs.length; i++) {
+-            //for each configuration we clear the cache of what's been fetched
+-            _fetchedSet.clear();
+-            
+             Configuration configuration = md.getConfiguration(confs[i]);
+             if (configuration == null) {
+                 Message.error("asked configuration not found in "+md.getModuleRevisionId()+": "+confs[i]);
+@@ -1076,7 +1071,7 @@ private void doFetchDependencies(IvyNode node, String conf) {
+             fetchDependencies(node, extendedConfs[i], false);
+         }
+         
+-        if (!isDependenciesFetched(node, conf) && (node.getDependencyDescriptor() == null || node.getDependencyDescriptor().isTransitive())) {
++        if ((node.getDependencyDescriptor() == null || node.getDependencyDescriptor().isTransitive())) {
+             Collection dependencies = node.getDependencies(conf, true);
+             for (Iterator iter = dependencies.iterator(); iter.hasNext();) {
+                 IvyNode dep = (IvyNode)iter.next();
+@@ -1100,22 +1095,6 @@ private void doFetchDependencies(IvyNode node, String conf) {
+     }
+ 
+ 
+-  
+-    /**
+-     * Returns true if we've already fetched the dependencies for this node and configuration
+-     * @param node node to check
+-     * @param conf configuration to check 
+-     * @return true if we've already fetched this dependency
+-     */
+-    private boolean isDependenciesFetched(IvyNode node, String conf) {
+-        String key = node.getId().getModuleId() + "|" + conf;
+-        if (_fetchedSet.contains(key)) {
+-            return true;
+-        }
+-        _fetchedSet.add(key);
+-        return false;
+-    }
+-
+     private void resolveConflict(IvyNode node, IvyNode parent) {
+         resolveConflict(node, parent, Collections.EMPTY_SET);
+     }
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+index 4fca74d60..b60d806aa 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+@@ -204,9 +204,9 @@ public void startElement(String uri, String localName, String qName, Attributes
+                     _md.setPublicationDate(getDefaultPubDate());                    
+                 }
+             } else if ("license".equals(qName)) {
+-                _md.addLicense(new License(attributes.getValue("name"), attributes.getValue("url")));
++                _md.addLicense(new License(_ivy.substitute(attributes.getValue("name")), _ivy.substitute(attributes.getValue("url"))));
+             } else if ("description".equals(qName)) {
+-                _md.setHomePage(attributes.getValue("homepage"));
++                _md.setHomePage(_ivy.substitute(attributes.getValue("homepage")));
+             } else if ("configurations".equals(qName)) {
+                 _state = CONF;
+                 setDefaultConfMapping(_ivy.substitute(attributes.getValue("defaultconfmapping")));
+@@ -231,10 +231,10 @@ public void startElement(String uri, String localName, String qName, Attributes
+             } else if ("artifact".equals(qName)) {
+                 if (_state == PUB) {
+                     // this is a published artifact
+-                    String ext = attributes.getValue("ext");
+-                    ext = ext != null?ext:attributes.getValue("type");
+-                    _artifact = new MDArtifact(_md, attributes.getValue("name"), attributes.getValue("type"), ext);
+-                    String confs = attributes.getValue("conf");
++                    String ext = _ivy.substitute(attributes.getValue("ext"));
++                    ext = ext != null?ext:_ivy.substitute(attributes.getValue("type"));
++                    _artifact = new MDArtifact(_md, _ivy.substitute(attributes.getValue("name")), _ivy.substitute(attributes.getValue("type")), ext);
++                    String confs = _ivy.substitute(attributes.getValue("conf"));
+                     // only add confs if they are specified. if they aren't, endElement will handle this
+                     // only if there are no conf defined in sub elements
+                     if (confs != null && confs.length() > 0) {
+@@ -264,30 +264,30 @@ public void startElement(String uri, String localName, String qName, Attributes
+                 if (org == null) { 
+                     org = _md.getModuleRevisionId().getOrganisation();
+                 }
+-                boolean force = Boolean.valueOf(attributes.getValue("force")).booleanValue();
+-                boolean changing = Boolean.valueOf(attributes.getValue("changing")).booleanValue();
++                boolean force = Boolean.valueOf(_ivy.substitute(attributes.getValue("force"))).booleanValue();
++                boolean changing = Boolean.valueOf(_ivy.substitute(attributes.getValue("changing"))).booleanValue();
+ 
+-                String transitiveValue = attributes.getValue("transitive");
++                String transitiveValue = _ivy.substitute(attributes.getValue("transitive"));
+                 boolean transitive = (transitiveValue == null) ? true : Boolean.valueOf(attributes.getValue("transitive")).booleanValue();
+                 
+                 String name = _ivy.substitute(attributes.getValue("name"));
+                 String rev = _ivy.substitute(attributes.getValue("rev"));
+                 _dd = new DefaultDependencyDescriptor(_md, ModuleRevisionId.newInstance(org, name, rev), force, changing, transitive);
+                 _md.addDependency(_dd);
+-                String confs = attributes.getValue("conf");
++                String confs = _ivy.substitute(attributes.getValue("conf"));
+                 if (confs != null && confs.length() > 0) {
+                     parseDepsConfs(confs, _dd);
+                 }
+             } else if ("conf".equals(qName)) {
+-        	    String conf = attributes.getValue("name");
++        	    String conf = _ivy.substitute(attributes.getValue("name"));
+                 switch (_state) {
+             	case CONF:
+-                    String visibility = attributes.getValue("visibility");
+-                    String ext = attributes.getValue("extends");
++                    String visibility = _ivy.substitute(attributes.getValue("visibility"));
++                    String ext = _ivy.substitute(attributes.getValue("extends"));
+                 	_md.addConfiguration(new Configuration(
+                             conf, 
+                             Configuration.Visibility.getVisibility(visibility == null ? "public":visibility),
+-                            attributes.getValue("description"),
++                            _ivy.substitute(attributes.getValue("description")),
+                             ext==null?null:ext.split(",")));
+                 	break;
+             	case PUB:
+@@ -304,7 +304,7 @@ public void startElement(String uri, String localName, String qName, Attributes
+                 	break;
+                 case DEP:
+                     _conf = conf;
+-                    String mappeds = attributes.getValue("mapped");
++                    String mappeds = _ivy.substitute(attributes.getValue("mapped"));
+                     if (mappeds != null) {
+                         String[] mapped = mappeds.split(",");
+                         for (int i = 0; i < mapped.length; i++) {
+@@ -323,7 +323,7 @@ public void startElement(String uri, String localName, String qName, Attributes
+                 	break;
+                 }
+             } else if ("mapped".equals(qName)) {
+-                _dd.addDependencyConfiguration(_conf, attributes.getValue("name"));
++                _dd.addDependencyConfiguration(_conf, _ivy.substitute(attributes.getValue("name")));
+             } else if ("manager".equals(qName) && _state == CONFLICT) {
+                 String org = _ivy.substitute(attributes.getValue("org"));
+                 org = org == null ? PatternMatcher.ANY_EXPRESSION : org;
+@@ -348,7 +348,7 @@ public void startElement(String uri, String localName, String qName, Attributes
+                     addError("bad conflict manager: no name nor rev");
+                     return;
+                 }
+-                String matcherName = attributes.getValue("matcher");
++                String matcherName = _ivy.substitute(attributes.getValue("matcher"));
+                 PatternMatcher matcher = matcherName == null ? _defaultMatcher : _ivy.getMatcher(matcherName);
+                 if (matcher == null) {
+                     addError("unknown matcher: "+matcherName);
+@@ -402,13 +402,13 @@ private void addDependencyArtifactsExcludes(Attributes attributes) {
+     }   
+     
+     private void addDependencyArtifact(Attributes attributes, boolean includes) {
+-        String name = attributes.getValue("name");
++        String name = _ivy.substitute(attributes.getValue("name"));
+         name = name == null ? PatternMatcher.ANY_EXPRESSION : name;
+-        String type = attributes.getValue("type");
++        String type = _ivy.substitute(attributes.getValue("type"));
+         type = type == null ? PatternMatcher.ANY_EXPRESSION : type;
+-        String ext = attributes.getValue("ext");
++        String ext = _ivy.substitute(attributes.getValue("ext"));
+         ext = ext != null?ext:type;
+-        String matcherName = attributes.getValue("matcher");
++        String matcherName = _ivy.substitute(attributes.getValue("matcher"));
+         PatternMatcher matcher = matcherName == null ? _defaultMatcher : _ivy.getMatcher(matcherName);
+         if (matcher == null) {
+             addError("unknown matcher "+matcherName);
+@@ -417,14 +417,14 @@ private void addDependencyArtifact(Attributes attributes, boolean includes) {
+         if (includes) {
+             _dad = new DefaultDependencyArtifactDescriptor(_dd, name, type, ext, includes, matcher);
+         } else {
+-            String org = attributes.getValue("org");
++            String org = _ivy.substitute(attributes.getValue("org"));
+             org = org == null ? PatternMatcher.ANY_EXPRESSION : org;
+-            String module = attributes.getValue("module");
++            String module = _ivy.substitute(attributes.getValue("module"));
+             module = module == null ? PatternMatcher.ANY_EXPRESSION : module;
+             ArtifactId aid = new ArtifactId(new ModuleId(org, module), name, type, ext);
+             _dad = new DefaultDependencyArtifactDescriptor(_dd, aid, includes, matcher);
+         }
+-        String confs = attributes.getValue("conf");
++        String confs = _ivy.substitute(attributes.getValue("conf"));
+         // only add confs if they are specified. if they aren't, endElement will handle this
+         // only if there are no conf defined in sub elements
+         if (confs != null && confs.length() > 0) {

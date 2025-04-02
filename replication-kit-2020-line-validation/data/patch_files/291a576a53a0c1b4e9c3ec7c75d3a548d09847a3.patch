@@ -1,0 +1,240 @@
+From 291a576a53a0c1b4e9c3ec7c75d3a548d09847a3 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sun, 18 May 2008 22:25:23 +0000
+Subject: [PATCH] Added quick-fix for IVY-633. I think it will solve most of
+ the packaging problems, but we should work on a better solution.
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@657658 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../parser/m2/PomModuleDescriptorBuilder.java | 75 ++++++++++++++++++-
+ .../parser/m2/PomModuleDescriptorParser.java  | 12 +++
+ .../ivy/plugins/parser/m2/PomReader.java      | 50 ++++++++++++-
+ 3 files changed, 133 insertions(+), 4 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index 09e801fd0..a5bbaf7c7 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -18,11 +18,14 @@
+ package org.apache.ivy.plugins.parser.m2;
+ 
+ import java.text.ParseException;
++import java.util.ArrayList;
+ import java.util.Date;
+ import java.util.HashMap;
+ import java.util.Iterator;
+ import java.util.LinkedHashMap;
++import java.util.List;
+ import java.util.Map;
++import java.util.StringTokenizer;
+ import java.util.Map.Entry;
+ 
+ import org.apache.ivy.Ivy;
+@@ -43,8 +46,10 @@
+ import org.apache.ivy.plugins.matcher.PatternMatcher;
+ import org.apache.ivy.plugins.parser.ModuleDescriptorParser;
+ import org.apache.ivy.plugins.parser.m2.PomReader.PomDependencyData;
++import org.apache.ivy.plugins.parser.m2.PomReader.PomPluginElement;
+ import org.apache.ivy.plugins.repository.Resource;
+ import org.apache.ivy.util.Message;
++import org.w3c.dom.Element;
+ 
+ 
+ /**
+@@ -202,8 +207,25 @@ public void setDescription(String description) {
+ 
+ 
+     public void addArtifact(String artifactId, String packaging) {
++        String ext = packaging;
++
++        // TODO: we should refactor the following code into something more configurable
++
++        // if 'packaging == bundle' and if we use the 'maven-bundle-plugin', the
++        // type must be 'jar'
++        if ("bundle".equals(packaging)) {
++            for (Iterator it = getPlugins(ivyModuleDescriptor).iterator(); it.hasNext();) {
++                PomDependencyMgt plugin = (PomDependencyMgt) it.next();
++                if ("org.apache.felix".equals(plugin.getGroupId())
++                        && "maven-bundle-plugin".equals(plugin.getArtifaceId())) {
++                    ext = "jar";
++                    break;
++                }
++            }
++        }
++
+         ivyModuleDescriptor.addArtifact("master", 
+-                new DefaultArtifact(mrid, new Date(), artifactId, packaging, packaging));
++                new DefaultArtifact(mrid, new Date(), artifactId, ext, ext));
+     }
+ 
+ 
+@@ -267,6 +289,57 @@ public void addDependencyMgt(PomDependencyMgt dep) {
+             ExactPatternMatcher.INSTANCE,
+             new OverrideDependencyDescriptorMediator(null, dep.getVersion()));
+     }
++    
++    public void addPlugin(PomDependencyMgt plugin) {
++        String pluginValue = plugin.getGroupId() + EXTRA_INFO_DELIMITER + plugin.getArtifaceId() 
++                + EXTRA_INFO_DELIMITER + plugin.getVersion();
++        String pluginExtraInfo = (String) ivyModuleDescriptor.getExtraInfo().get("maven.plugins");
++        if (pluginExtraInfo == null) {
++            pluginExtraInfo = pluginValue;
++        } else {
++            pluginExtraInfo = pluginExtraInfo + "|" + pluginValue;
++        }
++        ivyModuleDescriptor.getExtraInfo().put("m:maven.plugins", pluginExtraInfo);
++    }
++    
++    public static List /*<PomDependencyMgt>*/ getPlugins(ModuleDescriptor md) {
++        List result = new ArrayList();
++        String plugins = (String) md.getExtraInfo().get("m:maven.plugins");
++        if (plugins == null) {
++            return new ArrayList();
++        }
++        String[] pluginsArray = plugins.split("\\|");
++        for (int i = 0; i < pluginsArray.length; i++) {
++            String[] parts = pluginsArray[i].split(EXTRA_INFO_DELIMITER);
++            result.add(new PomPluginElement(parts[0], parts[1], parts[2]));
++        }
++        
++        return result;
++    }
++    
++    private static class PomPluginElement implements PomDependencyMgt {
++        private String groupId;
++        private String artifactId;
++        private String version;
++        
++        public PomPluginElement(String groupId, String artifactId, String version) {
++            this.groupId = groupId;
++            this.artifactId = artifactId;
++            this.version = version;
++        }
++        
++        public String getGroupId() {
++            return groupId;
++        }
++
++        public String getArtifaceId() {
++            return artifactId;
++        }
++
++        public String getVersion() {
++            return version;
++        }
++    }
+ 
+     private String getDefaultVersion(PomDependencyData dep) {
+         String key = getDependencyMgtExtraInfoKey(dep.getGroupId(), dep.getArtifaceId());        
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 3479e5b10..513c49cac 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -24,6 +24,7 @@
+ import java.text.ParseException;
+ import java.util.Date;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Map;
+ 
+ import org.apache.ivy.core.IvyContext;
+@@ -215,6 +216,12 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                         mdBuilder.addDependencyMgt(
+                             new DefaultPomDependencyMgt(mid.getOrganisation(), mid.getName(), v));
+                     }
++                    
++                    // add plugins from parent
++                    List /*<PomDependencyMgt>*/ plugins = PomModuleDescriptorBuilder.getPlugins(parentDescr);
++                    for (Iterator it = plugins.iterator(); it.hasNext();) {
++                        mdBuilder.addPlugin((PomDependencyMgt) it.next());
++                    }
+                 }
+                 
+                 for (Iterator it = domReader.getDependencyMgt().iterator(); it.hasNext();) {
+@@ -233,6 +240,11 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                     }
+                 }
+                 
++                for (Iterator it = domReader.getPlugins().iterator(); it.hasNext();) {
++                    PomReader.PomPluginElement plugin = (PomReader.PomPluginElement) it.next();
++                    mdBuilder.addPlugin(plugin);
++                }
++                
+                 mdBuilder.addArtifact(artifactId , domReader.getPackaging());
+             }            
+         } catch (SAXException e) {
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+index 0fd23b975..4d12594fe 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+@@ -64,8 +64,8 @@ public class PomReader {
+     private static final String DISTRIBUTION_MGT = "distributionManagement";
+     private static final String RELOCATION = "relocation";
+     private static final String PROPERTIES = "properties";
+-    
+-    
++    private static final String PLUGINS = "plugins";
++    private static final String PLUGIN = "plugin";
+     
+ 
+     private HashMap properties = new HashMap();
+@@ -227,7 +227,6 @@ public ModuleRevisionId getRelocation() {
+         return dependencies;
+     }
+ 
+-    
+     public class PomDependencyMgtElement implements PomDependencyMgt {
+         private final Element depElement;
+         
+@@ -261,6 +260,51 @@ public String getVersion() {
+         
+     }
+     
++    public List /* <PomPluginElement> */ getPlugins() {
++        LinkedList plugins = new LinkedList();
++
++        Element buildElement = getFirstChildElement(projectElement, "build");
++        if (buildElement == null) {
++            return plugins;
++        }
++        
++        Element pluginsElement = getFirstChildElement(buildElement, PLUGINS);
++        if (pluginsElement != null) {
++            NodeList childs = pluginsElement.getChildNodes();
++            for (int i = 0; i < childs.getLength(); i++) {
++                Node node = childs.item(i);
++                if (node instanceof Element && PLUGIN.equals(node.getNodeName())) {
++                    plugins.add(new PomPluginElement((Element) node));
++                }
++            }
++        }
++        return plugins;
++    }
++
++    public class PomPluginElement implements PomDependencyMgt {
++        private Element pluginElement;
++        
++        PomPluginElement(Element pluginElement) {
++            this.pluginElement = pluginElement; 
++        }
++        
++        public String getGroupId() {
++            String val = getFirstChildText(pluginElement , GROUP_ID);
++            return replaceProps(val);
++        }
++
++        public String getArtifaceId() {
++            String val = getFirstChildText(pluginElement , ARTIFACT_ID);
++            return replaceProps(val);
++        }
++
++        public String getVersion() {
++            String val = getFirstChildText(pluginElement , VERSION);
++            return replaceProps(val);
++        }
++        
++    }
++    
+     
+     public class PomDependencyData extends PomDependencyMgtElement {
+         private final Element depElement;

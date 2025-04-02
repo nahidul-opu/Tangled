@@ -1,0 +1,479 @@
+From b62c3ff93e214fc7487f9bf5d56bb94c5e86c177 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 30 Mar 2010 19:59:33 +0000
+Subject: [PATCH] FIX: Transitive dependencies resolutions issue when eviction
+ is triggered (IVY-1178)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@929238 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/ResolveEngine.java       |  3 +-
+ .../apache/ivy/core/resolve/VisitNode.java    | 24 ++++++++++---
+ .../org/apache/ivy/core/resolve/ivy-1178.xml  | 28 +++++++++++++++
+ test/repositories/IVY-1178/ivysettings.xml    | 27 ++++++++++++++
+ .../IVY-1178/myorg/modA/1.0/ivy-1.0.xml       | 28 +++++++++++++++
+ .../IVY-1178/myorg/modA/1.0/modA-1.0.jar      |  1 +
+ .../IVY-1178/myorg/modB/1.0/ivy-1.0.xml       | 27 ++++++++++++++
+ .../IVY-1178/myorg/modB/1.0/modB-1.0.jar      |  1 +
+ .../IVY-1178/myorg/modC/1.0/ivy-1.0.xml       | 27 ++++++++++++++
+ .../IVY-1178/myorg/modC/1.0/modC-1.0.jar      |  1 +
+ .../IVY-1178/myorg/modD/1.0/ivy-1.0.xml       | 34 ++++++++++++++++++
+ .../IVY-1178/myorg/modD/1.0/modD-1.0.jar      |  1 +
+ .../IVY-1178/myorg/modD/1.1/ivy-1.1.xml       | 36 +++++++++++++++++++
+ .../IVY-1178/myorg/modD/1.1/modD-1.1.jar      |  1 +
+ .../IVY-1178/myorg/modE/1.0/ivy-1.0.xml       | 22 ++++++++++++
+ .../IVY-1178/myorg/modE/1.0/modE-1.0.jar      |  1 +
+ .../IVY-1178/myorg/modE/1.1/ivy-1.1.xml       | 34 ++++++++++++++++++
+ .../IVY-1178/myorg/modE/1.1/modE-1.1.jar      |  1 +
+ 19 files changed, 291 insertions(+), 7 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/resolve/ivy-1178.xml
+ create mode 100644 test/repositories/IVY-1178/ivysettings.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modA/1.0/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modA/1.0/modA-1.0.jar
+ create mode 100644 test/repositories/IVY-1178/myorg/modB/1.0/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modB/1.0/modB-1.0.jar
+ create mode 100644 test/repositories/IVY-1178/myorg/modC/1.0/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modC/1.0/modC-1.0.jar
+ create mode 100644 test/repositories/IVY-1178/myorg/modD/1.0/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modD/1.0/modD-1.0.jar
+ create mode 100644 test/repositories/IVY-1178/myorg/modD/1.1/ivy-1.1.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modD/1.1/modD-1.1.jar
+ create mode 100644 test/repositories/IVY-1178/myorg/modE/1.0/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modE/1.0/modE-1.0.jar
+ create mode 100644 test/repositories/IVY-1178/myorg/modE/1.1/ivy-1.1.xml
+ create mode 100644 test/repositories/IVY-1178/myorg/modE/1.1/modE-1.1.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 0e2cf54f0..08896861d 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -117,6 +117,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Trace a message when a property file referenced from the settings doesn't exixts (IVY-1074)
+ - IMPROVEMENT: use defaultconf in combination with defaultconfmapping (IVY-1135) (thanks to Jon Schneider)
+ 
++- FIX: Transitive dependencies resolutions issue when eviction is triggered (IVY-1178)
+ - FIX: Can't deal with [VERSION] version pattern from Maven (IVY-1177) (thanks to Richard Vowles)
+ - FIX: verbose/debug messages were not logged while running ivy:configure task
+ - FIX: ApacheURLLister does not allow directories not containing a dot on Artifactory (IVY-1175) (thanks to Anders Jacobsson)
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index c7d71528c..f525c17ec 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -746,8 +746,7 @@ private void doFetchDependencies(VisitNode node, String conf) {
+         }
+ 
+         // now we can actually resolve this configuration dependencies
+-        DependencyDescriptor dd = node.getDependencyDescriptor();
+-        if (!isDependenciesFetched(node.getNode(), conf) && (dd == null || node.isTransitive())) {
++        if (!isDependenciesFetched(node.getNode(), conf) && node.isTransitive()) {
+             Collection dependencies = node.getDependencies(conf);
+             for (Iterator iter = dependencies.iterator(); iter.hasNext();) {
+                 VisitNode dep = (VisitNode) iter.next();
+diff --git a/src/java/org/apache/ivy/core/resolve/VisitNode.java b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+index 4a4d3e799..13227cbad 100644
+--- a/src/java/org/apache/ivy/core/resolve/VisitNode.java
++++ b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+@@ -214,11 +214,25 @@ public static VisitNode getRoot(VisitNode parent) {
+      * @return true if current node is transitive and the parent configuration is transitive.
+      */
+     public boolean isTransitive() {
+-        return (data.isTransitive() 
+-                && (
+-                        node.getDependencyDescriptor(getParentNode()).isTransitive() 
+-                     || node.hasAnyMergedUsageWithTransitiveDependency(rootModuleConf))
+-                && isParentConfTransitive());
++        if (node.isRoot()) {
++            // the root node is always considered transitive!
++            return true;
++        }
++        
++        if (!data.isTransitive()) {
++            return false;
++        }
++        
++        if (!isParentConfTransitive()) {
++            return false;
++        }
++        
++        DependencyDescriptor dd = node.getDependencyDescriptor(getParentNode());
++        if ((dd != null) && dd.isTransitive()) {
++            return true;
++        }
++
++        return node.hasAnyMergedUsageWithTransitiveDependency(rootModuleConf);
+     }
+ 
+     /**
+diff --git a/test/java/org/apache/ivy/core/resolve/ivy-1178.xml b/test/java/org/apache/ivy/core/resolve/ivy-1178.xml
+new file mode 100644
+index 000000000..65e1984eb
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/resolve/ivy-1178.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="org.apache" module="ivy-test" />
++    <configurations>
++        <conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf"/>
++    </configurations>
++    <dependencies>
++        <dependency org="myorg" name="modC" rev="1.0" />
++        <dependency org="myorg" name="modA" rev="1.0" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/ivysettings.xml b/test/repositories/IVY-1178/ivysettings.xml
+new file mode 100644
+index 000000000..ceb3920d8
+--- /dev/null
++++ b/test/repositories/IVY-1178/ivysettings.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivysettings>
++   <settings defaultResolver="local" />
++   <resolvers>
++        <filesystem name="local" >
++            <ivy pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/ivy-[revision].xml"/>
++            <artifact pattern="${ivy.settings.dir}/[organisation]/[module]/[revision]/[artifact]-[revision].[ext]"/>
++        </filesystem>
++    </resolvers>
++</ivysettings>
+diff --git a/test/repositories/IVY-1178/myorg/modA/1.0/ivy-1.0.xml b/test/repositories/IVY-1178/myorg/modA/1.0/ivy-1.0.xml
+new file mode 100644
+index 000000000..011a61762
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modA/1.0/ivy-1.0.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modA" revision="1.0" />
++    <configurations>
++        <conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf" />
++        <conf name="optional" visibility="public" description="contains all optional dependencies"/>
++    </configurations>
++    <dependencies>
++        <dependency org="myorg" name="modB" rev="1.0" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/myorg/modA/1.0/modA-1.0.jar b/test/repositories/IVY-1178/myorg/modA/1.0/modA-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modA/1.0/modA-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1178/myorg/modB/1.0/ivy-1.0.xml b/test/repositories/IVY-1178/myorg/modB/1.0/ivy-1.0.xml
+new file mode 100644
+index 000000000..f36d0dd39
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modB/1.0/ivy-1.0.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modB" revision="1.0" />
++    <configurations>
++        <conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf" />
++    </configurations>
++    <dependencies>
++        <dependency org="myorg" name="modD" rev="1.0" transitive="false" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/myorg/modB/1.0/modB-1.0.jar b/test/repositories/IVY-1178/myorg/modB/1.0/modB-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modB/1.0/modB-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1178/myorg/modC/1.0/ivy-1.0.xml b/test/repositories/IVY-1178/myorg/modC/1.0/ivy-1.0.xml
+new file mode 100644
+index 000000000..d33fd00de
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modC/1.0/ivy-1.0.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modC" revision="1.0" />
++    <configurations>
++        <conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf"/>
++    </configurations>
++    <dependencies>
++        <dependency org="myorg" name="modD" rev="1.1" transitive="false" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/myorg/modC/1.0/modC-1.0.jar b/test/repositories/IVY-1178/myorg/modC/1.0/modC-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modC/1.0/modC-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1178/myorg/modD/1.0/ivy-1.0.xml b/test/repositories/IVY-1178/myorg/modD/1.0/ivy-1.0.xml
+new file mode 100644
+index 000000000..5a03d6e3d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modD/1.0/ivy-1.0.xml
+@@ -0,0 +1,34 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modD" revision="1.0" />
++    <configurations>
++        <conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf" extends="runtime,master"/>
++        <conf name="master" visibility="public" description="contains only the artifact published by this module itself, with no transitive dependencies"/>
++        <conf name="compile" visibility="public" description="this is the default scope, used if none is specified. Compile dependencies are available in all classpaths."/>
++        <conf name="provided" visibility="public" description="this is much like compile, but indicates you expect the JDK or a container to provide it. It is only available on the compilation classpath, and is not transitive."/>
++        <conf name="runtime" visibility="public" description="this scope indicates that the dependency is not required for compilation, but is for execution. It is in the runtime and test classpaths, but not the compile classpath." extends="compile"/>
++        <conf name="test" visibility="private" description="this scope indicates that the dependency is not required for normal use of the application, and is only available for the test compilation and execution phases." extends="runtime"/>
++        <conf name="system" visibility="public" description="this scope is similar to provided except that you have to provide the JAR which contains it explicitly. The artifact is always available and is not looked up in a repository."/>
++        <conf name="sources" visibility="public" description="this configuration contains the source artifact of this module, if any."/>
++        <conf name="javadoc" visibility="public" description="this configuration contains the javadoc artifact of this module, if any."/>
++        <conf name="optional" visibility="public" description="contains all optional dependencies"/>
++    </configurations>
++    <dependencies />
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/myorg/modD/1.0/modD-1.0.jar b/test/repositories/IVY-1178/myorg/modD/1.0/modD-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modD/1.0/modD-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1178/myorg/modD/1.1/ivy-1.1.xml b/test/repositories/IVY-1178/myorg/modD/1.1/ivy-1.1.xml
+new file mode 100644
+index 000000000..db340ff50
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modD/1.1/ivy-1.1.xml
+@@ -0,0 +1,36 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modD" revision="1.1" />
++    <configurations>
++        <conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf" extends="runtime,master"/>
++        <conf name="master" visibility="public" description="contains only the artifact published by this module itself, with no transitive dependencies"/>
++        <conf name="compile" visibility="public" description="this is the default scope, used if none is specified. Compile dependencies are available in all classpaths."/>
++        <conf name="provided" visibility="public" description="this is much like compile, but indicates you expect the JDK or a container to provide it. It is only available on the compilation classpath, and is not transitive."/>
++        <conf name="runtime" visibility="public" description="this scope indicates that the dependency is not required for compilation, but is for execution. It is in the runtime and test classpaths, but not the compile classpath." extends="compile"/>
++        <conf name="test" visibility="private" description="this scope indicates that the dependency is not required for normal use of the application, and is only available for the test compilation and execution phases." extends="runtime"/>
++        <conf name="system" visibility="public" description="this scope is similar to provided except that you have to provide the JAR which contains it explicitly. The artifact is always available and is not looked up in a repository."/>
++        <conf name="sources" visibility="public" description="this configuration contains the source artifact of this module, if any."/>
++        <conf name="javadoc" visibility="public" description="this configuration contains the javadoc artifact of this module, if any."/>
++        <conf name="optional" visibility="public" description="contains all optional dependencies"/>
++    </configurations>
++    <dependencies>
++        <dependency org="myorg" name="modE" rev="1.1" force="true" conf="compile->compile(*),master(*);runtime->runtime(*)"/>
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/myorg/modD/1.1/modD-1.1.jar b/test/repositories/IVY-1178/myorg/modD/1.1/modD-1.1.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modD/1.1/modD-1.1.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1178/myorg/modE/1.0/ivy-1.0.xml b/test/repositories/IVY-1178/myorg/modE/1.0/ivy-1.0.xml
+new file mode 100644
+index 000000000..37ba92b6d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modE/1.0/ivy-1.0.xml
+@@ -0,0 +1,22 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modE" revision="1.0" />
++    <dependencies />
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/myorg/modE/1.0/modE-1.0.jar b/test/repositories/IVY-1178/myorg/modE/1.0/modE-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modE/1.0/modE-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-1178/myorg/modE/1.1/ivy-1.1.xml b/test/repositories/IVY-1178/myorg/modE/1.1/ivy-1.1.xml
+new file mode 100644
+index 000000000..69ff9e27b
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modE/1.1/ivy-1.1.xml
+@@ -0,0 +1,34 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="myorg" module="modE" revision="1.1" />
++    <configurations>
++        <conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf" extends="runtime,master"/>
++        <conf name="master" visibility="public" description="contains only the artifact published by this module itself, with no transitive dependencies"/>
++        <conf name="compile" visibility="public" description="this is the default scope, used if none is specified. Compile dependencies are available in all classpaths."/>
++        <conf name="provided" visibility="public" description="this is much like compile, but indicates you expect the JDK or a container to provide it. It is only available on the compilation classpath, and is not transitive."/>
++        <conf name="runtime" visibility="public" description="this scope indicates that the dependency is not required for compilation, but is for execution. It is in the runtime and test classpaths, but not the compile classpath." extends="compile"/>
++        <conf name="test" visibility="private" description="this scope indicates that the dependency is not required for normal use of the application, and is only available for the test compilation and execution phases." extends="runtime"/>
++        <conf name="system" visibility="public" description="this scope is similar to provided except that you have to provide the JAR which contains it explicitly. The artifact is always available and is not looked up in a repository."/>
++        <conf name="sources" visibility="public" description="this configuration contains the source artifact of this module, if any."/>
++        <conf name="javadoc" visibility="public" description="this configuration contains the javadoc artifact of this module, if any."/>
++        <conf name="optional" visibility="public" description="contains all optional dependencies"/>
++    </configurations>
++    <dependencies />
++</ivy-module>
+diff --git a/test/repositories/IVY-1178/myorg/modE/1.1/modE-1.1.jar b/test/repositories/IVY-1178/myorg/modE/1.1/modE-1.1.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-1178/myorg/modE/1.1/modE-1.1.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file

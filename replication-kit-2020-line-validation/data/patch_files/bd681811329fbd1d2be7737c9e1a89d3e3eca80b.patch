@@ -1,0 +1,308 @@
+From bd681811329fbd1d2be7737c9e1a89d3e3eca80b Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Thu, 6 Feb 2014 11:24:56 +0000
+Subject: [PATCH] OPENNLP-600 Refactored the command line Tool classes to use
+ the System Input Stream when reading from System.in. And added the Paragraph
+ Stream in the Sentence Detector Tool again.
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1565172 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../cmdline/SystemInputStreamFactory.java     | 45 +++++++++++++++++++
+ .../tools/cmdline/chunker/ChunkerMETool.java  |  4 +-
+ .../tools/cmdline/doccat/DoccatTool.java      |  4 +-
+ .../cmdline/namefind/TokenNameFinderTool.java |  4 +-
+ .../tools/cmdline/parser/ParserTool.java      |  4 +-
+ .../tools/cmdline/postag/POSTaggerTool.java   |  5 +--
+ .../sentdetect/SentenceDetectorTool.java      | 11 +++--
+ .../tokenizer/CommandLineTokenizer.java       |  5 +--
+ .../tokenizer/DictionaryDetokenizerTool.java  |  5 +--
+ 9 files changed, 64 insertions(+), 23 deletions(-)
+ create mode 100644 opennlp-tools/src/main/java/opennlp/tools/cmdline/SystemInputStreamFactory.java
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/SystemInputStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/SystemInputStreamFactory.java
+new file mode 100644
+index 000000000..8f58b880b
+--- /dev/null
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/SystemInputStreamFactory.java
+@@ -0,0 +1,45 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.cmdline;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.charset.Charset;
++
++import opennlp.tools.util.InputStreamFactory;
++
++public class SystemInputStreamFactory implements InputStreamFactory {
++
++  private boolean isTainted = false;
++  
++  public static Charset encoding() {
++    return Charset.forName("UTF-8");
++  }
++  
++  @Override
++  public InputStream createInputStream() throws IOException {
++    
++    if (!isTainted) {
++      isTainted = true;
++      return System.in;
++    }
++    else {
++      throw new UnsupportedOperationException("The System.in stream can't be re-created to read from the beginning!");
++    }
++  }
++}
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/chunker/ChunkerMETool.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/chunker/ChunkerMETool.java
+index 578ed9e41..1d57514a2 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/chunker/ChunkerMETool.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/chunker/ChunkerMETool.java
+@@ -27,9 +27,9 @@
+ import opennlp.tools.cmdline.CLI;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.postag.POSSample;
+ import opennlp.tools.util.InvalidFormatException;
+-import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -55,7 +55,7 @@ public void run(String[] args) {
+       PerformanceMonitor perfMon = null;
+ 
+       try {
+-        lineStream = new PlainTextByLineStream(new MockInputStreamFactory(System.in), "UTF-8");
++        lineStream = new PlainTextByLineStream(new SystemInputStreamFactory(), SystemInputStreamFactory.encoding());
+         perfMon = new PerformanceMonitor(System.err, "sent");
+         String line;
+         while ((line = lineStream.read()) != null) {
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/doccat/DoccatTool.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/doccat/DoccatTool.java
+index 3675939f3..712618d9f 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/doccat/DoccatTool.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/doccat/DoccatTool.java
+@@ -23,6 +23,7 @@
+ import opennlp.tools.cmdline.CLI;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.doccat.DoccatModel;
+ import opennlp.tools.doccat.DocumentCategorizerME;
+ import opennlp.tools.doccat.DocumentSample;
+@@ -30,7 +31,6 @@
+ import opennlp.tools.util.ParagraphStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.tokenize.WhitespaceTokenizer;
+-import opennlp.tools.util.MockInputStreamFactory;
+ 
+ public class DoccatTool extends BasicCmdLineTool {
+ 
+@@ -69,7 +69,7 @@ public void run(String[] args) {
+ 
+       try {
+         documentStream = new ParagraphStream(
+-                new PlainTextByLineStream(new MockInputStreamFactory(System.in), "UTF-8"));
++                new PlainTextByLineStream(new SystemInputStreamFactory(), SystemInputStreamFactory.encoding()));
+         String document;
+         while ((document = documentStream.read()) != null) {
+           double prob[] = doccat.categorize(WhitespaceTokenizer.INSTANCE.tokenize(document));
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/namefind/TokenNameFinderTool.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/namefind/TokenNameFinderTool.java
+index dafd8ae75..1099a71f0 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/namefind/TokenNameFinderTool.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/namefind/TokenNameFinderTool.java
+@@ -27,12 +27,12 @@
+ import opennlp.tools.cmdline.CLI;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.namefind.NameFinderME;
+ import opennlp.tools.namefind.NameSample;
+ import opennlp.tools.namefind.TokenNameFinder;
+ import opennlp.tools.namefind.TokenNameFinderModel;
+ import opennlp.tools.tokenize.WhitespaceTokenizer;
+-import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.util.Span;
+@@ -68,7 +68,7 @@ public void run(String[] args) {
+ 
+       try {
+         untokenizedLineStream =
+-                new PlainTextByLineStream(new MockInputStreamFactory(System.in), "UTF-8");
++                new PlainTextByLineStream(new SystemInputStreamFactory(), SystemInputStreamFactory.encoding());
+         String line;
+         while ((line = untokenizedLineStream.read()) != null) {
+           String whitespaceTokenizerLine[] = WhitespaceTokenizer.INSTANCE.tokenize(line);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/parser/ParserTool.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/parser/ParserTool.java
+index c84a02106..eeca03900 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/parser/ParserTool.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/parser/ParserTool.java
+@@ -29,11 +29,11 @@
+ import opennlp.tools.cmdline.CLI;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.parser.AbstractBottomUpParser;
+ import opennlp.tools.parser.Parse;
+ import opennlp.tools.parser.ParserFactory;
+ import opennlp.tools.parser.ParserModel;
+-import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ import opennlp.tools.util.Span;
+@@ -117,7 +117,7 @@ public void run(String[] args) {
+       ObjectStream<String> lineStream = null;
+       PerformanceMonitor perfMon = null;
+       try {
+-        lineStream = new PlainTextByLineStream(new MockInputStreamFactory(System.in), "UTF-8");
++        lineStream = new PlainTextByLineStream(new SystemInputStreamFactory(), SystemInputStreamFactory.encoding());
+         perfMon = new PerformanceMonitor(System.err, "sent");
+         perfMon.start();
+         String line;
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/postag/POSTaggerTool.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/postag/POSTaggerTool.java
+index 671b0a32f..d2ceab87d 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/postag/POSTaggerTool.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/postag/POSTaggerTool.java
+@@ -18,17 +18,16 @@
+ 
+ import java.io.File;
+ import java.io.IOException;
+-import java.io.InputStreamReader;
+ 
+ import opennlp.tools.cmdline.BasicCmdLineTool;
+ import opennlp.tools.cmdline.CLI;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.postag.POSModel;
+ import opennlp.tools.postag.POSSample;
+ import opennlp.tools.postag.POSTaggerME;
+ import opennlp.tools.tokenize.WhitespaceTokenizer;
+-import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -56,7 +55,7 @@ public void run(String[] args) {
+       PerformanceMonitor perfMon = null;
+ 
+       try {
+-        lineStream = new PlainTextByLineStream(new MockInputStreamFactory(System.in), "UTF-8");
++        lineStream = new PlainTextByLineStream(new SystemInputStreamFactory(), SystemInputStreamFactory.encoding());
+         perfMon = new PerformanceMonitor(System.err, "sent");
+         perfMon.start();
+         String line;
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/sentdetect/SentenceDetectorTool.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/sentdetect/SentenceDetectorTool.java
+index 9f3e1a398..2a462a672 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/sentdetect/SentenceDetectorTool.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/sentdetect/SentenceDetectorTool.java
+@@ -19,15 +19,14 @@
+ 
+ import java.io.File;
+ import java.io.IOException;
+-import java.io.InputStreamReader;
+ 
+ import opennlp.tools.cmdline.BasicCmdLineTool;
+ import opennlp.tools.cmdline.CLI;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.sentdetect.SentenceDetectorME;
+ import opennlp.tools.sentdetect.SentenceModel;
+-import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.ParagraphStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+@@ -60,12 +59,12 @@ public void run(String[] args) {
+ 
+       SentenceDetectorME sdetector = new SentenceDetectorME(model);
+ 
+-       ObjectStream<String> paraStream = null;
+-      PerformanceMonitor perfMon = null;
++      PerformanceMonitor perfMon = new PerformanceMonitor(System.err, "sent");
+ 
+       try {
+-        paraStream = new PlainTextByLineStream(new MockInputStreamFactory(System.in), "UTF-8");
+-        perfMon = new PerformanceMonitor(System.err, "sent");
++        ObjectStream<String> paraStream = new ParagraphStream(new PlainTextByLineStream(new SystemInputStreamFactory(),
++            SystemInputStreamFactory.encoding()));
++        
+         String para;
+         while ((para = paraStream.read()) != null) {
+ 
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/CommandLineTokenizer.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/CommandLineTokenizer.java
+index 0f39e78a9..2c537a912 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/CommandLineTokenizer.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/CommandLineTokenizer.java
+@@ -17,14 +17,13 @@
+ package opennlp.tools.cmdline.tokenizer;
+ 
+ import java.io.IOException;
+-import java.io.InputStreamReader;
+ 
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.tokenize.Tokenizer;
+ import opennlp.tools.tokenize.TokenizerStream;
+ import opennlp.tools.tokenize.WhitespaceTokenStream;
+-import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -43,7 +42,7 @@ void process() {
+     PerformanceMonitor perfMon = null;
+     try {
+       untokenizedLineStream =
+-              new PlainTextByLineStream(new MockInputStreamFactory(System.in), "UTF-8");
++              new PlainTextByLineStream(new SystemInputStreamFactory(), SystemInputStreamFactory.encoding());
+ 
+       tokenizedLineStream = new WhitespaceTokenStream(
+               new TokenizerStream(tokenizer, untokenizedLineStream));
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/DictionaryDetokenizerTool.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/DictionaryDetokenizerTool.java
+index 32f674a61..171d980f8 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/DictionaryDetokenizerTool.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/tokenizer/DictionaryDetokenizerTool.java
+@@ -19,16 +19,15 @@
+ 
+ import java.io.File;
+ import java.io.IOException;
+-import java.io.InputStreamReader;
+ 
+ import opennlp.tools.cmdline.BasicCmdLineTool;
+ import opennlp.tools.cmdline.CLI;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.PerformanceMonitor;
++import opennlp.tools.cmdline.SystemInputStreamFactory;
+ import opennlp.tools.tokenize.Detokenizer;
+ import opennlp.tools.tokenize.DictionaryDetokenizer;
+ import opennlp.tools.tokenize.WhitespaceTokenizer;
+-import opennlp.tools.util.MockInputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -49,7 +48,7 @@ public void run(String[] args) {
+           new DetokenizationDictionaryLoader().load(new File(args[0])));
+ 
+       ObjectStream<String> tokenizedLineStream =
+-        new PlainTextByLineStream(new MockInputStreamFactory(System.in),"UTF-8");
++        new PlainTextByLineStream(new SystemInputStreamFactory(), SystemInputStreamFactory.encoding());
+ 
+       PerformanceMonitor perfMon = new PerformanceMonitor(System.err, "sent");
+       perfMon.start();

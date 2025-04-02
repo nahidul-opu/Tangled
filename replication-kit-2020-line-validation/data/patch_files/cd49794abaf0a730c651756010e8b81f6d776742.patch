@@ -1,0 +1,324 @@
+From cd49794abaf0a730c651756010e8b81f6d776742 Mon Sep 17 00:00:00 2001
+From: Avery Ching <aching@apache.org>
+Date: Thu, 26 Jul 2012 04:06:35 +0000
+Subject: [PATCH] GIRAPH-267: Jobs can get killed for not reporting status
+ during INPUT SUPERSTEP (netj via aching).
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1365878 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                     |  3 ++
+ .../org/apache/giraph/graph/BspService.java   | 44 ++++++++--------
+ .../apache/giraph/graph/BspServiceMaster.java |  4 +-
+ .../apache/giraph/graph/BspServiceWorker.java |  6 +--
+ .../org/apache/giraph/zk/ContextLock.java     | 52 -------------------
+ .../org/apache/giraph/zk/PredicateLock.java   | 21 +++++++-
+ .../org/apache/giraph/TestPredicateLock.java  | 20 +++++--
+ 7 files changed, 67 insertions(+), 83 deletions(-)
+ delete mode 100644 src/main/java/org/apache/giraph/zk/ContextLock.java
+
+diff --git a/CHANGELOG b/CHANGELOG
+index a223bff7a..f50da4e44 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -2,6 +2,9 @@ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
+ 
++  GIRAPH-267: Jobs can get killed for not reporting status during
++  INPUT SUPERSTEP (netj via aching).
++
+   GIRAPH-266: Average aggregators don't calculate real average
+   (majakabiljo via aching).
+ 
+diff --git a/src/main/java/org/apache/giraph/graph/BspService.java b/src/main/java/org/apache/giraph/graph/BspService.java
+index 0b3b63a66..70b07973b 100644
+--- a/src/main/java/org/apache/giraph/graph/BspService.java
++++ b/src/main/java/org/apache/giraph/graph/BspService.java
+@@ -208,37 +208,27 @@ public abstract class BspService<I extends WritableComparable,
+   /** Private ZooKeeper instance that implements the service */
+   private final ZooKeeperExt zk;
+   /** Has the Connection occurred? */
+-  private final BspEvent connectedEvent = new PredicateLock();
++  private final BspEvent connectedEvent;
+   /** Has worker registration changed (either healthy or unhealthy) */
+-  private final BspEvent workerHealthRegistrationChanged =
+-      new PredicateLock();
++  private final BspEvent workerHealthRegistrationChanged;
+   /** InputSplits are ready for consumption by workers */
+-  private final BspEvent inputSplitsAllReadyChanged =
+-      new PredicateLock();
++  private final BspEvent inputSplitsAllReadyChanged;
+   /** InputSplit reservation or finished notification and synchronization */
+-  private final BspEvent inputSplitsStateChanged =
+-      new PredicateLock();
++  private final BspEvent inputSplitsStateChanged;
+   /** InputSplits are done being processed by workers */
+-  private final BspEvent inputSplitsAllDoneChanged =
+-      new PredicateLock();
++  private final BspEvent inputSplitsAllDoneChanged;
+   /** InputSplit done by a worker finished notification and synchronization */
+-  private final BspEvent inputSplitsDoneStateChanged =
+-      new PredicateLock();
++  private final BspEvent inputSplitsDoneStateChanged;
+   /** Are the partition assignments to workers ready? */
+-  private final BspEvent partitionAssignmentsReadyChanged =
+-      new PredicateLock();
++  private final BspEvent partitionAssignmentsReadyChanged;
+   /** Application attempt changed */
+-  private final BspEvent applicationAttemptChanged =
+-      new PredicateLock();
++  private final BspEvent applicationAttemptChanged;
+   /** Superstep finished synchronization */
+-  private final BspEvent superstepFinished =
+-      new PredicateLock();
++  private final BspEvent superstepFinished;
+   /** Master election changed for any waited on attempt */
+-  private final BspEvent masterElectionChildrenChanged =
+-      new PredicateLock();
++  private final BspEvent masterElectionChildrenChanged;
+   /** Cleaned up directory children changed*/
+-  private final BspEvent cleanedUpChildrenChanged =
+-      new PredicateLock();
++  private final BspEvent cleanedUpChildrenChanged;
+   /** Registered list of BspEvents */
+   private final List<BspEvent> registeredBspEvents =
+       new ArrayList<BspEvent>();
+@@ -284,6 +274,18 @@ public BspService(String serverPortList,
+       int sessionMsecTimeout,
+       Mapper<?, ?, ?, ?>.Context context,
+       GraphMapper<I, V, E, M> graphMapper) {
++    this.connectedEvent = new PredicateLock(context);
++    this.workerHealthRegistrationChanged = new PredicateLock(context);
++    this.inputSplitsAllReadyChanged = new PredicateLock(context);
++    this.inputSplitsStateChanged = new PredicateLock(context);
++    this.inputSplitsAllDoneChanged = new PredicateLock(context);
++    this.inputSplitsDoneStateChanged = new PredicateLock(context);
++    this.partitionAssignmentsReadyChanged = new PredicateLock(context);
++    this.applicationAttemptChanged = new PredicateLock(context);
++    this.superstepFinished = new PredicateLock(context);
++    this.masterElectionChildrenChanged = new PredicateLock(context);
++    this.cleanedUpChildrenChanged = new PredicateLock(context);
++
+     registerBspEvent(connectedEvent);
+     registerBspEvent(workerHealthRegistrationChanged);
+     registerBspEvent(inputSplitsAllReadyChanged);
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceMaster.java b/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+index ffcd5b136..b6ad60dd9 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+@@ -121,8 +121,7 @@ public class BspServiceMaster<I extends WritableComparable,
+   /** Last finalized checkpoint */
+   private long lastCheckpointedSuperstep = -1;
+   /** State of the superstep changed */
+-  private final BspEvent superstepStateChanged =
+-      new PredicateLock();
++  private final BspEvent superstepStateChanged;
+   /** Master graph partitioner */
+   private final MasterGraphPartitioner<I, V, E, M> masterGraphPartitioner;
+   /** All the partition stats from the last superstep */
+@@ -147,6 +146,7 @@ public BspServiceMaster(
+       Mapper<?, ?, ?, ?>.Context context,
+       GraphMapper<I, V, E, M> graphMapper) {
+     super(serverPortList, sessionMsecTimeout, context, graphMapper);
++    superstepStateChanged = new PredicateLock(context);
+     registerBspEvent(superstepStateChanged);
+ 
+     maxWorkers =
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+index 280a104fb..a858c7edc 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+@@ -106,8 +106,7 @@ public class BspServiceWorker<I extends WritableComparable,
+   private final Map<Integer, Partition<I, V, E, M>> workerPartitionMap =
+       new HashMap<Integer, Partition<I, V, E, M>>();
+   /** Have the partition exchange children (workers) changed? */
+-  private final BspEvent partitionExchangeChildrenChanged =
+-      new PredicateLock();
++  private final BspEvent partitionExchangeChildrenChanged;
+   /** Max vertices per partition before sending */
+   private final int maxVerticesPerPartition;
+   /** Worker Context */
+@@ -139,6 +138,7 @@ public BspServiceWorker(
+     GraphState<I, V, E, M> graphState)
+     throws IOException, InterruptedException {
+     super(serverPortList, sessionMsecTimeout, context, graphMapper);
++    partitionExchangeChildrenChanged = new PredicateLock(context);
+     registerBspEvent(partitionExchangeChildrenChanged);
+     maxVerticesPerPartition =
+         getConfiguration().getInt(
+@@ -654,7 +654,7 @@ public void setup() {
+     }
+ 
+     // At this point all vertices have been sent to their destinations.
+-    // Move them to the worker, creating creating the empty partitions
++    // Move them to the worker, creating the empty partitions
+     movePartitionsToWorker(commService);
+     for (PartitionOwner partitionOwner : masterSetPartitionOwners) {
+       if (partitionOwner.getWorkerInfo().equals(getWorkerInfo()) &&
+diff --git a/src/main/java/org/apache/giraph/zk/ContextLock.java b/src/main/java/org/apache/giraph/zk/ContextLock.java
+deleted file mode 100644
+index f4fb00a6d..000000000
+--- a/src/main/java/org/apache/giraph/zk/ContextLock.java
++++ /dev/null
+@@ -1,52 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.giraph.zk;
+-
+-import org.apache.hadoop.mapreduce.Mapper.Context;
+-
+-/**
+- * A lock that will keep the job context updated while waiting.
+- */
+-public class ContextLock extends PredicateLock {
+-  /** Msecs to refresh the progress meter */
+-  private static final int MSEC_PERIOD = 10000;
+-  /** Job context (for progress) */
+-  @SuppressWarnings("rawtypes")
+-  private final Context context;
+-
+-  /**
+-   * Constructor.
+-   *
+-   * @param context used to call progress()
+-   */
+-  ContextLock(@SuppressWarnings("rawtypes") Context context) {
+-    this.context = context;
+-  }
+-
+-  /**
+-   * Specialized version of waitForever() that will keep the job progressing
+-   * while waiting.
+-   */
+-  @Override
+-  public void waitForever() {
+-    while (!waitMsecs(MSEC_PERIOD)) {
+-      context.progress();
+-    }
+-  }
+-}
+diff --git a/src/main/java/org/apache/giraph/zk/PredicateLock.java b/src/main/java/org/apache/giraph/zk/PredicateLock.java
+index ed5deb498..29269a6d8 100644
+--- a/src/main/java/org/apache/giraph/zk/PredicateLock.java
++++ b/src/main/java/org/apache/giraph/zk/PredicateLock.java
+@@ -23,14 +23,20 @@
+ import java.util.concurrent.locks.Lock;
+ import java.util.concurrent.locks.ReentrantLock;
+ 
++import org.apache.hadoop.util.Progressable;
+ import org.apache.log4j.Logger;
+ 
+ /**
+- * A lock with a predicate that was be used to synchronize events.
++ * A lock with a predicate that was be used to synchronize events and keep the
++ * job context updated while waiting.
+  */
+ public class PredicateLock implements BspEvent {
+   /** Class logger */
+   private static final Logger LOG = Logger.getLogger(PredicateLock.class);
++  /** Msecs to refresh the progress meter */
++  private static final int MSEC_PERIOD = 10000;
++  /** Progressable for reporting progress (Job context) */
++  protected final Progressable progressable;
+   /** Lock */
+   private Lock lock = new ReentrantLock();
+   /** Condition associated with lock */
+@@ -38,6 +44,15 @@ public class PredicateLock implements BspEvent {
+   /** Predicate */
+   private boolean eventOccurred = false;
+ 
++  /**
++   * Constructor.
++   *
++   * @param progressable used to report progress() (usually a Mapper.Context)
++   */
++  public PredicateLock(Progressable progressable) {
++    this.progressable = progressable;
++  }
++
+   @Override
+   public void reset() {
+     lock.lock();
+@@ -111,6 +126,8 @@ public boolean waitMsecs(int msecs) {
+ 
+   @Override
+   public void waitForever() {
+-    waitMsecs(-1);
++    while (!waitMsecs(MSEC_PERIOD)) {
++      progressable.progress();
++    }
+   }
+ }
+diff --git a/src/test/java/org/apache/giraph/TestPredicateLock.java b/src/test/java/org/apache/giraph/TestPredicateLock.java
+index 253e4a40d..7d6c2a873 100644
+--- a/src/test/java/org/apache/giraph/TestPredicateLock.java
++++ b/src/test/java/org/apache/giraph/TestPredicateLock.java
+@@ -23,6 +23,7 @@
+ 
+ import org.apache.giraph.zk.BspEvent;
+ import org.apache.giraph.zk.PredicateLock;
++import org.apache.hadoop.util.Progressable;
+ import org.junit.Test;
+ 
+ /**
+@@ -43,12 +44,25 @@ public void run() {
+         }
+     }
+ 
++    private Progressable stubContext;
++
++    private Progressable getStubProgressable() {
++        if (stubContext == null)
++            stubContext = new Progressable() {
++                @Override
++                    public void progress() {
++                        System.out.println("progress received");
++                    }
++            };
++        return stubContext;
++    }
++
+     /**
+      * Make sure the the event is not signaled.
+      */
+   @Test
+     public void testWaitMsecsNoEvent() {
+-        BspEvent event = new PredicateLock();
++        BspEvent event = new PredicateLock(getStubProgressable());
+         boolean gotPredicate = event.waitMsecs(50);
+         assertFalse(gotPredicate);
+     }
+@@ -58,7 +72,7 @@ public void testWaitMsecsNoEvent() {
+      */
+   @Test
+     public void testEvent() {
+-        BspEvent event = new PredicateLock();
++        BspEvent event = new PredicateLock(getStubProgressable());
+         event.signal();
+         boolean gotPredicate = event.waitMsecs(-1);
+         assertTrue(gotPredicate );
+@@ -74,7 +88,7 @@ public void testEvent() {
+   @Test
+     public void testWaitMsecs() {
+         System.out.println("testWaitMsecs:");
+-        BspEvent event = new PredicateLock();
++        BspEvent event = new PredicateLock(getStubProgressable());
+         Thread signalThread = new SignalThread(event);
+         signalThread.start();
+         boolean gotPredicate = event.waitMsecs(2000);

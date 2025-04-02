@@ -1,0 +1,215 @@
+From b14ad2e30a3f6f8e3112b375a1379f5eefb09050 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Wed, 25 Jan 2017 16:46:00 +0100
+Subject: [PATCH] OPENNLP-961: Add support to parse event annotations in brat
+ files
+
+---
+ .../formats/brat/AnnotationConfiguration.java |  5 ++
+ .../tools/formats/brat/BratAnnotation.java    |  6 +-
+ .../formats/brat/BratAnnotationStream.java    | 70 ++++++++++++++++---
+ .../tools/formats/brat/EventAnnotation.java   | 44 ++++++++++++
+ 4 files changed, 113 insertions(+), 12 deletions(-)
+ create mode 100644 opennlp-tools/src/main/java/opennlp/tools/formats/brat/EventAnnotation.java
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java
+index e510bc6fe..35e7221e4 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java
+@@ -37,6 +37,7 @@ public class AnnotationConfiguration {
+   public static final String ENTITY_TYPE = "Entity";
+   public static final String RELATION_TYPE = "Relation";
+   public static final String ATTRIBUTE_TYPE = "Attribute";
++  public static final String EVENT_TYPE = "Event";
+ 
+   private final Map<String, String> typeToClassMap;
+ 
+@@ -83,6 +84,10 @@ public static AnnotationConfiguration parse(InputStream in) throws IOException {
+                 typeToClassMap.put(typeName, AnnotationConfiguration.ATTRIBUTE_TYPE);
+                 break;
+ 
++              case "events":
++                typeToClassMap.put(typeName, AnnotationConfiguration.EVENT_TYPE);
++                break;
++
+               default:
+                 break;
+             }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotation.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotation.java
+index 1e7d20c40..459f04ec1 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotation.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotation.java
+@@ -17,14 +17,16 @@
+ 
+ package opennlp.tools.formats.brat;
+ 
++import java.util.Objects;
++
+ public abstract class BratAnnotation {
+ 
+   private final String id;
+   private final String type;
+ 
+   protected BratAnnotation(String id, String type) {
+-    this.id = id;
+-    this.type = type;
++    this.id = Objects.requireNonNull(id);
++    this.type = Objects.requireNonNull(type);
+   }
+ 
+   public String getId() {
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
+index 8a34a31b8..76e3d0ff4 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
+@@ -119,6 +119,39 @@ BratAnnotation parse(Span tokens[], CharSequence line) throws IOException {
+     }
+   }
+ 
++  static class EventAnnotationParser extends BratAnnotationParser {
++
++    @Override
++    BratAnnotation parse(Span tokens[], CharSequence line) throws IOException {
++
++      String[] typeParts = tokens[TYPE_OFFSET].getCoveredText(line).toString().split(":");
++
++      if (typeParts.length != 2) {
++        throw new InvalidFormatException(String.format(
++            "Failed to parse [%s], type part must be in the format type:trigger", line));
++      }
++
++      String type = typeParts[0];
++      String eventTrigger = typeParts[1];
++
++      Map<String, String> arguments = new HashMap<>();
++
++      for (int i = TYPE_OFFSET + 1; i < tokens.length; i++) {
++        String[] parts = tokens[i].getCoveredText(line).toString().split(":");
++
++        if (parts.length != 2) {
++          throw new InvalidFormatException(String.format(
++              "Failed to parse [%s], argument parts must be in form argument:value", line));
++        }
++
++        arguments.put(parts[0], parts[1]);
++      }
++
++      return new EventAnnotation(tokens[ID_OFFSET].getCoveredText(line).toString(),type, eventTrigger,
++          arguments);
++    }
++  }
++
+   static class AttributeAnnotationParser extends BratAnnotationParser {
+ 
+     private static final int ATTACHED_TO_OFFSET = 2;
+@@ -145,7 +178,6 @@ BratAnnotation parse(Span[] values, CharSequence line) throws IOException {
+     }
+   }
+ 
+-  private final Map<String, BratAnnotationParser> parsers = new HashMap<>();
+   private final AnnotationConfiguration config;
+   private final BufferedReader reader;
+   private final String id;
+@@ -155,11 +187,6 @@ BratAnnotation parse(Span[] values, CharSequence line) throws IOException {
+     this.id = id;
+ 
+     reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+-
+-    parsers.put(AnnotationConfiguration.SPAN_TYPE, new SpanAnnotationParser());
+-    parsers.put(AnnotationConfiguration.ENTITY_TYPE, new SpanAnnotationParser());
+-    parsers.put(AnnotationConfiguration.RELATION_TYPE, new RelationAnnotationParser());
+-    parsers.put(AnnotationConfiguration.ATTRIBUTE_TYPE, new AttributeAnnotationParser());
+   }
+ 
+   public BratAnnotation read() throws IOException {
+@@ -170,13 +197,36 @@ public BratAnnotation read() throws IOException {
+       Span tokens[] = WhitespaceTokenizer.INSTANCE.tokenizePos(line);
+ 
+       if (tokens.length > 2) {
+-        String typeClass = config.getTypeClass(tokens[BratAnnotationParser.TYPE_OFFSET]
+-            .getCoveredText(line).toString());
++        String annId = tokens[BratAnnotationParser.ID_OFFSET].getCoveredText(line).toString();
++
++        if (annId.length() == 0) {
++          throw new InvalidFormatException("annotation id is empty");
++        }
++
++        // The first leter of the annotation id marks the annotation type
+ 
+-        BratAnnotationParser parser = parsers.get(typeClass);
++        final BratAnnotationParser parser;
++        switch (annId.charAt(0)) {
++          case 'T':
++            parser = new SpanAnnotationParser();
++            break;
++          case 'R':
++            parser = new RelationAnnotationParser();
++            break;
++          case 'A':
++            parser = new AttributeAnnotationParser();
++            break;
++          case 'E':
++            parser = new EventAnnotationParser();
++            break;
++
++          default:
++            // Skip it, do that for everything unsupported (e.g. "*" id)
++            return read();
++        }
+ 
+         if (parser == null) {
+-          throw new IOException("Failed to parse ann document with id " + id + ".ann" +
++          throw new IOException("Failed to parse ann document with id " + id + ".ann and" +
+               " type class, no parser registered: " + tokens[BratAnnotationParser.TYPE_OFFSET]
+               .getCoveredText(line).toString());
+         }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/EventAnnotation.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/EventAnnotation.java
+new file mode 100644
+index 000000000..96495698f
+--- /dev/null
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/EventAnnotation.java
+@@ -0,0 +1,44 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.formats.brat;
++
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.Objects;
++
++public class EventAnnotation extends BratAnnotation {
++
++  private final String eventTrigger;
++  private final Map<String, String> arguments;
++
++  protected EventAnnotation(String id, String type, String eventTrigger, Map<String, String> arguments) {
++    super(id, type);
++
++    this.eventTrigger = Objects.requireNonNull(eventTrigger);
++    this.arguments = Collections.unmodifiableMap(new HashMap<>(arguments));
++  }
++
++  public String getEventTrigger() {
++    return eventTrigger;
++  }
++
++  public Map<String, String> getArguments() {
++    return arguments;
++  }
++}

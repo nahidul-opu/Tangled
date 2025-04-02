@@ -1,0 +1,96 @@
+From 9b444e87f14af09670529fe388c98357cb21f345 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sun, 27 Apr 2014 17:34:44 +0000
+Subject: [PATCH] [CONFIGURATION-567] XMLBeanDeclaration now escapes node
+ names.
+
+When nested properties are processed the name of a child node used to be
+directly passed to configurationAt(). This can fail if the node name contains
+characters with a special meaning for the expression engine. Now node names
+are escaped using the current expression engine.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1590424 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../beanutils/XMLBeanDeclaration.java          | 18 +++++++++++++++++-
+ .../beanutils/TestXMLBeanDeclaration.java      | 18 +++++++++++++++++-
+ 2 files changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration/beanutils/XMLBeanDeclaration.java b/src/main/java/org/apache/commons/configuration/beanutils/XMLBeanDeclaration.java
+index 8b9ad0bc93..e53b4a52ac 100644
+--- a/src/main/java/org/apache/commons/configuration/beanutils/XMLBeanDeclaration.java
++++ b/src/main/java/org/apache/commons/configuration/beanutils/XMLBeanDeclaration.java
+@@ -29,6 +29,7 @@
+ import org.apache.commons.configuration.ex.ConfigurationRuntimeException;
+ import org.apache.commons.configuration.interpol.ConfigurationInterpolator;
+ import org.apache.commons.configuration.tree.NodeHandler;
++import org.apache.commons.lang3.StringUtils;
+ 
+ /**
+  * <p>
+@@ -515,7 +516,7 @@ NodeData<?> getNode()
+     BeanDeclaration createBeanDeclaration(NodeData<?> node)
+     {
+         for (HierarchicalConfiguration<?> config : getConfiguration()
+-                .configurationsAt(node.nodeName()))
++                .configurationsAt(node.escapedNodeName(getConfiguration())))
+         {
+             if (node.matchesConfigRootNode(config))
+             {
+@@ -636,6 +637,21 @@ public String nodeName()
+             return handler.nodeName(node);
+         }
+ 
++        /**
++         * Returns the unescaped name of the node stored in this data object.
++         * This method handles the case that the node name may contain reserved
++         * characters with a special meaning for the current expression engine.
++         * In this case, the characters affected have to be escaped accordingly.
++         *
++         * @param config the configuration
++         * @return the escaped node name
++         */
++        public String escapedNodeName(HierarchicalConfiguration<?> config)
++        {
++            return config.getExpressionEngine().nodeKey(node,
++                    StringUtils.EMPTY, handler);
++        }
++
+         /**
+          * Returns a list with the children of the wrapped node, again wrapped
+          * into {@code NodeData} objects.
+diff --git a/src/test/java/org/apache/commons/configuration/beanutils/TestXMLBeanDeclaration.java b/src/test/java/org/apache/commons/configuration/beanutils/TestXMLBeanDeclaration.java
+index 2d3b207386..c05ba414e5 100644
+--- a/src/test/java/org/apache/commons/configuration/beanutils/TestXMLBeanDeclaration.java
++++ b/src/test/java/org/apache/commons/configuration/beanutils/TestXMLBeanDeclaration.java
+@@ -340,6 +340,22 @@ public void testGetNestedBeanDeclarations()
+         }
+     }
+ 
++    /**
++     * Tests whether reserved characters in the node names of nested bean declarations
++     * are handled correctly. This is related to CONFIGURATION-567.
++     */
++    @Test
++    public void testGetNestedBeanDeclarationsReservedCharacter()
++    {
++        BaseHierarchicalConfiguration config = new BaseHierarchicalConfiguration();
++        String key = KEY + ".address..private";
++        setupBeanDeclaration(config, key, COMPLEX_ATTRIBUTES[0], COMPLEX_VALUES[0]);
++        XMLBeanDeclaration decl = new XMLBeanDeclaration(config, KEY);
++
++        Map<String, Object> nested = decl.getNestedBeanDeclarations();
++        assertTrue("Key not found", nested.containsKey("address.private"));
++    }
++
+     /**
+      * Tests whether the factory method for creating nested bean declarations
+      * gets called.
+@@ -522,7 +538,7 @@ public void testInterpolateNoInterpolator()
+      * @param names an array with the names of the properties
+      * @param values an array with the corresponding values
+      */
+-    private static void setupBeanDeclaration(HierarchicalConfiguration config,
++    private static void setupBeanDeclaration(HierarchicalConfiguration<?> config,
+             String key, String[] names, String[] values)
+     {
+         for (int i = 0; i < names.length; i++)

@@ -1,0 +1,157 @@
+From c9c4dfa594ab2901ba627d68c0fc043806ec0ab1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Wed, 28 Jan 2015 12:22:32 +0000
+Subject: [PATCH] OPENNLP-744 Added support for attribute annotation in the
+ brat .ann files
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1655274 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../formats/brat/AnnotationConfiguration.java | 18 ++++++--
+ .../formats/brat/AttributeAnnotation.java     | 44 +++++++++++++++++++
+ .../formats/brat/BratAnnotationStream.java    | 30 ++++++++++++-
+ 3 files changed, 88 insertions(+), 4 deletions(-)
+ create mode 100644 opennlp-tools/src/main/java/opennlp/tools/formats/brat/AttributeAnnotation.java
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java
+index 7534d36fa..3d855416b 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AnnotationConfiguration.java
+@@ -31,6 +31,7 @@ public class AnnotationConfiguration {
+   public static final String SPAN_TYPE = "Span";
+   public static final String ENTITY_TYPE = "Entity";
+   public static final String RELATION_TYPE = "Relation";
++  public static final String ATTRIBUTE_TYPE = "Attribute";
+ 
+   private final Map<String, String> typeToClassMap;
+ 
+@@ -65,11 +66,22 @@ public static AnnotationConfiguration parse(InputStream in) throws IOException {
+         sectionType = line.substring(line.indexOf('[') + 1, line.indexOf(']'));
+       }
+       else {
+-        if ("entities".equals(sectionType)) {
++        
++        switch (sectionType) {
++        case "entities":
+           typeToClassMap.put(line, AnnotationConfiguration.ENTITY_TYPE);
+-        }
+-        else if ("relations".equals(sectionType)) {
++          break;
++
++        case "relations":
+           typeToClassMap.put(line.substring(0, line.indexOf(' ')), AnnotationConfiguration.RELATION_TYPE);
++          break;
++          
++        case "attributes":
++          typeToClassMap.put(line.substring(0, line.indexOf(' ')), AnnotationConfiguration.ATTRIBUTE_TYPE);
++          break;
++          
++        default:
++          break;
+         }
+       }
+     }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AttributeAnnotation.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AttributeAnnotation.java
+new file mode 100644
+index 000000000..4de4b4315
+--- /dev/null
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/AttributeAnnotation.java
+@@ -0,0 +1,44 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.formats.brat;
++
++public class AttributeAnnotation extends BratAnnotation {
++
++  private final String attachedTo;
++  private final String value;
++
++  protected AttributeAnnotation(String id, String type, String attachedTo,
++      String value) {
++    super(id, type);
++    this.attachedTo = attachedTo;
++    this.value = value;
++  }
++
++  public String getAttachedTo() {
++    return attachedTo;
++  }
++
++  public String getValue() {
++    return value;
++  }
++
++  @Override
++  public String toString() {
++    return super.toString() + " " + attachedTo + (value != null ? " " + value : "");
++  }
++}
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
+index 664808010..869802a3d 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratAnnotationStream.java
+@@ -115,6 +115,32 @@ BratAnnotation parse(Span tokens[], CharSequence line) throws IOException {
+     }
+   }
+ 
++  static class AttributeAnnotationParser extends BratAnnotationParser {
++    
++    private static final int ATTACHED_TO_OFFSET = 2;
++    private static final int VALUE_OFFSET = 3;
++    
++    @Override
++    BratAnnotation parse(Span[] values, CharSequence line) throws IOException {
++      
++      if (values.length == 3 || values.length == 4) {
++        
++        String value = null;
++        
++        if (values.length == 4) {
++          value = values[VALUE_OFFSET].getCoveredText(line).toString();
++        }
++        
++        return new AttributeAnnotation(values[ID_OFFSET].getCoveredText(line).toString(),
++            values[TYPE_OFFSET].getCoveredText(line).toString(),
++            values[ATTACHED_TO_OFFSET].getCoveredText(line).toString(), value);
++      }
++      else {
++        throw new InvalidFormatException("Line must have 3 or 4 fields");
++      }
++    }
++  }
++  
+   private final Map<String, BratAnnotationParser> parsers =
+       new HashMap<String, BratAnnotationParser>();
+   private final AnnotationConfiguration config;
+@@ -130,6 +156,7 @@ BratAnnotation parse(Span tokens[], CharSequence line) throws IOException {
+     parsers.put(AnnotationConfiguration.SPAN_TYPE, new SpanAnnotationParser());
+     parsers.put(AnnotationConfiguration.ENTITY_TYPE, new SpanAnnotationParser());
+     parsers.put(AnnotationConfiguration.RELATION_TYPE, new RelationAnnotationParser());
++    parsers.put(AnnotationConfiguration.ATTRIBUTE_TYPE, new AttributeAnnotationParser());
+   }
+ 
+   public BratAnnotation read() throws IOException {
+@@ -147,7 +174,8 @@ public BratAnnotation read() throws IOException {
+ 
+         if (parser == null) {
+           throw new IOException("Failed to parse ann document with id " + id +
+-              " type class, no parser registered: " + tokens[BratAnnotationParser.TYPE_OFFSET]);
++              " type class, no parser registered: " + tokens[BratAnnotationParser.TYPE_OFFSET]
++              .getCoveredText(line).toString());
+         }
+ 
+         return parser.parse(tokens, line);

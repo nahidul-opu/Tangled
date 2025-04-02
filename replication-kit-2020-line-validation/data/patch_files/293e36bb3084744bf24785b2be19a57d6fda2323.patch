@@ -1,0 +1,167 @@
+From 293e36bb3084744bf24785b2be19a57d6fda2323 Mon Sep 17 00:00:00 2001
+From: Joerg Schaible <joehni@apache.org>
+Date: Mon, 9 Mar 2009 21:00:26 +0000
+Subject: [PATCH] Fix local lookups for SubsetConfiguration
+ (CONFIGURATION-369).
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@751830 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration2/SubsetConfiguration.java   | 10 ++++--
+ .../interpol/ConfigurationInterpolator.java   | 15 ++++++--
+ .../TestSubsetConfiguration.java              | 35 +++++++++++++++++--
+ 3 files changed, 54 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/SubsetConfiguration.java b/src/main/java/org/apache/commons/configuration2/SubsetConfiguration.java
+index 2408dd9c64..0b5ae1f8c6 100644
+--- a/src/main/java/org/apache/commons/configuration2/SubsetConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/SubsetConfiguration.java
+@@ -17,7 +17,12 @@
+ 
+ package org.apache.commons.configuration2;
+ 
++import org.apache.commons.configuration2.interpol.ConfigurationInterpolator;
++import org.apache.commons.lang.text.StrLookup;
++
+ import java.util.Iterator;
++import java.util.Map;
++import java.util.Map.Entry;
+ 
+ /**
+  * <p>A subset of another configuration. The new Configuration object contains
+@@ -195,7 +200,7 @@ public Iterator<String> getKeys()
+     {
+         return new SubsetIterator(parent.getKeys(prefix));
+     }
+-
++    
+     @Override
+     protected Object interpolate(Object base)
+     {
+@@ -206,6 +211,7 @@ protected Object interpolate(Object base)
+         else
+         {
+             SubsetConfiguration config = new SubsetConfiguration(parent, "");
++            getInterpolator().registerLocalLookups(config.getInterpolator());
+             return config.interpolate(base);
+         }
+     }
+@@ -323,7 +329,7 @@ public void setDelimiterParsingDisabled(boolean delimiterParsingDisabled)
+     /**
+      * A specialized iterator to be returned by the <code>getKeys()</code>
+      * methods. This implementation wraps an iterator from the parent
+-     * configuration. The keys returned by this iterator are correspondigly
++     * configuration. The keys returned by this iterator are correspondingly
+      * transformed.
+      */
+     private class SubsetIterator implements Iterator<String>
+diff --git a/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java b/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java
+index 928aaa15ab..6ed7e08c77 100644
+--- a/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java
++++ b/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java
+@@ -16,6 +16,7 @@
+  */
+ package org.apache.commons.configuration2.interpol;
+ 
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.Map;
+ import java.util.Set;
+@@ -229,7 +230,7 @@ public boolean deregisterLookup(String prefix)
+      *
+      * @return a set with the registered variable prefixes
+      */
+-    public Set prefixSet()
++    public Set<String> prefixSet()
+     {
+         return localLookups.keySet();
+     }
+@@ -313,13 +314,23 @@ protected StrLookup fetchNoPrefixLookup()
+      */
+     protected StrLookup fetchLookupForPrefix(String prefix)
+     {
+-        StrLookup lookup = (StrLookup) localLookups.get(prefix);
++        StrLookup lookup = localLookups.get(prefix);
+         if (lookup == null)
+         {
+             lookup = StrLookup.noneLookup();
+         }
+         return lookup;
+     }
++    
++    /**
++     * Registers the local lookup instances for the given interpolator.
++     * 
++     * @param interpolator the instance receiving the local lookups
++     * @since upcoming
++     */
++    public void registerLocalLookups(ConfigurationInterpolator interpolator) {
++        interpolator.localLookups.putAll(localLookups);
++    }
+ 
+     // static initializer, sets up the map with the standard lookups
+     static
+diff --git a/src/test/java/org/apache/commons/configuration2/TestSubsetConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestSubsetConfiguration.java
+index 260ae0db5e..8a1e9c0eb7 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestSubsetConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestSubsetConfiguration.java
+@@ -26,6 +26,8 @@
+ import java.util.Set;
+ 
+ import org.apache.commons.configuration2.flat.BaseConfiguration;
++import org.apache.commons.configuration2.interpol.ConfigurationInterpolator;
++import org.apache.commons.lang.text.StrLookup;
+ 
+ import junit.framework.TestCase;
+ 
+@@ -160,7 +162,7 @@ public void testSetPrefix()
+         assertEquals("prefix", "prefix", subset.getPrefix());
+     }
+ 
+-    public void testThrowtExceptionOnMissing()
++    public void testThrowExceptionOnMissing()
+     {
+         BaseConfiguration config = new BaseConfiguration();
+         config.setThrowExceptionOnMissing(true);
+@@ -208,7 +210,7 @@ public void testNested() throws Exception
+         keys.add("type");
+         while(itKeys.hasNext())
+         {
+-            String k = (String) itKeys.next();
++            String k = itKeys.next();
+             assertTrue(keys.contains(k));
+             keys.remove(k);
+         }
+@@ -283,4 +285,33 @@ public void testIsDelimiterParsingDisabled()
+         assertFalse("Wrong value of list parsing flag in parent", config
+                 .isDelimiterParsingDisabled());
+     }
++
++    /**
++     * Tests manipulating the interpolator.
++     */
++    public void testInterpolator()
++    {
++        BaseConfiguration config = new BaseConfiguration();
++        AbstractConfiguration subset = (AbstractConfiguration) config
++                .subset("prefix");
++        InterpolationTestHelper.testGetInterpolator(subset);
++    }
++    
++    // TODO: Next step
++    public void todoTestLocalLookupsInInterpolorAreInherited() {
++        BaseConfiguration config = new BaseConfiguration();
++        ConfigurationInterpolator interpolator = config.getInterpolator();
++        interpolator.registerLookup("brackets", new StrLookup(){
++
++            @Override
++            public String lookup(String key) {
++                return "(" + key +")";
++            }
++            
++        });
++        config.setProperty("prefix.var", "${brackets:x}");
++        AbstractConfiguration subset = (AbstractConfiguration) config
++                .subset("prefix");
++        assertEquals("Local lookup was not inherited", "(x)", subset.getString("var", ""));
++    }
+ }

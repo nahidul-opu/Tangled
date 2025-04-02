@@ -1,0 +1,123 @@
+From a8e22c5d18eaccc539f266df5e5a8f4ae52ea1ef Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 25 Aug 2008 14:51:26 +0000
+Subject: [PATCH] FIX: Deliver delivers the wrong version when a dynamic
+ revision is evicted before being resolved (IVY-707)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@688740 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/ResolveEngine.java       | 14 ++++++++-
+ .../org/apache/ivy/ant/IvyDeliverTest.java    | 29 ++++++++++++++++++-
+ .../org/apache/ivy/ant/ivy-dyn-evicted2.xml   | 11 +++++++
+ 4 files changed, 53 insertions(+), 2 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/ant/ivy-dyn-evicted2.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index aab9d8825..8adc2fce6 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -108,6 +108,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Add a memory cache for the module descriptor that are parsed from the cache (IVY-883)
+ - IMPROVEMENT: Improve performance (IVY-872)
+ 
++- FIX: Deliver delivers the wrong version when a dynamic revision is evicted before being resolved (IVY-707)
+ - FIX: Inconsistency with "multi-project" tutorial (IVY-667)
+ - FIX: URLRepository does not allow some valid file scheme uri's (IVY-884)
+ - FIX: Incorrect parsing artifactPattern attribute in a sftp resolver (IVY-661) (thanks to Alexey Kiselev)
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 8649946b8..e9df9fb49 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -63,6 +63,7 @@
+ import org.apache.ivy.plugins.repository.url.URLResource;
+ import org.apache.ivy.plugins.resolver.CacheResolver;
+ import org.apache.ivy.plugins.resolver.DependencyResolver;
++import org.apache.ivy.plugins.version.VersionMatcher;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.filter.Filter;
+ 
+@@ -608,7 +609,18 @@ private void fetchDependencies(VisitNode node, String conf, boolean shouldBePubl
+         VisitNode parentVisitNode = data.getCurrentVisitNode();
+         
+         data.setCurrentVisitNode(node);
+-        resolveConflict(node, conf);
++        DependencyDescriptor dd = node.getDependencyDescriptor();
++        VersionMatcher versionMatcher = node.getNode().getData().getSettings().getVersionMatcher();
++        if (dd != null 
++                && !(node.getRoot() == node.getParent() 
++                        && versionMatcher.isDynamic(dd.getDependencyRevisionId()))) {
++            /*
++             * we don't resolve conflicts before loading data for direct dependencies on dynamic
++             * revisions, so that direct dynamic revisions are always resolved, which is mandatory
++             * for proper replacement of dynamic revisions during 'deliver'
++             */
++            resolveConflict(node, conf);
++        }
+ 
+         if (node.loadData(conf, shouldBePublic)) {
+             // we resolve conflict again now that we have all information loaded
+diff --git a/test/java/org/apache/ivy/ant/IvyDeliverTest.java b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+index cf2c3b6ca..f4ae7dfa1 100644
+--- a/test/java/org/apache/ivy/ant/IvyDeliverTest.java
++++ b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+@@ -302,7 +302,7 @@ public void testWithDynEvicted() throws Exception {
+         File deliveredIvyFile = new File("build/test/deliver/ivy-1.2.xml");
+         assertTrue(deliveredIvyFile.exists()); 
+         ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
+-	    new IvySettings(), deliveredIvyFile.toURL(), false);
++        new IvySettings(), deliveredIvyFile.toURL(), false);
+         assertEquals(ModuleRevisionId.newInstance("apache", "resolve-latest", "1.2"), 
+             md.getModuleRevisionId());
+         DependencyDescriptor[] dds = md.getDependencies();
+@@ -311,6 +311,33 @@ public void testWithDynEvicted() throws Exception {
+             dds[0].getDependencyRevisionId());
+     }
+ 
++    public void testWithDynEvicted2() throws Exception {
++        // same as previous but dynamic dependency is placed after the one causing the conflict
++        // test case for IVY-707
++        project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-dyn-evicted2.xml");
++        IvyResolve res = new IvyResolve();
++        res.setValidate(false);
++        res.setProject(project);
++        res.execute();
++        
++        deliver.setPubrevision("1.2");
++        deliver.setDeliverpattern("build/test/deliver/ivy-[revision].xml");
++        deliver.setValidate(false);
++        deliver.execute();
++        
++        // should have done the ivy delivering
++        File deliveredIvyFile = new File("build/test/deliver/ivy-1.2.xml");
++        assertTrue(deliveredIvyFile.exists()); 
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
++        new IvySettings(), deliveredIvyFile.toURL(), false);
++        assertEquals(ModuleRevisionId.newInstance("apache", "resolve-latest", "1.2"), 
++            md.getModuleRevisionId());
++        DependencyDescriptor[] dds = md.getDependencies();
++        assertEquals(2, dds.length);
++        assertEquals(ModuleRevisionId.newInstance("org1", "mod1.2", "1.1"), 
++            dds[1].getDependencyRevisionId());
++    }
++
+     public void testReplaceImportedConfigurations() throws Exception {
+         project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-import-confs.xml");
+         IvyResolve res = new IvyResolve();
+diff --git a/test/java/org/apache/ivy/ant/ivy-dyn-evicted2.xml b/test/java/org/apache/ivy/ant/ivy-dyn-evicted2.xml
+new file mode 100644
+index 000000000..667eadbef
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/ivy-dyn-evicted2.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0"> 
++	<info organisation="apache"
++	       module="resolve-latest"
++	       revision="1.0"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="org6" name="mod6.1" rev="2.0" />
++		<dependency org="org1" name="mod1.2" rev="1+" />
++	</dependencies>
++</ivy-module>

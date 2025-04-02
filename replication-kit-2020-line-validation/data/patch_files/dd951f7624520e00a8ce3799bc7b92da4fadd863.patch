@@ -1,0 +1,583 @@
+From dd951f7624520e00a8ce3799bc7b92da4fadd863 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sat, 6 Jun 2009 15:27:02 +0000
+Subject: [PATCH] CONFIGURATION-385: DatabaseConfiguration now generates
+ correct events for the clear() and clearProperty() methods. (Ported from
+ trunk.)
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@782274 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration2/DatabaseConfiguration.java |   4 +-
+ .../DatabaseConfigurationTestHelper.java      | 204 ++++++++++++++++++
+ .../TestDatabaseConfiguration.java            | 140 ++++--------
+ .../TestDatabaseConfigurationEvents.java      |  54 +++++
+ xdocs/changes.xml                             |   4 +
+ 5 files changed, 302 insertions(+), 104 deletions(-)
+ create mode 100644 src/test/java/org/apache/commons/configuration2/DatabaseConfigurationTestHelper.java
+ create mode 100644 src/test/java/org/apache/commons/configuration2/event/TestDatabaseConfigurationEvents.java
+
+diff --git a/src/main/java/org/apache/commons/configuration2/DatabaseConfiguration.java b/src/main/java/org/apache/commons/configuration2/DatabaseConfiguration.java
+index 820b5afe0f..d3e32dc33b 100644
+--- a/src/main/java/org/apache/commons/configuration2/DatabaseConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/DatabaseConfiguration.java
+@@ -347,7 +347,7 @@ protected Object performOperation() throws SQLException
+      * @param key the key of the property to be removed
+      */
+     @Override
+-    public void clearProperty(final String key)
++    protected void clearPropertyDirect(final String key)
+     {
+         new JdbcOperation(EVENT_CLEAR_PROPERTY, key, null)
+         {
+@@ -370,6 +370,7 @@ protected Object performOperation() throws SQLException
+     @Override
+     public void clear()
+     {
++        fireEvent(EVENT_CLEAR, null, null, true);
+         new JdbcOperation(EVENT_CLEAR, null, null)
+         {
+             @Override
+@@ -380,6 +381,7 @@ protected Object performOperation() throws SQLException
+                 return ps.executeUpdate();
+             }
+         }.execute();
++        fireEvent(EVENT_CLEAR, null, null, false);
+     }
+ 
+     /**
+diff --git a/src/test/java/org/apache/commons/configuration2/DatabaseConfigurationTestHelper.java b/src/test/java/org/apache/commons/configuration2/DatabaseConfigurationTestHelper.java
+new file mode 100644
+index 0000000000..3c7af58b7c
+--- /dev/null
++++ b/src/test/java/org/apache/commons/configuration2/DatabaseConfigurationTestHelper.java
+@@ -0,0 +1,204 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.configuration2;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.sql.Connection;
++import java.sql.SQLException;
++
++import org.apache.commons.configuration2.test.HsqlDB;
++import org.apache.commons.dbcp.BasicDataSource;
++import org.dbunit.database.DatabaseConnection;
++import org.dbunit.database.IDatabaseConnection;
++import org.dbunit.dataset.IDataSet;
++import org.dbunit.dataset.xml.XmlDataSet;
++import org.dbunit.operation.DatabaseOperation;
++
++/**
++ * A helper class for performing tests for {@link DatabaseConfiguration}. This
++ * class maintains an in-process database that stores configuration data and can
++ * be accessed from a {@link DatabaseConfiguration} instance. Constants for
++ * table and column names and database connection settings are provided, too.
++ *
++ * @version $Id$
++ */
++public class DatabaseConfigurationTestHelper
++{
++    /** Constant for the JDBC driver class. */
++    public final String DATABASE_DRIVER = "org.hsqldb.jdbcDriver";
++
++    /** Constant for the connection URL. */
++    public final String DATABASE_URL = "jdbc:hsqldb:mem:testdb";
++
++    /** Constant for the DB user name. */
++    public final String DATABASE_USERNAME = "sa";
++
++    /** Constant for the DB password. */
++    public final String DATABASE_PASSWORD = "";
++
++    /** Constant for the configuration table. */
++    public static final String TABLE = "configuration";
++
++    /** Constant for the multi configuration table. */
++    public static final String TABLE_MULTI = "configurations";
++
++    /** Constant for the column with the keys. */
++    public static final String COL_KEY = "key";
++
++    /** Constant for the column with the values. */
++    public static final String COL_VALUE = "value";
++
++    /** Constant for the column with the configuration name. */
++    public static final String COL_NAME = "name";
++
++    /** Constant for the name of the test configuration. */
++    public static final String CONFIG_NAME = "test";
++
++    /** Stores the in-process database. */
++    private static HsqlDB hsqlDB = null;
++
++    /** The data source. */
++    private PotentialErrorDataSource datasource;
++
++    /**
++     * Initializes this helper object. This method can be called from a
++     * <code>setUp()</code> method of a unit test class. It creates the database
++     * instance if necessary and populates it with test data.
++     *
++     * @throws Exception if an error occurs
++     */
++    public void setUp() throws Exception
++    {
++        if (hsqlDB == null)
++        {
++            File script = ConfigurationAssert.getTestFile("testdb.script");
++            hsqlDB = new HsqlDB(DATABASE_URL, DATABASE_DRIVER, script
++                    .getAbsolutePath());
++        }
++
++        PotentialErrorDataSource datasource = new PotentialErrorDataSource();
++        datasource.setDriverClassName(DATABASE_DRIVER);
++        datasource.setUrl(DATABASE_URL);
++        datasource.setUsername(DATABASE_USERNAME);
++        datasource.setPassword(DATABASE_PASSWORD);
++
++        this.datasource = datasource;
++
++        // prepare the database
++        IDatabaseConnection connection = new DatabaseConnection(datasource
++                .getConnection());
++        IDataSet dataSet = new XmlDataSet(new FileInputStream(
++                ConfigurationAssert.getTestFile("dataset.xml")));
++
++        try
++        {
++            DatabaseOperation.CLEAN_INSERT.execute(connection, dataSet);
++        }
++        finally
++        {
++            connection.close();
++        }
++    }
++
++    /**
++     * Frees the resources used by this helper class. This method can be called
++     * by a <code>tearDown()</code> method of a unit test class.
++     *
++     * @throws Exception if an error occurs
++     */
++    public void tearDown() throws Exception
++    {
++        datasource.getConnection().commit();
++        datasource.getConnection().close();
++    }
++
++    /**
++     * Creates a database configuration with default values.
++     *
++     * @return the configuration
++     */
++    public DatabaseConfiguration setUpConfig()
++    {
++        return new DatabaseConfiguration(datasource, TABLE, COL_KEY, COL_VALUE);
++    }
++
++    /**
++     * Creates a database configuration that supports multiple configurations in
++     * a table with default values.
++     *
++     * @return the configuration
++     */
++    public DatabaseConfiguration setUpMultiConfig()
++    {
++        return new DatabaseConfiguration(datasource, TABLE_MULTI, COL_NAME,
++                COL_KEY, COL_VALUE, CONFIG_NAME);
++    }
++
++    /**
++     * Returns the <code>DataSource</code> managed by this class.
++     *
++     * @return the <code>DataSource</code>
++     */
++    public PotentialErrorDataSource getDatasource()
++    {
++        return datasource;
++    }
++
++    /**
++     * A specialized DataSource implementation that can be configured to throw
++     * an exception when obtaining a connection. This way database exceptions
++     * can be simulated.
++     */
++    public static class PotentialErrorDataSource extends BasicDataSource
++    {
++        /** A flag whether a getConnection() call should fail. */
++        private boolean failOnConnect;
++
++        /**
++         * Returns the fail on connect flag.
++         *
++         * @return the fail on connect flag
++         */
++        public boolean isFailOnConnect()
++        {
++            return failOnConnect;
++        }
++
++        /**
++         * Sets the fail on connect flag. If set to <b>true</b>, the next call
++         * to {@link #getConnection()} will throw an exception.
++         *
++         * @param failOnConnect the fail on connect flag
++         */
++        public void setFailOnConnect(boolean failOnConnect)
++        {
++            this.failOnConnect = failOnConnect;
++        }
++
++        @Override
++        public Connection getConnection() throws SQLException
++        {
++            if (failOnConnect)
++            {
++                failOnConnect = false; // fail only once
++                throw new SQLException("Simulated DB error");
++            }
++            return super.getConnection();
++        }
++    }
++}
+diff --git a/src/test/java/org/apache/commons/configuration2/TestDatabaseConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestDatabaseConfiguration.java
+index ad220d2a2d..443e6e881b 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestDatabaseConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestDatabaseConfiguration.java
+@@ -18,8 +18,6 @@
+ package org.apache.commons.configuration2;
+ 
+ import java.io.File;
+-import java.io.FileInputStream;
+-import java.sql.Connection;
+ import java.sql.SQLException;
+ import java.util.Hashtable;
+ import java.util.Iterator;
+@@ -33,16 +31,9 @@
+ import junit.framework.TestCase;
+ 
+ import org.apache.commons.configuration2.event.ConfigurationErrorListener;
+-import org.apache.commons.configuration2.test.HsqlDB;
+-import org.apache.commons.dbcp.BasicDataSource;
+ import org.codehaus.spice.jndikit.DefaultNameParser;
+ import org.codehaus.spice.jndikit.DefaultNamespace;
+ import org.codehaus.spice.jndikit.memory.MemoryContext;
+-import org.dbunit.database.DatabaseConnection;
+-import org.dbunit.database.IDatabaseConnection;
+-import org.dbunit.dataset.IDataSet;
+-import org.dbunit.dataset.xml.XmlDataSet;
+-import org.dbunit.operation.DatabaseOperation;
+ 
+ /**
+  * Test for database stored configurations.  Note, when running this Unit
+@@ -53,36 +44,12 @@
+  */
+ public class TestDatabaseConfiguration extends TestCase
+ {
+-    public final String DATABASE_DRIVER = "org.hsqldb.jdbcDriver";
+-    public final String DATABASE_URL = "jdbc:hsqldb:mem:testdb";
+-    public final String DATABASE_USERNAME = "sa";
+-    public final String DATABASE_PASSWORD = "";
+-
+-    /** Constant for the configuration table.*/
+-    private static final String TABLE = "configuration";
+-
+-    /** Constant for the multi configuration table.*/
+-    private static final String TABLE_MULTI = "configurations";
+-
+-    /** Constant for the column with the keys.*/
+-    private static final String COL_KEY = "key";
+-
+-    /** Constant for the column with the values.*/
+-    private static final String COL_VALUE = "value";
+-
+-    /** Constant for the column with the configuration name.*/
+-    private static final String COL_NAME = "name";
+-
+-    /** Constant for the name of the test configuration.*/
+-    private static final String CONFIG_NAME = "test";
+-
+-    private static HsqlDB hsqlDB = null;
+-
+-    private PotentialErrorDataSource datasource;
+-
+     /** An error listener for testing whether internal errors occurred.*/
+     private ConfigurationErrorListenerImpl listener;
+ 
++    /** The test helper. */
++    private DatabaseConfigurationTestHelper helper;
++
+     @Override
+     protected void setUp() throws Exception
+     {
+@@ -92,46 +59,19 @@ protected void setUp() throws Exception
+          */
+         //Thread.sleep(1000);
+ 
+-        // set up the datasource
+-
+-        if (hsqlDB == null)
+-        {
+-            File script = ConfigurationAssert.getTestFile("testdb.script");
+-            hsqlDB = new HsqlDB(DATABASE_URL, DATABASE_DRIVER, script.getAbsolutePath());
+-        }
+-
+-        PotentialErrorDataSource datasource = new PotentialErrorDataSource();
+-        datasource.setDriverClassName(DATABASE_DRIVER);
+-        datasource.setUrl(DATABASE_URL);
+-        datasource.setUsername(DATABASE_USERNAME);
+-        datasource.setPassword(DATABASE_PASSWORD);
+-
+-        this.datasource = datasource;
+-
+-        // prepare the database
+-        IDatabaseConnection connection = new DatabaseConnection(datasource.getConnection());
+-        IDataSet dataSet = new XmlDataSet(new FileInputStream(ConfigurationAssert.getTestFile("dataset.xml")));
+-
+-        try
+-        {
+-            DatabaseOperation.CLEAN_INSERT.execute(connection, dataSet);
+-        }
+-        finally
+-        {
+-            connection.close();
+-        }
++        helper = new DatabaseConfigurationTestHelper();
++        helper.setUp();
+     }
+ 
+     @Override
+     protected void tearDown() throws Exception{
+-        datasource.getConnection().commit();
+-        datasource.getConnection().close();
+-
+         // if an error listener is defined, we check whether an error occurred
+         if(listener != null)
+         {
+             assertEquals("An internal error occurred", 0, listener.getErrorCount());
+         }
++        helper.tearDown();
++
+         super.tearDown();
+     }
+ 
+@@ -142,7 +82,7 @@ protected void tearDown() throws Exception{
+      */
+     private DatabaseConfiguration setUpConfig()
+     {
+-        return new DatabaseConfiguration(datasource, TABLE, COL_KEY, COL_VALUE);
++        return helper.setUpConfig();
+     }
+ 
+     /**
+@@ -153,7 +93,7 @@ private DatabaseConfiguration setUpConfig()
+      */
+     private DatabaseConfiguration setUpMultiConfig()
+     {
+-        return new DatabaseConfiguration(datasource, TABLE_MULTI, COL_NAME, COL_KEY, COL_VALUE, CONFIG_NAME);
++        return helper.setUpMultiConfig();
+     }
+ 
+     /**
+@@ -167,7 +107,7 @@ private void setUpErrorListener(DatabaseConfiguration config)
+         config.removeErrorListener((ConfigurationErrorListener) config.getErrorListeners().iterator().next());
+         listener = new ConfigurationErrorListenerImpl();
+         config.addErrorListener(listener);
+-        datasource.failOnConnect = true;
++        helper.getDatasource().setFailOnConnect(true);
+     }
+ 
+     /**
+@@ -314,26 +254,38 @@ public void testIsEmptySingle()
+     public void testIsEmptyMultiple()
+     {
+         Configuration config1 = setUpMultiConfig();
+-        assertFalse("The configuration named 'test' is empty", config1.isEmpty());
++        assertFalse("The configuration named 'test' is empty", config1
++                .isEmpty());
+ 
+-        Configuration config2 = new DatabaseConfiguration(datasource, TABLE_MULTI, COL_NAME, COL_KEY, COL_VALUE, "testIsEmpty");
+-        assertTrue("The configuration named 'testIsEmpty' is not empty", config2.isEmpty());
++        Configuration config2 = new DatabaseConfiguration(helper
++                .getDatasource(), DatabaseConfigurationTestHelper.TABLE_MULTI,
++                DatabaseConfigurationTestHelper.COL_NAME,
++                DatabaseConfigurationTestHelper.COL_KEY,
++                DatabaseConfigurationTestHelper.COL_VALUE, "testIsEmpty");
++        assertTrue("The configuration named 'testIsEmpty' is not empty",
++                config2.isEmpty());
+     }
+ 
+     public void testGetList()
+     {
+-        Configuration config1 = new DatabaseConfiguration(datasource, "configurationList", COL_KEY, COL_VALUE);
++        Configuration config1 = new DatabaseConfiguration(helper
++                .getDatasource(), "configurationList",
++                DatabaseConfigurationTestHelper.COL_KEY,
++                DatabaseConfigurationTestHelper.COL_VALUE);
+         List<?> list = config1.getList("key3");
+-        assertEquals(3,list.size());
++        assertEquals(3, list.size());
+     }
+ 
+     public void testGetKeys()
+     {
+-        Configuration config1 = new DatabaseConfiguration(datasource, "configurationList", COL_KEY, COL_VALUE);
++        Configuration config1 = new DatabaseConfiguration(helper
++                .getDatasource(), "configurationList",
++                DatabaseConfigurationTestHelper.COL_KEY,
++                DatabaseConfigurationTestHelper.COL_VALUE);
+         Iterator<?> i = config1.getKeys();
+         assertTrue(i.hasNext());
+         Object key = i.next();
+-        assertEquals("key3",key.toString());
++        assertEquals("key3", key.toString());
+         assertFalse(i.hasNext());
+     }
+ 
+@@ -354,8 +306,12 @@ public void testClearSubset()
+      */
+     public void testLogErrorListener()
+     {
+-        DatabaseConfiguration config = new DatabaseConfiguration(datasource, TABLE, COL_KEY, COL_VALUE);
+-        assertEquals("No error listener registered", 1, config.getErrorListeners().size());
++        DatabaseConfiguration config = new DatabaseConfiguration(helper
++                .getDatasource(), DatabaseConfigurationTestHelper.TABLE,
++                DatabaseConfigurationTestHelper.COL_KEY,
++                DatabaseConfigurationTestHelper.COL_VALUE);
++        assertEquals("No error listener registered", 1, config
++                .getErrorListeners().size());
+     }
+ 
+     /**
+@@ -463,12 +419,12 @@ public void testAddWithDelimiter()
+     }
+ 
+     /**
+-     * Test instanciating a DatabaseConfiguration from a configuration descriptor.
++     * Test instantiating a DatabaseConfiguration from a configuration descriptor.
+      */
+     public void testConfigurationBuilder() throws Exception
+     {
+         // bind the datasource in the JNDI context
+-        TestInitialContextFactory.datasource = datasource;
++        TestInitialContextFactory.datasource = helper.getDatasource();
+         System.setProperty("java.naming.factory.initial", TestInitialContextFactory.class.getName());
+ 
+         File testFile = ConfigurationAssert.getTestFile("testDatabaseConfiguration.xml");
+@@ -503,26 +459,4 @@ public Context getInitialContext(Hashtable<?, ?> environment) throws NamingExcep
+             return context;
+         }
+     }
+-
+-    /**
+-     * A specialized DataSource implementation that can be configured to throw
+-     * an exception when obtaining a connection. This way database exceptions
+-     * can be simulated.
+-     */
+-    private static class PotentialErrorDataSource extends BasicDataSource
+-    {
+-        /** A flag whether a getConnection() call should fail. */
+-        boolean failOnConnect;
+-
+-        @Override
+-        public Connection getConnection() throws SQLException
+-        {
+-            if (failOnConnect)
+-            {
+-                failOnConnect = false; // fail only once
+-                throw new SQLException("Simulated DB error");
+-            }
+-            return super.getConnection();
+-        }
+-    }
+ }
+diff --git a/src/test/java/org/apache/commons/configuration2/event/TestDatabaseConfigurationEvents.java b/src/test/java/org/apache/commons/configuration2/event/TestDatabaseConfigurationEvents.java
+new file mode 100644
+index 0000000000..54a4bcb3bf
+--- /dev/null
++++ b/src/test/java/org/apache/commons/configuration2/event/TestDatabaseConfigurationEvents.java
+@@ -0,0 +1,54 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.configuration2.event;
++
++import org.apache.commons.configuration2.AbstractConfiguration;
++import org.apache.commons.configuration2.DatabaseConfigurationTestHelper;
++
++/**
++ * A test class for the events generated by DatabaseConfiguration.
++ *
++ * @version $Id$
++ */
++public class TestDatabaseConfigurationEvents extends
++        AbstractTestConfigurationEvents
++{
++    /** The test helper. */
++    private DatabaseConfigurationTestHelper helper;
++
++    @Override
++    protected void setUp() throws Exception
++    {
++        helper = new DatabaseConfigurationTestHelper();
++        helper.setUp();
++
++        super.setUp();
++    }
++
++    @Override
++    protected void tearDown() throws Exception
++    {
++        helper.tearDown();
++        super.tearDown();
++    }
++
++    @Override
++    protected AbstractConfiguration createConfiguration()
++    {
++        return helper.setUpConfig();
++    }
++}
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index d170d44837..7ee1ce6d4d 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -85,6 +85,10 @@
+     </release>
+ 
+     <release version="1.7" date="in SVN" description="">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-385">
++        DatabaseConfiguration now generates correct events for the clear() and
++        clearProperty() methods.
++      </action>
+       <action dev="rgoers" type="add" issue="CONFIGURATION-380">
+         Add ExprLookup to allow expressions to be evaluated in configurations. When
+         used, this requires that Apache Commons Jexl be added as a dependency to

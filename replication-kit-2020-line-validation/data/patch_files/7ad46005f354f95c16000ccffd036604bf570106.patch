@@ -1,0 +1,416 @@
+From 7ad46005f354f95c16000ccffd036604bf570106 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 1 May 2007 10:18:49 +0000
+Subject: [PATCH] FIX: Cache is storing ArtifactOrigin properties with no
+ guarantee of unicity and types telescope during resolve. (IVY-430) (thanks to
+ Stephane Bailliez)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@533993 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   5 +-
+ .../apache/ivy/core/cache/ArtifactOrigin.java |  56 ++++++++--
+ .../apache/ivy/core/cache/CacheManager.java   |  57 ++++++++--
+ .../ivy/core/module/descriptor/Artifact.java  |  32 +++++-
+ .../core/module/id/ArtifactRevisionId.java    |   2 +
+ .../ivy/core/cache/CacheManagerTest.java      | 101 ++++++++++++++++++
+ 6 files changed, 230 insertions(+), 23 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/cache/CacheManagerTest.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2e88ccdb9..8cb8553a4 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -11,7 +11,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+  
+  Contributors
+  	Ingo Adler
+-	Stephane Baillez
++	Stephane Bailliez
+ 	Karl Baum
+ 	Jeffrey Blatttman
+ 	Matthieu Brouillard
+@@ -48,6 +48,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - IMPROVEMENT: Allow "main" parameters to be passed directly (instead of using -args flag) (IVY-480) (thanks to Archie Cobbs)
+ 
++- FIX: Cache is storing ArtifactOrigin properties with no guarantee of unicity and types telescope during resolve. (IVY-430) (thanks to Stephane Bailliez)
+ - FIX: ivy:install ant task does not fail on error (IVY-475) (thanks to Jeffrey Blatttman)
+ - FIX: Credentials are shown in build log even if debug is not enabled (IVY-486) (thanks to Gilles Scokart)
+ - FIX: Post-Resolve task shouldn't set the 'resolveid' (IVY-489)
+@@ -65,7 +66,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVE: Please typedef CacheResolver as "cache" for us (IVY-359)
+ - IMPROVE: ivy:retrieve should be able to create symlinks (IVY-353) (thanks to John Williams)
+ - IMPROVE: Ability to have multiple roots in the <ivy:buildfilelist> task (IVY-340) (thanks to Matt Inger)
+-- IMPROVE: Refactoring / documentation / test of matcher package (IVY-375) (thanks to Stephane Baillez)
++- IMPROVE: Refactoring / documentation / test of matcher package (IVY-375) (thanks to Stephane Bailliez)
+ - IMPROVE: Add a unit test to verify that latest.integration accepts released modules (IVY-394) (thanks to Gilles Scokart)
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ - IMPROVE: Generated XML reports now contains more information about the resolved module (IVY-446)
+diff --git a/src/java/org/apache/ivy/core/cache/ArtifactOrigin.java b/src/java/org/apache/ivy/core/cache/ArtifactOrigin.java
+index f6ada030e..1a1bdbb31 100644
+--- a/src/java/org/apache/ivy/core/cache/ArtifactOrigin.java
++++ b/src/java/org/apache/ivy/core/cache/ArtifactOrigin.java
+@@ -19,20 +19,62 @@
+ 
+ /**
+  * This class contains information about the origin of an artifact.
+- * 
+- * @author maartenc
++ * @see org.apache.ivy.plugins.resolver.BasicResolver
++ * @see org.apache.ivy.plugins.resolver.util.ResolvedResource
+  */
+-public class ArtifactOrigin {
+-	private boolean _isLocal;
++public class ArtifactOrigin {    
++    private boolean _isLocal;
+ 	private String _location;
+-	public ArtifactOrigin(boolean isLocal, String location) {
++
++    /**
++     *  Create a new instance
++     * 
++     * @param isLocal <code>boolean</code> value indicating if the resource is local (on the filesystem).
++     * @param location the location of the resource (normally a url)
++     */
++    public ArtifactOrigin(boolean isLocal, String location) {
+ 		_isLocal = isLocal;
+ 		_location = location;
+ 	}
+-	public boolean isLocal() {
++
++    /**
++     * Is this resource local to this host, i.e. is it on the file system?
++     *
++     * @return <code>boolean</code> value indicating if the resource is local.
++     */
++    public boolean isLocal() {
+ 		return _isLocal;
+ 	}
+-	public String getLocation() {
++
++    /**
++     * Return the location of the resource (normally a url)
++     *
++     * @return the location of the resource
++     */
++    public String getLocation() {
+ 		return _location;
+ 	}
++
++    public String toString() {
++        return "ArtifactOrigin { _isLocal=" + _isLocal + ", _location=" + _location + "}";
++    }
++
++    public boolean equals(Object o) {
++        if (this == o) return true;
++        if (o == null || getClass() != o.getClass()) return false;
++
++        ArtifactOrigin that = (ArtifactOrigin) o;
++
++        if (_isLocal != that._isLocal) return false;
++        if (!_location.equals(that._location)) return false;
++
++        return true;
++    }
++
++    public int hashCode() {
++        int result;
++        result = (_isLocal ? 1 : 0);
++        result = 31 * result + _location.hashCode();
++        return result;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/core/cache/CacheManager.java b/src/java/org/apache/ivy/core/cache/CacheManager.java
+index 7778ab0eb..f5f1d48ff 100644
+--- a/src/java/org/apache/ivy/core/cache/CacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/CacheManager.java
+@@ -25,6 +25,7 @@
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.module.id.ArtifactRevisionId;
+ import org.apache.ivy.core.resolve.DefaultModuleRevision;
+ import org.apache.ivy.core.resolve.ResolvedModuleRevision;
+ import org.apache.ivy.core.settings.IvySettings;
+@@ -51,15 +52,18 @@ public CacheManager(IvySettings settings, File cache) {
+ 	}
+ 
+ 	public File getResolvedIvyFileInCache(ModuleRevisionId mrid) {
+-        return new File(_cache, IvyPatternHelper.substitute(_settings.getCacheResolvedIvyPattern(), mrid.getOrganisation(), mrid.getName(), mrid.getRevision(), "ivy", "ivy", "xml"));
++        String file = IvyPatternHelper.substitute(_settings.getCacheResolvedIvyPattern(), mrid.getOrganisation(), mrid.getName(), mrid.getRevision(), "ivy", "ivy", "xml");
++        return new File(_cache, file);
+     }
+ 
+     public File getResolvedIvyPropertiesInCache(ModuleRevisionId mrid) {
+-        return new File(_cache, IvyPatternHelper.substitute(_settings.getCacheResolvedIvyPropertiesPattern(), mrid.getOrganisation(), mrid.getName(), mrid.getRevision(), "ivy", "ivy", "xml"));
++        String file = IvyPatternHelper.substitute(_settings.getCacheResolvedIvyPropertiesPattern(), mrid.getOrganisation(), mrid.getName(), mrid.getRevision(), "ivy", "ivy", "xml");
++        return new File(_cache, file);
+     }
+ 
+     public File getIvyFileInCache(ModuleRevisionId mrid) {
+-        return new File(_cache, IvyPatternHelper.substitute(_settings.getCacheIvyPattern(), DefaultArtifact.newIvyArtifact(mrid, null)));
++        String file = IvyPatternHelper.substitute(_settings.getCacheIvyPattern(), DefaultArtifact.newIvyArtifact(mrid, null));
++        return new File(_cache, file);
+     }
+     
+     public File getConfigurationResolveReportInCache(String resolveId, String conf) {
+@@ -156,15 +160,16 @@ public void saveArtResolver(ModuleDescriptor md, String name) {
+     
+     public void saveArtifactOrigin(Artifact artifact, ArtifactOrigin origin) {
+        PropertiesFile cdf = getCachedDataFile(artifact.getModuleRevisionId());
+-       cdf.setProperty("artifact." + artifact.getName() + "#" + artifact.getExt() + ".is-local", String.valueOf(origin.isLocal()));
+-       cdf.setProperty("artifact." + artifact.getName() + "#" + artifact.getExt() + ".location", origin.getLocation());
++       cdf.setProperty(getIsLocalKey(artifact), String.valueOf(origin.isLocal()));
++       cdf.setProperty(getLocationKey(artifact), origin.getLocation());
+        cdf.save();
+     }
+     
+     public ArtifactOrigin getSavedArtifactOrigin(Artifact artifact) {
+         PropertiesFile cdf = getCachedDataFile(artifact.getModuleRevisionId());
+-        String location = cdf.getProperty("artifact." + artifact.getName() + "#" + artifact.getExt() + ".location");
+-        boolean isLocal = Boolean.valueOf(cdf.getProperty("artifact." + artifact.getName() + "#" + artifact.getExt() + ".is-local")).booleanValue();
++        String location = cdf.getProperty(getLocationKey(artifact));
++        String local = cdf.getProperty(getIsLocalKey(artifact));
++        boolean isLocal = Boolean.valueOf(local).booleanValue();
+         
+         if (location == null) {
+            // origin has not been specified, return null
+@@ -176,11 +181,43 @@ public ArtifactOrigin getSavedArtifactOrigin(Artifact artifact) {
+     
+     public void removeSavedArtifactOrigin(Artifact artifact) {
+         PropertiesFile cdf = getCachedDataFile(artifact.getModuleRevisionId());
+-        cdf.remove("artifact." + artifact.getName() + "#" + artifact.getExt() + ".location");
+-        cdf.remove("artifact." + artifact.getName() + "#" + artifact.getExt() + ".is-local");
++        cdf.remove(getLocationKey(artifact));
++        cdf.remove(getIsLocalKey(artifact));
+         cdf.save();
+     }
+-    
++
++    /**
++     * Creates the unique prefix key that will reference the artifact within the properties.
++     * @param artifact the artifact to create the unique key from. Cannot be null.
++     * @return the unique prefix key as a string.
++     */
++    private String getPrefixKey(Artifact artifact) {
++        // use the hashcode as a uuid for the artifact (fingers crossed)        
++        int hashCode = artifact.getId().hashCode();
++        // use just some visual cue
++        return "artifact:" + artifact.getName() + "#" + artifact.getType() + "#" + artifact.getExt() + "#" + hashCode;
++    }
++
++    /**
++     * Returns the key used to identify the location of the artifact.
++     * @param artifact the artifact to generate the key from. Cannot be null.
++     * @return the key to be used to reference the artifact location.
++     */
++    private String getLocationKey(Artifact artifact) {
++        String prefix = getPrefixKey(artifact);
++        return prefix + ".location";
++    }
++
++    /**
++     * Returns the key used to identify if the artifact is local.
++     * @param artifact the artifact to generate the key from. Cannot be null.
++     * @return the key to be used to reference the artifact location.
++     */
++    private String getIsLocalKey(Artifact artifact) {
++        String prefix = getPrefixKey(artifact);
++        return prefix + ".is-local";
++    }
++
+     private String getSavedResolverName(ModuleDescriptor md) {
+         PropertiesFile cdf = getCachedDataFile(md);
+         return cdf.getProperty("resolver");
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/Artifact.java b/src/java/org/apache/ivy/core/module/descriptor/Artifact.java
+index ba878cb07..d82858cca 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/Artifact.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/Artifact.java
+@@ -27,32 +27,56 @@
+ 
+ 
+ /**
+- * @author x.hanin
+- *
++ * Representation of a published 'file' in the development environment. An artifact is generally a file
++ * that is produced by a project build. This is typically a jar, a war, an ear, a zip, a deb, ...
+  */
+ public interface Artifact extends ExtendableItem {
++
+     /**
+      * Returns the resolved module revision id for this artifact
+-     * @return
++     * @return the resolved module revision id.
+      */
+     ModuleRevisionId getModuleRevisionId();
++
+     /**
+      * Returns the resolved publication date for this artifact
+-     * @return the resolved publication date
++     * @return the resolved publication date. Never null.
+      */
+     Date getPublicationDate();
++
++    /**
++     * Return the name of the artifact, generally 'part' of the basename of the file.
++     * @return the name of the artifact. Never null.
++     */
+     String getName();
++
++    /**
++     * Returns the type of the artifact, typically 'jar', 'source', 'javadoc', 'debian', ...
++     * @return the type of the artifact. Never null.
++     */
+     String getType();
++
++    /**
++     * Retrieve the extension of the artifact. The extension is without dot (ie. 'jar' and not '.jar')
++     * @return the extension of the artifact. Never null.
++     */
+     String getExt();
++
+     /**
+      * Returns the url at which this artifact can be found independently of ivy configuration.
+      * This can be null (and is usually for standard artifacts)
+      * @return url at which this artifact can be found independently of ivy configuration
+      */
+     URL getUrl();
++
++    /**
++     * Returns the list of configurations where this artifact is associated to.
++     * @return the list of configuration this artifact is associated to. Never null.
++     */
+     String[] getConfigurations();
+ 
+     /**
++     * Return the specific identifier of this artifact.
+      * @return the id of the artifact
+      */
+     ArtifactRevisionId getId();
+diff --git a/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java b/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java
+index 04c831521..a0607db28 100644
+--- a/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java
++++ b/src/java/org/apache/ivy/core/module/id/ArtifactRevisionId.java
+@@ -50,6 +50,7 @@ public static ArtifactRevisionId newInstance(ModuleRevisionId mrid, String name,
+     public ArtifactRevisionId(ArtifactId artifactId, ModuleRevisionId mrid) {
+         this(artifactId, mrid, null);
+     }
++
+     public ArtifactRevisionId(ArtifactId artifactId, ModuleRevisionId mrid, Map extraAttributes) {
+         super(null, extraAttributes);
+         _artifactId = artifactId;
+@@ -74,6 +75,7 @@ && getModuleRevisionId().equals(arid.getModuleRevisionId())
+     }
+     
+     public int hashCode() {
++        // WARN: uniqueness needs to be relatively strong here
+         int hash = 17;
+         hash += getArtifactId().hashCode() * 37;
+         hash += getModuleRevisionId().hashCode() * 37;
+diff --git a/test/java/org/apache/ivy/core/cache/CacheManagerTest.java b/test/java/org/apache/ivy/core/cache/CacheManagerTest.java
+new file mode 100644
+index 000000000..f57bcf820
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/cache/CacheManagerTest.java
+@@ -0,0 +1,101 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.core.cache;
++
++import java.io.File;
++import java.util.Date;
++
++import junit.framework.TestCase;
++import org.apache.ivy.core.settings.IvySettings;
++import org.apache.ivy.core.module.descriptor.Artifact;
++import org.apache.ivy.core.module.descriptor.DefaultArtifact;
++import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.module.id.ModuleId;
++import org.apache.ivy.Ivy;
++import org.apache.tools.ant.util.FileUtils;
++
++/**
++ * @see CacheManager
++ */
++public class CacheManagerTest extends TestCase {
++    private CacheManager cacheManager;
++    private Artifact artifact;
++    private ArtifactOrigin origin;
++
++    protected void setUp() throws Exception {
++        File f = File.createTempFile("ivycache", ".dir");
++        Ivy ivy = new Ivy();
++        ivy.configureDefault();
++        IvySettings settings = ivy.getSettings();
++        f.delete(); // we want to use the file as a directory, so we delete the file itself
++        cacheManager = new CacheManager(settings, f);
++
++        artifact = createArtifact("org", "module", "rev", "name", "type", "ext");
++        origin = new ArtifactOrigin(true, "/some/where");
++        cacheManager.saveArtifactOrigin(artifact, origin);
++    }
++
++    protected void tearDown() throws Exception {
++        FileUtils.delete(cacheManager.getCache());
++    }
++
++    public void testArtifactOrigin() {
++        ArtifactOrigin found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertEquals(origin, found);
++
++        artifact = createArtifact("org", "module", "rev", "name", "type2", "ext");
++        found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertNull(found);
++    }
++
++    public void testUniqueness()  {
++        cacheManager.saveArtifactOrigin(artifact, origin);
++
++        artifact = createArtifact("org1", "module", "rev", "name", "type", "ext");
++        ArtifactOrigin found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertNull(found);
++
++        artifact = createArtifact("org", "module1", "rev", "name", "type", "ext");
++        found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertNull(found);
++
++        artifact = createArtifact("org", "module", "rev1", "name", "type", "ext");
++        found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertNull(found);
++
++        artifact = createArtifact("org", "module", "rev", "name1", "type", "ext");
++        found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertNull(found);
++
++        artifact = createArtifact("org", "module", "rev", "name", "type1", "ext");
++        found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertNull(found);
++
++        artifact = createArtifact("org", "module", "rev", "name", "type", "ext1");
++        found = cacheManager.getSavedArtifactOrigin(artifact);
++        assertNull(found);
++    }
++
++
++    protected Artifact createArtifact(String org, String module, String rev, String name, String type, String ext) {
++        ModuleId mid = new ModuleId(org, module);
++        ModuleRevisionId mrid = new ModuleRevisionId(mid, rev);
++        return new DefaultArtifact(mrid, new Date(), name, type, ext);
++    }
++
++}

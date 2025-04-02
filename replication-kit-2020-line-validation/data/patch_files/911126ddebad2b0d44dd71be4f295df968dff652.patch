@@ -1,0 +1,166 @@
+From 911126ddebad2b0d44dd71be4f295df968dff652 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 6 Sep 2006 20:32:07 +0000
+Subject: [PATCH] FIX: ivy file deliver doesn't respect the original file nor
+ custom attributes (IVY-289)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484506 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../AbstractModuleDescriptorParser.java       |  2 +-
+ .../ivy/xml/XmlModuleDescriptorUpdater.java   |  8 ++++
+ .../fr/jayasoft/ivy/ant/IvyPublishTest.java   | 41 +++++++++++++++++++
+ test/java/fr/jayasoft/ivy/ant/ivy-custom.xml  | 16 ++++++++
+ .../jayasoft/ivy/ant/published-ivy-custom.xml | 12 ++++++
+ 5 files changed, 78 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/ivy-custom.xml
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/published-ivy-custom.xml
+
+diff --git a/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java
+index dac851a6d..54e81f024 100644
+--- a/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/parser/AbstractModuleDescriptorParser.java
+@@ -62,8 +62,8 @@ protected void checkErrors() throws ParseException {
+         }
+         
+         protected void setResource(Resource res) {
+-            _md = new DefaultModuleDescriptor(_parser, _res);
+             _res = res; // used for log and date only
++            _md = new DefaultModuleDescriptor(_parser, res);
+             _md.setLastModified(getLastModified());
+         }
+         
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
+index 281e5dbac..707c94185 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
+@@ -15,6 +15,8 @@
+ import java.io.OutputStream;
+ import java.io.PrintWriter;
+ import java.net.URL;
++import java.util.Arrays;
++import java.util.Collection;
+ import java.util.Date;
+ import java.util.Map;
+ import java.util.Stack;
+@@ -130,9 +132,15 @@ public void startElement(String uri, String localName,
+                         } else if (attributes.getValue("publication") != null) {
+                             out.print(" publication=\""+substitute(ivy, attributes.getValue("publication"))+"\"");
+                         }
++                        Collection stdAtts = Arrays.asList(new String[] {"organisation", "module", "revision", "status", "publication", "namespace"});
+                         if (attributes.getValue("namespace") != null) {
+                             out.print(" namespace=\""+substitute(ivy, attributes.getValue("namespace"))+"\"");
+                         }
++                        for (int i=0; i<attributes.getLength(); i++) {
++                        	if (!stdAtts.contains(attributes.getQName(i))) {
++                        		out.print(" "+attributes.getQName(i)+"=\""+substitute(ivy, attributes.getValue(i))+"\"");
++                        	}
++                        }
+                     } else if (replaceInclude && "include".equals(qName) && _context.contains("configurations")) {
+                         try {
+                             URL url;
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java b/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java
+index 9c74b6fc0..ddf457c17 100644
+--- a/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java
++++ b/test/java/fr/jayasoft/ivy/ant/IvyPublishTest.java
+@@ -8,6 +8,7 @@
+ import java.io.BufferedReader;
+ import java.io.File;
+ import java.io.FileReader;
++import java.io.InputStreamReader;
+ 
+ import junit.framework.TestCase;
+ 
+@@ -19,6 +20,7 @@
+ import fr.jayasoft.ivy.ModuleDescriptor;
+ import fr.jayasoft.ivy.util.FileUtil;
+ import fr.jayasoft.ivy.xml.XmlModuleDescriptorParser;
++import fr.jayasoft.ivy.xml.XmlModuleUpdaterTest;
+ 
+ public class IvyPublishTest extends TestCase {
+     private File _cache;
+@@ -94,6 +96,45 @@ public void testSimple() throws Exception {
+         assertEquals("1.2", md.getModuleRevisionId().getRevision());
+     }
+ 
++    public void testCustom() throws Exception {
++        _project.setProperty("ivy.dep.file", "test/java/fr/jayasoft/ivy/ant/ivy-custom.xml");
++        IvyResolve res = new IvyResolve();
++        res.setValidate(false);
++        res.setProject(_project);
++        res.execute();
++        
++        _publish.setPubrevision("1.2");
++        _publish.setPubdate("20060906141243");
++        _publish.setResolver("1");
++        _publish.setValidate(false);
++        File art = new File("build/test/publish/resolve-custom-1.2.jar");
++        FileUtil.copy(new File("test/repositories/1/org1/mod1.1/jars/mod1.1-1.0.jar"), art, null);
++        _publish.execute();
++        
++        // should have do the ivy delivering
++        assertTrue(new File("build/test/publish/ivy-1.2.xml").exists()); 
++        
++        File dest = new File("test/repositories/1/jayasoft/resolve-custom/ivys/ivy-1.2.xml");
++		// should have published the files with "1" resolver
++        assertTrue(dest.exists()); 
++        assertTrue(new File("test/repositories/1/jayasoft/resolve-custom/jars/resolve-custom-1.2.jar").exists());
++        
++        // should have updated published ivy version
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(new Ivy(), dest.toURL(), false);
++        assertEquals("1.2", md.getModuleRevisionId().getRevision());
++        
++        // should have kept custom attributes
++        assertEquals("cval1", md.getModuleRevisionId().getAttribute("custom-info"));
++        assertEquals("cval2", md.getConfiguration("default").getAttribute("custom-conf"));
++        assertEquals("cval3", md.getDependencies()[0].getAttribute("custom-dep"));
++        
++        // should respect the ivy file, with descriptions, ...
++        String expected = FileUtil.readEntirely(new BufferedReader(new InputStreamReader(IvyPublishTest.class.getResourceAsStream("published-ivy-custom.xml"))));
++        String updated = FileUtil.readEntirely(new BufferedReader(new FileReader(dest)));
++        assertEquals(expected, updated);
++        
++    }
++
+     public void testNoDeliver() throws Exception {
+         _project.setProperty("ivy.dep.file", "test/java/fr/jayasoft/ivy/ant/ivy-latest.xml");
+         IvyResolve res = new IvyResolve();
+diff --git a/test/java/fr/jayasoft/ivy/ant/ivy-custom.xml b/test/java/fr/jayasoft/ivy/ant/ivy-custom.xml
+new file mode 100644
+index 000000000..cee775e4d
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/ivy-custom.xml
+@@ -0,0 +1,16 @@
++<ivy-module version="1.0"> 
++	<info organisation="jayasoft"
++	       module="resolve-custom"
++	       revision="1.0"
++	       status="release"
++	       custom-info="cval1">
++	       <license name="BSD"/>
++	       <description>This is the <b>description</b> of this custom module</description>
++	</info>
++	<configurations>
++		<conf name="default" custom-conf="cval2"/>
++	</configurations>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0" custom-dep="cval3"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/java/fr/jayasoft/ivy/ant/published-ivy-custom.xml b/test/java/fr/jayasoft/ivy/ant/published-ivy-custom.xml
+new file mode 100644
+index 000000000..6447118b2
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/published-ivy-custom.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0"> 
++	<info organisation="jayasoft" module="resolve-custom" revision="1.2" status="integration" publication="20060906141243" custom-info="cval1">
++	       <license name="BSD"/>
++	       <description>This is the <b>description</b> of this custom module</description>
++	</info>
++	<configurations>
++		<conf name="default" custom-conf="cval2"/>
++	</configurations>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0" custom-dep="cval3"/>
++	</dependencies>
++</ivy-module>

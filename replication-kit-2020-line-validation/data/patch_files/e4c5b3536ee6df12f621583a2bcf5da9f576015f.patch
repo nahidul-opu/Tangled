@@ -1,0 +1,75 @@
+From e4c5b3536ee6df12f621583a2bcf5da9f576015f Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Thu, 16 Mar 2017 14:00:12 +0000
+Subject: [PATCH] NET-584 Error with org.apache.commons.net.ftp.FTPClient
+ setControlKeepAliveTimeout Look for command completion first
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/net/trunk@1787188 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../org/apache/commons/net/ftp/FTPClient.java | 22 +++++++++----------
+ 1 file changed, 10 insertions(+), 12 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/net/ftp/FTPClient.java b/src/main/java/org/apache/commons/net/ftp/FTPClient.java
+index 13416efcf..d5ae42481 100644
+--- a/src/main/java/org/apache/commons/net/ftp/FTPClient.java
++++ b/src/main/java/org/apache/commons/net/ftp/FTPClient.java
+@@ -681,9 +681,15 @@ protected boolean _storeFile(String command, String remote, InputStream local)
+             Util.copyStream(local, output, getBufferSize(),
+                     CopyStreamEvent.UNKNOWN_STREAM_SIZE, __mergeListeners(csl),
+                     false);
++            output.close(); // ensure the file is fully written
++            socket.close(); // done writing the file
++
++            // Get the transfer response
++            return completePendingCommand();
+         }
+         catch (IOException e)
+         {
++            Util.closeQuietly(output); // ignore close errors here
+             Util.closeQuietly(socket); // ignore close errors here
+             throw e;
+         } finally {
+@@ -691,13 +697,6 @@ CopyStreamEvent.UNKNOWN_STREAM_SIZE, __mergeListeners(csl),
+                 __cslDebug = csl.cleanUp(); // fetch any outstanding keepalive replies
+             }
+         }
+-
+-        output.close(); // ensure the file is fully written
+-        socket.close(); // done writing the file
+-
+-        // Get the transfer response
+-        boolean ok = completePendingCommand();
+-        return ok;
+     }
+ 
+     private OutputStream __storeFileStream(FTPCmd command, String remote)
+@@ -1925,6 +1924,9 @@ protected boolean _retrieveFile(String command, String remote, OutputStream loca
+             Util.copyStream(input, local, getBufferSize(),
+                     CopyStreamEvent.UNKNOWN_STREAM_SIZE, __mergeListeners(csl),
+                     false);
++
++            // Get the transfer response
++            return completePendingCommand();
+         } finally {
+             Util.closeQuietly(input);
+             Util.closeQuietly(socket);
+@@ -1932,10 +1934,6 @@ CopyStreamEvent.UNKNOWN_STREAM_SIZE, __mergeListeners(csl),
+                 __cslDebug = csl.cleanUp(); // fetch any outstanding keepalive replies
+             }
+         }
+-
+-        // Get the transfer response
+-        boolean ok = completePendingCommand();
+-        return ok;
+     }
+ 
+     /**
+@@ -3935,7 +3933,7 @@ int[] cleanUp() throws IOException {
+             }
+             try {
+                 while(notAcked > 0) {
+-                    parent.__getReplyNoReport();
++                    parent.getReply(); // we do want to see these
+                     notAcked--; // only decrement if actually received
+                 }
+             } catch (SocketTimeoutException e) { // NET-584

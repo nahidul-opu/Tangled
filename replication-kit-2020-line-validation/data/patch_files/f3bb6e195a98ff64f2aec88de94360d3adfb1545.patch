@@ -1,0 +1,565 @@
+From f3bb6e195a98ff64f2aec88de94360d3adfb1545 Mon Sep 17 00:00:00 2001
+From: William Colen <colen@apache.org>
+Date: Fri, 31 Jan 2014 16:57:21 +0000
+Subject: [PATCH] OPENNLP-600: Created the InputStreamFactory interface and the
+ implementation MarkableFileInputStreamFactory. Created an utility method in
+ CmdLineUtil to create InputStreamFactories from a file.
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1563175 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../opennlp/tools/cmdline/CmdLineUtil.java    | 110 ++++++++++--------
+ .../MarkableFileInputStreamFactory.java       |  45 +++++++
+ .../tools/util/InputStreamFactory.java        |  25 ++++
+ .../tools/util/PlainTextByLineStream.java     |  53 ++++++---
+ .../tools/util/MockInputStreamFactory.java    |  36 ++++++
+ 5 files changed, 205 insertions(+), 64 deletions(-)
+ create mode 100644 opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java
+ create mode 100644 opennlp-tools/src/main/java/opennlp/tools/util/InputStreamFactory.java
+ create mode 100644 opennlp-tools/src/test/java/opennlp/tools/util/MockInputStreamFactory.java
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
+index 5903682c0..62c81416e 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
+@@ -31,7 +31,7 @@
+ import java.util.Locale;
+ 
+ import opennlp.tools.ml.TrainerFactory;
+-import opennlp.tools.ml.model.TrainUtil;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.TrainingParameters;
+ import opennlp.tools.util.model.BaseModel;
+ 
+@@ -43,11 +43,11 @@
+ public final class CmdLineUtil {
+ 
+  static final int IO_BUFFER_SIZE = 1024 * 1024;
+-  
++
+   private CmdLineUtil() {
+     // not intended to be instantiated
+   }
+-  
++
+   /**
+    * Check that the given input file is valid.
+    * <p>
+@@ -55,17 +55,17 @@ private CmdLineUtil() {
+    * - exist<br>
+    * - not be a directory<br>
+    * - accessibly<br>
+-   * 
++   *
+    * @param name the name which is used to refer to the file in an error message, it
+    * should start with a capital letter.
+-   * 
++   *
+    * @param inFile the particular file to check to qualify an input file
+-   * 
++   *
+    * @throws TerminateToolException  if test does not pass this exception is
+    * thrown and an error message is printed to the console.
+    */
+   public static void checkInputFile(String name, File inFile) {
+-    
++
+     String isFailure = null;
+ 
+     if (inFile.isDirectory()) {
+@@ -82,9 +82,9 @@ else if (!inFile.canRead()) {
+       throw new TerminateToolException(-1, isFailure + " Path: " + inFile.getAbsolutePath());
+     }
+   }
+-  
++
+   /**
+-   * Tries to ensure that it is possible to write to an output file. 
++   * Tries to ensure that it is possible to write to an output file.
+    * <p>
+    * The method does nothing if it is possible to write otherwise
+    * it prints an appropriate error message and a {@link TerminateToolException} is thrown.
+@@ -93,19 +93,19 @@ else if (!inFile.canRead()) {
+    * Prior to this computation it should be checked once that writing this output file is
+    * possible to be able to fail fast if not. If this validation is only done after a time
+    * consuming computation it could frustrate the user.
+-   * 
++   *
+    * @param name human-friendly file name. for example perceptron model
+    * @param outFile file
+    */
+   public static void checkOutputFile(String name, File outFile) {
+-    
++
+     String isFailure = null;
+-    
++
+     if (outFile.exists()) {
+-      
++
+       // The file already exists, ensure that it is a normal file and that it is
+       // possible to write into it
+-      
++
+       if (outFile.isDirectory()) {
+         isFailure = "The " + name + " file is a directory!";
+       }
+@@ -119,15 +119,15 @@ else if (outFile.isFile()) {
+       }
+     }
+     else {
+-      
++
+       // The file does not exist ensure its parent
+       // directory exists and has write permissions to create
+       // a new file in it
+-      
++
+       File parentDir = outFile.getAbsoluteFile().getParentFile();
+-      
++
+       if (parentDir != null && parentDir.exists()) {
+-        
++
+         if (!parentDir.canWrite()) {
+           isFailure = "No permissions to create the " + name + " file!";
+         }
+@@ -136,14 +136,14 @@ else if (outFile.isFile()) {
+         isFailure = "The parent directory of the " + name + " file does not exist, " +
+         		"please create it first!";
+       }
+-      
++
+     }
+-    
++
+     if (null != isFailure) {
+       throw new TerminateToolException(-1, isFailure + " Path: " + outFile.getAbsolutePath());
+     }
+   }
+-  
++
+   public static FileInputStream openInFile(File file) {
+     try {
+       return new FileInputStream(file);
+@@ -151,11 +151,19 @@ public static FileInputStream openInFile(File file) {
+       throw new TerminateToolException(-1, "File '" + file + "' cannot be found", e);
+     }
+   }
+-  
++
++  public static InputStreamFactory createInputStreamFactory(File file) {
++    try {
++      return new MarkableFileInputStreamFactory(file);
++    } catch (FileNotFoundException e) {
++      throw new TerminateToolException(-1, "File '" + file + "' cannot be found", e);
++    }
++  }
++
+   /**
+    * Writes a {@link BaseModel} to disk. Occurring errors are printed to the console
+    * to inform the user.
+-   * 
++   *
+    * @param modelName type of the model, name is used in error messages.
+    * @param modelFile output file of the model
+    * @param model the model itself which should be written to disk
+@@ -165,9 +173,9 @@ public static void writeModel(String modelName, File modelFile, BaseModel model)
+     CmdLineUtil.checkOutputFile(modelName + " model", modelFile);
+ 
+     System.err.print("Writing " + modelName + " model ... ");
+-    
++
+     long beginModelWritingTime = System.currentTimeMillis();
+-    
++
+     OutputStream modelOut = null;
+     try {
+       modelOut = new BufferedOutputStream(new FileOutputStream(modelFile), IO_BUFFER_SIZE);
+@@ -185,16 +193,16 @@ public static void writeModel(String modelName, File modelFile, BaseModel model)
+         }
+       }
+     }
+-    
++
+     long modelWritingDuration = System.currentTimeMillis() - beginModelWritingTime;
+-    
++
+     System.err.printf("done (%.3fs)\n", modelWritingDuration / 1000d);
+-    
++
+     System.err.println();
+-    
++
+     System.err.println("Wrote " + modelName + " model to");
+     System.err.println("path: " + modelFile.getAbsolutePath());
+-    
++
+     System.err.println();
+   }
+ 
+@@ -217,7 +225,7 @@ public static int getParameterIndex(String param, String args[]) {
+ 
+   /**
+    * Retrieves the specified parameter from the given arguments.
+-   * 
++   *
+    * @param param parameter name
+    * @param args arguments
+    * @return parameter value
+@@ -233,44 +241,44 @@ public static String getParameter(String param, String args[]) {
+ 
+     return null;
+   }
+-  
++
+   /**
+    * Retrieves the specified parameter from the specified arguments.
+-   * 
++   *
+    * @param param parameter name
+    * @param args arguments
+    * @return parameter value
+    */
+   public static Integer getIntParameter(String param, String args[]) {
+     String value = getParameter(param, args);
+-    
++
+     try {
+       if (value != null)
+           return Integer.parseInt(value);
+     }
+     catch (NumberFormatException e) {
+     }
+-    
++
+     return null;
+   }
+-  
++
+   /**
+    * Retrieves the specified parameter from the specified arguments.
+-   * 
++   *
+    * @param param parameter name
+    * @param args arguments
+    * @return parameter value
+    */
+   public static Double getDoubleParameter(String param, String args[]) {
+     String value = getParameter(param, args);
+-    
++
+     try {
+       if (value != null)
+           return Double.parseDouble(value);
+     }
+     catch (NumberFormatException e) {
+     }
+-    
++
+     return null;
+   }
+ 
+@@ -278,41 +286,41 @@ public static void checkLanguageCode(String code) {
+     List<String> languageCodes  = new ArrayList<String>();
+     languageCodes.addAll(Arrays.asList(Locale.getISOLanguages()));
+     languageCodes.add("x-unspecified");
+-    
++
+     if (!languageCodes.contains(code)) {
+       throw new TerminateToolException(1, "Unknown language code " + code + ", " +
+           "must be an ISO 639 code!");
+     }
+   }
+-  
++
+   public static boolean containsParam(String param, String args[]) {
+     for (String arg : args) {
+       if (arg.equals(param)) {
+         return true;
+       }
+     }
+-    
++
+     return false;
+   }
+ 
+   public static void handleStdinIoError(IOException e) {
+     throw new TerminateToolException(-1, "IO Error while reading from stdin: " + e.getMessage(), e);
+   }
+-  
++
+   // its optional, passing null is allowed
+   public static TrainingParameters loadTrainingParameters(String paramFile,
+       boolean supportSequenceTraining) {
+-    
++
+     TrainingParameters params = null;
+-    
++
+     if (paramFile != null) {
+-      
++
+       checkInputFile("Training Parameter", new File(paramFile));
+-      
++
+       InputStream paramsIn = null;
+       try {
+         paramsIn = new FileInputStream(new File(paramFile));
+-        
++
+         params = new opennlp.tools.util.TrainingParameters(paramsIn);
+       } catch (IOException e) {
+         throw new TerminateToolException(-1, "Error during parameters loading: " + e.getMessage(), e);
+@@ -325,16 +333,16 @@ public static TrainingParameters loadTrainingParameters(String paramFile,
+           //sorry that this can fail
+         }
+       }
+-      
++
+       if (!TrainerFactory.isValid(params.getSettings())) {
+         throw new TerminateToolException(1, "Training parameters file '" + paramFile + "' is invalid!");
+       }
+-      
++
+       if (!supportSequenceTraining && TrainerFactory.isSupportEventModelSequenceTraining(params.getSettings())) {
+         throw new TerminateToolException(1, "Sequence training is not supported!");
+       }
+     }
+-    
++
+     return params;
+   }
+ }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java
+new file mode 100644
+index 000000000..6fc116b2f
+--- /dev/null
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/MarkableFileInputStreamFactory.java
+@@ -0,0 +1,45 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.cmdline;
++
++import java.io.File;
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.io.InputStream;
++
++import opennlp.tools.util.InputStreamFactory;
++
++/**
++ * A factory that creates {@link MarkableFileInputStream} from a {@link File}
++ */
++public class MarkableFileInputStreamFactory implements InputStreamFactory {
++
++  private File file;
++
++  public MarkableFileInputStreamFactory(File file) throws FileNotFoundException {
++    if(!file.exists()) {
++      throw new FileNotFoundException("File '" + file + "' cannot be found");
++    }
++    this.file = file;
++  }
++
++  @Override
++  public InputStream createInputStream() throws IOException {
++    return new MarkableFileInputStream(file);
++  }
++}
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/util/InputStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/util/InputStreamFactory.java
+new file mode 100644
+index 000000000..5176c898f
+--- /dev/null
++++ b/opennlp-tools/src/main/java/opennlp/tools/util/InputStreamFactory.java
+@@ -0,0 +1,25 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.util;
++
++import java.io.IOException;
++import java.io.InputStream;
++
++public interface InputStreamFactory {
++  InputStream createInputStream() throws IOException;
++}
+\ No newline at end of file
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/util/PlainTextByLineStream.java b/opennlp-tools/src/main/java/opennlp/tools/util/PlainTextByLineStream.java
+index fe3dc22ea..e58b267cd 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/util/PlainTextByLineStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/util/PlainTextByLineStream.java
+@@ -32,49 +32,76 @@
+  * Reads a plain text file and return each line as a <code>String</code> object.
+  */
+ public class PlainTextByLineStream implements ObjectStream<String> {
+-  
++
+   private final FileChannel channel;
+   private final String encoding;
+-  
++
+   private BufferedReader in;
+-  
++
++  public PlainTextByLineStream(InputStreamFactory inputStreamFactory, String charsetName) throws IOException {
++    this.in = new BufferedReader(new InputStreamReader(
++        inputStreamFactory.createInputStream(), charsetName));
++    this.channel = null;
++    this.encoding = charsetName;
++  }
++
++  public PlainTextByLineStream(InputStreamFactory inputStreamFactory, Charset charset) throws IOException {
++    this.in = new BufferedReader(new InputStreamReader(
++        inputStreamFactory.createInputStream(), charset));
++    this.channel = null;
++    this.encoding = charset.name();
++  }
++
+   /**
+    * Initializes the current instance.
+-   * 
++   *
+    * @param in
++   * @deprecated Use {@link #PlainTextByLineStream(InputStreamFactory, Charset)} instead.
+    */
+   public PlainTextByLineStream(Reader in) {
+     this.in = new BufferedReader(in);
+     this.channel = null;
+     this.encoding = null;
+   }
+-  
++
++  /**
++   * @deprecated Use {@link #PlainTextByLineStream(InputStreamFactory, String)} instead.
++   */
+   public PlainTextByLineStream(InputStream in, String charsetName) throws UnsupportedEncodingException {
+     this(new InputStreamReader(in, charsetName));
+   }
+-  
++
++  /**
++   * @deprecated Use {@link #PlainTextByLineStream(InputStreamFactory, Charset)} instead.
++   */
+   public PlainTextByLineStream(InputStream in, Charset charset) {
+     this(new InputStreamReader(in, charset));
+   }
+-  
++
++  /**
++   * @deprecated Use {@link #PlainTextByLineStream(InputStreamFactory, String)} instead.
++   */
+   public PlainTextByLineStream(FileChannel channel, String charsetName) {
+     this.encoding = charsetName;
+     this.channel = channel;
+-    
++
+     // TODO: Why isn't reset called here ?
+     in = new BufferedReader(Channels.newReader(channel, encoding));
+   }
+-  
++
++  /**
++   * @deprecated Use {@link #PlainTextByLineStream(InputStreamFactory, Charset)} instead.
++   */
+   public PlainTextByLineStream(FileChannel channel, Charset encoding) {
+     this(channel, encoding.name());
+   }
+-  
++
+   public String read() throws IOException {
+     return in.readLine();
+   }
+ 
+   public void reset() throws IOException {
+-    
++
+     if (channel == null) {
+         in.reset();
+     }
+@@ -83,13 +110,13 @@ public void reset() throws IOException {
+       in = new BufferedReader(Channels.newReader(channel, encoding));
+     }
+   }
+-  
++
+   public void close() throws IOException {
+       if (channel == null) {
+         in.close();
+       }
+       else {
+-       channel.close(); 
++       channel.close();
+       }
+   }
+ }
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/util/MockInputStreamFactory.java b/opennlp-tools/src/test/java/opennlp/tools/util/MockInputStreamFactory.java
+new file mode 100644
+index 000000000..a95a9032d
+--- /dev/null
++++ b/opennlp-tools/src/test/java/opennlp/tools/util/MockInputStreamFactory.java
+@@ -0,0 +1,36 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.util;
++
++import java.io.FileNotFoundException;
++import java.io.IOException;
++import java.io.InputStream;
++
++public class MockInputStreamFactory implements InputStreamFactory {
++
++  private InputStream is;
++
++  public MockInputStreamFactory(InputStream is) throws FileNotFoundException {
++    this.is = is;
++  }
++
++  @Override
++  public InputStream createInputStream() throws IOException {
++    return is;
++  }
++}

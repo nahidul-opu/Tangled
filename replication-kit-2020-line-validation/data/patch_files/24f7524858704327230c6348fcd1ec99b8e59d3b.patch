@@ -1,0 +1,2342 @@
+From 24f7524858704327230c6348fcd1ec99b8e59d3b Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 13 Nov 2007 10:55:27 +0000
+Subject: [PATCH] FIX: Bad IvyContext scope causing memory leak and bad
+ handling of subproject builds (IVY-639)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@594481 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ src/java/org/apache/ivy/Ivy.java              | 461 ++++++++++++++----
+ src/java/org/apache/ivy/Main.java             |  17 +-
+ .../org/apache/ivy/ant/AntBuildTrigger.java   |  19 +-
+ .../org/apache/ivy/ant/AntCallTrigger.java    |  11 +-
+ ...MessageImpl.java => AntMessageLogger.java} |  76 ++-
+ .../org/apache/ivy/ant/IvyAntSettings.java    |   8 +-
+ src/java/org/apache/ivy/ant/IvyConfigure.java |   1 -
+ src/java/org/apache/ivy/ant/IvyDeliver.java   |  10 +-
+ .../apache/ivy/ant/IvyPostResolveTask.java    |   2 -
+ src/java/org/apache/ivy/ant/IvyTask.java      |  15 +-
+ src/java/org/apache/ivy/core/IvyContext.java  |  92 +++-
+ src/java/org/apache/ivy/core/IvyThread.java   |   2 +-
+ .../ivy/util/AbstractMessageLogger.java       | 171 +++++++
+ ...ageImpl.java => DefaultMessageLogger.java} |  16 +-
+ src/java/org/apache/ivy/util/Message.java     | 157 ++----
+ src/java/org/apache/ivy/util/MessageImpl.java |  28 --
+ .../org/apache/ivy/util/MessageLogger.java    | 105 ++++
+ .../apache/ivy/util/MessageLoggerEngine.java  | 199 ++++++++
+ .../apache/ivy/util/MessageLoggerHelper.java  |  50 ++
+ test/java/org/apache/ivy/IvyTest.java         |  88 ++++
+ .../ivy/ant/IvyPostResolveTaskTest.java       |   5 +-
+ .../org/apache/ivy/ant/IvyPublishTest.java    |   4 +-
+ .../plugins/resolver/IBiblioResolverTest.java |   7 +-
+ ...essageImpl.java => MockMessageLogger.java} |   6 +-
+ 25 files changed, 1176 insertions(+), 375 deletions(-)
+ rename src/java/org/apache/ivy/ant/{AntMessageImpl.java => AntMessageLogger.java} (55%)
+ create mode 100644 src/java/org/apache/ivy/util/AbstractMessageLogger.java
+ rename src/java/org/apache/ivy/util/{DefaultMessageImpl.java => DefaultMessageLogger.java} (79%)
+ delete mode 100644 src/java/org/apache/ivy/util/MessageImpl.java
+ create mode 100644 src/java/org/apache/ivy/util/MessageLogger.java
+ create mode 100644 src/java/org/apache/ivy/util/MessageLoggerEngine.java
+ create mode 100644 src/java/org/apache/ivy/util/MessageLoggerHelper.java
+ create mode 100644 test/java/org/apache/ivy/IvyTest.java
+ rename test/java/org/apache/ivy/util/{MockMessageImpl.java => MockMessageLogger.java} (95%)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 873464bc0..19d7a63f2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -53,6 +53,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+    version in SVN
+ =====================================
++- FIX: Bad IvyContext scope causing memory leak and bad handling of subproject builds (IVY-639)
+ - FIX: Resolution failure when no ivy.xml file present (IVY-630)
+ - FIX: ${parent.version} property is not recognized in maven2 pom (IVY-620)
+ - FIX: Ivy doesn't work with Ant 1.6.2 (IVY-614)
+diff --git a/src/java/org/apache/ivy/Ivy.java b/src/java/org/apache/ivy/Ivy.java
+index c7d1ebffe..a50832a75 100644
+--- a/src/java/org/apache/ivy/Ivy.java
++++ b/src/java/org/apache/ivy/Ivy.java
+@@ -60,6 +60,7 @@
+ import org.apache.ivy.plugins.trigger.Trigger;
+ import org.apache.ivy.util.HostUtil;
+ import org.apache.ivy.util.Message;
++import org.apache.ivy.util.MessageLoggerEngine;
+ import org.apache.ivy.util.filter.Filter;
+ 
+ /**
+@@ -71,7 +72,7 @@
+  * <li>retrieve artifacts to a local location</li>
+  * <li>deliver and publish modules</li>
+  * <li>repository search and listing</li>
+- * </li>
++ * </ul>
+  * Here is one typical usage:
+  * 
+  * <pre>
+@@ -79,8 +80,48 @@
+  * ivy.configure(new URL(&quot;ivysettings.xml&quot;));
+  * ivy.resolve(new URL(&quot;ivy.xml&quot;));
+  * </pre>
++ * 
++ * </p>
++ * <h2>Using Ivy engines directly</h2>
++ * <p>
++ * If the methods offered by the {@link Ivy} class are not flexible enough and you want to use Ivy
++ * engines directly, you need to call the methods within a single {@link IvyContext} associated to
++ * the {@link Ivy} instance you use.<br/> To do so, it is recommended to use the
++ * {@link #execute(org.apache.ivy.Ivy.IvyCallback)} method like this:
++ * <pre>
++ * Ivy ivy = Ivy.newInstance();
++ * ivy.execute(new IvyCallback() {
++ *     public Object doInIvyContext(Ivy ivy, IvyContext context) {
++ *         // obviously we can use regular Ivy methods in the callback 
++ *         ivy.configure(new URL(&quot;ivysettings.xml&quot;));
++ *         // and we can safely use Ivy engines too
++ *         ivy.getResolveEngine().resolve(new URL(&quot;ivy.xml&quot;));
++ *         return null;
++ *     }
++ * });
++ * </pre>
++ * 
++ * </p>
+  */
+ public class Ivy {
++    /**
++     * Callback used to execute a set of Ivy related methods within an {@link IvyContext}.
++     * 
++     * @see Ivy#execute(org.apache.ivy.Ivy.IvyCallback)
++     */
++    public static interface IvyCallback {
++        /**
++         * Executes Ivy related job within an {@link IvyContext}
++         * 
++         * @param ivy
++         *            the {@link Ivy} instance to which this callback is related
++         * @param context
++         *            the {@link IvyContext} in which this callback is executed
++         * @return the result of this job, <code>null</code> if there is no result
++         */
++        public Object doInIvyContext(Ivy ivy, IvyContext context);
++    }
++    
+     private static final int KILO = 1024;
+ 
+     public static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyyMMddHHmmss");
+@@ -193,6 +234,11 @@ public static Ivy newInstance(IvySettings settings) {
+     private PublishEngine publishEngine;
+ 
+     private InstallEngine installEngine;
++    
++    /**
++     * The logger engine to use to log messages when using this Ivy instance.
++     */
++    private MessageLoggerEngine loggerEngine = new MessageLoggerEngine();
+ 
+     /**
+      * The default constructor of Ivy allows to create an instance of Ivy with none of its
+@@ -207,92 +253,192 @@ public Ivy() {
+ 
+     /**
+      * This method is used to bind this Ivy instance to required dependencies, i.e. instance of
+-     * settings, engines, and so on. After this call Ivy is still not configured, which means that
++     * settings, engines, and so on. 
++     * <p>
++     * After this call Ivy is still not configured, which means that
+      * the settings object is still empty.
++     * </p>
+      */
+     public void bind() {
+-        IvyContext.getContext().setIvy(this);
+-        if (settings == null) {
+-            settings = new IvySettings();
+-        }
+-        if (eventManager == null) {
+-            eventManager = new EventManager();
+-        }
+-        if (sortEngine == null) {
+-            sortEngine = new SortEngine(settings);
+-        }
+-        if (searchEngine == null) {
+-            searchEngine = new SearchEngine(settings);
+-        }
+-        if (resolveEngine == null) {
+-            resolveEngine = new ResolveEngine(settings, eventManager, sortEngine);
+-        }
+-        if (retrieveEngine == null) {
+-            retrieveEngine = new RetrieveEngine(settings);
+-        }
+-        if (deliverEngine == null) {
+-            deliverEngine = new DeliverEngine(settings);
++        pushContext();
++        try {
++            if (settings == null) {
++                settings = new IvySettings();
++            }
++            if (eventManager == null) {
++                eventManager = new EventManager();
++            }
++            if (sortEngine == null) {
++                sortEngine = new SortEngine(settings);
++            }
++            if (searchEngine == null) {
++                searchEngine = new SearchEngine(settings);
++            }
++            if (resolveEngine == null) {
++                resolveEngine = new ResolveEngine(settings, eventManager, sortEngine);
++            }
++            if (retrieveEngine == null) {
++                retrieveEngine = new RetrieveEngine(settings);
++            }
++            if (deliverEngine == null) {
++                deliverEngine = new DeliverEngine(settings);
++            }
++            if (publishEngine == null) {
++                publishEngine = new PublishEngine(settings);
++            }
++            if (installEngine == null) {
++                installEngine = new InstallEngine(
++                    settings, searchEngine, resolveEngine, publishEngine);
++            }
++    
++            eventManager.addTransferListener(new TransferListener() {
++                public void transferProgress(TransferEvent evt) {
++                    switch (evt.getEventType()) {
++                        case TransferEvent.TRANSFER_PROGRESS:
++                            Message.progress();
++                            break;
++                        case TransferEvent.TRANSFER_COMPLETED:
++                            Message.endProgress(" (" + (evt.getTotalLength() / KILO) + "kB)");
++                            break;
++                        default:
++                            break;
++                    }
++                }
++            });
++    
++            bound = true;
++        } finally {
++            popContext();
+         }
+-        if (publishEngine == null) {
+-            publishEngine = new PublishEngine(settings);
++    }
++    
++    /**
++     * Executes the given callback in the context of this Ivy instance.
++     * <p>
++     * Alternatively you can use the {@link #pushContext()} and {@link #popContext()} methods, but
++     * this is not recommended:
++     * 
++     * <pre>
++     * Object result = null;
++     * pushContext();
++     * try {
++     *     result = callback.doInIvyContext(this, IvyContext.getContext());
++     * } finally {
++     *     popContext();
++     * }
++     * doSomethingWithResult(result);
++     * </pre>
++     * 
++     * </p>
++     * 
++     * @param callback
++     * @return
++     */
++    public Object execute(IvyCallback callback) {
++        pushContext();
++        try {
++            return callback.doInIvyContext(this, IvyContext.getContext());
++        } finally {
++            popContext();
+         }
+-        if (installEngine == null) {
+-            installEngine = new InstallEngine(settings, searchEngine, resolveEngine, publishEngine);
++    }
++    
++    /**
++     * Pushes a new IvyContext bound to this Ivy instance if the current context is not already
++     * bound to this Ivy instance. If the current context is already bound to this Ivy instance, it
++     * pushes the current context on the context stack, so that you can (and must) always call
++     * {@link #popContext()} when you're done.
++     * <p>
++     * Alternatively, you can use the {@link #execute(org.apache.ivy.Ivy.IvyCallback)} method which
++     * takes care of everything for you.
++     * </p>
++     */
++    public void pushContext() {
++        if (IvyContext.getContext().peekIvy() != this) {
++            IvyContext.pushNewContext();
++            IvyContext.getContext().setIvy(this);
++        } else {
++            IvyContext.pushContext(IvyContext.getContext());
+         }
++    }
+ 
+-        eventManager.addTransferListener(new TransferListener() {
+-            public void transferProgress(TransferEvent evt) {
+-                switch (evt.getEventType()) {
+-                    case TransferEvent.TRANSFER_PROGRESS:
+-                        Message.progress();
+-                        break;
+-                    case TransferEvent.TRANSFER_COMPLETED:
+-                        Message.endProgress(" (" + (evt.getTotalLength() / KILO) + "kB)");
+-                        break;
+-                    default:
+-                        break;
+-                }
+-            }
+-        });
+ 
+-        bound = true;
++    /**
++     * Pops the current Ivy context.
++     * <p>
++     * You must call this method once and only once for each call to {@link #pushContext()}, when
++     * you're done with the your Ivy related work.
++     * </p>
++     * <p>
++     * Alternatively, you can use the {@link #execute(org.apache.ivy.Ivy.IvyCallback)} method which
++     * takes care of everything for you.
++     * </p>
++     */
++    public void popContext() {
++        IvyContext.popContext();
+     }
++    
+ 
+     // ///////////////////////////////////////////////////////////////////////
+     // LOAD SETTINGS
+     // ///////////////////////////////////////////////////////////////////////
+     public void configure(File settingsFile) throws ParseException, IOException {
+-        assertBound();
+-        settings.load(settingsFile);
+-        postConfigure();
++        pushContext();
++        try {
++            assertBound();
++            settings.load(settingsFile);
++            postConfigure();
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public void configure(URL settingsURL) throws ParseException, IOException {
+-        assertBound();
+-        settings.load(settingsURL);
+-        postConfigure();
++        pushContext();
++        try {
++            assertBound();
++            settings.load(settingsURL);
++            postConfigure();
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public void configureDefault() throws ParseException, IOException {
+-        assertBound();
+-        settings.loadDefault();
+-        postConfigure();
++        pushContext();
++        try {
++            assertBound();
++            settings.loadDefault();
++            postConfigure();
++        } finally {
++            popContext();
++        }
+     }
+ 
+     /**
+      * Configures Ivy with 1.4 compatible default settings
+      */
+     public void configureDefault14() throws ParseException, IOException {
+-        assertBound();
+-        settings.loadDefault14();
+-        postConfigure();
++        pushContext();
++        try {
++            assertBound();
++            settings.loadDefault14();
++            postConfigure();
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+     // CHECK
+     // ///////////////////////////////////////////////////////////////////////
+     public boolean check(URL ivyFile, String resolvername) {
+-        return checkEngine.check(ivyFile, resolvername);
++        pushContext();
++        try {
++            return checkEngine.check(ivyFile, resolvername);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -300,26 +446,51 @@ public boolean check(URL ivyFile, String resolvername) {
+     // ///////////////////////////////////////////////////////////////////////
+ 
+     public ResolveReport resolve(File ivySource) throws ParseException, IOException {
+-        return resolveEngine.resolve(ivySource);
++        pushContext();
++        try {
++            return resolveEngine.resolve(ivySource);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public ResolveReport resolve(URL ivySource) throws ParseException, IOException {
+-        return resolveEngine.resolve(ivySource);
++        pushContext();
++        try {
++            return resolveEngine.resolve(ivySource);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public ResolveReport resolve(ModuleRevisionId mrid, ResolveOptions options, boolean changing)
+             throws ParseException, IOException {
+-        return resolveEngine.resolve(mrid, options, changing);
++        pushContext();
++        try {
++            return resolveEngine.resolve(mrid, options, changing);
++        } finally {
++            popContext();
++        }
+     }
+ 
+-    public ResolveReport resolve(URL ivySource, ResolveOptions options) throws ParseException,
+-            IOException {
+-        return resolveEngine.resolve(ivySource, options);
++    public ResolveReport resolve(URL ivySource, ResolveOptions options) 
++            throws ParseException, IOException {
++        pushContext();
++        try {
++            return resolveEngine.resolve(ivySource, options);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public ResolveReport resolve(ModuleDescriptor md, ResolveOptions options)
+             throws ParseException, IOException {
+-        return resolveEngine.resolve(md, options);
++        pushContext();
++        try {
++            return resolveEngine.resolve(md, options);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -329,8 +500,13 @@ public ResolveReport resolve(ModuleDescriptor md, ResolveOptions options)
+     public ResolveReport install(ModuleRevisionId mrid, String from, String to, boolean transitive,
+             boolean validate, boolean overwrite, Filter artifactFilter, File cache,
+             String matcherName) throws IOException {
+-        return installEngine.install(mrid, from, to, transitive, validate, overwrite,
+-            artifactFilter, cache, matcherName);
++        pushContext();
++        try {
++            return installEngine.install(mrid, from, to, transitive, validate, overwrite,
++                artifactFilter, cache, matcherName);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -339,7 +515,12 @@ public ResolveReport install(ModuleRevisionId mrid, String from, String to, bool
+ 
+     public int retrieve(ModuleRevisionId mrid, String destFilePattern, RetrieveOptions options)
+             throws IOException {
+-        return retrieveEngine.retrieve(mrid, destFilePattern, options);
++        pushContext();
++        try {
++            return retrieveEngine.retrieve(mrid, destFilePattern, options);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -348,12 +529,23 @@ public int retrieve(ModuleRevisionId mrid, String destFilePattern, RetrieveOptio
+ 
+     public void deliver(ModuleRevisionId mrid, String revision, String destIvyPattern)
+             throws IOException, ParseException {
+-        deliverEngine.deliver(mrid, revision, destIvyPattern, DeliverOptions.newInstance(settings));
++        pushContext();
++        try {
++            deliverEngine.deliver(
++                mrid, revision, destIvyPattern, DeliverOptions.newInstance(settings));
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public void deliver(String revision, String destIvyPattern, DeliverOptions options)
+             throws IOException, ParseException {
+-        deliverEngine.deliver(revision, destIvyPattern, options);
++        pushContext();
++        try {
++            deliverEngine.deliver(revision, destIvyPattern, options);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     /**
+@@ -369,7 +561,12 @@ public void deliver(String revision, String destIvyPattern, DeliverOptions optio
+      */
+     public void deliver(ModuleRevisionId mrid, String revision, String destIvyPattern,
+             DeliverOptions options) throws IOException, ParseException {
+-        deliverEngine.deliver(mrid, revision, destIvyPattern, options);
++        pushContext();
++        try {
++            deliverEngine.deliver(mrid, revision, destIvyPattern, options);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -378,7 +575,12 @@ public void deliver(ModuleRevisionId mrid, String revision, String destIvyPatter
+ 
+     public Collection publish(ModuleRevisionId mrid, Collection srcArtifactPattern,
+             String resolverName, PublishOptions options) throws IOException {
+-        return publishEngine.publish(mrid, srcArtifactPattern, resolverName, options);
++        pushContext();
++        try {
++            return publishEngine.publish(mrid, srcArtifactPattern, resolverName, options);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -389,7 +591,12 @@ public Collection publish(ModuleRevisionId mrid, Collection srcArtifactPattern,
+      * Sorts the collection of IvyNode from the less dependent to the more dependent
+      */
+     public List sortNodes(Collection nodes) {
+-        return getSortEngine().sortNodes(nodes);
++        pushContext();
++        try {
++            return getSortEngine().sortNodes(nodes);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     /**
+@@ -407,7 +614,13 @@ public List sortNodes(Collection nodes) {
+      */
+     public List sortModuleDescriptors(Collection moduleDescriptors,
+             NonMatchingVersionReporter nonMatchingVersionReporter) {
+-        return getSortEngine().sortModuleDescriptors(moduleDescriptors, nonMatchingVersionReporter);
++        pushContext();
++        try {
++            return getSortEngine().sortModuleDescriptors(
++                moduleDescriptors, nonMatchingVersionReporter);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -415,46 +628,96 @@ public List sortModuleDescriptors(Collection moduleDescriptors,
+     // ///////////////////////////////////////////////////////////////////////
+ 
+     public ResolvedModuleRevision findModule(ModuleRevisionId mrid) {
+-        ResolveOptions options = new ResolveOptions();
+-        options.setValidate(false);
+-        options.setCache(CacheManager.getInstance(settings));
+-        return resolveEngine.findModule(mrid, options);
++        pushContext();
++        try {
++            ResolveOptions options = new ResolveOptions();
++            options.setValidate(false);
++            options.setCache(CacheManager.getInstance(settings));
++            return resolveEngine.findModule(mrid, options);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public ModuleEntry[] listModuleEntries(OrganisationEntry org) {
+-        return searchEngine.listModuleEntries(org);
++        pushContext();
++        try {
++            return searchEngine.listModuleEntries(org);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public ModuleId[] listModules(ModuleId criteria, PatternMatcher matcher) {
+-        return searchEngine.listModules(criteria, matcher);
++        pushContext();
++        try {
++            return searchEngine.listModules(criteria, matcher);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public ModuleRevisionId[] listModules(ModuleRevisionId criteria, PatternMatcher matcher) {
+-        return searchEngine.listModules(criteria, matcher);
++        pushContext();
++        try {
++            return searchEngine.listModules(criteria, matcher);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public String[] listModules(String org) {
+-        return searchEngine.listModules(org);
++        pushContext();
++        try {
++            return searchEngine.listModules(org);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public OrganisationEntry[] listOrganisationEntries() {
+-        return searchEngine.listOrganisationEntries();
++        pushContext();
++        try {
++            return searchEngine.listOrganisationEntries();
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public String[] listOrganisations() {
+-        return searchEngine.listOrganisations();
++        pushContext();
++        try {
++            return searchEngine.listOrganisations();
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public RevisionEntry[] listRevisionEntries(ModuleEntry module) {
+-        return searchEngine.listRevisionEntries(module);
++        pushContext();
++        try {
++            return searchEngine.listRevisionEntries(module);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public String[] listRevisions(String org, String module) {
+-        return searchEngine.listRevisions(org, module);
++        pushContext();
++        try {
++            return searchEngine.listRevisions(org, module);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public String[] listTokenValues(String token, Map otherTokenValues) {
+-        return searchEngine.listTokenValues(token, otherTokenValues);
++        pushContext();
++        try {
++            return searchEngine.listTokenValues(token, otherTokenValues);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////////
+@@ -541,18 +804,33 @@ private void postConfigure() {
+     }
+ 
+     public String getVariable(String name) {
+-        assertBound();
+-        return settings.getVariable(name);
++        pushContext();
++        try {
++            assertBound();
++            return settings.getVariable(name);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public String substitute(String str) {
+-        assertBound();
+-        return settings.substitute(str);
++        pushContext();
++        try {
++            assertBound();
++            return settings.substitute(str);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     public void setVariable(String varName, String value) {
+-        assertBound();
+-        settings.setVariable(varName, value);
++        pushContext();
++        try {
++            assertBound();
++            settings.setVariable(varName, value);
++        } finally {
++            popContext();
++        }
+     }
+ 
+     // ///////////////////////////////////////////////////////////////////
+@@ -639,4 +917,7 @@ public void setSettings(IvySettings settings) {
+         this.settings = settings;
+     }
+ 
++    public MessageLoggerEngine getLoggerEngine() {
++        return loggerEngine;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/Main.java b/src/java/org/apache/ivy/Main.java
+index 78dc00f70..f123de846 100644
+--- a/src/java/org/apache/ivy/Main.java
++++ b/src/java/org/apache/ivy/Main.java
+@@ -57,7 +57,7 @@
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorWriter;
+ import org.apache.ivy.plugins.report.XmlReportParser;
+-import org.apache.ivy.util.DefaultMessageImpl;
++import org.apache.ivy.util.DefaultMessageLogger;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.url.CredentialsStore;
+ import org.apache.ivy.util.url.URLHandler;
+@@ -174,11 +174,11 @@ public static void main(String[] args) throws Exception {
+                 return;
+             }
+ 
+-            initMessage(line);
+ 
+             boolean validate = line.hasOption("novalidate") ? false : true;
+ 
+             Ivy ivy = Ivy.newInstance();
++            initMessage(line, ivy);
+             IvySettings settings = initSettings(line, options, ivy);
+ 
+             File cache = new File(settings.substitute(line.getOptionValue("cache", settings
+@@ -288,6 +288,7 @@ public static void main(String[] args) throws Exception {
+                 // invoke with given main class and merged params
+                 invoke(ivy, cache, md, confs, fileList, line.getOptionValue("main"), params);
+             }
++            ivy.getLoggerEngine().popLogger();
+         } catch (ParseException exp) {
+             // oops, something went wrong
+             System.err.println("Parsing failed.  Reason: " + exp.getMessage());
+@@ -363,17 +364,17 @@ private static IvySettings initSettings(CommandLine line, Options options, Ivy i
+         return settings;
+     }
+ 
+-    private static void initMessage(CommandLine line) {
++    private static void initMessage(CommandLine line, Ivy ivy) {
+         if (line.hasOption("debug")) {
+-            Message.init(new DefaultMessageImpl(Message.MSG_DEBUG));
++            ivy.getLoggerEngine().pushLogger(new DefaultMessageLogger(Message.MSG_DEBUG));
+         } else if (line.hasOption("verbose")) {
+-            Message.init(new DefaultMessageImpl(Message.MSG_VERBOSE));
++            ivy.getLoggerEngine().pushLogger(new DefaultMessageLogger(Message.MSG_VERBOSE));
+         } else if (line.hasOption("warn")) {
+-            Message.init(new DefaultMessageImpl(Message.MSG_WARN));
++            ivy.getLoggerEngine().pushLogger(new DefaultMessageLogger(Message.MSG_WARN));
+         } else if (line.hasOption("error")) {
+-            Message.init(new DefaultMessageImpl(Message.MSG_ERR));
++            ivy.getLoggerEngine().pushLogger(new DefaultMessageLogger(Message.MSG_ERR));
+         } else {
+-            Message.init(new DefaultMessageImpl(Message.MSG_INFO));
++            ivy.getLoggerEngine().pushLogger(new DefaultMessageLogger(Message.MSG_INFO));
+         }
+     }
+ 
+diff --git a/src/java/org/apache/ivy/ant/AntBuildTrigger.java b/src/java/org/apache/ivy/ant/AntBuildTrigger.java
+index 6900b7c00..6286f7813 100644
+--- a/src/java/org/apache/ivy/ant/AntBuildTrigger.java
++++ b/src/java/org/apache/ivy/ant/AntBuildTrigger.java
+@@ -29,7 +29,6 @@
+ import org.apache.ivy.plugins.trigger.AbstractTrigger;
+ import org.apache.ivy.plugins.trigger.Trigger;
+ import org.apache.ivy.util.Message;
+-import org.apache.ivy.util.MessageImpl;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Ant;
+@@ -97,20 +96,14 @@ public void progress(IvyEvent event) {
+                 }
+ 
+                 Message.verbose("triggering build: " + f + " target=" + target + " for " + event);
+-                MessageImpl impl = IvyContext.getContext().getMessageImpl();
+                 try {
+-                    IvyContext.getContext().setMessageImpl(null);
+-                    try {
+-                        ant.execute();
+-                    } catch (BuildException e) {
+-                        Message.verbose("Exception occurred while executing target " + target);
+-                        e.printStackTrace(); // TODO: remove when finished debugging
+-                        throw e;
+-                    }
+-                    markBuilt(f);
+-                } finally {
+-                    IvyContext.getContext().setMessageImpl(impl);
++                    ant.execute();
++                } catch (BuildException e) {
++                    Message.verbose("Exception occurred while executing target " + target);
++                    e.printStackTrace(); // TODO: remove when finished debugging
++                    throw e;
+                 }
++                markBuilt(f);
+ 
+                 Message.debug("triggered build finished: " + f + " target=" + target + " for "
+                         + event);
+diff --git a/src/java/org/apache/ivy/ant/AntCallTrigger.java b/src/java/org/apache/ivy/ant/AntCallTrigger.java
+index 0dd7c7dd1..555b5a066 100644
+--- a/src/java/org/apache/ivy/ant/AntCallTrigger.java
++++ b/src/java/org/apache/ivy/ant/AntCallTrigger.java
+@@ -28,7 +28,6 @@
+ import org.apache.ivy.plugins.trigger.AbstractTrigger;
+ import org.apache.ivy.plugins.trigger.Trigger;
+ import org.apache.ivy.util.Message;
+-import org.apache.ivy.util.MessageImpl;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.CallTarget;
+ import org.apache.tools.ant.taskdefs.Property;
+@@ -86,14 +85,8 @@ public void progress(IvyEvent event) {
+             }
+ 
+             Message.verbose("triggering ant call: target=" + target + " for " + event);
+-            MessageImpl impl = IvyContext.getContext().getMessageImpl();
+-            try {
+-                IvyContext.getContext().setMessageImpl(null);
+-                call.execute();
+-                markTriggered(event);
+-            } finally {
+-                IvyContext.getContext().setMessageImpl(impl);
+-            }
++            call.execute();
++            markTriggered(event);
+ 
+             Message.debug("triggered ant call finished: target=" + target + " for " + event);
+         }
+diff --git a/src/java/org/apache/ivy/ant/AntMessageImpl.java b/src/java/org/apache/ivy/ant/AntMessageLogger.java
+similarity index 55%
+rename from src/java/org/apache/ivy/ant/AntMessageImpl.java
+rename to src/java/org/apache/ivy/ant/AntMessageLogger.java
+index 836dc5b33..629e4acf9 100644
+--- a/src/java/org/apache/ivy/ant/AntMessageImpl.java
++++ b/src/java/org/apache/ivy/ant/AntMessageLogger.java
+@@ -17,30 +17,37 @@
+  */
+ package org.apache.ivy.ant;
+ 
+-import org.apache.ivy.util.Message;
+-import org.apache.ivy.util.MessageImpl;
++import org.apache.ivy.Ivy;
++import org.apache.ivy.util.AbstractMessageLogger;
++import org.apache.ivy.util.Checks;
+ import org.apache.tools.ant.BuildEvent;
+ import org.apache.tools.ant.BuildListener;
++import org.apache.tools.ant.ProjectComponent;
+ import org.apache.tools.ant.Task;
+ 
+ /**
+  * Implementation of the simple message facility for ant.
+  */
+-public class AntMessageImpl implements MessageImpl {
++public class AntMessageLogger extends AbstractMessageLogger {
+     private static final int PROGRESS_LOG_PERIOD = 1500;
+ 
+-    private Task task;
+-
+-    private static long lastProgressFlush = 0;
+-
+-    private static StringBuffer buf = new StringBuffer();
+-
+     /**
+-     * @param aTask
++     * Creates and register an {@link AntMessageLogger} for the given {@link Task}, with the given
++     * {@link Ivy} instance.
++     * <p>
++     * The created instance will automatically be unregistered from the Ivy instance when the task
++     * finishes.
++     * </p>
++     * 
++     * @param task
++     *            the task the logger should use for logging
++     * @param ivy
++     *            the ivy instance on which the logger should be registered
+      */
+-    public AntMessageImpl(Task aTask) {
+-        task = aTask;
+-        aTask.getProject().addBuildListener(new BuildListener() {
++    public static void register(Task task, final Ivy ivy) {
++        AntMessageLogger logger = new AntMessageLogger(task);
++        ivy.getLoggerEngine().pushLogger(logger);
++        task.getProject().addBuildListener(new BuildListener() {
+             private int stackDepth = 0;
+ 
+             public void buildFinished(BuildEvent event) {
+@@ -66,7 +73,7 @@ public void taskFinished(BuildEvent event) {
+                 // NB2 : Testing the identity of the task is not enought, event.getTask() return
+                 // an instance of UnknownElement is wrapping the concrete instance
+                 if (stackDepth == 0) {
+-                    Message.uninit();
++                    ivy.getLoggerEngine().popLogger();
+                     event.getProject().removeBuildListener(this);
+                 }
+                 stackDepth--;
+@@ -75,33 +82,50 @@ public void taskFinished(BuildEvent event) {
+             public void messageLogged(BuildEvent event) {
+             }
+         });
++        
++    }
++
++    private ProjectComponent projectComponent;
++
++    private long lastProgressFlush = 0;
++
++    private StringBuffer buf = new StringBuffer();
++
++    /**
++     * Constructs a new AntMEssageImpl instance.
++     * 
++     * @param antProjectComponent
++     *            the ant project component this message implementation should use for logging. Must
++     *            not be <code>null</code>.
++     */
++    protected AntMessageLogger(ProjectComponent antProjectComponent) {
++        Checks.checkNotNull(antProjectComponent, "antProjectComponent");
++        projectComponent = antProjectComponent;
+     }
+ 
+     public void log(String msg, int level) {
+-        task.log(msg, level);
++        projectComponent.log(msg, level);
+     }
+ 
+     public void rawlog(String msg, int level) {
+-        task.getProject().log(msg, level);
++        projectComponent.getProject().log(msg, level);
+     }
+ 
+-    public void progress() {
++    public void doProgress() {
+         buf.append(".");
+         if (lastProgressFlush == 0) {
+             lastProgressFlush = System.currentTimeMillis();
+         }
+-        if (task != null) {
+-            // log with ant causes a new line -> we do it only once in a while
+-            if (System.currentTimeMillis() - lastProgressFlush > PROGRESS_LOG_PERIOD) {
+-                task.log(buf.toString());
+-                buf.setLength(0);
+-                lastProgressFlush = System.currentTimeMillis();
+-            }
++        // log with ant causes a new line -> we do it only once in a while
++        if (System.currentTimeMillis() - lastProgressFlush > PROGRESS_LOG_PERIOD) {
++            projectComponent.log(buf.toString());
++            buf.setLength(0);
++            lastProgressFlush = System.currentTimeMillis();
+         }
+     }
+ 
+-    public void endProgress(String msg) {
+-        task.log(buf + msg);
++    public void doEndProgress(String msg) {
++        projectComponent.log(buf + msg);
+         buf.setLength(0);
+         lastProgressFlush = 0;
+     }
+diff --git a/src/java/org/apache/ivy/ant/IvyAntSettings.java b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+index bf0285509..faa6e8c40 100644
+--- a/src/java/org/apache/ivy/ant/IvyAntSettings.java
++++ b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+@@ -229,12 +229,14 @@ private Ivy createIvyEngine() {
+         // defineDefaultSettingFile (that should be done before the ivy.configure
+         settings.addAllVariables(getDefaultProperties(), false);
+ 
+-        Ivy ivy = Ivy.newInstance(settings);
+-
++        
+         if (file == null && url == null) {
+             defineDefaultSettingFile(ivyAntVariableContainer);
+         }
+ 
++        Ivy ivy = Ivy.newInstance(settings);
++        ivy.getLoggerEngine().pushLogger(new AntMessageLogger(this));
++        Message.showInfo();
+         try {
+             configureURLHandler();
+             if (file != null) {
+@@ -257,6 +259,8 @@ private Ivy createIvyEngine() {
+         } catch (IOException e) {
+             throw new BuildException("impossible to configure ivy:settings with given "
+                     + (file != null ? "file: " + file : "url :" + url) + " :" + e, e);
++        } finally {
++            ivy.getLoggerEngine().popLogger();
+         }
+         return ivy;
+     }
+diff --git a/src/java/org/apache/ivy/ant/IvyConfigure.java b/src/java/org/apache/ivy/ant/IvyConfigure.java
+index 79b536fb4..d3f6b5018 100644
+--- a/src/java/org/apache/ivy/ant/IvyConfigure.java
++++ b/src/java/org/apache/ivy/ant/IvyConfigure.java
+@@ -36,7 +36,6 @@ public class IvyConfigure extends IvyTask {
+     private IvyAntSettings antSettings = new IvyAntSettings();
+ 
+     public void doExecute() throws BuildException {
+-        ensureMessageInitialised();
+         log("ivy:configure is deprecated, please use the data type ivy:settings instead",
+             Project.MSG_WARN);
+         // ivyConfigure used to export properties in the ant script.
+diff --git a/src/java/org/apache/ivy/ant/IvyDeliver.java b/src/java/org/apache/ivy/ant/IvyDeliver.java
+index 3e3433a82..bf23faf57 100644
+--- a/src/java/org/apache/ivy/ant/IvyDeliver.java
++++ b/src/java/org/apache/ivy/ant/IvyDeliver.java
+@@ -21,7 +21,6 @@
+ import java.util.Date;
+ 
+ import org.apache.ivy.Ivy;
+-import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.cache.CacheManager;
+ import org.apache.ivy.core.deliver.DefaultPublishingDRResolver;
+ import org.apache.ivy.core.deliver.DeliverOptions;
+@@ -31,7 +30,6 @@
+ import org.apache.ivy.core.module.status.StatusManager;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.util.Message;
+-import org.apache.ivy.util.MessageImpl;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.taskdefs.CallTarget;
+ import org.apache.tools.ant.taskdefs.Echo;
+@@ -168,13 +166,7 @@ public void deliverDependency(ModuleRevisionId depMrid, String version, String s
+                 param.setName("dependency.status");
+                 param.setValue(depStatus == null ? "null" : depStatus);
+ 
+-                MessageImpl impl = IvyContext.getContext().getMessageImpl();
+-                try {
+-                    IvyContext.getContext().setMessageImpl(null);
+-                    ct.perform();
+-                } finally {
+-                    IvyContext.getContext().setMessageImpl(impl);
+-                }
++                ct.perform();
+ 
+                 String deliveredProperty = depMrid.getName() + "." + depMrid.getRevision()
+                         + ".delivered";
+diff --git a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+index 57561d762..ede1092ba 100644
+--- a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
++++ b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+@@ -182,8 +182,6 @@ protected void prepareAndCheck() {
+     }
+ 
+     protected void ensureResolved(IvySettings settings) {
+-        ensureMessageInitialised();
+-        
+         String requestedConfigs = getProperty(getConf(), settings, "ivy.resolved.configurations");
+ 
+         String[] confs = null;
+diff --git a/src/java/org/apache/ivy/ant/IvyTask.java b/src/java/org/apache/ivy/ant/IvyTask.java
+index 4d4866842..2b1390ae8 100644
+--- a/src/java/org/apache/ivy/ant/IvyTask.java
++++ b/src/java/org/apache/ivy/ant/IvyTask.java
+@@ -71,7 +71,6 @@ protected IvySettings getSettings() {
+     }
+ 
+     protected Ivy getIvyInstance() {
+-        ensureMessageInitialised();
+         Object antIvyEngine;
+         if (antIvyEngineRef != null) {
+             antIvyEngine = antIvyEngineRef.getReferencedObject(getProject());
+@@ -90,17 +89,9 @@ protected Ivy getIvyInstance() {
+         } else {
+             antIvyEngine = IvyAntSettings.getDefaultInstance(getProject());
+         }
+-        return ((IvyAntSettings) antIvyEngine).getConfiguredIvyInstance();
+-    }
+-
+-    /**
+-     * Every task MUST call ensureMessageInitialised when the execution method starts (at least
+-     * before doing any log in order to set the correct task in the log.
+-     */
+-    protected void ensureMessageInitialised() {
+-        if (!Message.isInitialised()) {
+-            Message.init(new AntMessageImpl(this));
+-        }
++        Ivy ivy = ((IvyAntSettings) antIvyEngine).getConfiguredIvyInstance();
++        AntMessageLogger.register(this, ivy);
++        return ivy;
+     }
+ 
+     protected void setResolved(ResolveReport report, boolean keep) {
+diff --git a/src/java/org/apache/ivy/core/IvyContext.java b/src/java/org/apache/ivy/core/IvyContext.java
+index f99bbf713..635bf64b9 100644
+--- a/src/java/org/apache/ivy/core/IvyContext.java
++++ b/src/java/org/apache/ivy/core/IvyContext.java
+@@ -23,13 +23,14 @@
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Stack;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.cache.CacheManager;
+ import org.apache.ivy.core.event.EventManager;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.circular.CircularDependencyStrategy;
+-import org.apache.ivy.util.MessageImpl;
++import org.apache.ivy.util.MessageLogger;
+ 
+ /**
+  * This class represents an execution context of an Ivy action. It contains several getters to
+@@ -39,54 +40,101 @@
+  */
+ public class IvyContext {
+ 
+-    private static ThreadLocal current = new ThreadLocal();
++    private static ThreadLocal/*<Stack<IvyContext>>*/ current = new ThreadLocal();
+ 
+     private Ivy defaultIvy;
+ 
+-    private WeakReference ivy = new WeakReference(null);
++    private WeakReference/*<Ivy>*/ ivy = new WeakReference(null);
+ 
+     private File cache;
+ 
+-    private MessageImpl messageImpl;
+-
+     private Map contextMap = new HashMap();
+ 
+     private Thread operatingThread;
+ 
+     public static IvyContext getContext() {
+-        IvyContext cur = (IvyContext) current.get();
++        Stack cur = getCurrentStack();
++        if (cur.isEmpty()) {
++            cur.push(new IvyContext());
++        }
++        return (IvyContext) cur.peek();
++    }
++    
++    private static Stack/*<IvyContext>*/ getCurrentStack() {
++        Stack cur = (Stack) current.get();
+         if (cur == null) {
+-            cur = new IvyContext();
++            cur = new Stack();
+             current.set(cur);
+         }
+         return cur;
+     }
+ 
++    /**
++     * Creates a new IvyContext and pushes it as the current context in the current thread.
++     * <p>
++     * {@link #popContext()} should usually be called when the job for which this context has been
++     * pushed is finsihed.
++     * </p>
++     */
++    public static void pushNewContext() {
++        pushContext(new IvyContext());
++    }
++    
+     /**
+      * Changes the context associated with this thread. This is especially useful when launching a
+-     * new thread, to associate it with the same context as the initial one.
++     * new thread, to associate it with the same context as the initial one. Do not forget to call
++     * {@link #popContext()} when done.
+      * 
+      * @param context
+      *            the new context to use in this thread.
+      */
+-    public static void setContext(IvyContext context) {
+-        current.set(context);
++    public static void pushContext(IvyContext context) {
++        getCurrentStack().push(context);
++    }
++    
++    /**
++     * Pops one context used with this thread. This is usually called after having finished a task
++     * for which a call to {@link #pushNewContext()} or {@link #pushContext(IvyContext)} was done
++     * prior to beginning the task.
++     */
++    public static void popContext() {
++        getCurrentStack().pop();
+     }
+ 
+     /**
+-     * Returns the current ivy instance. When calling any public ivy method on an ivy instance, a
+-     * reference to this instance is put in this context, and thus accessible using this method,
+-     * until no code reference this instance and the garbage collector collects it. Then, or if no
+-     * ivy method has been called, a default ivy instance is returned by this method, so that it
+-     * never returns null.
++     * Returns the current ivy instance.
++     * <p>
++     * When calling any public ivy method on an ivy instance, a reference to this instance is put in
++     * this context, and thus accessible using this method, until no code reference this instance
++     * and the garbage collector collects it.
++     * </p>
++     * <p>
++     * Then, or if no ivy method has been called, a default ivy instance is returned by this method,
++     * so that it never returns <code>null</code>.
++     * </p>
+      * 
+      * @return the current ivy instance
+      */
+     public Ivy getIvy() {
+-        Ivy ivy = (Ivy) this.ivy.get();
++        Ivy ivy = peekIvy();
+         return ivy == null ? getDefaultIvy() : ivy;
+     }
+ 
++    /**
++     * Returns the Ivy instance associated with this context, or <code>null</code> if no such
++     * instance is currently associated with this context.
++     * <p>
++     * If you want get a default Ivy instance in case no instance if currently associated, use
++     * {@link #getIvy()}.
++     * </p>
++     * 
++     * @return the current ivy instance, or <code>null</code> if there is no current ivy instance.
++     */
++    public Ivy peekIvy() {
++        Ivy ivy = (Ivy) this.ivy.get();
++        return ivy;
++    }
++
+     private Ivy getDefaultIvy() {
+         if (defaultIvy == null) {
+             defaultIvy = Ivy.newInstance();
+@@ -241,17 +289,9 @@ public Thread getOperatingThread() {
+         return operatingThread;
+     }
+ 
+-    /*
+-     * NB : The messageImpl is only used by Message. It should be better to place it there.
+-     * Alternatively, the Message itself could be placed here, bu this is has a major impact because
+-     * Message is used at a lot of place.
+-     */
+-    public MessageImpl getMessageImpl() {
+-        return messageImpl;
+-    }
+ 
+-    public void setMessageImpl(MessageImpl impl) {
+-        messageImpl = impl;
++    public MessageLogger getMessageLogger() {
++        return getIvy().getLoggerEngine();
+     }
+ 
+     public EventManager getEventManager() {
+diff --git a/src/java/org/apache/ivy/core/IvyThread.java b/src/java/org/apache/ivy/core/IvyThread.java
+index 522c65b12..b0d2a5126 100644
+--- a/src/java/org/apache/ivy/core/IvyThread.java
++++ b/src/java/org/apache/ivy/core/IvyThread.java
+@@ -65,6 +65,6 @@ public void run() {
+     }
+ 
+     protected void initContext() {
+-        IvyContext.setContext(context);
++        IvyContext.pushContext(context);
+     }
+ }
+diff --git a/src/java/org/apache/ivy/util/AbstractMessageLogger.java b/src/java/org/apache/ivy/util/AbstractMessageLogger.java
+new file mode 100644
+index 000000000..6628aba0f
+--- /dev/null
++++ b/src/java/org/apache/ivy/util/AbstractMessageLogger.java
+@@ -0,0 +1,171 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.util;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * An abstract base class to ease {@link MessageLogger} implementation.
++ */
++public abstract class AbstractMessageLogger implements MessageLogger {
++    private List problems = new ArrayList();
++
++    private List warns = new ArrayList();
++
++    private List errors = new ArrayList();
++
++    private boolean showProgress = true;
++    
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#debug(java.lang.String)
++     */
++    public void debug(String msg) {
++        log(msg, Message.MSG_DEBUG);
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#verbose(java.lang.String)
++     */
++    public void verbose(String msg) {
++        log(msg, Message.MSG_VERBOSE);
++    }
++    
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#deprecated(java.lang.String)
++     */
++    public void deprecated(String msg) {
++        log("DEPRECATED: " + msg, Message.MSG_WARN);
++    }
++
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#info(java.lang.String)
++     */
++    public void info(String msg) {
++        log(msg, Message.MSG_INFO);
++    }
++    
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#info(java.lang.String)
++     */
++    public void rawinfo(String msg) {
++        rawlog(msg, Message.MSG_INFO);
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#warn(java.lang.String)
++     */
++    public void warn(String msg) {
++        log("WARN: " + msg, Message.MSG_VERBOSE);
++        problems.add("WARN:  " + msg);
++        getWarns().add(msg);
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#error(java.lang.String)
++     */
++    public void error(String msg) {
++        // log in verbose mode because message is appended as a problem, and will be
++        // logged at the end at error level
++        log("ERROR: " + msg, Message.MSG_VERBOSE);
++        problems.add("\tERROR: " + msg);
++        getErrors().add(msg);
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#getProblems()
++     */
++    public List getProblems() {
++        return problems;
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#sumupProblems()
++     */
++    public void sumupProblems() {
++        MessageLoggerHelper.sumupProblems(this);
++        clearProblems();
++    }
++
++    public void clearProblems() {
++        problems.clear();
++        warns.clear();
++        errors.clear();
++    }
++
++    public List getErrors() {
++        return errors;
++    }
++
++    public List getWarns() {
++        return warns;
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#progress()
++     */
++    public void progress() {
++        if (showProgress) {
++            doProgress();
++        }
++    }
++
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#endProgress()
++     */
++    public void endProgress() {
++        endProgress("");
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#endProgress(java.lang.String)
++     */
++    public void endProgress(String msg) {
++        if (showProgress) {
++            doEndProgress(msg);
++        }
++    }
++
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#isShowProgress()
++     */
++    public boolean isShowProgress() {
++        return showProgress;
++    }
++
++    /* (non-Javadoc)
++     * @see org.apache.ivy.util.MessageLogger#setShowProgress(boolean)
++     */
++    public void setShowProgress(boolean progress) {
++        showProgress = progress;
++    }
++
++    /**
++     * Indicates a progression for a long running task
++     */
++    protected abstract void doProgress();
++    /**
++     * Indicates the end of a long running task
++     * @param msg the message associated with long running task end.
++     */
++    protected abstract void doEndProgress(String msg);
++
++}
+diff --git a/src/java/org/apache/ivy/util/DefaultMessageImpl.java b/src/java/org/apache/ivy/util/DefaultMessageLogger.java
+similarity index 79%
+rename from src/java/org/apache/ivy/util/DefaultMessageImpl.java
+rename to src/java/org/apache/ivy/util/DefaultMessageLogger.java
+index ae8dcd3ca..7a88a3680 100644
+--- a/src/java/org/apache/ivy/util/DefaultMessageImpl.java
++++ b/src/java/org/apache/ivy/util/DefaultMessageLogger.java
+@@ -17,18 +17,18 @@
+  */
+ package org.apache.ivy.util;
+ 
+-public class DefaultMessageImpl implements MessageImpl {
+-    private int _level = Message.MSG_INFO;
++public class DefaultMessageLogger extends AbstractMessageLogger {
++    private int level = Message.MSG_INFO;
+ 
+     /**
+      * @param level
+      */
+-    public DefaultMessageImpl(int level) {
+-        _level = level;
++    public DefaultMessageLogger(int level) {
++        this.level = level;
+     }
+ 
+     public void log(String msg, int level) {
+-        if (level <= _level) {
++        if (level <= this.level) {
+             System.out.println(msg);
+         }
+     }
+@@ -37,15 +37,15 @@ public void rawlog(String msg, int level) {
+         log(msg, level);
+     }
+ 
+-    public void progress() {
++    public void doProgress() {
+         System.out.print(".");
+     }
+ 
+-    public void endProgress(String msg) {
++    public void doEndProgress(String msg) {
+         System.out.println(msg);
+     }
+ 
+     public int getLevel() {
+-        return _level;
++        return level;
+     }
+ }
+diff --git a/src/java/org/apache/ivy/util/Message.java b/src/java/org/apache/ivy/util/Message.java
+index baeb09cf9..f63bec0c8 100644
+--- a/src/java/org/apache/ivy/util/Message.java
++++ b/src/java/org/apache/ivy/util/Message.java
+@@ -17,8 +17,6 @@
+  */
+ package org.apache.ivy.util;
+ 
+-import java.util.ArrayList;
+-import java.util.Iterator;
+ import java.util.List;
+ 
+ import org.apache.ivy.Ivy;
+@@ -27,10 +25,12 @@
+ /**
+  * Logging utility class.
+  * <p>
+- * To initialize Message you can call {@link #init(MessageImpl)} with
+- * the {@link MessageImpl} of your choice.
+- * <p> 
+- * This only takes effect in the current thread.
++ * This class provides static methods for easy access to the current logger in {@link IvyContext}.
++ * </p>
++ * <p>
++ * To configure logging, you should use the methods provided by the {@link MessageLoggerEngine}
++ * associated with the {@link Ivy} engine.
++ * </p>
+  */
+ public final class Message {
+     // messages level copied from ant project, to avoid dependency on ant
+@@ -49,39 +49,24 @@ public final class Message {
+     /** Message priority of "debug". */
+     public static final int MSG_DEBUG = 4;
+ 
+-    private static List problems = new ArrayList();
+-
+-    private static List warns = new ArrayList();
+-
+-    private static List errors = new ArrayList();
+-
+-    private static boolean showProgress = true;
+ 
+     private static boolean showedInfo = false;
+ 
+-    public static void init(MessageImpl impl) {
+-        IvyContext.getContext().setMessageImpl(impl);
+-        showInfo();
+-    }
++    private static MessageLogger defaultLogger = new DefaultMessageLogger(Message.MSG_INFO);
+ 
+-    /**
+-     * same as init, but without displaying info
+-     * 
+-     * @param impl
+-     */
+-    public static void setImpl(MessageImpl impl) {
+-        IvyContext.getContext().setMessageImpl(impl);
++    public static MessageLogger getDefaultLogger() {
++        return defaultLogger;
+     }
+ 
+-    public static MessageImpl getImpl() {
+-        return IvyContext.getContext().getMessageImpl();
++    public static void setDefaultLogger(MessageLogger logger) {
++        defaultLogger = logger;
+     }
+ 
+-    public static boolean isInitialised() {
+-        return IvyContext.getContext().getMessageImpl() != null;
++    private static MessageLogger getLogger() {
++        return IvyContext.getContext().getMessageLogger();
+     }
+ 
+-    private static void showInfo() {
++    public static void showInfo() {
+         if (!showedInfo) {
+             info(":: Ivy " + Ivy.getIvyVersion() + " - "
+                    + Ivy.getIvyDate() + " :: " + Ivy.getIvyHomeURL() + " ::");
+@@ -90,147 +75,61 @@ private static void showInfo() {
+     }
+ 
+     public static void debug(String msg) {
+-        MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-        if (messageImpl != null) {
+-            messageImpl.log(msg, MSG_DEBUG);
+-        } else {
+-            System.err.println(msg);
+-        }
++        getLogger().debug(msg);
+     }
+ 
+     public static void verbose(String msg) {
+-        MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-        if (messageImpl != null) {
+-            messageImpl.log(msg, MSG_VERBOSE);
+-        } else {
+-            System.err.println(msg);
+-        }
++        getLogger().verbose(msg);
+     }
+ 
+     public static void info(String msg) {
+-        MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-        if (messageImpl != null) {
+-            messageImpl.log(msg, MSG_INFO);
+-        } else {
+-            System.err.println(msg);
+-        }
++        getLogger().info(msg);
+     }
+ 
+     public static void rawinfo(String msg) {
+-        MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-        if (messageImpl != null) {
+-            messageImpl.rawlog(msg, MSG_INFO);
+-        } else {
+-            System.err.println(msg);
+-        }
++        getLogger().rawinfo(msg);
+     }
+ 
+     public static void deprecated(String msg) {
+-        MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-        if (messageImpl != null) {
+-            messageImpl.log("DEPRECATED: " + msg, MSG_WARN);
+-        } else {
+-            System.err.println(msg);
+-        }
++        getLogger().deprecated(msg);
+     }
+ 
+     public static void warn(String msg) {
+-        MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-        if (messageImpl != null) {
+-            messageImpl.log("WARN: " + msg, MSG_VERBOSE);
+-        } else {
+-            System.err.println(msg);
+-        }
+-        problems.add("WARN:  " + msg);
+-        warns.add(msg);
++        getLogger().warn(msg);
+     }
+ 
+     public static void error(String msg) {
+-        MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-        if (messageImpl != null) {
+-            // log in verbose mode because message is appended as a problem, and will be
+-            // logged at the end at error level
+-            messageImpl.log("ERROR: " + msg, MSG_VERBOSE);
+-        } else {
+-            System.err.println(msg);
+-        }
+-        problems.add("\tERROR: " + msg);
+-        errors.add(msg);
++        getLogger().error(msg);
+     }
+ 
+     public static List getProblems() {
+-        return problems;
++        return getLogger().getProblems();
+     }
+ 
+     public static void sumupProblems() {
+-        if (problems.size() > 0) {
+-            info("\n:: problems summary ::");
+-            MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-            if (warns.size() > 0) {
+-                info(":::: WARNINGS");
+-                for (Iterator iter = warns.iterator(); iter.hasNext();) {
+-                    String msg = (String) iter.next();
+-                    if (messageImpl != null) {
+-                        messageImpl.log("\t" + msg + "\n", MSG_WARN);
+-                    } else {
+-                        System.err.println(msg);
+-                    }
+-                }
+-            }
+-            if (errors.size() > 0) {
+-                info(":::: ERRORS");
+-                for (Iterator iter = errors.iterator(); iter.hasNext();) {
+-                    String msg = (String) iter.next();
+-                    if (messageImpl != null) {
+-                        messageImpl.log("\t" + msg + "\n", MSG_ERR);
+-                    } else {
+-                        System.err.println(msg);
+-                    }
+-                }
+-            }
+-            info("\n:: USE VERBOSE OR DEBUG MESSAGE LEVEL FOR MORE DETAILS");
+-            problems.clear();
+-            warns.clear();
+-            errors.clear();
+-        }
++        getLogger().sumupProblems();
+     }
+ 
+     public static void progress() {
+-        if (showProgress) {
+-            MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-            if (messageImpl != null) {
+-                messageImpl.progress();
+-            } else {
+-                System.out.println(".");
+-            }
+-        }
++        getLogger().progress();
+     }
+ 
+     public static void endProgress() {
+-        endProgress("");
++        getLogger().endProgress();
+     }
+ 
+     public static void endProgress(String msg) {
+-        if (showProgress) {
+-            MessageImpl messageImpl = IvyContext.getContext().getMessageImpl();
+-            if (messageImpl != null) {
+-                messageImpl.endProgress(msg);
+-            }
+-        }
++        getLogger().endProgress(msg);
+     }
+ 
+     public static boolean isShowProgress() {
+-        return showProgress;
++        return getLogger().isShowProgress();
+     }
+ 
+     public static void setShowProgress(boolean progress) {
+-        showProgress = progress;
++        getLogger().setShowProgress(progress);
+     }
+ 
+-    public static void uninit() {
+-        IvyContext.getContext().setMessageImpl(null);
+-    }
+-    
+     private Message() {
+     }
+ }
+diff --git a/src/java/org/apache/ivy/util/MessageImpl.java b/src/java/org/apache/ivy/util/MessageImpl.java
+deleted file mode 100644
+index 2980ed89f..000000000
+--- a/src/java/org/apache/ivy/util/MessageImpl.java
++++ /dev/null
+@@ -1,28 +0,0 @@
+-/*
+- *  Licensed to the Apache Software Foundation (ASF) under one or more
+- *  contributor license agreements.  See the NOTICE file distributed with
+- *  this work for additional information regarding copyright ownership.
+- *  The ASF licenses this file to You under the Apache License, Version 2.0
+- *  (the "License"); you may not use this file except in compliance with
+- *  the License.  You may obtain a copy of the License at
+- *
+- *      http://www.apache.org/licenses/LICENSE-2.0
+- *
+- *  Unless required by applicable law or agreed to in writing, software
+- *  distributed under the License is distributed on an "AS IS" BASIS,
+- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  See the License for the specific language governing permissions and
+- *  limitations under the License.
+- *
+- */
+-package org.apache.ivy.util;
+-
+-public interface MessageImpl {
+-    public void log(String msg, int level);
+-
+-    public void rawlog(String msg, int level);
+-
+-    public void progress();
+-
+-    public void endProgress(String msg);
+-}
+diff --git a/src/java/org/apache/ivy/util/MessageLogger.java b/src/java/org/apache/ivy/util/MessageLogger.java
+new file mode 100644
+index 000000000..5d6435bd1
+--- /dev/null
++++ b/src/java/org/apache/ivy/util/MessageLogger.java
+@@ -0,0 +1,105 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.util;
++
++import java.util.List;
++
++/**
++ * A MessageLogger is used to log messages.
++ * <p>
++ * Where the messages are logged is depending on the implementation.
++ * </p>
++ * <p>
++ * This interface provides both level specific methods ({@link #info(String)},
++ * {@link #warn(String)}, ...) and generic methods ({@link #log(String, int)},
++ * {@link #rawlog(String, int)}). Note that calling level specific methods is usually not
++ * equivalent to calling the generic method with the corresponding level. Indeed, for warn and error
++ * level, the implementation will actually log the message at a lower level (usually
++ * {@link Message#MSG_VERBOSE}) and log the message at the actual level only when
++ * {@link #sumupProblems()} is called.
++ * </p>
++ * 
++ * @see Message
++ */
++public interface MessageLogger {
++    /**
++     * Logs a message at the given level.
++     * <p>
++     * <code>level</code> constants are defined in the {@link Message} class.
++     * </p>
++     * 
++     * @param msg
++     *            the message to log
++     * @param level
++     *            the level at which the message should be logged.
++     * @see Message#MSG_DEBUG
++     * @see Message#MSG_VERBOSE
++     * @see Message#MSG_INFO
++     * @see Message#MSG_WARN
++     * @see Message#MSG_ERROR
++     */
++    public abstract void log(String msg, int level);
++    /**
++     * Same as {@link #log(String, int)}, but without adding any contextual information to the
++     * message.
++     * 
++     * @param msg
++     *            the message to log
++     * @param level
++     *            the level at which the message should be logged.
++     */
++    public abstract void rawlog(String msg, int level);
++
++    public abstract void debug(String msg);
++
++    public abstract void verbose(String msg);
++    
++    public abstract void deprecated(String msg);
++
++    public abstract void info(String msg);
++
++    public abstract void rawinfo(String msg);
++
++    public abstract void warn(String msg);
++
++    public abstract void error(String msg);
++
++    public abstract List/*<String>*/ getProblems();
++    public abstract List/*<String>*/ getWarns();
++    public abstract List/*<String>*/ getErrors();
++
++    /**
++     * Clears the list of problems, warns and errors.
++     */
++    public abstract void clearProblems();
++    /**
++     * Sumup all problems encountered so far, and clear them.
++     */
++    public abstract void sumupProblems();
++
++    public abstract void progress();
++
++    public abstract void endProgress();
++
++    public abstract void endProgress(String msg);
++
++    public abstract boolean isShowProgress();
++
++    public abstract void setShowProgress(boolean progress);
++
++}
+\ No newline at end of file
+diff --git a/src/java/org/apache/ivy/util/MessageLoggerEngine.java b/src/java/org/apache/ivy/util/MessageLoggerEngine.java
+new file mode 100644
+index 000000000..4a9728b04
+--- /dev/null
++++ b/src/java/org/apache/ivy/util/MessageLoggerEngine.java
+@@ -0,0 +1,199 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.util;
++
++import java.util.ArrayList;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Stack;
++
++/**
++ * A {@link MessageLogger} implementation delegating the work to the current top logger on a stack.
++ * <p>
++ * When the logger stack is empty, it delegates the work to a default logger, which by default is
++ * the {@link Message#getDefaultLogger()}.
++ * </p>
++ * <p>
++ * {@link #pushLogger(MessageLogger)} should be called to delegate to a new logger, and
++ * {@link #popLogger()} should be called when the context of this logger is finished.
++ * </p>
++ */
++public class MessageLoggerEngine implements MessageLogger {
++    private final Stack/*<MessageLogger>*/ loggerStack = new Stack();
++    
++    private MessageLogger defaultLogger = Message.getDefaultLogger();
++    
++    public MessageLoggerEngine() {
++    }
++
++    /**
++     * Sets the logger used when the stack is empty.
++     * 
++     * @param defaultLogger the logger to use when the stack is empty.
++     */
++    public void setDefaultLogger(MessageLogger defaultLogger) {
++        this.defaultLogger = defaultLogger;
++    }
++
++
++
++    /**
++     * Push a logger on the stack.
++     * 
++     * @param logger
++     *            the logger to push. Must not be <code>null</code>.
++     */
++    public void pushLogger(MessageLogger logger) {
++        Checks.checkNotNull(logger, "logger");
++        loggerStack.push(logger);
++    }
++    
++    /**
++     * Pops a logger from the logger stack.
++     * <p>
++     * Does nothing if the logger stack is empty
++     * </p>
++     */
++    public void popLogger() {
++        if (!loggerStack.isEmpty()) {
++            loggerStack.pop();
++        }
++    }
++
++    /**
++     * Returns the current logger, or the default one if there is no logger in the stack
++     * @return the current logger, or the default one if there is no logger in the stack
++     */
++    private MessageLogger peekLogger() {
++        if (loggerStack.isEmpty()) {
++            return defaultLogger;
++        }
++        return (MessageLogger) loggerStack.peek();
++    }
++
++    // consolidated methods
++    
++    public List getErrors() {
++        List errors = new ArrayList();
++        errors.addAll(defaultLogger.getErrors());
++        for (Iterator iter = loggerStack.iterator(); iter.hasNext();) {
++            MessageLogger l = (MessageLogger) iter.next();
++            errors.addAll(l.getErrors());
++        }
++        return errors;
++    }
++
++    public List getProblems() {
++        List problems = new ArrayList();
++        problems.addAll(defaultLogger.getProblems());
++        for (Iterator iter = loggerStack.iterator(); iter.hasNext();) {
++            MessageLogger l = (MessageLogger) iter.next();
++            problems.addAll(l.getProblems());
++        }
++        return problems;
++    }
++
++    public List getWarns() {
++        List warns = new ArrayList();
++        warns.addAll(defaultLogger.getWarns());
++        for (Iterator iter = loggerStack.iterator(); iter.hasNext();) {
++            MessageLogger l = (MessageLogger) iter.next();
++            warns.addAll(l.getWarns());
++        }
++        return warns;
++    }
++
++    public void sumupProblems() {
++        MessageLoggerHelper.sumupProblems(this);
++        clearProblems();
++    }
++    
++    public void clearProblems() {
++        defaultLogger.clearProblems();
++        for (Iterator iter = loggerStack.iterator(); iter.hasNext();) {
++            MessageLogger l = (MessageLogger) iter.next();
++            l.clearProblems();
++        }
++    }
++
++    public void setShowProgress(boolean progress) {
++        defaultLogger.setShowProgress(progress);
++        // updates all loggers in the stack
++        for (Iterator iter = loggerStack.iterator(); iter.hasNext();) {
++            MessageLogger l = (MessageLogger) iter.next();
++            l.setShowProgress(progress);
++        }
++    }
++    
++    public boolean isShowProgress() {
++        // testing the default logger is enough, all loggers should be in sync
++        return defaultLogger.isShowProgress();
++    }
++
++    // delegation methods
++    
++    public void debug(String msg) {
++        peekLogger().debug(msg);
++    }
++    
++    public void deprecated(String msg) {
++        peekLogger().deprecated(msg);
++    }
++
++    public void endProgress() {
++        peekLogger().endProgress();
++    }
++
++    public void endProgress(String msg) {
++        peekLogger().endProgress(msg);
++    }
++
++    public void error(String msg) {
++        peekLogger().error(msg);
++    }
++
++    public void info(String msg) {
++        peekLogger().info(msg);
++    }
++
++    public void rawinfo(String msg) {
++        peekLogger().rawinfo(msg);
++    }
++
++    public void log(String msg, int level) {
++        peekLogger().log(msg, level);
++    }
++
++    public void progress() {
++        peekLogger().progress();
++    }
++
++    public void rawlog(String msg, int level) {
++        peekLogger().rawlog(msg, level);
++    }
++
++    public void verbose(String msg) {
++        peekLogger().verbose(msg);
++    }
++
++    public void warn(String msg) {
++        peekLogger().warn(msg);
++    }
++
++    
++}
+diff --git a/src/java/org/apache/ivy/util/MessageLoggerHelper.java b/src/java/org/apache/ivy/util/MessageLoggerHelper.java
+new file mode 100644
+index 000000000..ee953d5b6
+--- /dev/null
++++ b/src/java/org/apache/ivy/util/MessageLoggerHelper.java
+@@ -0,0 +1,50 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.util;
++
++import java.util.Iterator;
++import java.util.List;
++
++public final class MessageLoggerHelper {
++    public static void sumupProblems(MessageLogger logger) {
++        List myProblems = logger.getProblems();
++        if (myProblems.size() > 0) {
++            logger.info("\n:: problems summary ::");
++            List myWarns = logger.getWarns();
++            if (myWarns.size() > 0) {
++                logger.info(":::: WARNINGS");
++                for (Iterator iter = myWarns.iterator(); iter.hasNext();) {
++                    String msg = (String) iter.next();
++                    logger.log("\t" + msg + "\n", Message.MSG_WARN);
++                }
++            }
++            List myErrors = logger.getErrors();
++            if (myErrors.size() > 0) {
++                logger.info(":::: ERRORS");
++                for (Iterator iter = myErrors.iterator(); iter.hasNext();) {
++                    String msg = (String) iter.next();
++                    logger.log("\t" + msg + "\n", Message.MSG_ERR);
++                }
++            }
++            logger.info("\n:: USE VERBOSE OR DEBUG MESSAGE LEVEL FOR MORE DETAILS");
++        }
++    }
++
++    private MessageLoggerHelper() {
++    }
++}
+diff --git a/test/java/org/apache/ivy/IvyTest.java b/test/java/org/apache/ivy/IvyTest.java
+new file mode 100644
+index 000000000..fec54db33
+--- /dev/null
++++ b/test/java/org/apache/ivy/IvyTest.java
+@@ -0,0 +1,88 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy;
++
++import java.io.File;
++
++import org.apache.ivy.core.IvyContext;
++import org.apache.ivy.core.cache.CacheManager;
++import org.apache.ivy.core.report.ResolveReport;
++import org.apache.ivy.core.resolve.ResolveOptions;
++import org.apache.ivy.core.resolve.ResolveTest;
++import org.apache.ivy.core.settings.IvySettings;
++import org.apache.ivy.util.Message;
++import org.apache.ivy.util.MockMessageLogger;
++
++import junit.framework.TestCase;
++
++public class IvyTest extends TestCase {
++    public void testMultipleInstances() throws Exception {
++        // this test checks that IvyContext is properly set and unset when using multiple instances
++        // of Ivy. We also check logging, because it heavily relies on IvyContext.
++        
++        // we start by loading one ivy instance and using it to resolve some dependencies
++        MockMessageLogger mockLogger = new MockMessageLogger();
++        Ivy ivy = Ivy.newInstance();
++        ivy.getLoggerEngine().setDefaultLogger(mockLogger);
++        ivy.configure(new File("test/repositories/ivysettings.xml"));
++        assertFalse("IvyContext should be cleared and return a default Ivy instance", 
++            IvyContext.getContext().getIvy() == ivy);
++        
++        File cache = new File("build/cache");
++        ResolveReport report = ivy.resolve(new File(
++            "test/repositories/1/org1/mod1.1/ivys/ivy-1.0.xml").toURL(),
++            getResolveOptions(ivy, new String[] {"*"}));
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        mockLogger.assertLogContains("mod1.1");
++        assertFalse("IvyContext should be cleared and return a default Ivy instance", 
++            IvyContext.getContext().getIvy() == ivy);
++
++        // then we load another instance, and use it for another resolution
++        MockMessageLogger mockLogger2 = new MockMessageLogger();
++        Ivy ivy2 = new Ivy();
++        ivy2.getLoggerEngine().setDefaultLogger(mockLogger2);
++        ivy2.configure(new File("test/repositories/norev/ivysettings.xml").toURL());
++        report = ivy2.resolve(new File("test/repositories/norev/ivy.xml").toURL(),
++            getResolveOptions(ivy2, new String[] {"*"}));
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        mockLogger2.assertLogContains("norev/ivysettings.xml");
++        assertFalse("IvyContext should be cleared and return a default Ivy instance", 
++            IvyContext.getContext().getIvy() == ivy2);
++        
++        // finally we reuse the first instance to make another resolution
++        report = ivy.resolve(new File(
++            "test/repositories/1/org6/mod6.1/ivys/ivy-0.3.xml").toURL(),
++            getResolveOptions(ivy, new String[] {"extension"}));
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        mockLogger.assertLogContains("mod6.1");
++        assertFalse("IvyContext should be cleared and return a default Ivy instance", 
++            IvyContext.getContext().getIvy() == ivy);
++    }
++
++    private ResolveOptions getResolveOptions(Ivy ivy, String[] confs) {
++        return getResolveOptions(ivy.getSettings(), confs);
++    }
++
++    private ResolveOptions getResolveOptions(IvySettings settings, String[] confs) {
++        return new ResolveOptions().setConfs(confs).setCache(
++            CacheManager.getInstance(settings, settings.getDefaultCache()));
++    }
++}
+diff --git a/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java b/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
+index 6b918e37e..0df2637a2 100644
+--- a/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
++++ b/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
+@@ -24,7 +24,7 @@
+ import org.apache.ivy.TestHelper;
+ import org.apache.ivy.core.report.ResolveReport;
+ import org.apache.ivy.util.CacheCleaner;
+-import org.apache.ivy.util.DefaultMessageImpl;
++import org.apache.ivy.util.DefaultMessageLogger;
+ import org.apache.ivy.util.Message;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.Project;
+@@ -37,8 +37,7 @@ public class IvyPostResolveTaskTest extends TestCase {
+     private Project project;
+ 
+     protected void setUp() throws Exception {
+-        Message.init(new DefaultMessageImpl(10));
+-
++        Message.setDefaultLogger(new DefaultMessageLogger(10));
+         createCache();
+         project = new Project();
+         project.setProperty("ivy.settings.file", "test/repositories/ivysettings.xml");
+diff --git a/test/java/org/apache/ivy/ant/IvyPublishTest.java b/test/java/org/apache/ivy/ant/IvyPublishTest.java
+index 7d55398e2..e55833ccb 100644
+--- a/test/java/org/apache/ivy/ant/IvyPublishTest.java
++++ b/test/java/org/apache/ivy/ant/IvyPublishTest.java
+@@ -27,7 +27,7 @@
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorParser;
+-import org.apache.ivy.util.DefaultMessageImpl;
++import org.apache.ivy.util.DefaultMessageLogger;
+ import org.apache.ivy.util.FileUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.tools.ant.BuildException;
+@@ -55,7 +55,7 @@ protected void setUp() throws Exception {
+         publish.setProject(project);
+         publish.setCache(cache);
+ 
+-        Message.init(new DefaultMessageImpl(10));
++        Message.setDefaultLogger(new DefaultMessageLogger(10));
+     }
+ 
+     private void createCache() {
+diff --git a/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java
+index 296e2fc44..99feb1b87 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java
+@@ -22,6 +22,7 @@
+ 
+ import junit.framework.TestCase;
+ 
++import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.cache.CacheManager;
+ import org.apache.ivy.core.event.EventManager;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+@@ -42,7 +43,7 @@
+ import org.apache.ivy.core.sort.SortEngine;
+ import org.apache.ivy.plugins.matcher.ExactPatternMatcher;
+ import org.apache.ivy.util.Message;
+-import org.apache.ivy.util.MockMessageImpl;
++import org.apache.ivy.util.MockMessageLogger;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Delete;
+ 
+@@ -208,8 +209,8 @@ public void testErrorReport() throws Exception {
+         resolver.setSettings(_settings);
+         assertEquals("test", resolver.getName());
+ 
+-        MockMessageImpl mockMessageImpl = new MockMessageImpl();
+-        Message.setImpl(mockMessageImpl);
++        MockMessageLogger mockMessageImpl = new MockMessageLogger();
++        IvyContext.getContext().getIvy().getLoggerEngine().setDefaultLogger(mockMessageImpl);
+ 
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org.apache", "commons-fileupload",
+             "1.0");
+diff --git a/test/java/org/apache/ivy/util/MockMessageImpl.java b/test/java/org/apache/ivy/util/MockMessageLogger.java
+similarity index 95%
+rename from test/java/org/apache/ivy/util/MockMessageImpl.java
+rename to test/java/org/apache/ivy/util/MockMessageLogger.java
+index 8a6559458..f1aa7929c 100644
+--- a/test/java/org/apache/ivy/util/MockMessageImpl.java
++++ b/test/java/org/apache/ivy/util/MockMessageLogger.java
+@@ -23,7 +23,7 @@
+ 
+ import junit.framework.AssertionFailedError;
+ 
+-public class MockMessageImpl implements MessageImpl {
++public class MockMessageLogger extends AbstractMessageLogger {
+ 
+     private List _endProgress = new ArrayList();
+ 
+@@ -33,7 +33,7 @@ public class MockMessageImpl implements MessageImpl {
+ 
+     private int _progressCalls;
+ 
+-    public void endProgress(String msg) {
++    public void doEndProgress(String msg) {
+         _endProgress.add(msg);
+     }
+ 
+@@ -41,7 +41,7 @@ public void log(String msg, int level) {
+         _logs.add(level + " " + msg);
+     }
+ 
+-    public void progress() {
++    public void doProgress() {
+         _progressCalls++;
+     }
+ 

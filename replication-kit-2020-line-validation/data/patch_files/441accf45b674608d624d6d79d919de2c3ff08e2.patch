@@ -1,0 +1,167 @@
+From 441accf45b674608d624d6d79d919de2c3ff08e2 Mon Sep 17 00:00:00 2001
+From: Nicolas Lalevee <hibou@apache.org>
+Date: Wed, 15 Aug 2012 15:40:18 +0000
+Subject: [PATCH] merge r1373478: IVY-1060 : take into account the provided
+ encoding of the page (Thanks to Robin Fernandes)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/branches/2.3.x@1373479 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 ++
+ .../apache/ivy/util/url/ApacheURLLister.java  |  7 ++--
+ .../apache/ivy/util/url/BasicURLHandler.java  | 35 +++++++++++++++++--
+ .../ivy/util/url/HttpClientHandler.java       |  4 ++-
+ .../org/apache/ivy/util/url/URLHandler.java   | 11 ++++++
+ 5 files changed, 54 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 474228c02..771f64330 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -41,6 +41,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Stefan De Boey
+ 	Martin Eigenbrodt
+ 	Stephen Evanchik
++	Robin Fernandes
+ 	Gregory Fernandez
+ 	Danno Ferrin
+ 	Benjamin Francisoud	
+@@ -136,6 +137,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: buildlist task chokes on absolute path to parent Ivy module (IVY-1364) (thanks to Mitch Gitman and Jean-Louis Boudart)
+ - FIX: The ignore circular dependency strategy is clobbering the warn strategy (IVY-1353) (Thanks to Carl Quinn)
+ - FIX: Buildnumber and IvyFindRevision Ant tasks should honour defaultBranch setting (IVY-1344) (Thanks to Ales Nosek)
++- FIX: ApacheURLLister.retrieveListing() fails if the encoding of the URL list is different from the default encoding (IVY-1060) (Thanks to Robin Fernandes)
+ 
+    2.3.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/util/url/ApacheURLLister.java b/src/java/org/apache/ivy/util/url/ApacheURLLister.java
+index e15d37b02..a55df0e30 100644
+--- a/src/java/org/apache/ivy/util/url/ApacheURLLister.java
++++ b/src/java/org/apache/ivy/util/url/ApacheURLLister.java
+@@ -19,6 +19,7 @@
+ 
+ import java.io.BufferedReader;
+ import java.io.IOException;
++import java.io.InputStream;
+ import java.io.InputStreamReader;
+ import java.net.URL;
+ import java.util.ArrayList;
+@@ -106,8 +107,10 @@ public List retrieveListing(URL url, boolean includeFiles, boolean includeDirect
+             url = new URL(url.getProtocol(), url.getHost(), url.getPort(), url.getPath() + "/");
+         }
+ 
+-        BufferedReader r = new BufferedReader(new InputStreamReader(URLHandlerRegistry.getDefault()
+-                .openStream(url)));
++        URLHandler urlHandler = URLHandlerRegistry.getDefault();
++        String charset = urlHandler.getURLInfo(url).getBodyCharset();
++        InputStream contentStream = urlHandler.openStream(url);
++        BufferedReader r = new BufferedReader(new InputStreamReader(contentStream, charset));
+ 
+         String htmlText = FileUtil.readEntirely(r);
+ 
+diff --git a/src/java/org/apache/ivy/util/url/BasicURLHandler.java b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+index f0f6b90a7..286ab35f9 100644
+--- a/src/java/org/apache/ivy/util/url/BasicURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+@@ -71,14 +71,17 @@ public URLInfo getURLInfo(URL url, int timeout) {
+                     httpCon.setRequestMethod("HEAD");
+                 }
+                 if (checkStatusCode(url, httpCon)) {
+-                    return new URLInfo(true, httpCon.getContentLength(), con.getLastModified());
++                    String bodyCharset = getCharSetFromContentType(con.getContentType());
++                    return new URLInfo(true, httpCon.getContentLength(), con.getLastModified(), bodyCharset);
+                 }
+             } else {
+                 int contentLength = con.getContentLength();
+                 if (contentLength <= 0) {
+                     return UNAVAILABLE;
+                 } else {
+-                    return new URLInfo(true, contentLength, con.getLastModified());
++                    // TODO: not HTTP... maybe we *don't* want to default to ISO-8559-1 here?
++                    String bodyCharset = getCharSetFromContentType(con.getContentType());
++                    return new URLInfo(true, contentLength, con.getLastModified(), bodyCharset);
+                 }
+             }
+         } catch (UnknownHostException e) {
+@@ -93,6 +96,34 @@ public URLInfo getURLInfo(URL url, int timeout) {
+         return UNAVAILABLE;
+     }
+ 
++    /**
++     * Extract the charset from the Content-Type header string, or default to ISO-8859-1 as per
++     * rfc2616-sec3.html#sec3.7.1 .
++     * 
++     * @param contentType
++     *            the Content-Type header string
++     * @return the charset as specified in the content type, or ISO-8859-1 if unspecified.
++     */
++    public static String getCharSetFromContentType(String contentType) {
++
++        String charSet = null;
++
++        String[] elements = contentType.split(";");
++        for (int i = 0; i < elements.length; i++) {
++            String element = elements[i].trim();
++            if (element.toLowerCase().startsWith("charset=")) {
++                charSet = element.substring("charset=".length());
++            }
++        }
++
++        if (charSet == null || charSet.length() == 0) {
++            // default to ISO-8859-1 as per rfc2616-sec3.html#sec3.7.1
++            charSet = "ISO-8859-1";
++        }
++
++        return charSet;
++    }
++
+     private boolean checkStatusCode(URL url, HttpURLConnection con) throws IOException {
+         int status = con.getResponseCode();
+         if (status == HttpStatus.SC_OK) {
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index bc03d7a15..00bbc6a58 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -153,7 +153,9 @@ public URLInfo getURLInfo(URL url, int timeout) {
+                 method = doGet(url, timeout);
+             }
+             if (checkStatusCode(url, method)) {
+-                return new URLInfo(true, getResponseContentLength(method), getLastModified(method));
++                String contentType = method.getResponseHeader("content-type").getValue();
++                String bodyCharset = BasicURLHandler.getCharSetFromContentType(contentType);
++                return new URLInfo(true, getResponseContentLength(method), getLastModified(method), bodyCharset);
+             }
+         } catch (HttpException e) {
+             Message.error("HttpClientHandler: " + e.getMessage() + ":" + e.getReasonCode() + "="
+diff --git a/src/java/org/apache/ivy/util/url/URLHandler.java b/src/java/org/apache/ivy/util/url/URLHandler.java
+index ea8f0ce90..bcbda2196 100644
+--- a/src/java/org/apache/ivy/util/url/URLHandler.java
++++ b/src/java/org/apache/ivy/util/url/URLHandler.java
+@@ -48,10 +48,17 @@ public static class URLInfo {
+ 
+         private boolean available;
+ 
++        private String bodyCharset;
++
+         protected URLInfo(boolean available, long contentLength, long lastModified) {
++            this(available, contentLength, lastModified, null);
++        }
++
++        protected URLInfo(boolean available, long contentLength, long lastModified, String bodyCharset) {
+             this.available = available;
+             this.contentLength = contentLength;
+             this.lastModified = lastModified;
++            this.bodyCharset = bodyCharset;
+         }
+ 
+         public boolean isReachable() {
+@@ -65,6 +72,10 @@ public long getContentLength() {
+         public long getLastModified() {
+             return lastModified;
+         }
++
++        public String getBodyCharset() {
++            return bodyCharset;
++        }
+     }
+ 
+     public static final URLInfo UNAVAILABLE = new URLInfo(false, 0, 0);

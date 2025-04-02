@@ -1,0 +1,127 @@
+From 87c95a0528fef03240474d89b645ae0993d50ea2 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 27 Oct 2006 08:29:31 +0000
+Subject: [PATCH] FIX: attribute name in macrodef is not handled as expected
+ (IVY-319)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484576 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../fr/jayasoft/ivy/util/Configurator.java    | 10 ++++++++-
+ .../ivy/xml/XmlIvyConfigurationParser.java    |  4 +++-
+ .../xml/XmlIvyConfigurationParserTest.java    | 22 +++++++++++++++++++
+ .../fr/jayasoft/ivy/xml/ivyconf-macro+ref.xml | 16 ++++++++++++++
+ 5 files changed, 51 insertions(+), 2 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/xml/ivyconf-macro+ref.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index c8196601b..4741103d7 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -15,6 +15,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - FIX: ivy:resolve useOrigin fails to behave correctly (IVY-332)
+ - FIX: ChainVersionMatcher doesn't handle IvyAware children version matchers (IVY-331)
+ - FIX: latest.<status> does not work properly when no matching revision exist (IVY-318)
++- FIX: attribute name in macrodef is not handled as expected (IVY-319)
+ 
+ 
+    version 1.4 - 2006-10-09
+diff --git a/src/java/fr/jayasoft/ivy/util/Configurator.java b/src/java/fr/jayasoft/ivy/util/Configurator.java
+index c0ef6c3c8..d4ecf4009 100644
+--- a/src/java/fr/jayasoft/ivy/util/Configurator.java
++++ b/src/java/fr/jayasoft/ivy/util/Configurator.java
+@@ -53,7 +53,7 @@ public Macro(MacroDef def) {
+ 
+         public void defineAttribute(String attributeName, String value) {
+             if (_macrodef.getAttribute(attributeName) == null) {
+-                throw new IllegalArgumentException("undecalred attribute "+attributeName+" on macro "+_macrodef.getName());
++                throw new IllegalArgumentException("undeclared attribute "+attributeName+" on macro "+_macrodef.getName());
+             }
+             _attValues.put(attributeName, value);
+         }
+@@ -485,6 +485,14 @@ private Object addChild(ObjectDescriptor parentOD, Class childClass, String name
+         throw new IllegalArgumentException("no appropriate method found for adding "+name+" on "+parent.getClass());
+     }
+     
++    public boolean isTopLevelMacroRecord() {
++        if (_objectStack.isEmpty()) {
++            return false;
++        }
++        ObjectDescriptor od = (ObjectDescriptor)_objectStack.peek();
++        return (od.getObject() instanceof MacroDef);
++    }
++    
+     public void setAttribute(String attributeName, String value) {
+         if (_objectStack.isEmpty()) {
+             throw new IllegalStateException("set root before setting attribute");
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParser.java b/src/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParser.java
+index 99cc9c990..8ef735f98 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParser.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParser.java
+@@ -106,8 +106,10 @@ public void startElement(String uri, String localName, String qName, Attributes
+                     String name = (String)attributes.get("name");
+                     if (name == null) {
+                         attributes.put("name", "@{name}");
++                    } else if (_configurator.isTopLevelMacroRecord() && name.indexOf("@{name}") != -1) {
++                    	attributes.put("name", name);
+                     } else {
+-                        attributes.put("name", "@{name}-"+name);
++                    	attributes.put("name", "@{name}-"+name);
+                     }
+                 }
+                 if (attributes.get("ref") != null) {
+diff --git a/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java b/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java
+index 83d8dc12a..cef118a0b 100644
+--- a/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java
++++ b/test/java/fr/jayasoft/ivy/xml/XmlIvyConfigurationParserTest.java
+@@ -254,6 +254,28 @@ public void testMacro() throws Exception {
+         assertEquals("path/to/secondrep/[module]/[type]s/ivy-[revision].xml", ivyPatterns.get(0));
+     }
+     
++    public void testMacroAndRef() throws Exception {
++    	// test case for IVY-319
++        Ivy ivy = new Ivy();
++        XmlIvyConfigurationParser parser = new XmlIvyConfigurationParser(ivy);
++        parser.parse(XmlIvyConfigurationParserTest.class.getResource("ivyconf-macro+ref.xml"));
++        
++        DependencyResolver shared = ivy.getResolver("shared");
++        assertNotNull(shared);
++        assertTrue(shared instanceof FileSystemResolver);
++        
++        DependencyResolver mychain = ivy.getResolver("mychain");
++        assertNotNull(mychain);
++        assertTrue(mychain instanceof ChainResolver);
++        ChainResolver chain = (ChainResolver)mychain;
++        List subresolvers = chain.getResolvers();
++        assertNotNull(subresolvers);
++        assertEquals(1, subresolvers.size());
++        shared = (DependencyResolver) subresolvers.get(0);
++        assertEquals("shared", shared.getName());
++        assertTrue(shared instanceof FileSystemResolver);
++    }
++    
+     public void testInclude() throws Exception {
+         Ivy ivy = new Ivy();
+         XmlIvyConfigurationParser parser = new XmlIvyConfigurationParser(ivy);
+diff --git a/test/java/fr/jayasoft/ivy/xml/ivyconf-macro+ref.xml b/test/java/fr/jayasoft/ivy/xml/ivyconf-macro+ref.xml
+new file mode 100644
+index 000000000..0b939e6ed
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/xml/ivyconf-macro+ref.xml
+@@ -0,0 +1,16 @@
++<ivyconf>
++    <macrodef name="myresolver">
++        <attribute name="name"/>
++        <filesystem name="@{name}" m2compatible="true" checkconsistency="true" checkmodified="true" allownomd="false">
++            <artifact pattern="${some.dir}/[organisation]/[module]/[revision]/[type]s/[artifact]-[revision].[ext]" />
++            <ivy pattern="${some.dir}/[organisation]/[module]/[revision]/ivy.xml"/>
++        </filesystem>
++    </macrodef>
++
++	<resolvers>
++	   <myresolver name="shared"/>
++	   <chain name="mychain">
++	      <resolver ref="shared"/>
++	   </chain>
++	</resolvers> 
++</ivyconf>

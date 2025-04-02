@@ -1,0 +1,126 @@
+From f8a3e4edbe8eb96e428c7ba647f6b14555d9d68f Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 10 May 2007 22:20:57 +0000
+Subject: [PATCH] FIX: install ant task: requires default resolver in ivy
+ settings (IVY-477)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@537017 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/ResolveEngine.java       |  1 +
+ .../apache/ivy/core/settings/IvySettings.java |  4 ++
+ .../apache/ivy/core/install/InstallTest.java  | 11 +++++
+ .../ivysettings-nodefaultresolver.xml         | 43 +++++++++++++++++++
+ 5 files changed, 60 insertions(+)
+ create mode 100644 test/repositories/ivysettings-nodefaultresolver.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index c7caa5a1e..ff31a3f9b 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -51,6 +51,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+ - IMPROVEMENT: Allow "main" parameters to be passed directly (instead of using -args flag) (IVY-480) (thanks to Archie Cobbs)
+ 
++- FIX: install ant task: requires default resolver in ivy settings (IVY-477)
+ - FIX: Ant project reference lost from context on multiple ant calls in single thread (IVY-497) (thanks to Jaroslaw Wypychowski)
+ - FIX: EOL in the doc pages (IVY-470)
+ - FIX: Cache is storing ArtifactOrigin properties with no guarantee of unicity and types telescope during resolve. (IVY-430) (thanks to Stephane Bailliez)
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 0ead2bc48..063479abc 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -89,6 +89,7 @@ public DependencyResolver getDictatorResolver() {
+ 
+     public void setDictatorResolver(DependencyResolver dictatorResolver) {
+         _dictatorResolver = dictatorResolver;
++        _settings.setDictatorResolver(dictatorResolver);
+     }
+ 
+     public ResolveReport resolve(File ivySource) throws ParseException, IOException {
+diff --git a/src/java/org/apache/ivy/core/settings/IvySettings.java b/src/java/org/apache/ivy/core/settings/IvySettings.java
+index 7fad7a923..0fde85d94 100644
+--- a/src/java/org/apache/ivy/core/settings/IvySettings.java
++++ b/src/java/org/apache/ivy/core/settings/IvySettings.java
+@@ -622,6 +622,10 @@ public File getDefaultCache() {
+         }
+         return _defaultCache;
+     }
++    
++    public void setDictatorResolver(DependencyResolver resolver) {
++    	_dictatorResolver = resolver;
++    }
+ 
+     public DependencyResolver getResolver(ModuleId moduleId) {
+         if (_dictatorResolver != null) {
+diff --git a/test/java/org/apache/ivy/core/install/InstallTest.java b/test/java/org/apache/ivy/core/install/InstallTest.java
+index 94341b236..cf1a53537 100644
+--- a/test/java/org/apache/ivy/core/install/InstallTest.java
++++ b/test/java/org/apache/ivy/core/install/InstallTest.java
+@@ -41,6 +41,17 @@ public void testSimple() throws Exception {
+         assertTrue(new File("build/test/install/org1/mod1.2/mod1.2-2.0.jar").exists());
+     }
+ 
++    public void testSimpleWithoutDefaultResolver() throws Exception {
++        Ivy ivy = Ivy.newInstance();
++        ivy.configure(new File("test/repositories/ivysettings-nodefaultresolver.xml"));
++        
++        ivy.install(ModuleRevisionId.newInstance("org1", "mod1.2", "2.0"), 
++                "test", "install", true, true, true, null, _cache, PatternMatcher.EXACT);
++        
++        assertTrue(new File("build/test/install/org1/mod1.2/ivy-2.0.xml").exists());
++        assertTrue(new File("build/test/install/org1/mod1.2/mod1.2-2.0.jar").exists());
++    }
++
+     public void testDependencies() throws Exception {
+         Ivy ivy = Ivy.newInstance();
+         ivy.configure(new File("test/repositories/ivysettings.xml"));
+diff --git a/test/repositories/ivysettings-nodefaultresolver.xml b/test/repositories/ivysettings-nodefaultresolver.xml
+new file mode 100644
+index 000000000..11def0063
+--- /dev/null
++++ b/test/repositories/ivysettings-nodefaultresolver.xml
+@@ -0,0 +1,43 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<properties file="${ivy.settings.dir}/ivysettings.properties" />
++	<settings defaultCache="${cache.dir}"/>
++	<resolvers>
++		<chain name="test">
++			<filesystem name="1">
++				<ivy pattern="${ivy.settings.dir}/1/[organisation]/[module]/ivys/ivy-[revision].xml"/>
++				<artifact pattern="${ivy.settings.dir}/1/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]"/>
++			</filesystem>
++			<dual name="2">
++				<filesystem name="2-ivy">
++					<ivy pattern="${ivy.settings.dir}/2/[module]/ivy-[revision].xml"/>
++				</filesystem>
++				<filesystem name="2-artifact">
++					<artifact pattern="${ivy.settings.dir}/2/[module]/[artifact]-[revision].[ext]"/>
++					<artifact pattern="${ivy.settings.dir}/2/[module]/[artifact].[ext]"/>
++				</filesystem>
++			</dual>
++		</chain>
++		<filesystem name="install">
++			<ivy pattern="build/test/install/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++			<artifact pattern="build/test/install/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++		</filesystem>
++	</resolvers>
++</ivysettings>

@@ -1,0 +1,107 @@
+From 37f373401c3fefa832be0d52f617f0711b0bb831 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 31 May 2010 20:57:10 +0000
+Subject: [PATCH] FIX: LatestVersionMatcher.needModuleDescriptor() does not
+ honor custom statuses (IVY-1170) (thanks to Carl Quinn)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@949860 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../plugins/version/LatestVersionMatcher.java |  7 ++-
+ .../version/LatestVersionMatcherTest.java     | 47 +++++++++++++++++++
+ 3 files changed, 54 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 73bcdd831..6c2638789 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -125,6 +125,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Trace a message when a property file referenced from the settings doesn't exixts (IVY-1074)
+ - IMPROVEMENT: use defaultconf in combination with defaultconfmapping (IVY-1135) (thanks to Jon Schneider)
+ 
++- FIX: LatestVersionMatcher.needModuleDescriptor() does not honor custom statuses (IVY-1170) (thanks to Carl Quinn)
+ - FIX: Proxy authentication could fail when using commons-httpclient 
+ - FIX: Packager resolver always extracts all files from archives even when the packaging instructions contains include tags (IVY-1179) (thanks to Stefan De Boey)
+ - FIX: Ivy cannot connect to URLs with '_' in their hostname
+diff --git a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+index d502bea5f..ba5b153b3 100644
+--- a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+@@ -18,9 +18,11 @@
+ package org.apache.ivy.plugins.version;
+ 
+ import java.util.Comparator;
++import java.util.List;
+ 
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.module.status.Status;
+ import org.apache.ivy.core.module.status.StatusManager;
+ 
+ public class LatestVersionMatcher extends AbstractVersionMatcher {
+@@ -37,7 +39,10 @@ public boolean accept(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid) {
+     }
+ 
+     public boolean needModuleDescriptor(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid) {
+-        return !"latest.integration".equals(askedMrid.getRevision());
++        List statuses = StatusManager.getCurrent().getStatuses();
++        Status lowest = (Status) statuses.get(statuses.size() - 1);
++        String latestLowest = "latest." + lowest.getName();
++        return !latestLowest.equals(askedMrid.getRevision());
+     }
+ 
+     public boolean accept(ModuleRevisionId askedMrid, ModuleDescriptor foundMD) {
+diff --git a/test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java b/test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java
+new file mode 100644
+index 000000000..c044f223a
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java
+@@ -0,0 +1,47 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.plugins.version;
++
++import junit.framework.TestCase;
++
++import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.module.status.Status;
++import org.apache.ivy.core.module.status.StatusManager;
++
++public class LatestVersionMatcherTest extends TestCase {
++    private LatestVersionMatcher vm = new LatestVersionMatcher();
++
++    public void testNeedModuleDescriptorStandardStatus() throws Exception {
++        assertNeed("latest.release", true);
++        assertNeed("latest.milestone", true);
++        assertNeed("latest.integration", false);
++    }
++    
++    public void testNeedModuleDescriptorCustomStatus() throws Exception {
++        StatusManager.getCurrent().addStatus(new Status("release", false));
++        StatusManager.getCurrent().addStatus(new Status("snapshot", true));
++
++        assertNeed("latest.release", true);
++        assertNeed("latest.snapshot", false);
++    }
++
++    // assertion helper methods
++    private void assertNeed(String askedVersion, boolean b) {
++        assertEquals(b, vm.needModuleDescriptor(ModuleRevisionId.newInstance("org", "name", askedVersion), null));
++    }
++}

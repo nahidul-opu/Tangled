@@ -1,0 +1,221 @@
+From 343be17bd1ceaaa16b828c4c98e72abf96f13ade Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 24 Jan 2006 17:42:35 +0000
+Subject: [PATCH] added a junit test for IVY-150: not reproduced
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484163 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .classpath                                    |  1 +
+ src/java/fr/jayasoft/ivy/ant/IvyReport.java   |  7 ++-
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 16 +++++
+ .../fr/jayasoft/ivy/ant/IvyReportTest.java    | 58 +++++++++++++++++++
+ test/repositories/2/mod11.1/ivy-1.0.xml       | 21 +++++++
+ test/repositories/2/mod11.1/mod11.1-1.0.jar   |  1 +
+ test/repositories/2/mod11.2/ivy-1.0.xml       | 18 ++++++
+ test/repositories/2/mod11.2/mod11.2-1.0.jar   |  1 +
+ 8 files changed, 122 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/IvyReportTest.java
+ create mode 100644 test/repositories/2/mod11.1/ivy-1.0.xml
+ create mode 100644 test/repositories/2/mod11.1/mod11.1-1.0.jar
+ create mode 100644 test/repositories/2/mod11.2/ivy-1.0.xml
+ create mode 100644 test/repositories/2/mod11.2/mod11.2-1.0.jar
+
+diff --git a/.classpath b/.classpath
+index ee9bfc486..9095ce742 100644
+--- a/.classpath
++++ b/.classpath
+@@ -8,5 +8,6 @@
+ 	<classpathentry kind="var" path="ANT_HOME/lib/ant-launcher.jar"/>
+ 	<classpathentry kind="var" path="ANT_HOME/lib/xercesImpl.jar"/>
+ 	<classpathentry kind="con" path="org.jayasoft.ivyde.eclipse.cpcontainer.IVYDE_CONTAINER/ivy.xml/*"/>
++	<classpathentry kind="var" path="ANT_HOME/lib/ant-trax.jar"/>
+ 	<classpathentry kind="output" path="bin"/>
+ </classpath>
+diff --git a/src/java/fr/jayasoft/ivy/ant/IvyReport.java b/src/java/fr/jayasoft/ivy/ant/IvyReport.java
+index 566e98d12..e5888cabe 100644
+--- a/src/java/fr/jayasoft/ivy/ant/IvyReport.java
++++ b/src/java/fr/jayasoft/ivy/ant/IvyReport.java
+@@ -96,6 +96,9 @@ public void execute() throws BuildException {
+         if (_conf.equals("*")) {
+             _conf = getProperty(ivy, "ivy.resolved.configurations");
+         }
++        if (_conf == null) {
++            throw new BuildException("no conf provided for ivy report task: It can either be set explicitely via the attribute 'conf' or via 'ivy.resolved.configurations' property or a prior call to <resolve/>");
++        }
+         if (_todir == null) {
+             String t = getProperty(ivy, "ivy.report.todir");
+             if (t != null) {
+@@ -144,7 +147,7 @@ private void genxml(Ivy ivy, File cache, String organisation, String module, Str
+         if (_todir != null) {
+             out = new File(_todir, xml.getName());
+         } else {
+-            out = new File(xml.getName());
++            out = new File("./"+xml.getName());
+         }
+         
+         FileUtil.copy(xml, out, null);
+@@ -163,6 +166,8 @@ private void genreport(Ivy ivy, File cache, String organisation, String module,
+         }
+         if (out.getParentFile() != null && !out.getParentFile().exists()) {
+             out.getParentFile().mkdirs();
++        } else if(out.getParentFile() == null) {
++            out = new File("./"+out.getPath());
+         }
+         xslt.setOut(out);
+         xslt.setStyle(getReportStylePath(cache));
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 9fc71fc88..c8b1f77c8 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -783,6 +783,22 @@ public void testCircular() throws Exception {
+         }
+     }
+     
++    public void testRegularCircular() throws Exception {
++        // mod11.1 depends on mod11.2 but excludes itself
++        // mod11.2 depends on mod11.1
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod11.1/ivy-1.0.xml").toURL(),
++                null, new String[] {"test"}, _cache, null, true);
++        
++        assertNotNull(report);
++        assertFalse(report.hasError());
++            
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org11", "mod11.2", "1.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org11", "mod11.2", "1.0", "mod11.2", "jar", "jar").exists());
++
++        assertFalse(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org11", "mod11.1", "1.0")).exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org11", "mod11.1", "1.0", "mod11.1", "jar", "jar").exists());
++    }
++    
+     public void testResolveDualChain() throws Exception {
+         Ivy ivy = new Ivy();
+         ivy.configure(ResolveTest.class.getResource("dualchainresolverconf.xml"));
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyReportTest.java b/test/java/fr/jayasoft/ivy/ant/IvyReportTest.java
+new file mode 100644
+index 000000000..a2e352dae
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/IvyReportTest.java
+@@ -0,0 +1,58 @@
++/*
++ * This file is subject to the license found in LICENCE.TXT in the root directory of the project.
++ * 
++ * #SNAPSHOT#
++ */
++package fr.jayasoft.ivy.ant;
++
++import java.io.File;
++
++import junit.framework.TestCase;
++
++import org.apache.tools.ant.Project;
++import org.apache.tools.ant.taskdefs.Delete;
++
++public class IvyReportTest extends TestCase {
++    private File _cache;
++    private IvyReport _report;
++    private Project _project;
++    
++    protected void setUp() throws Exception {
++        createCache();
++        _project = new Project();
++        _project.setProperty("ivy.conf.file", "test/repositories/ivyconf.xml");
++
++        _report = new IvyReport();
++        _report.setTaskName("report");
++        _report.setProject(_project);
++        _report.setCache(_cache);
++    }
++
++    private void createCache() {
++        _cache = new File("build/cache");
++        _cache.mkdirs();
++    }
++    
++    protected void tearDown() throws Exception {
++        cleanCache();
++    }
++
++    private void cleanCache() {
++        Delete del = new Delete();
++        del.setProject(new Project());
++        del.setDir(_cache);
++        del.execute();
++    }
++
++    public void testRegularCircular() throws Exception {
++        _project.setProperty("ivy.dep.file", "test/repositories/2/mod11.1/ivy-1.0.xml");
++        IvyResolve res = new IvyResolve();
++        res.setProject(_project);
++        res.execute();
++        
++        _report.setTodir(new File("build/cache"));
++        _report.execute();
++        
++        assertTrue(new File("build/cache/org11-mod11.1-compile.html").exists());
++    }
++}
+diff --git a/test/repositories/2/mod11.1/ivy-1.0.xml b/test/repositories/2/mod11.1/ivy-1.0.xml
+new file mode 100644
+index 000000000..bdcce43f6
+--- /dev/null
++++ b/test/repositories/2/mod11.1/ivy-1.0.xml
+@@ -0,0 +1,21 @@
++<ivy-module version="1.0">
++	<info organisation="org11"
++	       module="mod11.1"
++	       revision="1.0"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++    <configurations defaultconfmapping="compile->@;test->compile">
++        <conf name="compile"/>
++        <conf name="test"/>
++    </configurations>
++	<publications>
++        <artifact name="mod11.1" type="jar" conf="compile"/>
++    </publications>
++	<dependencies>
++		<dependency name="mod11.2" rev="1.0" conf="test">
++			<!-- exclude ourselfs!! -->
++			<exclude module="mod11.1"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod11.1/mod11.1-1.0.jar b/test/repositories/2/mod11.1/mod11.1-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod11.1/mod11.1-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/2/mod11.2/ivy-1.0.xml b/test/repositories/2/mod11.2/ivy-1.0.xml
+new file mode 100644
+index 000000000..3e3e2563c
+--- /dev/null
++++ b/test/repositories/2/mod11.2/ivy-1.0.xml
+@@ -0,0 +1,18 @@
++<ivy-module version="1.0">
++	<info organisation="org11"
++	       module="mod11.2"
++	       revision="1.0"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++    <configurations defaultconfmapping="compile->@;test->compile">
++        <conf name="compile"/>
++        <conf name="test"/>
++    </configurations>
++	<publications>
++        <artifact name="mod11.2" type="jar" conf="compile"/>
++    </publications>
++	<dependencies>
++		<dependency name="mod11.1" rev="1.0" conf="compile"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod11.2/mod11.2-1.0.jar b/test/repositories/2/mod11.2/mod11.2-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod11.2/mod11.2-1.0.jar
+@@ -0,0 +1 @@
++ 

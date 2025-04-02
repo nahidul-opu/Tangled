@@ -1,0 +1,318 @@
+From a44565d382c441463b26e1beb3b78b27872434c5 Mon Sep 17 00:00:00 2001
+From: Jakob Glen Homan <jghoman@apache.org>
+Date: Mon, 6 Aug 2012 22:28:55 +0000
+Subject: [PATCH] GIRAPH-228. SimpleTriangleClosingVertex should not use
+ ArrayWritable for a vertex value. Contributed by Eli Reisman.
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1370047 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                     |   3 +
+ .../examples/SimpleTriangleClosingVertex.java | 104 +++++++++++-------
+ .../SimpleTriangleClosingVertexTest.java      | 103 ++++++-----------
+ 3 files changed, 106 insertions(+), 104 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 9ca5f09f9..6ae247e8b 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -2,6 +2,9 @@ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
+ 
++  GIRAPH-228: SimpleTriangleClosingVertex should not use ArrayWritable
++  for a vertex value. (Eli Reisman via jghoman)
++
+   GIRAPH-209: Include munge version in artifact name. 
+   (Eli Reisman via jghoman)
+   
+diff --git a/src/main/java/org/apache/giraph/examples/SimpleTriangleClosingVertex.java b/src/main/java/org/apache/giraph/examples/SimpleTriangleClosingVertex.java
+index d1e74ed5b..35652422f 100644
+--- a/src/main/java/org/apache/giraph/examples/SimpleTriangleClosingVertex.java
++++ b/src/main/java/org/apache/giraph/examples/SimpleTriangleClosingVertex.java
+@@ -18,17 +18,18 @@
+ 
+ package org.apache.giraph.examples;
+ 
++import org.apache.giraph.examples.SimpleTriangleClosingVertex.Pair;
+ import org.apache.giraph.graph.Edge;
+ import org.apache.giraph.graph.EdgeListVertex;
+-import org.apache.hadoop.io.ArrayWritable;
++import org.apache.giraph.comm.ArrayListWritable;
+ import org.apache.hadoop.io.IntWritable;
+ import org.apache.hadoop.io.NullWritable;
+-import org.apache.hadoop.io.Writable;
+ 
+-import java.util.HashSet;
+ import java.util.Map;
+ import java.util.Set;
+-import java.util.TreeMap;
++
++import com.google.common.collect.Sets;
++import com.google.common.collect.Maps;
+ 
+ /**
+  * Demonstrates triangle closing in simple,
+@@ -62,61 +63,90 @@
+  * ordering of the final result array.
+  */
+ public class SimpleTriangleClosingVertex extends EdgeListVertex<
+-  IntWritable, SimpleTriangleClosingVertex.IntArrayWritable,
++  IntWritable, SimpleTriangleClosingVertex.IntArrayListWritable,
+   NullWritable, IntWritable> {
+   /** Vertices to close the triangle, ranked by frequency of in-msgs */
+   private Map<IntWritable, Integer> closeMap =
+-    new TreeMap<IntWritable, Integer>();
+-  /** Set of vertices you already recieved @ least once */
+-  private Set<Integer> recvSet = new HashSet<Integer>();
++    Maps.<IntWritable, Integer>newHashMap();
+ 
+   @Override
+   public void compute(Iterable<IntWritable> messages) {
+     if (getSuperstep() == 0) {
+-      // obtain list of all out-edges from THIS vertex
++      // send list of this vertex's neighbors to all neighbors
+       for (Edge<IntWritable, NullWritable> edge : getEdges()) {
+         sendMessageToAllEdges(edge.getTargetVertexId());
+       }
+     } else {
+       for (IntWritable message : messages) {
+-        int inId = message.get();
+-        if (recvSet.contains(inId)) {
+-          int current = closeMap.get(message) == null ? 0 : inId;
+-          closeMap.put(message, current + 1);
+-        }
+-        if (inId != getId().get()) {
+-          recvSet.add(inId);
+-        }
++        final int current = (closeMap.get(message) == null) ?
++          0 : closeMap.get(message) + 1;
++        closeMap.put(message, current);
+       }
+-      int ndx = closeMap.size();
+-      IntWritable[] temp = new IntWritable[ndx];
+-      for (IntWritable w: closeMap.keySet()) {
+-        temp[--ndx] = w;
++      // make sure the result values are sorted and
++      // packaged in an IntArrayListWritable for output
++      Set<SimpleTriangleClosingVertex.Pair> sortedResults =
++        Sets.<SimpleTriangleClosingVertex.Pair>newTreeSet();
++      for (Map.Entry<IntWritable, Integer> entry : closeMap.entrySet()) {
++        sortedResults.add(new Pair(entry.getKey(), entry.getValue()));
+       }
+-      IntArrayWritable result = new IntArrayWritable();
+-      result.set(temp);
+-      setValue(result);
++      SimpleTriangleClosingVertex.IntArrayListWritable
++        outputList = new SimpleTriangleClosingVertex.IntArrayListWritable();
++      for (SimpleTriangleClosingVertex.Pair pair : sortedResults) {
++        if (pair.value > 0) {
++          outputList.add(pair.key);
++        } else {
++          break;
++        }
++      }
++      setValue(outputList);
+     }
+     voteToHalt();
+   }
+ 
++  /** Quick, immutable K,V storage for sorting in tree set */
++  public static class Pair implements Comparable<Pair> {
++    /** key
++     * @param key the IntWritable key */
++    private final IntWritable key;
++    /** value
++     * @param value the Integer value */
++    private final Integer value;
++    /** Constructor
++     * @param k the key
++     * @param v the value
++     */
++    public Pair(IntWritable k, Integer v) {
++      key = k;
++      value = v;
++    }
++    /** key getter
++     * @return the key */
++    public IntWritable getKey() { return key; }
++    /** value getter
++     * @return the value */
++    public Integer getValue() { return value; }
++    /** Comparator to quickly sort by values
++     * @param other the Pair to compare with THIS
++     * @return the comparison value as an integer */
++    @Override
++    public int compareTo(Pair other) {
++      return other.value - this.value;
++    }
++  }
++
+   /** Utility class for delivering the array of vertices THIS vertex
+     * should connect with to close triangles with neighbors */
+-  public static class IntArrayWritable extends ArrayWritable {
+-    /** default constructor */
+-    public IntArrayWritable() {
+-      super(IntWritable.class);
++  public static class IntArrayListWritable
++    extends ArrayListWritable<IntWritable> {
++    /** Default constructor for reflection */
++    public IntArrayListWritable() {
++      super();
+     }
+-
++    /** Set storage type for this ArrayListWritable */
+     @Override
+-    public String toString() {
+-      StringBuilder sb = new StringBuilder();
+-      Writable[] iwArray = get();
+-      for (int i = 0; i < iwArray.length; ++i) {
+-        IntWritable iw = (IntWritable) iwArray[i];
+-        sb.append(iw.get() + "  ");
+-      }
+-      return sb.toString();
++    @SuppressWarnings("unchecked")
++    public void setClass() {
++      setClass(IntWritable.class);
+     }
+   }
+ }
+diff --git a/src/test/java/org/apache/giraph/examples/SimpleTriangleClosingVertexTest.java b/src/test/java/org/apache/giraph/examples/SimpleTriangleClosingVertexTest.java
+index 9150bf2bb..5e5d5cfe6 100644
+--- a/src/test/java/org/apache/giraph/examples/SimpleTriangleClosingVertexTest.java
++++ b/src/test/java/org/apache/giraph/examples/SimpleTriangleClosingVertexTest.java
+@@ -26,19 +26,14 @@
+ import org.apache.giraph.utils.MockUtils;
+ import org.apache.giraph.lib.IdWithValueTextOutputFormat;
+ import org.apache.giraph.examples.IntIntNullIntTextInputFormat;
+-import org.apache.giraph.examples.SimpleTriangleClosingVertex.IntArrayWritable;
+-import org.apache.giraph.utils.InternalVertexRunner;
++import org.apache.giraph.examples.SimpleTriangleClosingVertex.IntArrayListWritable;
+ 
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.IntWritable;
+ import org.apache.hadoop.io.NullWritable;
+-import org.apache.hadoop.io.ArrayWritable;
+ 
+ import java.util.Map;
+-import java.util.HashMap;
+ import java.util.List;
+-import java.util.ArrayList;
+-import java.util.Iterator;
+ 
+ import org.mockito.Mockito;
+ 
+@@ -55,19 +50,21 @@ public class SimpleTriangleClosingVertexTest {
+    * does it send all its out edge values to all neighbors?
+    */
+   @Test
+-  public void testTriangleClosingOutMsgs() throws Exception {
++  public void testSuperstepZero() throws Exception {
+     // this guy should end up with an array value of 4
+-    SimpleTriangleClosingVertex vertex = new SimpleTriangleClosingVertex();
++    SimpleTriangleClosingVertex vertex =
++      new SimpleTriangleClosingVertex();
++    SimpleTriangleClosingVertex.IntArrayListWritable alw =
++      new SimpleTriangleClosingVertex.IntArrayListWritable();
+     vertex.initialize(null, null, null, null);
+     vertex.addEdge(new IntWritable(5), NullWritable.get());
+     vertex.addEdge(new IntWritable(7), NullWritable.get()); 
+-    IntArrayWritable iaw = new IntArrayWritable();
+-    iaw.set(new IntWritable[0]);
+ 
+-    MockUtils.MockedEnvironment<IntWritable, IntArrayWritable,
++    MockUtils.MockedEnvironment<IntWritable,
++      SimpleTriangleClosingVertex.IntArrayListWritable,
+     NullWritable, IntWritable> env =
+-      MockUtils.prepareVertex(vertex, 0L, new IntWritable(1),
+-        iaw, false);
++      MockUtils.prepareVertex(vertex, 0L,
++        new IntWritable(1), alw, false);
+ 
+     vertex.compute(Lists.<IntWritable>newArrayList(
+       new IntWritable(83), new IntWritable(42)));
+@@ -78,59 +75,31 @@ public void testTriangleClosingOutMsgs() throws Exception {
+     env.verifyMessageSent(new IntWritable(7), new IntWritable(7));
+   }
+ 
+- /**
+-   * A local integration test on toy data
+-   */
++  /** Test behavior of compute() with incoming messages (superstep 1) */
+   @Test
+-  public void testSampleGraph() throws Exception {
+-    // a small four vertex graph
+-    String[] graph = new String[] {
+-        "1", // this guy should end up with value { 4, 7 }
+-        "2 1 4",
+-        "3 1 4",
+-        "4",
+-        "5 1 7",
+-        "6 1 7",
+-        "7",
+-        "8 1 4"
+-    };
+-
+-    /*
+-    // run internally
+-    Iterable<String> results =
+-      InternalVertexRunner.run(
+-        SimpleTriangleClosingVertex.class,
+-        IntIntNullIntTextInputFormat.class,
+-        IdWithValueTextOutputFormat.class,
+-        Maps.<String,String>newHashMap(),
+-        graph);
+-
+-    // always be closing
+-    Map<Integer, List<Integer>> glenGarry = parseResults(results);
+-
+-    // verify results
+-    assertNotNull(glenGarry);
+-    assertEquals(8, glenGarry.size());
+-    assertEquals(4, glenGarry.get(1).get(0));
+-    assertEquals(7, glenGarry.get(1).get(1));
+-    */
+-    assertEquals(1,1);
+-  }
+-
+-  private Map<Integer, List<Integer>> parseResults(Iterable<String> in) {
+-    Map<Integer, List<Integer>> map =
+-      new HashMap<Integer, List<Integer>>();
+-    for (String line : in) {
+-      String[] tokens = line.trim().split("\\s*");
+-      final int id = Integer.parseInt(tokens[0]);
+-      if (map.get(id) == null) {
+-        map.put(id, new ArrayList<Integer>());
+-      }
+-      final int size = tokens.length;
+-      for (int ndx = 1; ndx < size; ++ndx) {
+-        map.get(id).add(Integer.parseInt(tokens[ndx]));
+-      }
+-    }
+-    return map;
++  public void testSuperstepOne() throws Exception {
++    // see if the vertex interprets its incoming
++    // messages properly to verify the algorithm
++    SimpleTriangleClosingVertex vertex =
++      new SimpleTriangleClosingVertex();
++    vertex.initialize(null, null, null, null);
++    MockUtils.MockedEnvironment<IntWritable,
++      SimpleTriangleClosingVertex.IntArrayListWritable,
++      NullWritable, IntWritable>
++      env = MockUtils.<IntWritable,
++      SimpleTriangleClosingVertex.IntArrayListWritable,
++      NullWritable, IntWritable> prepareVertex(
++        vertex, 1L, new IntWritable(1), null, false);
++      // superstep 1: can the vertex process these correctly?
++      vertex.compute(Lists.<IntWritable>newArrayList(
++        new IntWritable(7),
++        new IntWritable(3),
++        new IntWritable(4),
++        new IntWritable(7),
++        new IntWritable(4),
++        new IntWritable(2),
++        new IntWritable(4)));
++      final String pairCheck = "[4, 7]";
++      assertEquals(pairCheck, vertex.getValue().toString());
+   }
+-}
++ }

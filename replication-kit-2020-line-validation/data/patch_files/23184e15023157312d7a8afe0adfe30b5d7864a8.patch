@@ -1,0 +1,77 @@
+From 23184e15023157312d7a8afe0adfe30b5d7864a8 Mon Sep 17 00:00:00 2001
+From: Hassan Eslami <heslami@fb.com>
+Date: Tue, 28 Jun 2016 18:43:18 -0700
+Subject: [PATCH] GIRAPH-1081: Fix a bug in internal out-of-core infra:
+ multithreaded accesses to buffers
+
+Summary: The multi-threaded accesses to raw data buffers in `DiskBackedDataStore` is overlooked, violating assumption on properly partitioning data to different IO threads.
+
+Test Plan: mvn clean verify
+
+Reviewers: dionysis.logothetis, sergey.edunov, maja.kabiljo
+
+Reviewed By: maja.kabiljo
+
+Differential Revision: https://reviews.facebook.net/D60147
+---
+ .../apache/giraph/ooc/data/DiskBackedDataStore.java   | 11 ++++++++---
+ .../apache/giraph/ooc/data/MetaPartitionManager.java  |  6 +++---
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/giraph-core/src/main/java/org/apache/giraph/ooc/data/DiskBackedDataStore.java b/giraph-core/src/main/java/org/apache/giraph/ooc/data/DiskBackedDataStore.java
+index 72654100e..e9ab1670b 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/ooc/data/DiskBackedDataStore.java
++++ b/giraph-core/src/main/java/org/apache/giraph/ooc/data/DiskBackedDataStore.java
+@@ -354,16 +354,21 @@ protected long offloadBuffersProxy(int partitionId, DataIndex index)
+    * offloaded to disk), and sees if any of them has enough raw data buffer in
+    * memory. If so, puts that partition in a list to return.
+    *
++   * @param ioThreadId Id of the IO thread who would offload the buffers
+    * @return Set of partition ids of all partition raw buffers where the
+    *         aggregate size of buffers are large enough and it is worth flushing
+    *         those buffers to disk
+    */
+-  public Set<Integer> getCandidateBuffersToOffload() {
++  public Set<Integer> getCandidateBuffersToOffload(int ioThreadId) {
+     Set<Integer> result = new HashSet<>();
+     for (Map.Entry<Integer, Pair<Integer, List<T>>> entry :
+         dataBuffers.entrySet()) {
+-      if (entry.getValue().getLeft() > minBufferSizeToOffload) {
+-        result.add(entry.getKey());
++      int partitionId = entry.getKey();
++      long aggregateBufferSize = entry.getValue().getLeft();
++      if (aggregateBufferSize > minBufferSizeToOffload &&
++          oocEngine.getMetaPartitionManager().getOwnerThreadId(partitionId) ==
++              ioThreadId) {
++        result.add(partitionId);
+       }
+     }
+     return result;
+diff --git a/giraph-core/src/main/java/org/apache/giraph/ooc/data/MetaPartitionManager.java b/giraph-core/src/main/java/org/apache/giraph/ooc/data/MetaPartitionManager.java
+index 64e3aed78..30758298a 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/ooc/data/MetaPartitionManager.java
++++ b/giraph-core/src/main/java/org/apache/giraph/ooc/data/MetaPartitionManager.java
+@@ -332,12 +332,12 @@ public Integer getOffloadPartitionBufferId(int threadId) {
+             (DiskBackedPartitionStore<?, ?, ?>) (oocEngine.getServerData()
+                 .getPartitionStore());
+         perThreadVertexEdgeBuffers.get(threadId)
+-            .addAll(partitionStore.getCandidateBuffersToOffload());
++            .addAll(partitionStore.getCandidateBuffersToOffload(threadId));
+         DiskBackedEdgeStore<?, ?, ?> edgeStore =
+             (DiskBackedEdgeStore<?, ?, ?>) (oocEngine.getServerData())
+                 .getEdgeStore();
+         perThreadVertexEdgeBuffers.get(threadId)
+-            .addAll(edgeStore.getCandidateBuffersToOffload());
++            .addAll(edgeStore.getCandidateBuffersToOffload(threadId));
+         partitionId = popFromSet(perThreadVertexEdgeBuffers.get(threadId));
+       }
+       return partitionId;
+@@ -361,7 +361,7 @@ public Integer getOffloadMessageBufferId(int threadId) {
+                 .getIncomingMessageStore());
+         if (messageStore != null) {
+           perThreadMessageBuffers.get(threadId)
+-              .addAll(messageStore.getCandidateBuffersToOffload());
++              .addAll(messageStore.getCandidateBuffersToOffload(threadId));
+           partitionId = popFromSet(perThreadMessageBuffers.get(threadId));
+         }
+       }

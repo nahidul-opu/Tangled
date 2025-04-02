@@ -1,0 +1,302 @@
+From 1e19372380cc2e3e420b31916e6c4bc3eebc8144 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 20 Aug 2012 21:58:12 +0000
+Subject: [PATCH] FIX: SimpleDateFormat is not thread safe (IVY-1373) (merged
+ from trunk)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/branches/2.3.x@1375271 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/org/apache/ivy/Ivy.java              |  6 ++-
+ src/java/org/apache/ivy/ant/IvyDeliver.java   |  3 +-
+ src/java/org/apache/ivy/ant/IvyPublish.java   |  5 ++-
+ .../parser/xml/XmlModuleDescriptorParser.java |  3 +-
+ .../xml/XmlModuleDescriptorUpdater.java       |  4 +-
+ .../parser/xml/XmlModuleDescriptorWriter.java |  4 +-
+ .../ivy/plugins/report/XmlReportParser.java   |  4 +-
+ .../ivy/plugins/report/XmlReportWriter.java   |  6 +--
+ src/java/org/apache/ivy/util/DateUtil.java    | 42 +++++++++++++++++++
+ 10 files changed, 64 insertions(+), 14 deletions(-)
+ create mode 100644 src/java/org/apache/ivy/util/DateUtil.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index eb7d259fc..8f7546081 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -129,6 +129,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	
+    2.3.x
+ =====================================
++- FIX: SimpleDateFormat is not thread safe (IVY-1373)
+ - FIX: Maven 'hk2-jar' packaging is now supported (IVY-1357)
+ - FIX: Maven 'orbit' and 'pear' packaging is now supported (IVY-899)
+ - FIX: Memory leak and infinite loop in ModuleId.java (IVY-1362)
+diff --git a/src/java/org/apache/ivy/Ivy.java b/src/java/org/apache/ivy/Ivy.java
+index 23d0ec493..49d31978e 100644
+--- a/src/java/org/apache/ivy/Ivy.java
++++ b/src/java/org/apache/ivy/Ivy.java
+@@ -65,6 +65,7 @@
+ import org.apache.ivy.plugins.resolver.BasicResolver;
+ import org.apache.ivy.plugins.resolver.DependencyResolver;
+ import org.apache.ivy.plugins.trigger.Trigger;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.ivy.util.HostUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.MessageLoggerEngine;
+@@ -130,7 +131,10 @@ public static interface IvyCallback {
+     
+     private static final int KILO = 1024;
+ 
+-    public static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyyMMddHHmmss");
++    /**
++     * @deprecated Use the {@link DateUtil} utility class instead.
++     */
++    public static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat(DateUtil.DATE_FORMAT_PATTERN);
+     
+     /**
+      * the current version of Ivy, as displayed on the console when 
+diff --git a/src/java/org/apache/ivy/ant/IvyDeliver.java b/src/java/org/apache/ivy/ant/IvyDeliver.java
+index ae6ae6e9e..019f7b708 100644
+--- a/src/java/org/apache/ivy/ant/IvyDeliver.java
++++ b/src/java/org/apache/ivy/ant/IvyDeliver.java
+@@ -28,6 +28,7 @@
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.module.status.StatusManager;
+ import org.apache.ivy.core.settings.IvySettings;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.taskdefs.CallTarget;
+@@ -375,7 +376,7 @@ public void doExecute() throws BuildException {
+         Date pubdate = getPubDate(this.pubdate, new Date());
+         if (pubRevision == null) {
+             if (revision.startsWith("working@")) {
+-                pubRevision = Ivy.DATE_FORMAT.format(pubdate);
++                pubRevision = DateUtil.format(pubdate);
+             } else {
+                 pubRevision = revision;
+             }
+diff --git a/src/java/org/apache/ivy/ant/IvyPublish.java b/src/java/org/apache/ivy/ant/IvyPublish.java
+index 057da857b..8c94d43bc 100644
+--- a/src/java/org/apache/ivy/ant/IvyPublish.java
++++ b/src/java/org/apache/ivy/ant/IvyPublish.java
+@@ -33,6 +33,7 @@
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.publish.PublishOptions;
+ import org.apache.ivy.core.settings.IvySettings;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.DynamicAttribute;
+ 
+@@ -271,7 +272,7 @@ public void doExecute() throws BuildException {
+         Date pubdate = getPubDate(this.pubdate, new Date());
+         if (pubRevision == null) {
+             if (revision.startsWith("working@")) {
+-                pubRevision = Ivy.DATE_FORMAT.format(pubdate);
++                pubRevision = DateUtil.format(pubdate);
+             } else {
+                 pubRevision = revision;
+             }
+@@ -295,7 +296,7 @@ public void doExecute() throws BuildException {
+                 deliver.setDeliveryList(deliveryList);
+                 deliver.setModule(getModule());
+                 deliver.setOrganisation(getOrganisation());
+-                deliver.setPubdate(Ivy.DATE_FORMAT.format(pubdate));
++                deliver.setPubdate(DateUtil.format(pubdate));
+                 deliver.setPubrevision(getPubrevision());
+                 deliver.setPubbranch(getPubbranch());
+                 deliver.setRevision(getRevision());
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index bf3a8158d..44f6eb12e 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -71,6 +71,7 @@
+ import org.apache.ivy.plugins.repository.url.URLResource;
+ import org.apache.ivy.plugins.resolver.DependencyResolver;
+ import org.apache.ivy.plugins.resolver.URLResolver;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.XMLHelper;
+ import org.apache.ivy.util.extendable.ExtendableItemHelper;
+@@ -1008,7 +1009,7 @@ protected void infoStarted(Attributes attributes) {
+             String pubDate = settings.substitute(attributes.getValue("publication"));
+             if (pubDate != null && pubDate.length() > 0) {
+                 try {
+-                    getMd().setPublicationDate(Ivy.DATE_FORMAT.parse(pubDate));
++                    getMd().setPublicationDate(DateUtil.parse(pubDate));
+                 } catch (ParseException e) {
+                     addError("invalid publication date format: " + pubDate);
+                     getMd().setPublicationDate(getDefaultPubDate());
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index f4db2764c..bec7ea745 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -41,7 +41,6 @@
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+ 
+-import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.module.descriptor.Configuration;
+ import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+@@ -57,6 +56,7 @@
+ import org.apache.ivy.plugins.repository.file.FileResource;
+ import org.apache.ivy.plugins.repository.url.URLResource;
+ import org.apache.ivy.util.Checks;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.XMLHelper;
+ import org.apache.ivy.util.extendable.ExtendableItemHelper;
+@@ -755,7 +755,7 @@ private void infoStarted(Attributes attributes) {
+             }
+             write(" status=\"" + XMLHelper.escape(status) + "\"");
+             if (pubdate != null) {
+-                write(" publication=\"" + Ivy.DATE_FORMAT.format(pubdate) + "\"");
++                write(" publication=\"" + DateUtil.format(pubdate) + "\"");
+             } else if (attributes.getValue("publication") != null) {
+                 write(" publication=\""
+                         + substitute(settings, attributes.getValue("publication")) + "\"");
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+index 691615cb1..4418e3e4d 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+@@ -27,7 +27,6 @@
+ import java.util.Map;
+ import java.util.Map.Entry;
+ 
+-import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.IvyPatternHelper;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.Configuration;
+@@ -43,6 +42,7 @@
+ import org.apache.ivy.core.module.descriptor.OverrideDependencyDescriptorMediator;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.plugins.matcher.MapMatcher;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.StringUtils;
+ import org.apache.ivy.util.XMLHelper;
+@@ -450,7 +450,7 @@ private static void printInfoTag(ModuleDescriptor md, PrintWriter out) {
+         }
+         out.println("\t\tstatus=\"" + XMLHelper.escape(md.getStatus()) + "\"");
+         out.println("\t\tpublication=\""
+-                + Ivy.DATE_FORMAT.format(md.getResolvedPublicationDate()) + "\"");
++                + DateUtil.format(md.getResolvedPublicationDate()) + "\"");
+         if (md.isDefault()) {
+             out.println("\t\tdefault=\"true\"");
+         }
+diff --git a/src/java/org/apache/ivy/plugins/report/XmlReportParser.java b/src/java/org/apache/ivy/plugins/report/XmlReportParser.java
+index f4e26d766..43f34402f 100644
+--- a/src/java/org/apache/ivy/plugins/report/XmlReportParser.java
++++ b/src/java/org/apache/ivy/plugins/report/XmlReportParser.java
+@@ -31,7 +31,6 @@
+ import javax.xml.parsers.SAXParser;
+ import javax.xml.parsers.SAXParserFactory;
+ 
+-import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.cache.ArtifactOrigin;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+@@ -39,6 +38,7 @@
+ import org.apache.ivy.core.report.ArtifactDownloadReport;
+ import org.apache.ivy.core.report.DownloadStatus;
+ import org.apache.ivy.core.report.MetadataArtifactDownloadReport;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.ivy.util.extendable.ExtendableItemHelper;
+ import org.xml.sax.Attributes;
+ import org.xml.sax.SAXException;
+@@ -108,7 +108,7 @@ public void startElement(String uri, String localName, String qName,
+                         try {
+                             String pubDateAttr = attributes.getValue("pubdate");
+                             if (pubDateAttr != null) {
+-                                pubdate = Ivy.DATE_FORMAT.parse(pubDateAttr);
++                                pubdate = DateUtil.parse(pubDateAttr);
+                             }
+                             skip = false;
+                         } catch (ParseException e) {
+diff --git a/src/java/org/apache/ivy/plugins/report/XmlReportWriter.java b/src/java/org/apache/ivy/plugins/report/XmlReportWriter.java
+index 399fd0033..247677214 100644
+--- a/src/java/org/apache/ivy/plugins/report/XmlReportWriter.java
++++ b/src/java/org/apache/ivy/plugins/report/XmlReportWriter.java
+@@ -30,7 +30,6 @@
+ import java.util.Map;
+ import java.util.Map.Entry;
+ 
+-import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.cache.ArtifactOrigin;
+ import org.apache.ivy.core.module.descriptor.License;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+@@ -42,6 +41,7 @@
+ import org.apache.ivy.core.resolve.IvyNode;
+ import org.apache.ivy.core.resolve.IvyNodeCallers.Caller;
+ import org.apache.ivy.core.resolve.IvyNodeEviction.EvictionData;
++import org.apache.ivy.util.DateUtil;
+ import org.apache.ivy.util.StringUtils;
+ import org.apache.ivy.util.XMLHelper;
+ 
+@@ -85,7 +85,7 @@ public void output(
+         }
+         out.println("\t\tconf=\"" + XMLHelper.escape(report.getConfiguration()) + "\"");
+         out.println("\t\tconfs=\"" + XMLHelper.escape(StringUtils.join(confs, ", ")) + "\"");
+-        out.println("\t\tdate=\"" + Ivy.DATE_FORMAT.format(report.getDate()) + "\"/>");
++        out.println("\t\tdate=\"" + DateUtil.format(report.getDate()) + "\"/>");
+ 
+         out.println("\t<dependencies>");
+ 
+@@ -120,7 +120,7 @@ private void ouputRevision(ConfigurationResolveReport report, PrintWriter out,
+             details.append(" status=\"");
+             details.append(XMLHelper.escape(dep.getDescriptor().getStatus()));
+             details.append("\" pubdate=\"");
+-            details.append(Ivy.DATE_FORMAT.format(new Date(dep.getPublication())));
++            details.append(DateUtil.format(new Date(dep.getPublication())));
+             details.append("\" resolver=\"");
+             details.append(XMLHelper.escape(
+                 dep.getModuleRevision().getResolver().getName()));
+diff --git a/src/java/org/apache/ivy/util/DateUtil.java b/src/java/org/apache/ivy/util/DateUtil.java
+new file mode 100644
+index 000000000..96dc8fd05
+--- /dev/null
++++ b/src/java/org/apache/ivy/util/DateUtil.java
+@@ -0,0 +1,42 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.util;
++
++import java.text.ParseException;
++import java.text.SimpleDateFormat;
++import java.util.Date;
++
++public class DateUtil {
++    
++    private DateUtil() {
++        //Utility class
++    }
++    
++    public static final String DATE_FORMAT_PATTERN = "yyyyMMddHHmmss";
++    
++    public static String format(Date date) {
++        SimpleDateFormat format = new SimpleDateFormat(DATE_FORMAT_PATTERN);
++        return format.format(date);
++    }
++    
++    public static Date parse(String date) throws ParseException {
++        SimpleDateFormat format = new SimpleDateFormat(DATE_FORMAT_PATTERN);
++        return format.parse(date);
++    }
++
++}

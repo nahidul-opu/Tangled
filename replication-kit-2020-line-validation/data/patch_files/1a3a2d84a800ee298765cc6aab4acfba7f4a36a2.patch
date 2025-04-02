@@ -1,0 +1,107 @@
+From 1a3a2d84a800ee298765cc6aab4acfba7f4a36a2 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 21 Jul 2005 13:24:44 +0000
+Subject: [PATCH] FIX: trying to resolve latest with no revision in pattern
+ caused a StackOverflowError (IVY-56)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484012 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                       |  1 +
+ src/java/fr/jayasoft/ivy/IvyNode.java             |  9 ++++++++-
+ test/java/fr/jayasoft/ivy/ResolveTest.java        |  9 +++++++++
+ test/java/fr/jayasoft/ivy/ivy-56.xml              |  6 ++++++
+ test/repositories/bugIVY-56/ivyconf.xml           | 10 ++++++++++
+ test/repositories/bugIVY-56/mymodule/mymodule.jar |  1 +
+ 6 files changed, 35 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ivy-56.xml
+ create mode 100644 test/repositories/bugIVY-56/ivyconf.xml
+ create mode 100644 test/repositories/bugIVY-56/mymodule/mymodule.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2965a7026..dec9bd147 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -14,6 +14,7 @@
+ - new type filtering in cachepath task
+ - new cachefileset task: builds an ant fileset of artifacts in cache
+ - publish task now uses srcivypattern for ivy files finding and for delivery
++- FIX: trying to resolve latest with no revision in pattern caused a StackOverflowError (IVY-56)
+ - FIX: now handle transitive eviction (IVY-51)
+ - FIX: resolve now store resolved file id in ivy variables, so that multiple resolve calls
+   can be followed by multiple retrieve, each retrieve will use the last resolve info (IVY-49)
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index a91d5fc4f..dede58a28 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -447,7 +447,14 @@ public boolean loadData(String conf) {
+                     Message.debug("\tusing "+resolver+" to resolve "+getId());
+                     _module = resolver.getDependency(_dd, _data);
+                     if (_module != null) {
+-                        if (!getId().isExactRevision()) { 
++                        if (!getId().isExactRevision()) {
++                            // IVY-56: check if revision has actually been resolved
++                            if (!_module.getId().isExactRevision()) {
++                                Message.error("impossible to resolve latest revision for "+getId()+": check your configuration and make sure revision is part of your pattern");
++                                _problem = new RuntimeException("impossible to resolve latest revision");
++                                _data.getReport().addDependency(this);
++                                return false;
++                            }
+                             IvyNode resolved = _data.getNode(_module.getId());
+                             if (resolved != null) {
+                                 // exact revision has already been resolved
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 8a4083953..34a49b299 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -682,6 +682,15 @@ public void startElement(String uri,String localName,String qName,org.xml.sax.At
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.2", "mod1.2", "jar", "jar").exists());
+     }
+     
++    public void testIVY56() throws Exception {
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/bugIVY-56/ivyconf.xml"));
++        
++        ResolveReport report = ivy.resolve(ResolveTest.class.getResource("ivy-56.xml"),
++                null, new String[] {"default"}, _cache, null, true);
++        assertNotNull(report);
++    }
++    
+     public void testCircular() throws Exception {
+         // mod6.3 depends on mod6.2, which itself depends on mod6.3 !
+         ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod6.3/ivy-1.0.xml").toURL(),
+diff --git a/test/java/fr/jayasoft/ivy/ivy-56.xml b/test/java/fr/jayasoft/ivy/ivy-56.xml
+new file mode 100644
+index 000000000..ccafdaf08
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ivy-56.xml
+@@ -0,0 +1,6 @@
++<ivy-module version="1.0">
++    <info organisation="jayasoft" module="IVY-56" revision="1.0"/>
++    <dependencies>
++		<dependency name="mymodule" rev="latest.integration" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/bugIVY-56/ivyconf.xml b/test/repositories/bugIVY-56/ivyconf.xml
+new file mode 100644
+index 000000000..e214a9b6b
+--- /dev/null
++++ b/test/repositories/bugIVY-56/ivyconf.xml
+@@ -0,0 +1,10 @@
++<ivyconf>
++   <conf defaultCache="${ivy.conf.dir}/cache" 
++	 defaultResolver="default" />
++   <resolvers>
++        <filesystem name="default"> 
++          <artifact pattern="${ivy.conf.dir}/[module]/[artifact].[ext]" />
++          <ivy pattern="${ivy.conf.dir}/[module]/ivy.xml" /> 
++        </filesystem>
++    </resolvers> 
++</ivyconf>
+diff --git a/test/repositories/bugIVY-56/mymodule/mymodule.jar b/test/repositories/bugIVY-56/mymodule/mymodule.jar
+new file mode 100644
+index 000000000..0519ecba6
+--- /dev/null
++++ b/test/repositories/bugIVY-56/mymodule/mymodule.jar
+@@ -0,0 +1 @@
++ 
+\ No newline at end of file

@@ -1,0 +1,93 @@
+From 6f5090272f1f4129db2adc2d14b07150152224b3 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 25 Sep 2006 14:24:17 +0000
+Subject: [PATCH] FIX: Classloader problem with ant (IVY-311)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484539 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                               |  1 +
+ src/java/fr/jayasoft/ivy/ant/IvyTask.java | 35 ++++++++++++++++-------
+ 2 files changed, 25 insertions(+), 11 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d62a00eb4..deb64a05d 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -9,6 +9,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ =====================================
+ - FIX: m2compatible flag is ignored for display of failed artifact searches (IVY-303)
+ - FIX: AntCallTriggerTest and AntBuildTriggerTest fail when run from ivy build.xml (IVY-310)
++- FIX: Classloader problem with ant (IVY-311)
+ 
+    version 1.4-RC1 - 2006-09-17
+ =================================
+diff --git a/src/java/fr/jayasoft/ivy/ant/IvyTask.java b/src/java/fr/jayasoft/ivy/ant/IvyTask.java
+index e81117017..ab9b7d23f 100644
+--- a/src/java/fr/jayasoft/ivy/ant/IvyTask.java
++++ b/src/java/fr/jayasoft/ivy/ant/IvyTask.java
+@@ -9,11 +9,11 @@
+ import java.text.SimpleDateFormat;
+ import java.util.Arrays;
+ import java.util.Date;
++import java.util.HashMap;
+ import java.util.HashSet;
++import java.util.Map;
+ 
+-import org.apache.tools.ant.BuildEvent;
+ import org.apache.tools.ant.BuildException;
+-import org.apache.tools.ant.BuildListener;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.Task;
+ 
+@@ -49,21 +49,22 @@ public void setValidate(boolean validate) {
+     
+     protected Ivy getIvyInstance() {
+         ensureMessageInitialised();
+-        Object reference = getProject().getReference("ivy.instance");
+-        if (reference == null) {
++        Object ref = getProject().getReference("ivy.instances");
++        if (ref != null && !(ref instanceof Map)) {
++            throw new BuildException("ivy problem with ant: ivy.instances reference is not a Map. Please do not sett ivy.instances reference in your ant project. current reference: "+ref+" class="+ref.getClass()+" classloader="+ref.getClass().getClassLoader());
++        }
++        Map instances = (Map) ref;
++        if (instances == null || !instances.containsKey(Ivy.class)) {
+             Message.verbose("no ivy instance found: auto configuring ivy");
+             IvyConfigure configure = new IvyConfigure();
+             configure.setProject(getProject());
+             configure.execute();
+-            reference = getProject().getReference("ivy.instance");
+-            if (reference == null) {
+-                throw new BuildException("ivy internal problem: impossible to get ivy instance !");
++            instances = (Map) getProject().getReference("ivy.instances");
++            if (instances == null || !instances.containsKey(Ivy.class)) {
++                throw new BuildException("ivy internal problem: impossible to get ivy instance after configure... maybe a classloader problem");
+             }
+         } 
+-        if (! (reference instanceof Ivy)) {
+-            throw new BuildException("ivy internal problem: bad ivy instance class: "+reference.getClass());
+-        }
+-        return (Ivy)reference;
++        return (Ivy)instances.get(Ivy.class);
+     }
+ 
+     /** 
+@@ -78,7 +79,19 @@ protected void ensureMessageInitialised() {
+ 
+     }
+     protected void setIvyInstance(Ivy ivy) {
++    	// this reference is not used anymore, what is used is the instances map below
+         getProject().addReference("ivy.instance", ivy);
++        
++        if (ivy != null) {
++        	Message.debug("setting ivy.instance on "+getProject()+": "+ivy+" class="+ivy.getClass().getName()+" classloader="+ivy.getClass().getClassLoader());
++        	// we keep a map of ivy instances per Ivy class, in case of multiple classloaders
++        	Map instances = (Map) getProject().getReference("ivy.instances");
++        	if (instances == null) {
++        		instances = new HashMap();
++        		getProject().addReference("ivy.instances", instances);
++        	}
++        	instances.put(ivy.getClass(), ivy);
++        }
+     }
+     
+     protected void setResolved(ResolveReport report, boolean keep) {

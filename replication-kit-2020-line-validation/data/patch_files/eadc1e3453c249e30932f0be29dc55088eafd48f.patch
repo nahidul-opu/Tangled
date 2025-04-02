@@ -1,0 +1,178 @@
+From eadc1e3453c249e30932f0be29dc55088eafd48f Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 10 Sep 2008 22:25:06 +0000
+Subject: [PATCH] FIX: ivy.cache.dir.${settingsRef} is set to default instead
+ of the defaultCacheDir from the ivysettings.xml after ivy:resolve (IVY-898)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@694036 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/ant/IvyAntSettings.java    |  4 +++
+ src/java/org/apache/ivy/ant/IvyConfigure.java |  7 +++++
+ .../apache/ivy/core/settings/IvySettings.java |  2 --
+ .../org/apache/ivy/ant/IvyConfigureTest.java  | 29 +++++++++++++++++++
+ .../ivy/ant/ivysettings-defaultCacheDir.xml   | 21 ++++++++++++++
+ .../ivy/ant/ivysettings-noDefaultCacheDir.xml | 21 ++++++++++++++
+ 7 files changed, 83 insertions(+), 2 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/ant/ivysettings-defaultCacheDir.xml
+ create mode 100644 test/java/org/apache/ivy/ant/ivysettings-noDefaultCacheDir.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index a4c47f075..c6109c65a 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -111,6 +111,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Add a memory cache for the module descriptor that are parsed from the cache (IVY-883)
+ - IMPROVEMENT: Improve performance (IVY-872)
+ 
++- FIX: ivy.cache.dir.${settingsRef} is set to default instead of the defaultCacheDir from the ivysettings.xml after ivy:resolve (IVY-898)
+ - FIX: Ivy ibiblio resolver chokes on variables while checking descriptor consistency (IVY-818)
+ - FIX: Enable consistent support of the configuration negation operator (IVY-894) (thanks to Patrick Woodworth)
+ - FIX: add variable expansion in extra attributes (IVY-798)
+diff --git a/src/java/org/apache/ivy/ant/IvyAntSettings.java b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+index e3df4c02a..12c539b46 100644
+--- a/src/java/org/apache/ivy/ant/IvyAntSettings.java
++++ b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+@@ -201,6 +201,10 @@ public void setFile(File file) {
+     public void setUrl(String confUrl) throws MalformedURLException {
+         this.url = new URL(confUrl);
+     }
++    
++    public void setUrl(URL url) {
++        this.url = url;
++    }
+ 
+     /*
+      * This is usually not necessary to define a reference in Ant, but it's the only
+diff --git a/src/java/org/apache/ivy/ant/IvyConfigure.java b/src/java/org/apache/ivy/ant/IvyConfigure.java
+index 542440f39..d7de59e16 100644
+--- a/src/java/org/apache/ivy/ant/IvyConfigure.java
++++ b/src/java/org/apache/ivy/ant/IvyConfigure.java
+@@ -89,6 +89,13 @@ public URL getUrl() {
+     public void setUrl(String url) throws MalformedURLException {
+         settings.setUrl(url);
+     }
++    
++    public void setUrl(URL url) {
++        if (url == null) {
++            throw new NullPointerException("Cannot set a null URL");
++        }
++        settings.setUrl(url);
++    }
+ 
+     public String getRealm() {
+         return settings.getRealm();
+diff --git a/src/java/org/apache/ivy/core/settings/IvySettings.java b/src/java/org/apache/ivy/core/settings/IvySettings.java
+index 53a791d37..bb5982929 100644
+--- a/src/java/org/apache/ivy/core/settings/IvySettings.java
++++ b/src/java/org/apache/ivy/core/settings/IvySettings.java
+@@ -371,7 +371,6 @@ public void load(File settingsFile) throws ParseException, IOException {
+         } else {
+             getDefaultIvyUserDir();
+         }
+-        getDefaultCache();
+ 
+         loadDefaultProperties();
+         try {
+@@ -397,7 +396,6 @@ public void load(URL settingsURL) throws ParseException, IOException {
+         } else {
+             getDefaultIvyUserDir();
+         }
+-        getDefaultCache();
+ 
+         loadDefaultProperties();
+         new XmlSettingsParser(this).parse(settingsURL);
+diff --git a/test/java/org/apache/ivy/ant/IvyConfigureTest.java b/test/java/org/apache/ivy/ant/IvyConfigureTest.java
+index 7909fd27a..a07009165 100644
+--- a/test/java/org/apache/ivy/ant/IvyConfigureTest.java
++++ b/test/java/org/apache/ivy/ant/IvyConfigureTest.java
+@@ -54,6 +54,35 @@ public void doExecute() throws BuildException {
+         task.setSettingsRef(ref);
+         return task.getIvyInstance();
+     }
++    
++    public void testDefaultCacheDir() {
++        // test with an URL
++        configure.setUrl(getClass().getResource("ivysettings-defaultCacheDir.xml"));
++        configure.setSettingsId("test");
++        configure.execute();
++        
++        assertEquals(new File("mycache").getAbsolutePath(), project.getProperty("ivy.cache.dir.test"));
++        
++        // test with a File
++        project = new Project();
++        configure = new IvyConfigure();
++        configure.setProject(project);
++        configure.setFile(new File("test/java/org/apache/ivy/ant/ivysettings-defaultCacheDir.xml"));
++        configure.setSettingsId("test2");
++        configure.execute();
++
++        assertEquals(new File("mycache").getAbsolutePath(), project.getProperty("ivy.cache.dir.test2"));
++        
++        // test if no defaultCacheDir is specified
++        project = new Project();
++        configure = new IvyConfigure();
++        configure.setProject(project);
++        configure.setFile(new File("test/java/org/apache/ivy/ant/ivysettings-noDefaultCacheDir.xml"));
++        configure.setSettingsId("test3");
++        configure.execute();
++
++        assertNotNull(project.getProperty("ivy.cache.dir.test3"));
++    }
+ 
+     public void testDefault() throws Exception {
+         // by default settings look in the current directory for an ivysettings.xml file...
+diff --git a/test/java/org/apache/ivy/ant/ivysettings-defaultCacheDir.xml b/test/java/org/apache/ivy/ant/ivysettings-defaultCacheDir.xml
+new file mode 100644
+index 000000000..3304820bf
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/ivysettings-defaultCacheDir.xml
+@@ -0,0 +1,21 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<caches defaultCacheDir="${ivy.basedir}/mycache"  />
++</ivysettings>
+diff --git a/test/java/org/apache/ivy/ant/ivysettings-noDefaultCacheDir.xml b/test/java/org/apache/ivy/ant/ivysettings-noDefaultCacheDir.xml
+new file mode 100644
+index 000000000..3e440c38d
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/ivysettings-noDefaultCacheDir.xml
+@@ -0,0 +1,21 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<caches />
++</ivysettings>

@@ -1,0 +1,194 @@
+From 4f0e9a0acb4a7f647a513bff0fff11b85ec2109b Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 9 Jul 2008 07:45:23 +0000
+Subject: [PATCH] FIX: Referenced resolver not found in macro (IVY-860)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@675108 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/settings/XmlSettingsParser.java  |  5 ++-
+ .../org/apache/ivy/util/Configurator.java     | 27 ++++++++++++++--
+ .../core/settings/XmlSettingsParserTest.java  | 22 +++++++++++++
+ .../core/settings/ivysettings-macro+ref2.xml  | 32 +++++++++++++++++++
+ 5 files changed, 82 insertions(+), 5 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/settings/ivysettings-macro+ref2.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 356e889f8..8b7f120b2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -95,6 +95,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: Referenced resolver not found in macro (IVY-860)
+ - FIX: Ivy files are not retrieved when using useOrigin=true (IVY-713)
+ - FIX: NPE in Ivy:install task if the repository cache dir has been cleared (IVY-843)
+ - FIX: Maven version ranges with ( ) are not supported (IVY-678) (thanks to Michael Kebe)
+diff --git a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+index 4c27810c3..afe301d7b 100644
+--- a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
++++ b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+@@ -471,8 +471,7 @@ private void inConfiguratorStarted(String qName, Map attributes) {
+             String name = (String) attributes.get("name");
+             if (name == null) {
+                 attributes.put("name", "@{name}");
+-            } else if (configurator.isTopLevelMacroRecord()
+-                    && name.indexOf("@{name}") != -1) {
++            } else if (name.indexOf("@{name}") != -1) {
+                 attributes.put("name", name);
+             } else {
+                 attributes.put("name", "@{name}-" + name);
+@@ -486,7 +485,7 @@ private void inConfiguratorStarted(String qName, Map attributes) {
+             }
+             String name = (String) attributes.get("ref");
+             Object child = null;
+-            if ("resolvers".equals(currentConfiguratorTag)) {
++            if ("resolvers".equals(currentConfiguratorTag) || "resolver".equals(qName)) {
+                 child = ivy.getResolver(name);
+                 if (child == null) {
+                     throw new IllegalArgumentException("unknown resolver " + name
+diff --git a/src/java/org/apache/ivy/util/Configurator.java b/src/java/org/apache/ivy/util/Configurator.java
+index 6d752885d..50c23a630 100644
+--- a/src/java/org/apache/ivy/util/Configurator.java
++++ b/src/java/org/apache/ivy/util/Configurator.java
+@@ -142,6 +142,8 @@ public static class MacroRecord {
+ 
+         private List children = new ArrayList();
+ 
++        private Object object;
++
+         public MacroRecord(String name) {
+             this.name = name;
+         }
+@@ -159,6 +161,12 @@ public MacroRecord recordChild(String name) {
+             children.add(child);
+             return child;
+         }
++        
++        public MacroRecord recordChild(String name, Object object) {
++            MacroRecord child = recordChild(name);
++            child.object = object;
++            return child;
++        }
+ 
+         public Map getAttributes() {
+             return attributes;
+@@ -167,6 +175,10 @@ public Map getAttributes() {
+         public List getChildren() {
+             return children;
+         }
++
++        public Object getObject() {
++            return object;
++        }
+     }
+ 
+     public static class MacroDef {
+@@ -204,6 +216,12 @@ public Object play(Configurator conf, Map attValues, Map macroRecords) {
+ 
+         private Object play(Configurator conf, MacroRecord macroRecord, Map attValues,
+                 Map childrenRecords) {
++            if (macroRecord.getObject() != null) {
++                // this is a recorded reference, we can add the referenced object directly
++                conf.addChild(macroRecord.getName(), macroRecord.getObject());
++                conf.endCreateChild();
++                return macroRecord.getObject();
++            }
+             conf.startCreateChild(macroRecord.getName());
+             Map attributes = macroRecord.getAttributes();
+             for (Iterator iter = attributes.keySet().iterator(); iter.hasNext();) {
+@@ -541,8 +559,13 @@ public void addChild(String name, Object child) {
+     private Object addChild(ObjectDescriptor parentOD, Class childClass, String name, Object child)
+             throws InstantiationException, IllegalAccessException, InvocationTargetException {
+         Object parent = parentOD.getObject();
+-        Method addChild;
+-        addChild = parentOD.getAddMethod(childClass);
++        if (parent instanceof MacroRecord) {
++            MacroRecord record = (MacroRecord) parent;
++            MacroRecord recordChild = record.recordChild(name, child);
++            setCurrent(recordChild, name);
++            return recordChild;
++        }
++        Method addChild = parentOD.getAddMethod(childClass);
+         if (addChild != null) {
+             if (child == null) {
+                 child = childClass.newInstance();
+diff --git a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+index aa910d03d..50fa89a52 100644
+--- a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
++++ b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+@@ -41,6 +41,7 @@
+ import org.apache.ivy.plugins.resolver.ChainResolver;
+ import org.apache.ivy.plugins.resolver.DependencyResolver;
+ import org.apache.ivy.plugins.resolver.FileSystemResolver;
++import org.apache.ivy.plugins.resolver.IBiblioResolver;
+ import org.apache.ivy.plugins.resolver.MockResolver;
+ import org.apache.ivy.plugins.version.ChainVersionMatcher;
+ import org.apache.ivy.plugins.version.MockVersionMatcher;
+@@ -383,6 +384,27 @@ public void testMacroAndRef() throws Exception {
+         assertTrue(shared instanceof FileSystemResolver);
+     }
+ 
++    public void testMacroAndRef2() throws Exception {
++        // test case for IVY-860
++        IvySettings settings = new IvySettings();
++        XmlSettingsParser parser = new XmlSettingsParser(settings);
++        parser.parse(XmlSettingsParserTest.class.getResource("ivysettings-macro+ref2.xml"));
++
++        DependencyResolver macrores = settings.getResolver("macroresolver");
++        assertNotNull(macrores);
++        assertTrue(macrores instanceof ChainResolver);
++
++        DependencyResolver testResolver = settings.getResolver("test");
++        assertNotNull(testResolver);
++        assertTrue(testResolver instanceof IBiblioResolver);
++        
++        ChainResolver chain = (ChainResolver) macrores;
++        List subresolvers = chain.getResolvers();
++        assertNotNull(subresolvers);
++        assertEquals(1, subresolvers.size());
++        assertEquals(testResolver, subresolvers.get(0));
++    }
++
+     public void testInclude() throws Exception {
+         IvySettings settings = new IvySettings();
+         XmlSettingsParser parser = new XmlSettingsParser(settings);
+diff --git a/test/java/org/apache/ivy/core/settings/ivysettings-macro+ref2.xml b/test/java/org/apache/ivy/core/settings/ivysettings-macro+ref2.xml
+new file mode 100644
+index 000000000..67b05bf11
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/settings/ivysettings-macro+ref2.xml
+@@ -0,0 +1,32 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<resolvers>
++	   <ibiblio name="test"/>
++	</resolvers> 
++    <macrodef name="myresolver">
++        <attribute name="name"/>
++        <chain>
++            <resolver ref="test" />
++        </chain>
++    </macrodef>
++	<resolvers>
++	   <myresolver name="macroresolver"/>
++	</resolvers> 
++</ivysettings>

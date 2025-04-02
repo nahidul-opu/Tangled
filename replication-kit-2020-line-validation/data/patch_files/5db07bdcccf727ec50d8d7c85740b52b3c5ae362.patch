@@ -1,0 +1,842 @@
+From 5db07bdcccf727ec50d8d7c85740b52b3c5ae362 Mon Sep 17 00:00:00 2001
+From: Jean-Louis Boudart <jlboudart@apache.org>
+Date: Sun, 12 Jan 2014 16:53:40 +0000
+Subject: [PATCH] fix IVY-1457 XmlModuleDescriptorWritter doesn't support fully
+ extra infos elements
+
+ModuleDescriptor.getExtraInfo() is now deprecated as name of the tag was used as key. Tag name can't be used as key as extra info elements can be non unique.
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1557557 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../descriptor/DefaultModuleDescriptor.java   |  11 ++
+ .../module/descriptor/ExtraInfoHolder.java    |  73 +++++++++++
+ .../module/descriptor/ModuleDescriptor.java   |  11 ++
+ .../parser/xml/XmlModuleDescriptorParser.java |  27 ++++-
+ .../parser/xml/XmlModuleDescriptorWriter.java |  57 +++++++--
+ .../xml/XmlModuleDescriptorParserTest.java    |  55 +++++++++
+ .../xml/XmlModuleDescriptorWriterTest.java    |  28 +++++
+ .../parser/xml/test-extrainfo-nested.xml      | 113 ++++++++++++++++++
+ .../ivy/plugins/parser/xml/test-extrainfo.xml | 109 +++++++++++++++++
+ .../xml/test-write-extrainfo-nested.xml       |  81 +++++++++++++
+ .../parser/xml/test-write-extrainfo.xml       |  77 ++++++++++++
+ 11 files changed, 626 insertions(+), 16 deletions(-)
+ create mode 100644 src/java/org/apache/ivy/core/module/descriptor/ExtraInfoHolder.java
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo-nested.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo-nested.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo.xml
+
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+index 9103fa8f6..7e4228824 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+@@ -194,6 +194,7 @@ public static ModuleDescriptor transformInstance(ModuleDescriptor md, Namespace
+         nmd.lastModified = md.getLastModified();
+         nmd.extraAttributesNamespaces = md.getExtraAttributesNamespaces();
+         nmd.extraInfo = md.getExtraInfo();
++        nmd.extraInfos = md.getExtraInfos();
+         nmd.namespace = ns;
+ 
+         return nmd;
+@@ -256,6 +257,8 @@ public static ModuleDescriptor transformInstance(ModuleDescriptor md, Namespace
+ 
+     private Map/* <String,String> */extraInfo = new HashMap();
+ 
++    private List<ExtraInfoHolder> extraInfos = new ArrayList<ExtraInfoHolder>();
++
+     public DefaultModuleDescriptor(ModuleRevisionId id, String status, Date pubDate) {
+         this(id, status, pubDate, false);
+     }
+@@ -840,4 +843,12 @@ public void addExtraInfo(String infoKey, String value) {
+     public Map getExtraInfo() {
+         return extraInfo;
+     }
++
++    public List<ExtraInfoHolder> getExtraInfos() {
++        return extraInfos;
++    }
++
++    public void addExtraInfo(ExtraInfoHolder extraInfo) {
++        extraInfos.add(extraInfo);
++    }
+ }
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/ExtraInfoHolder.java b/src/java/org/apache/ivy/core/module/descriptor/ExtraInfoHolder.java
+new file mode 100644
+index 000000000..4c16b6707
+--- /dev/null
++++ b/src/java/org/apache/ivy/core/module/descriptor/ExtraInfoHolder.java
+@@ -0,0 +1,73 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.core.module.descriptor;
++
++import java.util.ArrayList;
++import java.util.LinkedHashMap;
++import java.util.List;
++import java.util.Map;
++
++public class ExtraInfoHolder {
++    
++    private String name;
++    private Map<String, String> attributes = new LinkedHashMap<String, String>();
++    private String content;
++    private List<ExtraInfoHolder> nestedExtraInfoHolder = new ArrayList<ExtraInfoHolder>();
++
++    public ExtraInfoHolder() {
++        
++    }
++    
++    public ExtraInfoHolder(String name, String content) {
++        this.name = name;
++        this.content = content;
++    }
++
++    public String getName() {
++        return name;
++    }
++
++    public void setName(String name) {
++        this.name = name;
++    }
++
++    public Map<String, String> getAttributes() {
++        return attributes;
++    }
++
++    public void setAttributes(Map<String, String> attributes) {
++        this.attributes = attributes;
++    }
++
++    public String getContent() {
++        return content;
++    }
++
++    public void setContent(String content) {
++        this.content = content;
++    }
++
++    public List<ExtraInfoHolder> getNestedExtraInfoHolder() {
++        return nestedExtraInfoHolder;
++    }
++
++    public void setNestedExtraInfoHolder(List<ExtraInfoHolder> nestedExtraInfoHolder) {
++        this.nestedExtraInfoHolder = nestedExtraInfoHolder;
++    }
++
++}
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java
+index 3b961f27b..3965b6e56 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/ModuleDescriptor.java
+@@ -21,8 +21,10 @@
+ import java.io.IOException;
+ import java.text.ParseException;
+ import java.util.Date;
++import java.util.List;
+ import java.util.Map;
+ 
++import org.apache.ivy.core.module.descriptor.ExtraInfoHolder;
+ import org.apache.ivy.core.module.id.ArtifactId;
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+@@ -263,5 +265,14 @@ public interface ModuleDescriptor
+      * The key is the name of the tag, the value is its content.
+      * @return
+      */
++    @Deprecated
+     Map/*<String,String>*/ getExtraInfo();
++    
++
++    /**
++     * Returns a list of extras infos (tag name, attributes and content).
++     * All the tags except the description are given.
++     * @return
++     */
++    List<ExtraInfoHolder> getExtraInfos();
+ }
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index 1a1f15ffe..434655393 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -26,7 +26,9 @@
+ import java.net.URL;
+ import java.text.ParseException;
+ import java.util.Arrays;
++import java.util.Deque;
+ import java.util.LinkedHashMap;
++import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.Map;
+@@ -47,6 +49,7 @@
+ import org.apache.ivy.core.module.descriptor.DependencyArtifactDescriptor;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.ExcludeRule;
++import org.apache.ivy.core.module.descriptor.ExtraInfoHolder;
+ import org.apache.ivy.core.module.descriptor.IncludeRule;
+ import org.apache.ivy.core.module.descriptor.License;
+ import org.apache.ivy.core.module.descriptor.MDArtifact;
+@@ -227,6 +230,7 @@ private State() {
+         private StringBuffer buffer;
+         private String descriptorVersion;
+         private String[] publicationsDefaultConf;
++        private Deque<ExtraInfoHolder> extraInfoStack = new LinkedList<ExtraInfoHolder>();
+         
+         public Parser(ModuleDescriptorParser parser, ParserSettings ivySettings) {
+             super(parser);
+@@ -313,9 +317,17 @@ public void startElement(String uri, String localName, String qName, Attributes
+                     // nothing to do, we don't store this
+                 } else if (state == State.INFO && "repository".equals(qName)) {
+                     // nothing to do, we don't store this
+-                } else if (state == State.INFO && isOtherNamespace(qName)) {
++                } else if (state == State.EXTRA_INFO || state == State.INFO
++                        && isOtherNamespace(qName)) {
+                     buffer = new StringBuffer();
+                     state = State.EXTRA_INFO;
++                    ExtraInfoHolder extraInfo = new ExtraInfoHolder();
++                    extraInfo.setName(qName);
++                    for (int i = 0; i < attributes.getLength(); i++) {
++                        extraInfo.getAttributes().put(attributes.getQName(i),
++                            attributes.getValue(i));
++                    }
++                    extraInfoStack.push(extraInfo);
+                 } else if ("configurations".equals(qName)) {
+                     configurationStarted(attributes);
+                 } else if ("publications".equals(qName)) {
+@@ -1194,9 +1206,18 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+                 buffer = null;
+                 state = State.INFO;
+             } else if (state == State.EXTRA_INFO) {
+-                getMd().addExtraInfo(qName, buffer == null ? "" : buffer.toString());
++                String content = buffer == null ? "" : buffer.toString();
+                 buffer = null;
+-                state = State.INFO;
++                getMd().addExtraInfo(qName, content);
++                ExtraInfoHolder extraInfo = extraInfoStack.pop();
++                extraInfo.setContent(content);
++                if (extraInfoStack.isEmpty()) {
++                    getMd().addExtraInfo(extraInfo);
++                    state = State.INFO;
++                } else {
++                    ExtraInfoHolder parentHolder = extraInfoStack.peek();
++                    parentHolder.getNestedExtraInfoHolder().add(extraInfo);
++                }
+             } else if (state == State.DESCRIPTION) {
+                 if (buffer.toString().endsWith("<" + qName + ">")) {
+                     buffer.deleteCharAt(buffer.length() - 1);
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+index 2513e0c24..ecc71bdab 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriter.java
+@@ -36,6 +36,7 @@
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptorMediator;
+ import org.apache.ivy.core.module.descriptor.ExcludeRule;
+ import org.apache.ivy.core.module.descriptor.ExtendsDescriptor;
++import org.apache.ivy.core.module.descriptor.ExtraInfoHolder;
+ import org.apache.ivy.core.module.descriptor.IncludeRule;
+ import org.apache.ivy.core.module.descriptor.License;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+@@ -507,19 +508,8 @@ private static void printInfoTag(ModuleDescriptor md, PrintWriter out) {
+                     out.println(" />");
+                 }
+             }
+-            for (Iterator it = md.getExtraInfo().entrySet().iterator(); it.hasNext();) {
+-                Map.Entry extraDescr = (Map.Entry) it.next();
+-                if (extraDescr.getValue() == null 
+-                        || ((String) extraDescr.getValue()).length() == 0) {
+-                    continue;
+-                }
+-                out.print("\t\t<");
+-                out.print(extraDescr.getKey());
+-                out.print(">");
+-                out.print(XMLHelper.escape((String) extraDescr.getValue()));
+-                out.print("</");
+-                out.print(extraDescr.getKey());
+-                out.println(">");
++            for (ExtraInfoHolder extraInfo : md.getExtraInfos()) {
++                printExtraInfoElement(out, extraInfo, 2);
+             }
+             out.println("\t</info>");
+         } else {
+@@ -527,9 +517,50 @@ private static void printInfoTag(ModuleDescriptor md, PrintWriter out) {
+         }
+ 
+     }
++    
++    private static void printExtraInfoElement(PrintWriter out, ExtraInfoHolder extraInfo, int indent) {
++        for (int i = 1; i <= indent; i++) {
++            out.print("\t");
++        }
++        out.print("<");
++        out.print(extraInfo.getName());
++        for (Entry<String, String> entry : extraInfo.getAttributes().entrySet()) {
++            out.print(" ");
++            out.print(entry.getKey());
++            out.print("=");
++            out.print("\"");
++            out.print(entry.getValue());
++            out.print("\"");
++        }
++        boolean requireClosingTag = false;
++        if (extraInfo.getContent() != null && extraInfo.getContent().trim().length() > 0) {
++            out.print(">");
++            out.print(XMLHelper.escape(extraInfo.getContent()));
++            requireClosingTag = true;
++        }
++        if (!extraInfo.getNestedExtraInfoHolder().isEmpty()) {
++            out.println(">");
++            for (ExtraInfoHolder nestedElement : extraInfo.getNestedExtraInfoHolder()) {
++                printExtraInfoElement(out, nestedElement, indent + 1);
++            }
++            requireClosingTag = true;
++            // prepare indentation for closing tag
++            for (int i = 1; i <= indent; i++) {
++                out.print("\t");
++            }
++        }
++        if (requireClosingTag) {
++            out.print("</");
++            out.print(extraInfo.getName());
++            out.println(">");
++        } else {
++            out.println("/>");
++        }
++    }
+ 
+     private static boolean requireInnerInfoElement(ModuleDescriptor md) {
+         return md.getExtraInfo().size() > 0 
++                || md.getExtraInfos().size() > 0
+                 || md.getHomePage() != null 
+                 || (md.getDescription() != null && md.getDescription().trim().length() > 0) 
+                 || md.getLicenses().length > 0
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+index b5d2cec05..96d3563b8 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+@@ -32,6 +32,7 @@
+ import org.apache.ivy.core.module.descriptor.DefaultDependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.ExcludeRule;
++import org.apache.ivy.core.module.descriptor.ExtraInfoHolder;
+ import org.apache.ivy.core.module.descriptor.License;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.descriptor.Configuration.Visibility;
+@@ -490,6 +491,60 @@ public void testFullNoValidation() throws Exception {
+         assertEquals("56576", md.getExtraInfo().get("e:someExtra"));
+     }
+     
++    public void testExtraInfos() throws Exception {
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(settings,
++            getClass().getResource("test-extrainfo.xml"), true);
++        assertNotNull(md);
++        assertEquals(2, md.getExtraInfo().size());
++        assertEquals("56576", md.getExtraInfo().get("e:someExtra"));
++        assertEquals(2, md.getExtraInfos().size());
++        ExtraInfoHolder firstExtraInfoElement = md.getExtraInfos().get(0);
++        assertEquals("e:someExtra", firstExtraInfoElement.getName());
++        assertEquals("56576", firstExtraInfoElement.getContent());
++        assertEquals(0, firstExtraInfoElement.getAttributes().size());
++        assertEquals(0, firstExtraInfoElement.getNestedExtraInfoHolder().size());
++        ExtraInfoHolder secondExtraInfoElement = md.getExtraInfos().get(1);
++        assertEquals("e:someExtraWithAttributes", secondExtraInfoElement.getName());
++        assertEquals("", secondExtraInfoElement.getContent());
++        assertEquals(2, secondExtraInfoElement.getAttributes().size());
++        assertEquals("foo", secondExtraInfoElement.getAttributes().get("attr1"));
++        assertEquals("bar", secondExtraInfoElement.getAttributes().get("attr2"));
++        assertEquals(0, secondExtraInfoElement.getNestedExtraInfoHolder().size());
++    }
++    
++    public void testExtraInfosNested() throws Exception {
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(settings,
++            getClass().getResource("test-extrainfo-nested.xml"), true);
++        assertNotNull(md);
++        assertEquals(4, md.getExtraInfo().size());
++        assertEquals("56576", md.getExtraInfo().get("e:someExtra"));
++        assertEquals(2, md.getExtraInfos().size());
++        ExtraInfoHolder someExtraElement = md.getExtraInfos().get(0);
++        assertEquals("e:someExtra", someExtraElement.getName());
++        assertEquals("56576", someExtraElement.getContent());
++        assertEquals(0, someExtraElement.getAttributes().size());
++        assertEquals(0, someExtraElement.getNestedExtraInfoHolder().size());
++        ExtraInfoHolder someExtraElementWithAttributes = md.getExtraInfos().get(1);
++        assertEquals("e:someExtraWithAttributes", someExtraElementWithAttributes.getName());
++        assertEquals("", someExtraElementWithAttributes.getContent());
++        assertEquals(2, someExtraElementWithAttributes.getAttributes().size());
++        assertEquals("foo", someExtraElementWithAttributes.getAttributes().get("attr1"));
++        assertEquals("bar", someExtraElementWithAttributes.getAttributes().get("attr2"));
++        assertEquals(1, someExtraElementWithAttributes.getNestedExtraInfoHolder().size());
++        ExtraInfoHolder anotherExtraInfoElement = someExtraElementWithAttributes.getNestedExtraInfoHolder().get(0);
++        assertEquals("e:anotherExtraInfo", anotherExtraInfoElement.getName());
++        assertEquals("", anotherExtraInfoElement.getContent());
++        assertEquals(1, anotherExtraInfoElement.getAttributes().size());
++        assertEquals("foobar", anotherExtraInfoElement.getAttributes().get("myattribute"));
++        assertEquals(1, anotherExtraInfoElement.getNestedExtraInfoHolder().size());
++        ExtraInfoHolder yetAnotherExtraInfoElement = anotherExtraInfoElement.getNestedExtraInfoHolder().get(0);
++        assertEquals("e:yetAnotherExtraInfo", yetAnotherExtraInfoElement.getName());
++        assertEquals("", yetAnotherExtraInfoElement.getContent());
++        assertEquals(1, yetAnotherExtraInfoElement.getAttributes().size());
++        assertEquals("value", yetAnotherExtraInfoElement.getAttributes().get("anAttribute"));
++        assertEquals(0, yetAnotherExtraInfoElement.getNestedExtraInfoHolder().size());
++    }
++    
+     public void testBug60() throws Exception {
+         ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(settings,
+             getClass().getResource("test-bug60.xml"), true);
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+index ef922afbb..e869313ee 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+@@ -110,6 +110,34 @@ public void testFull() throws Exception {
+             '\r', '\n');
+         assertEquals(expected, wrote);
+     }
++    
++    public void testExtraInfos() throws Exception {
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
++            new IvySettings(),
++            XmlModuleDescriptorWriterTest.class.getResource("test-extrainfo.xml"), false);
++        XmlModuleDescriptorWriter.write(md, LICENSE, dest);
++
++        assertTrue(dest.exists());
++        String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(dest)))
++                .replaceAll("\r\n", "\n").replace('\r', '\n');
++        String expected = readEntirely("test-write-extrainfo.xml").replaceAll("\r\n", "\n")
++                .replace('\r', '\n');
++        assertEquals(expected, wrote);
++    }
++
++    public void testExtraInfosWithNestedElement() throws Exception {
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
++            new IvySettings(),
++            XmlModuleDescriptorWriterTest.class.getResource("test-extrainfo-nested.xml"), false);
++        XmlModuleDescriptorWriter.write(md, LICENSE, dest);
++
++        assertTrue(dest.exists());
++        String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(dest)))
++                .replaceAll("\r\n", "\n").replace('\r', '\n');
++        String expected = readEntirely("test-write-extrainfo-nested.xml").replaceAll("\r\n", "\n")
++                .replace('\r', '\n');
++        assertEquals(expected, wrote);
++    }
+ 
+ 	public void testExtends() throws Exception {
+ 		ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo-nested.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo-nested.xml
+new file mode 100644
+index 000000000..ad0be44e2
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo-nested.xml
+@@ -0,0 +1,113 @@
++<?xml version="1.0" encoding="ISO-8859-1"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0" xmlns:e="http://ant.apache.org/ivy/extra">
++	<info organisation="myorg"
++	       module="mymodule"
++	       revision="myrev"
++	       status="integration"
++	       publication="20041101110000"
++	       e:attr1="value1">
++	       
++		<license name="MyLicense" url="http://www.my.org/mymodule/mylicense.html"/>
++		
++		<ivyauthor name="jayasoft" url="http://www.jayasoft.org/"/>
++		<ivyauthor name="myorg" url="http://www.myorg.org/"/>
++
++		<repository name="ivyrep" url="http://www.jayasoft.fr/org/ivyrep/" pattern="[organisation]/[module]/ivy-[revision].xml" ivys="true" artifacts="false"/>
++
++		<description homepage="http://www.my.org/mymodule/">			
++	This module is <b>great</b> !<br/>
++	You can use it especially with myconf1 and myconf2, and myconf4 is not too bad too.
++		</description>
++
++		<e:someExtra>56576</e:someExtra>
++        <e:someExtraWithAttributes attr1="foo" attr2="bar">
++            <e:anotherExtraInfo myattribute="foobar">
++                <e:yetAnotherExtraInfo anAttribute="value"/>
++            </e:anotherExtraInfo>
++        </e:someExtraWithAttributes>
++  	</info>
++	<configurations>
++		<conf name="myconf1" description="desc 1" e:attr2="value2"/>
++		<conf name="myconf2" description="desc 2" visibility="public"/>
++		<conf name="myconf3" description="desc 3" visibility="private"/>
++		<conf name="myconf4" description="desc 4" extends="myconf1, myconf2"/>		
++		<conf name="myoldconf" description="my old desc" deprecated="20050115"/>
++	</configurations>
++	<publications>
++		<artifact name="myartifact1" type="jar" e:attr3="value3"/>
++		<artifact name="myartifact2" type="jar" conf="myconf1"/>
++		<artifact name="myartifact3" type="jar" conf="myconf1, myconf2, myconf3"/>
++		<artifact name="myartifact4" type="jar">
++			<conf name="myconf1"/>
++			<conf name="myconf3"/>
++		</artifact>
++	</publications>
++	<dependencies>
++		<dependency name="mymodule2" rev="2.0" e:attr4="value4"/>
++		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1"/>
++		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
++		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1, myconf2->yourconf1, yourconf2"/>
++		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1, yourconf2"/>
++
++		<dependency org="yourorg" name="yourmodule6" rev="latest.integration">
++			<conf name="myconf1" mapped="yourconf1"/>
++			<conf name="myconf2" mapped="yourconf1, yourconf2"/>
++		</dependency>
++
++		<dependency org="yourorg" name="yourmodule7" rev="7.1">
++			<conf name="myconf1">
++				<mapped name="yourconf1"/>
++			</conf>
++			<conf name="myconf2">
++				<mapped name="yourconf1"/>
++				<mapped name="yourconf2"/>
++			</conf>
++		</dependency>
++
++		<dependency org="yourorg" name="yourmodule8" rev="8.1">
++			<artifact name="yourartifact8-1" type="jar" e:attr5="value5"/>
++			<artifact name="yourartifact8-2" type="jar"/>
++		</dependency>		
++
++		<dependency org="yourorg" name="yourmodule9" rev="9.1" conf="myconf1,myconf2,myconf3->default">
++			<artifact name="yourartifact9-1" type="jar" conf="myconf1,myconf2"/>
++			<artifact name="yourartifact9-2" type="jar">
++				<conf name="myconf2"/>
++				<conf name="myconf3"/>
++			</artifact>
++		</dependency>		
++
++		<dependency org="yourorg" name="yourmodule10" rev="10.1">
++			<include name="your.*" type="jar"/>
++			<include ext="xml"/>
++			<exclude name="toexclude"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->@"/>
++		
++		<exclude module="*servlet*" matcher="glob" conf="myconf1" /> 
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar" />
++        <override org="yourorg" module=".*1" matcher="regexp" branch="BRANCH" rev="1.0" /> 
++		<conflict org="yourorg" module=".*" matcher="regexp" manager="all" />
++		<conflict org="theirorg" module="theirmodule1" rev="1.0, 1.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo.xml
+new file mode 100644
+index 000000000..d767d239c
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-extrainfo.xml
+@@ -0,0 +1,109 @@
++<?xml version="1.0" encoding="ISO-8859-1"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0" xmlns:e="http://ant.apache.org/ivy/extra">
++	<info organisation="myorg"
++	       module="mymodule"
++	       revision="myrev"
++	       status="integration"
++	       publication="20041101110000"
++	       e:attr1="value1">
++	       
++		<license name="MyLicense" url="http://www.my.org/mymodule/mylicense.html"/>
++		
++		<ivyauthor name="jayasoft" url="http://www.jayasoft.org/"/>
++		<ivyauthor name="myorg" url="http://www.myorg.org/"/>
++
++		<repository name="ivyrep" url="http://www.jayasoft.fr/org/ivyrep/" pattern="[organisation]/[module]/ivy-[revision].xml" ivys="true" artifacts="false"/>
++
++		<description homepage="http://www.my.org/mymodule/">			
++	This module is <b>great</b> !<br/>
++	You can use it especially with myconf1 and myconf2, and myconf4 is not too bad too.
++		</description>
++
++		<e:someExtra>56576</e:someExtra>
++        <e:someExtraWithAttributes attr1="foo" attr2="bar"/>
++	</info>
++	<configurations>
++		<conf name="myconf1" description="desc 1" e:attr2="value2"/>
++		<conf name="myconf2" description="desc 2" visibility="public"/>
++		<conf name="myconf3" description="desc 3" visibility="private"/>
++		<conf name="myconf4" description="desc 4" extends="myconf1, myconf2"/>		
++		<conf name="myoldconf" description="my old desc" deprecated="20050115"/>
++	</configurations>
++	<publications>
++		<artifact name="myartifact1" type="jar" e:attr3="value3"/>
++		<artifact name="myartifact2" type="jar" conf="myconf1"/>
++		<artifact name="myartifact3" type="jar" conf="myconf1, myconf2, myconf3"/>
++		<artifact name="myartifact4" type="jar">
++			<conf name="myconf1"/>
++			<conf name="myconf3"/>
++		</artifact>
++	</publications>
++	<dependencies>
++		<dependency name="mymodule2" rev="2.0" e:attr4="value4"/>
++		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1"/>
++		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
++		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1, myconf2->yourconf1, yourconf2"/>
++		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1, yourconf2"/>
++
++		<dependency org="yourorg" name="yourmodule6" rev="latest.integration">
++			<conf name="myconf1" mapped="yourconf1"/>
++			<conf name="myconf2" mapped="yourconf1, yourconf2"/>
++		</dependency>
++
++		<dependency org="yourorg" name="yourmodule7" rev="7.1">
++			<conf name="myconf1">
++				<mapped name="yourconf1"/>
++			</conf>
++			<conf name="myconf2">
++				<mapped name="yourconf1"/>
++				<mapped name="yourconf2"/>
++			</conf>
++		</dependency>
++
++		<dependency org="yourorg" name="yourmodule8" rev="8.1">
++			<artifact name="yourartifact8-1" type="jar" e:attr5="value5"/>
++			<artifact name="yourartifact8-2" type="jar"/>
++		</dependency>		
++
++		<dependency org="yourorg" name="yourmodule9" rev="9.1" conf="myconf1,myconf2,myconf3->default">
++			<artifact name="yourartifact9-1" type="jar" conf="myconf1,myconf2"/>
++			<artifact name="yourartifact9-2" type="jar">
++				<conf name="myconf2"/>
++				<conf name="myconf3"/>
++			</artifact>
++		</dependency>		
++
++		<dependency org="yourorg" name="yourmodule10" rev="10.1">
++			<include name="your.*" type="jar"/>
++			<include ext="xml"/>
++			<exclude name="toexclude"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->@"/>
++		
++		<exclude module="*servlet*" matcher="glob" conf="myconf1" /> 
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar" />
++        <override org="yourorg" module=".*1" matcher="regexp" branch="BRANCH" rev="1.0" /> 
++		<conflict org="yourorg" module=".*" matcher="regexp" manager="all" />
++		<conflict org="theirorg" module="theirmodule1" rev="1.0, 1.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo-nested.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo-nested.xml
+new file mode 100644
+index 000000000..590fffc83
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo-nested.xml
+@@ -0,0 +1,81 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0" xmlns:e="http://ant.apache.org/ivy/extra">
++	<info organisation="myorg"
++		module="mymodule"
++		revision="myrev"
++		status="integration"
++		publication="20041101110000"
++		e:attr1="value1"
++	>
++		<license name="MyLicense" url="http://www.my.org/mymodule/mylicense.html" />
++		<description homepage="http://www.my.org/mymodule/">
++		This module is &lt;b>great&lt;/b> !&lt;br/>
++	You can use it especially with myconf1 and myconf2, and myconf4 is not too bad too.
++		</description>
++		<e:someExtra>56576</e:someExtra>
++		<e:someExtraWithAttributes attr1="foo" attr2="bar">
++			<e:anotherExtraInfo myattribute="foobar">
++				<e:yetAnotherExtraInfo anAttribute="value"/>
++			</e:anotherExtraInfo>
++		</e:someExtraWithAttributes>
++	</info>
++	<configurations>
++		<conf name="myconf1" visibility="public" description="desc 1" e:attr2="value2"/>
++		<conf name="myconf2" visibility="public" description="desc 2"/>
++		<conf name="myconf3" visibility="private" description="desc 3"/>
++		<conf name="myconf4" visibility="public" description="desc 4" extends="myconf1,myconf2"/>
++		<conf name="myoldconf" visibility="public" description="my old desc" deprecated="20050115"/>
++	</configurations>
++	<publications>
++		<artifact name="myartifact1" type="jar" ext="jar" conf="myconf1,myconf2,myconf3,myconf4,myoldconf" e:attr3="value3"/>
++		<artifact name="myartifact2" type="jar" ext="jar" conf="myconf1"/>
++		<artifact name="myartifact3" type="jar" ext="jar" conf="myconf1,myconf2,myconf3"/>
++		<artifact name="myartifact4" type="jar" ext="jar" conf="myconf1,myconf3"/>
++	</publications>
++	<dependencies>
++		<dependency org="myorg" name="mymodule2" rev="2.0" conf="*->*" e:attr4="value4"/>
++		<dependency org="myorg" name="mymodule3" rev="2.0" changing="true" transitive="false" conf="*->*"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1->myconf1"/>
++		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1->yourconf1,yourconf2;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule6" rev="latest.integration" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule7" rev="7.1" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule8" rev="8.1" conf="*->*">
++			<artifact name="yourartifact8-1" type="jar" ext="jar" e:attr5="value5"/>
++			<artifact name="yourartifact8-2" type="jar" ext="jar"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule9" rev="9.1" conf="myconf1->default;myconf2->default;myconf3->default">
++			<artifact name="yourartifact9-1" type="jar" ext="jar" conf="myconf1,myconf2"/>
++			<artifact name="yourartifact9-2" type="jar" ext="jar" conf="myconf2,myconf3"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule10" rev="10.1" conf="*->*">
++			<include name="your.*" type="jar" ext="jar" matcher="exact"/>
++			<include name="*" type="*" ext="xml" matcher="exact"/>
++			<exclude org="*" module="*" name="toexclude" type="*" ext="*" matcher="exact"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->*"/>
++		<exclude org="*" module="*servlet*" artifact="*" type="*" ext="*" conf="myconf1" matcher="glob"/>
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar" matcher="exact"/>
++		<override org="yourorg" module=".*1" matcher="regexp" branch="BRANCH" rev="1.0"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo.xml
+new file mode 100644
+index 000000000..a0ac19485
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-write-extrainfo.xml
+@@ -0,0 +1,77 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="2.0" xmlns:e="http://ant.apache.org/ivy/extra">
++	<info organisation="myorg"
++		module="mymodule"
++		revision="myrev"
++		status="integration"
++		publication="20041101110000"
++		e:attr1="value1"
++	>
++		<license name="MyLicense" url="http://www.my.org/mymodule/mylicense.html" />
++		<description homepage="http://www.my.org/mymodule/">
++		This module is &lt;b>great&lt;/b> !&lt;br/>
++	You can use it especially with myconf1 and myconf2, and myconf4 is not too bad too.
++		</description>
++		<e:someExtra>56576</e:someExtra>
++		<e:someExtraWithAttributes attr1="foo" attr2="bar"/>
++	</info>
++	<configurations>
++		<conf name="myconf1" visibility="public" description="desc 1" e:attr2="value2"/>
++		<conf name="myconf2" visibility="public" description="desc 2"/>
++		<conf name="myconf3" visibility="private" description="desc 3"/>
++		<conf name="myconf4" visibility="public" description="desc 4" extends="myconf1,myconf2"/>
++		<conf name="myoldconf" visibility="public" description="my old desc" deprecated="20050115"/>
++	</configurations>
++	<publications>
++		<artifact name="myartifact1" type="jar" ext="jar" conf="myconf1,myconf2,myconf3,myconf4,myoldconf" e:attr3="value3"/>
++		<artifact name="myartifact2" type="jar" ext="jar" conf="myconf1"/>
++		<artifact name="myartifact3" type="jar" ext="jar" conf="myconf1,myconf2,myconf3"/>
++		<artifact name="myartifact4" type="jar" ext="jar" conf="myconf1,myconf3"/>
++	</publications>
++	<dependencies>
++		<dependency org="myorg" name="mymodule2" rev="2.0" conf="*->*" e:attr4="value4"/>
++		<dependency org="myorg" name="mymodule3" rev="2.0" changing="true" transitive="false" conf="*->*"/>
++		<dependency org="yourorg" name="yourmodule1" branch="trunk" rev="1.1" branchConstraint="branch1" revConstraint="1+" conf="myconf1->myconf1"/>
++		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1->yourconf1,yourconf2;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule6" rev="latest.integration" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule7" rev="7.1" conf="myconf1->yourconf1;myconf2->yourconf1,yourconf2"/>
++		<dependency org="yourorg" name="yourmodule8" rev="8.1" conf="*->*">
++			<artifact name="yourartifact8-1" type="jar" ext="jar" e:attr5="value5"/>
++			<artifact name="yourartifact8-2" type="jar" ext="jar"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule9" rev="9.1" conf="myconf1->default;myconf2->default;myconf3->default">
++			<artifact name="yourartifact9-1" type="jar" ext="jar" conf="myconf1,myconf2"/>
++			<artifact name="yourartifact9-2" type="jar" ext="jar" conf="myconf2,myconf3"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule10" rev="10.1" conf="*->*">
++			<include name="your.*" type="jar" ext="jar" matcher="exact"/>
++			<include name="*" type="*" ext="xml" matcher="exact"/>
++			<exclude org="*" module="*" name="toexclude" type="*" ext="*" matcher="exact"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->*"/>
++		<exclude org="*" module="*servlet*" artifact="*" type="*" ext="*" conf="myconf1" matcher="glob"/>
++		<exclude org="acme" module="test" artifact="test" type="source" ext="jar" matcher="exact"/>
++		<override org="yourorg" module=".*1" matcher="regexp" branch="BRANCH" rev="1.0"/>
++	</dependencies>
++</ivy-module>

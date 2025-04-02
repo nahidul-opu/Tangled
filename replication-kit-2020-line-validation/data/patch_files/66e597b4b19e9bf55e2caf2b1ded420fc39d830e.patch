@@ -1,0 +1,474 @@
+From 66e597b4b19e9bf55e2caf2b1ded420fc39d830e Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 20 Mar 2006 18:13:43 +0000
+Subject: [PATCH] FIX: pb with force when it comes after a conflict has already
+ been solved (IVY-193)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484250 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/fr/jayasoft/ivy/Ivy.java             |  3 +-
+ src/java/fr/jayasoft/ivy/IvyNode.java         | 42 ++++++----
+ .../ivy/conflict/LatestConflictManager.java   |  2 +-
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 82 +++++++++++++++++++
+ test/repositories/2/mod3.1/ivy-1.0.1.xml      | 11 +++
+ test/repositories/2/mod3.1/mod3.1-1.0.1.jar   |  1 +
+ test/repositories/2/mod3.2/ivy-1.1.xml        | 10 +++
+ test/repositories/2/mod3.2/ivy-1.2.xml        | 11 +++
+ test/repositories/2/mod3.2/ivy-1.3.xml        | 11 +++
+ test/repositories/2/mod3.2/ivy-1.4.xml        | 11 +++
+ test/repositories/2/mod3.2/mod3.2-1.1.jar     |  1 +
+ test/repositories/2/mod3.2/mod3.2-1.2.jar     |  1 +
+ test/repositories/2/mod3.2/mod3.2-1.3.jar     |  1 +
+ test/repositories/2/mod3.2/mod3.2-1.4.jar     |  1 +
+ test/repositories/2/mod4.1/ivy-4.10.xml       | 12 +++
+ test/repositories/2/mod4.1/ivy-4.11.xml       | 12 +++
+ test/repositories/2/mod4.1/ivy-4.12.xml       | 12 +++
+ test/repositories/2/mod4.1/ivy-4.9.xml        | 13 +++
+ 19 files changed, 220 insertions(+), 18 deletions(-)
+ create mode 100644 test/repositories/2/mod3.1/ivy-1.0.1.xml
+ create mode 100644 test/repositories/2/mod3.1/mod3.1-1.0.1.jar
+ create mode 100644 test/repositories/2/mod3.2/ivy-1.1.xml
+ create mode 100644 test/repositories/2/mod3.2/ivy-1.2.xml
+ create mode 100644 test/repositories/2/mod3.2/ivy-1.3.xml
+ create mode 100644 test/repositories/2/mod3.2/ivy-1.4.xml
+ create mode 100644 test/repositories/2/mod3.2/mod3.2-1.1.jar
+ create mode 100644 test/repositories/2/mod3.2/mod3.2-1.2.jar
+ create mode 100644 test/repositories/2/mod3.2/mod3.2-1.3.jar
+ create mode 100644 test/repositories/2/mod3.2/mod3.2-1.4.jar
+ create mode 100644 test/repositories/2/mod4.1/ivy-4.10.xml
+ create mode 100644 test/repositories/2/mod4.1/ivy-4.11.xml
+ create mode 100644 test/repositories/2/mod4.1/ivy-4.12.xml
+ create mode 100644 test/repositories/2/mod4.1/ivy-4.9.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 0307db9b4..de002e908 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,3 +1,4 @@
++- FIX: pb with force when it comes after a conflict has already been solved (IVY-193)
+ - FIX: POM files that reference to the parent artifact download fails (IVY-195) (thanks to Tat Leung)
+ 
+    version 1.3 - 2006-03-17
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index 311aa76f0..bc72fde36 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -1071,7 +1071,8 @@ private void doFetchDependencies(IvyNode node, String conf) {
+             fetchDependencies(node, extendedConfs[i], false);
+         }
+         
+-        if ((node.getDependencyDescriptor() == null || node.getDependencyDescriptor().isTransitive())) {
++        DependencyDescriptor dd = node.getDependencyDescriptor(node.getParent());
++        if ((dd == null || dd.isTransitive())) {
+             Collection dependencies = node.getDependencies(conf, true);
+             for (Iterator iter = dependencies.iterator(); iter.hasNext();) {
+                 IvyNode dep = (IvyNode)iter.next();
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 9d936b01f..90de8e0cf 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -231,8 +231,8 @@ public int hashCode() {
+     private Collection _confsToFetch = new HashSet();
+     private Collection _fetchedConfigurations = new HashSet();
+ 
+-    // set only when node has been built from DependencyDescriptor
+-    private DependencyDescriptor _dd;
++    // set only when node has been built or updated from a DependencyDescriptor
++    private Map _dds = new HashMap(); // Map(IvyNode parent -> DependencyDescriptor)
+ 
+     // Set when data has been loaded only
+     private ModuleDescriptor _md;
+@@ -256,9 +256,9 @@ public int hashCode() {
+     private Collection _loadedRootModuleConfs = new HashSet();
+ 
+     
+-    public IvyNode(ResolveData data, DependencyDescriptor dd) {
++    public IvyNode(ResolveData data, IvyNode parent, DependencyDescriptor dd) {
+         _id = dd.getDependencyRevisionId();
+-        _dd = dd;
++        _dds.put(parent, dd);
+         _isRoot = false;
+ 
+         init(data, true);
+@@ -586,7 +586,7 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+                 }
+                 try {
+                     Message.debug("\tusing "+resolver+" to resolve "+getId());
+-                    _module = resolver.getDependency(_dd, _data);
++                    _module = resolver.getDependency(getDependencyDescriptor(getParent()), _data);
+                     if (_module != null) {
+                         _data.getIvy().saveResolver(_data.getCache(), _module.getDescriptor(), resolver.getName());
+                         if (_data.getIvy().logModuleWhenFound()) {
+@@ -612,8 +612,9 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+                                 resolved.markSelected(_rootModuleConf);
+                                 resolved.updateDataFrom(this, _rootModuleConf);
+                                 resolved.loadData(conf, shouldBePublic);
+-                                if (_dd != null) {
+-                                    resolved.addDependencyArtifactsIncludes(_rootModuleConf, _dd.getDependencyArtifactsIncludes(getParentConf()));
++                                DependencyDescriptor dd = getDependencyDescriptor(getParent());
++                                if (dd != null) {
++                                    resolved.addDependencyArtifactsIncludes(_rootModuleConf, dd.getDependencyArtifactsIncludes(getParentConf()));
+                                 }
+                                 _data.register(getId(), resolved); // this actually discards the node
+                                 return true;
+@@ -663,8 +664,9 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+         if (!handleConfiguration(loaded, conf, shouldBePublic)) {
+             return false;
+         }
+-        if (_dd != null) {
+-            addDependencyArtifactsIncludes(_rootModuleConf, _dd.getDependencyArtifactsIncludes(getParentConf()));
++        DependencyDescriptor dd = getDependencyDescriptor(getParent());
++        if (dd != null) {
++            addDependencyArtifactsIncludes(_rootModuleConf, dd.getDependencyArtifactsIncludes(getParentConf()));
+         }
+         return loaded;
+         
+@@ -771,10 +773,13 @@ public Collection getDependencies(String conf, boolean traverse) {
+             }
+             IvyNode depNode = _data.getNode(dd.getDependencyRevisionId());
+             if (depNode == null) {
+-                depNode = new IvyNode(_data, dd);
+-            } else if (depNode.hasProblem()) {
+-                // dependency already tried to be resolved, but unsuccessfully
+-                // nothing special to do
++                depNode = new IvyNode(_data, this, dd);
++            } else {
++                depNode.addDependencyDescriptor(this, dd);
++                if (depNode.hasProblem()) {
++                    // dependency already tried to be resolved, but unsuccessfully
++                    // nothing special to do
++                }
+                 
+             }
+             Collection confs = Arrays.asList(resolveSpecialConfigurations(dependencyConfigurations, depNode));
+@@ -798,6 +803,10 @@ public Collection getDependencies(String conf, boolean traverse) {
+         return dependencies;
+     }
+ 
++    private void addDependencyDescriptor(IvyNode parent, DependencyDescriptor dd) {
++        _dds.put(parent, dd);
++    }
++
+     private boolean isDependencyModuleExcluded(ModuleRevisionId dependencyRevisionId, String conf) {
+         return doesCallersExclude(getRootModuleConf(), new DefaultArtifact(dependencyRevisionId, new Date(), "ivy", "ivy", "xml"));
+     }
+@@ -913,7 +922,8 @@ public void addCaller(String rootModuleConf, IvyNode node, String callerConf, St
+     }
+     
+     private boolean canExclude(String rootModuleConf) {
+-        if (_dd != null && _dd.canExclude()) {
++        DependencyDescriptor dd = getDependencyDescriptor(getParent());
++        if (dd != null && dd.canExclude()) {
+             return true;
+         }
+         Caller[] callers = getCallers(rootModuleConf);
+@@ -1237,8 +1247,8 @@ public long getPublication() {
+         return 0;
+     }
+ 
+-    public DependencyDescriptor getDependencyDescriptor() {
+-        return _dd;
++    public DependencyDescriptor getDependencyDescriptor(IvyNode parent) {
++        return (DependencyDescriptor)_dds.get(parent);
+     }
+ 
+     public boolean hasProblem() {
+diff --git a/src/java/fr/jayasoft/ivy/conflict/LatestConflictManager.java b/src/java/fr/jayasoft/ivy/conflict/LatestConflictManager.java
+index 0a8566ae2..c67fd0806 100644
+--- a/src/java/fr/jayasoft/ivy/conflict/LatestConflictManager.java
++++ b/src/java/fr/jayasoft/ivy/conflict/LatestConflictManager.java
+@@ -61,7 +61,7 @@ public Collection resolveConflicts(IvyNode parent, Collection conflicts) {
+         }
+         for (Iterator iter = conflicts.iterator(); iter.hasNext();) {
+             IvyNode node = (IvyNode)iter.next();
+-            DependencyDescriptor dd = node.getDependencyDescriptor();
++            DependencyDescriptor dd = node.getDependencyDescriptor(parent);
+             if (dd != null && dd.isForce() && parent.getResolvedId().equals(dd.getParentRevisionId())) {
+                 return Collections.singleton(node);
+             }
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index a1f7ea096..5fcd5dda9 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -874,6 +874,88 @@ public void testResolveForce() throws Exception {
+         assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
+     }
+     
++    public void testResolveForceAfterConflictSolved() throws Exception {
++        // IVY-193
++        // mod4.1 v 4.9 depends on 
++        //   - mod3.2 v 1.1 which depends on mod1.2 v 2.0
++        //   - mod3.1 v 1.1 which depends on mod1.2 v 2.1
++        //   - mod1.2 v 2.0 and forces it
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod4.1/ivy-4.9.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org4", "mod4.1", "4.9");
++        assertEquals(mrid, md.getModuleRevisionId());
++        
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
++        
++        // dependencies
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++    
++    public void testResolveForceAfterDependencyExist() throws Exception {
++        // IVY-193
++        // mod4.1 v 4.10 depends on 
++        //   - mod3.1 v 1.0.1 which depends on mod1.2 v 2.0 and forces it
++        //   - mod3.2 v 1.2 which depends on mod1.2 v 2.1 and on mod3.1 v1.0.1
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod4.1/ivy-4.10.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        
++        // dependencies
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.1")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++    
++    public void testResolveForceInDepOnly() throws Exception {
++        // IVY-193
++        // mod4.1 v 4.11 depends on 
++        //   - mod1.2 v 2.0
++        //   - mod3.2 v 1.3 which depends on 
++        //          - mod3.1 v1.1 which depends on
++        //                  - mod1.2 v 2.1
++        //          - mod1.2 v 1.0 and forces it 
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod4.1/ivy-4.11.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        
++        // dependencies
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "1.0", "mod1.2", "jar", "jar").exists());
++    }
++    
++    public void testResolveForceInDepOnly2() throws Exception {
++        // IVY-193
++        // mod4.1 v 4.12 depends on 
++        //   - mod3.1 v1.0 which depends on
++        //          - mod1.2 v 2.0
++        //   - mod3.2 v 1.4 which depends on 
++        //          - mod1.2 v 2.0 and forces it 
++        //          - mod3.1 v1.1 which depends on
++        //                  - mod1.2 v 2.1
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod4.1/ivy-4.12.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        
++        // dependencies
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++    
+     public void testResolveForceWithDynamicRevisions() throws Exception {
+         // mod4.1 v 4.5 depends on 
+         //   - mod1.2 v 1+ and forces it
+diff --git a/test/repositories/2/mod3.1/ivy-1.0.1.xml b/test/repositories/2/mod3.1/ivy-1.0.1.xml
+new file mode 100644
+index 000000000..92bd42349
+--- /dev/null
++++ b/test/repositories/2/mod3.1/ivy-1.0.1.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org3"
++	       module="mod3.1"
++	       revision="1.0.1"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0" force="true"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod3.1/mod3.1-1.0.1.jar b/test/repositories/2/mod3.1/mod3.1-1.0.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod3.1/mod3.1-1.0.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/2/mod3.2/ivy-1.1.xml b/test/repositories/2/mod3.2/ivy-1.1.xml
+new file mode 100644
+index 000000000..d19a64219
+--- /dev/null
++++ b/test/repositories/2/mod3.2/ivy-1.1.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0">
++	<info organisation="org3"
++	       module="mod3.2"
++	       revision="1.1"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod3.2/ivy-1.2.xml b/test/repositories/2/mod3.2/ivy-1.2.xml
+new file mode 100644
+index 000000000..5ee53f5ac
+--- /dev/null
++++ b/test/repositories/2/mod3.2/ivy-1.2.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org3"
++	       module="mod3.2"
++	       revision="1.2"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.1"/>
++		<dependency org="org3" name="mod3.1" rev="1.0.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod3.2/ivy-1.3.xml b/test/repositories/2/mod3.2/ivy-1.3.xml
+new file mode 100644
+index 000000000..4554f8e67
+--- /dev/null
++++ b/test/repositories/2/mod3.2/ivy-1.3.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org3"
++	       module="mod3.2"
++	       revision="1.3"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency org="org3" name="mod3.1" rev="1.1"/>
++		<dependency org="org1" name="mod1.2" rev="1.0" force="true"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod3.2/ivy-1.4.xml b/test/repositories/2/mod3.2/ivy-1.4.xml
+new file mode 100644
+index 000000000..49dd6fcb2
+--- /dev/null
++++ b/test/repositories/2/mod3.2/ivy-1.4.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org3"
++	       module="mod3.2"
++	       revision="1.4"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0" force="true"/>
++		<dependency org="org3" name="mod3.1" rev="1.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod3.2/mod3.2-1.1.jar b/test/repositories/2/mod3.2/mod3.2-1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod3.2/mod3.2-1.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/2/mod3.2/mod3.2-1.2.jar b/test/repositories/2/mod3.2/mod3.2-1.2.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod3.2/mod3.2-1.2.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/2/mod3.2/mod3.2-1.3.jar b/test/repositories/2/mod3.2/mod3.2-1.3.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod3.2/mod3.2-1.3.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/2/mod3.2/mod3.2-1.4.jar b/test/repositories/2/mod3.2/mod3.2-1.4.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod3.2/mod3.2-1.4.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/2/mod4.1/ivy-4.10.xml b/test/repositories/2/mod4.1/ivy-4.10.xml
+new file mode 100644
+index 000000000..cd163dfa6
+--- /dev/null
++++ b/test/repositories/2/mod4.1/ivy-4.10.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org4"
++	       module="mod4.1"
++	       revision="4.10"
++	       status="integration"
++	       publication="20041202110000"
++	/>
++	<dependencies>
++		<dependency org="org3" name="mod3.1" rev="1.0.1"/>
++		<dependency org="org3" name="mod3.2" rev="1.2"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod4.1/ivy-4.11.xml b/test/repositories/2/mod4.1/ivy-4.11.xml
+new file mode 100644
+index 000000000..9d9ceea3e
+--- /dev/null
++++ b/test/repositories/2/mod4.1/ivy-4.11.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org4"
++	       module="mod4.1"
++	       revision="4.11"
++	       status="integration"
++	       publication="20041202110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0"/>
++		<dependency org="org3" name="mod3.2" rev="1.3"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod4.1/ivy-4.12.xml b/test/repositories/2/mod4.1/ivy-4.12.xml
+new file mode 100644
+index 000000000..cd9082dda
+--- /dev/null
++++ b/test/repositories/2/mod4.1/ivy-4.12.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org4"
++	       module="mod4.1"
++	       revision="4.12"
++	       status="integration"
++	       publication="20041202110000"
++	/>
++	<dependencies>
++		<dependency org="org3" name="mod3.1" rev="1.0"/>
++		<dependency org="org3" name="mod3.2" rev="1.4"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod4.1/ivy-4.9.xml b/test/repositories/2/mod4.1/ivy-4.9.xml
+new file mode 100644
+index 000000000..beaf868f5
+--- /dev/null
++++ b/test/repositories/2/mod4.1/ivy-4.9.xml
+@@ -0,0 +1,13 @@
++<ivy-module version="1.0">
++	<info organisation="org4"
++	       module="mod4.1"
++	       revision="4.9"
++	       status="integration"
++	       publication="20041202110000"
++	/>
++	<dependencies>
++		<dependency org="org3" name="mod3.2" rev="1.1"/>
++		<dependency org="org3" name="mod3.1" rev="1.1"/>
++		<dependency org="org1" name="mod1.2" rev="2.0" force="true"/>
++	</dependencies>
++</ivy-module>

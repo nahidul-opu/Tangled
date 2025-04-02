@@ -1,0 +1,211 @@
+From 3f0a000feff036509963ff93d59fe3e084611c08 Mon Sep 17 00:00:00 2001
+From: Luc Maisonobe <luc@apache.org>
+Date: Mon, 3 Mar 2014 09:58:29 +0000
+Subject: [PATCH] Prevent penalties to grow multiplicatively in CMAES.
+
+Patch provided by Bruce A Johnson.
+
+JIRA: MATH-1107
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/math/trunk@1573506 13f79535-47bb-0310-9956-ffa450edef68
+---
+ pom.xml                                       |  3 +
+ src/changes/changes.xml                       |  3 +
+ .../scalar/noderiv/CMAESOptimizer.java        | 78 ++++++++++++++-----
+ 3 files changed, 64 insertions(+), 20 deletions(-)
+
+diff --git a/pom.xml b/pom.xml
+index 2be9ff917a..a314b13184 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -222,6 +222,9 @@
+     <contributor>
+       <name>Curtis Jensen</name>
+     </contributor>
++    <contributor>
++      <name>Bruce A Johnson</name>
++    </contributor>
+     <contributor>
+       <name>Ismael Juma</name>
+     </contributor>
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 4e4e167189..99692b5498 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -51,6 +51,9 @@ If the output is not quite correct, check for invisible trailing spaces!
+   </properties>
+   <body>
+     <release version="3.3" date="TBD" description="TBD">
++      <action dev="luc" type="fix" issue="MATH-1107" due-to="Bruce A Johnson">
++        Prevent penalties to grow multiplicatively in CMAES for out of bounds points.
++      </action>
+       <action dev="psteitz" type="update" issue="MATH-437">
+         Added KolmogorovSmirnovTest class, deprecating KolmogorovSmirnovDistribution.
+       </action>
+diff --git a/src/main/java/org/apache/commons/math3/optim/nonlinear/scalar/noderiv/CMAESOptimizer.java b/src/main/java/org/apache/commons/math3/optim/nonlinear/scalar/noderiv/CMAESOptimizer.java
+index 6c64ff29fd..90850f8bf8 100644
+--- a/src/main/java/org/apache/commons/math3/optim/nonlinear/scalar/noderiv/CMAESOptimizer.java
++++ b/src/main/java/org/apache/commons/math3/optim/nonlinear/scalar/noderiv/CMAESOptimizer.java
+@@ -377,7 +377,8 @@ protected PointValuePair doOptimize() {
+         dimension = guess.length;
+         initializeCMA(guess);
+         iterations = 0;
+-        double bestValue = fitfun.value(guess);
++        ValuePenaltyPair valuePenalty = fitfun.value(guess);
++        double bestValue = valuePenalty.value+valuePenalty.penalty;
+         push(fitnessHistory, bestValue);
+         PointValuePair optimum
+             = new PointValuePair(getStartPoint(),
+@@ -394,6 +395,7 @@ protected PointValuePair doOptimize() {
+             final RealMatrix arz = randn1(dimension, lambda);
+             final RealMatrix arx = zeros(dimension, lambda);
+             final double[] fitness = new double[lambda];
++            final ValuePenaltyPair[] valuePenaltyPairs = new ValuePenaltyPair[lambda];
+             // generate random offspring
+             for (int k = 0; k < lambda; k++) {
+                 RealMatrix arxk = null;
+@@ -414,11 +416,18 @@ protected PointValuePair doOptimize() {
+                 }
+                 copyColumn(arxk, 0, arx, k);
+                 try {
+-                    fitness[k] = fitfun.value(arx.getColumn(k)); // compute fitness
++                    valuePenaltyPairs[k] = fitfun.value(arx.getColumn(k)); // compute fitness
+                 } catch (TooManyEvaluationsException e) {
+                     break generationLoop;
+                 }
+             }
++
++            // Compute fitnesses by adding value and penalty after scaling by value range.
++            double valueRange = valueRange(valuePenaltyPairs);
++            for (int iValue=0;iValue<valuePenaltyPairs.length;iValue++) {
++                 fitness[iValue] = valuePenaltyPairs[iValue].value + valuePenaltyPairs[iValue].penalty*valueRange;
++            }
++
+             // Sort by fitness and compute weighted mean into xmean
+             final int[] arindex = sortedIndices(fitness);
+             // Calculate new xmean, this is selection and recombination
+@@ -503,7 +512,6 @@ protected PointValuePair doOptimize() {
+             }
+             // store best in history
+             push(fitnessHistory,bestFitness);
+-            fitfun.setValueRange(worstFitness-bestFitness);
+             if (generateStatistics) {
+                 statisticsSigmaHistory.add(sigma);
+                 statisticsFitnessHistory.add(bestFitness);
+@@ -825,6 +833,25 @@ private int[] sortedIndices(final double[] doubles) {
+         }
+         return indices;
+     }
++   /**
++     * Get range of values.
++     *
++     * @param vpPairs Array of valuePenaltyPairs to get range from.
++     * @return a double equal to maximum value minus minimum value.
++     */
++    private double valueRange(final ValuePenaltyPair[] vpPairs) {
++        double max = Double.NEGATIVE_INFINITY;
++        double min = Double.MAX_VALUE;
++        for (ValuePenaltyPair vpPair:vpPairs) {
++            if (vpPair.value > max) {
++                max = vpPair.value;
++            }
++            if (vpPair.value < min) {
++                min = vpPair.value;
++            }
++        }
++        return max-min;
++    }
+ 
+     /**
+      * Used to sort fitness values. Sorting is always in lower value first
+@@ -872,15 +899,31 @@ public int hashCode() {
+             return (int) ((1438542 ^ (bits >>> 32) ^ bits) & 0xffffffff);
+         }
+     }
++    /**
++     * Stores the value and penalty (for repair of out of bounds point).
++     */
++    private static class ValuePenaltyPair {
++        /** Objective function value. */
++        private double value;
++        /** Penalty value for repair of out out of bounds points. */
++        private double penalty;
++
++        /**
++         * @param value Function value.
++         * @param penalty Out-of-bounds penalty.
++        */
++        public ValuePenaltyPair(final double value, final double penalty) {
++            this.value   = value;
++            this.penalty = penalty;
++        }
++    }
++
+ 
+     /**
+      * Normalizes fitness values to the range [0,1]. Adds a penalty to the
+-     * fitness value if out of range. The penalty is adjusted by calling
+-     * setValueRange().
++     * fitness value if out of range.
+      */
+     private class FitnessFunction {
+-        /** Determines the penalty for boundary violations */
+-        private double valueRange;
+         /**
+          * Flag indicating whether the objective variables are forced into their
+          * bounds if defined
+@@ -890,7 +933,6 @@ private class FitnessFunction {
+         /** Simple constructor.
+          */
+         public FitnessFunction() {
+-            valueRange = 1;
+             isRepairMode = true;
+         }
+ 
+@@ -898,16 +940,19 @@ public FitnessFunction() {
+          * @param point Normalized objective variables.
+          * @return the objective value + penalty for violated bounds.
+          */
+-        public double value(final double[] point) {
++        public ValuePenaltyPair value(final double[] point) {
+             double value;
++            double penalty=0.0;
+             if (isRepairMode) {
+                 double[] repaired = repair(point);
+-                value = CMAESOptimizer.this.computeObjectiveValue(repaired) +
+-                    penalty(point, repaired);
++                value = CMAESOptimizer.this.computeObjectiveValue(repaired);
++                penalty =  penalty(point, repaired);
+             } else {
+                 value = CMAESOptimizer.this.computeObjectiveValue(point);
+             }
+-            return isMinimize ? value : -value;
++            value = isMinimize ? value : -value;
++            penalty = isMinimize ? penalty : -penalty;
++            return new ValuePenaltyPair(value,penalty);
+         }
+ 
+         /**
+@@ -929,13 +974,6 @@ public boolean isFeasible(final double[] x) {
+             return true;
+         }
+ 
+-        /**
+-         * @param valueRange Adjusts the penalty computation.
+-         */
+-        public void setValueRange(double valueRange) {
+-            this.valueRange = valueRange;
+-        }
+-
+         /**
+          * @param x Normalized objective variables.
+          * @return the repaired (i.e. all in bounds) objective variables.
+@@ -966,7 +1004,7 @@ private double penalty(final double[] x, final double[] repaired) {
+             double penalty = 0;
+             for (int i = 0; i < x.length; i++) {
+                 double diff = FastMath.abs(x[i] - repaired[i]);
+-                penalty += diff * valueRange;
++                penalty += diff;
+             }
+             return isMinimize ? penalty : -penalty;
+         }

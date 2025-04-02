@@ -1,0 +1,75 @@
+From 31bed4312cc60099839a1a4548df6fff0c4bb79c Mon Sep 17 00:00:00 2001
+From: Alessandro Presta <apresta@apache.org>
+Date: Fri, 17 Aug 2012 10:16:40 +0000
+Subject: [PATCH] GIRAPH-302: Thread safety issue with sending partitions
+ around. (aching via apresta)
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1374192 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                          |  3 +++
+ .../org/apache/giraph/graph/BspServiceWorker.java  | 14 ++++++++++----
+ 2 files changed, 13 insertions(+), 4 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 679b96bd7..0665863b3 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++  GIRAPH-302: Thread safety issue with sending partitions around.
++  (aching via apresta)
++
+   GIRAPH-303: Regression: cleanup phase happens earlier than it
+   should. (majakabiljo via apresta)
+ 
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+index 6a66a7148..5051c5bb8 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+@@ -311,11 +311,10 @@ private VertexEdgeCount loadVertices() throws IOException,
+       if (!entry.getValue().getVertices().isEmpty()) {
+         commService.sendPartitionRequest(entry.getKey().getWorkerInfo(),
+             entry.getValue());
+-        entry.getValue().getVertices().clear();
+       }
+     }
+-    commService.flush();
+     inputSplitCache.clear();
++    commService.flush();
+ 
+     return vertexEdgeCount;
+   }
+@@ -470,7 +469,7 @@ private VertexEdgeCount readVerticesFromInputSplit(
+       if (transferRegulator.transferThisPartition(partitionOwner)) {
+         commService.sendPartitionRequest(partitionOwner.getWorkerInfo(),
+             partition);
+-        partition.getVertices().clear();
++        inputSplitCache.remove(partitionOwner);
+       }
+       ++totalVerticesLoaded;
+       totalEdgesLoaded += readerVertex.getNumEdges();
+@@ -960,6 +959,12 @@ public boolean finishSuperstep(List<PartitionStats> partitionStatsList) {
+     //    of this worker
+     // 5. Let the master know it is finished.
+     // 6. Wait for the master's global stats, and check if done
++
++    getContext().setStatus("Flushing started: " +
++        getGraphMapper().getMapFunctions().toString() +
++        " - Attempt=" + getApplicationAttempt() +
++        ", Superstep=" + getSuperstep());
++
+     long workerSentMessages = 0;
+     try {
+       commService.flush();
+@@ -975,7 +980,8 @@ public boolean finishSuperstep(List<PartitionStats> partitionStatsList) {
+     }
+ 
+     if (LOG.isInfoEnabled()) {
+-      LOG.info("finishSuperstep: Superstep " + getSuperstep() + " " +
++      LOG.info("finishSuperstep: Superstep " + getSuperstep() +
++          " , mesages = " + workerSentMessages + " " +
+           MemoryUtils.getRuntimeMemoryStats());
+     }
+ 

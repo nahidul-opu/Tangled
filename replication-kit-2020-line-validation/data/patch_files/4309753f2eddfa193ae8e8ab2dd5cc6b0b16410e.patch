@@ -1,0 +1,4364 @@
+From 4309753f2eddfa193ae8e8ab2dd5cc6b0b16410e Mon Sep 17 00:00:00 2001
+From: Alessandro Presta <apresta@apache.org>
+Date: Thu, 9 Aug 2012 09:10:57 +0000
+Subject: [PATCH] GIRAPH-259: TestBspBasic.testBspPageRank is broken
+ (majakabiljo via apresta)
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1371108 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                     |   2 +
+ .../giraph/aggregators/BasicAggregator.java   |  58 +++++
+ .../aggregators/BooleanAndAggregator.java     |  41 +--
+ .../aggregators/BooleanOrAggregator.java      |  41 +--
+ .../BooleanOverwriteAggregator.java           |  42 +---
+ .../aggregators/DoubleMaxAggregator.java      |  49 +---
+ .../aggregators/DoubleMinAggregator.java      |  49 +---
+ .../DoubleOverwriteAggregator.java            |  42 +---
+ .../aggregators/DoubleProductAggregator.java  |  42 +---
+ .../aggregators/DoubleSumAggregator.java      |  46 +---
+ .../aggregators/FloatMaxAggregator.java       |  49 +---
+ .../aggregators/FloatMinAggregator.java       |  49 +---
+ .../aggregators/FloatOverwriteAggregator.java |  41 +--
+ .../aggregators/FloatProductAggregator.java   |  42 +---
+ .../aggregators/FloatSumAggregator.java       |  42 +---
+ .../giraph/aggregators/IntMaxAggregator.java  |  49 +---
+ .../giraph/aggregators/IntMinAggregator.java  |  49 +---
+ .../aggregators/IntOverwriteAggregator.java   |  41 +--
+ .../aggregators/IntProductAggregator.java     |  41 +--
+ .../giraph/aggregators/IntSumAggregator.java  |  41 +--
+ .../giraph/aggregators/LongMaxAggregator.java |  49 +---
+ .../giraph/aggregators/LongMinAggregator.java |  49 +---
+ .../aggregators/LongOverwriteAggregator.java  |  41 +--
+ .../aggregators/LongProductAggregator.java    |  41 +--
+ .../giraph/aggregators/LongSumAggregator.java |  41 +--
+ .../benchmark/RandomMessageBenchmark.java     | 123 ++++-----
+ .../giraph/bsp/CentralizedServiceMaster.java  |   8 +-
+ .../giraph/bsp/CentralizedServiceWorker.java  |   4 +-
+ .../examples/AggregatorsTestVertex.java       | 115 +++++++++
+ .../examples/SimpleAggregatorWriter.java      |  10 +-
+ .../examples/SimpleCheckpointVertex.java      |  40 +--
+ .../examples/SimpleMasterComputeVertex.java   |  27 +-
+ .../giraph/examples/SimplePageRankVertex.java |  75 +++---
+ .../apache/giraph/examples/VerifyMessage.java |  36 +--
+ .../org/apache/giraph/graph/Aggregator.java   |  21 +-
+ .../apache/giraph/graph/AggregatorUsage.java  |  58 -----
+ .../giraph/graph/AggregatorWrapper.java       | 146 +++++++++++
+ .../apache/giraph/graph/AggregatorWriter.java |  10 +-
+ .../org/apache/giraph/graph/BspService.java   |  43 +++-
+ .../apache/giraph/graph/BspServiceMaster.java | 237 +++++++++---------
+ .../apache/giraph/graph/BspServiceWorker.java | 185 +++++++-------
+ .../org/apache/giraph/graph/GraphMapper.java  |  24 +-
+ .../giraph/graph/MasterAggregatorUsage.java   |  71 ++++++
+ .../apache/giraph/graph/MasterCompute.java    |  27 +-
+ .../giraph/graph/TextAggregatorWriter.java    |  19 +-
+ .../java/org/apache/giraph/graph/Vertex.java  |  22 +-
+ .../giraph/graph/WorkerAggregatorUsage.java   |  44 ++++
+ .../apache/giraph/graph/WorkerContext.java    |  23 +-
+ src/test/java/org/apache/giraph/BspCase.java  |  24 ++
+ .../giraph/TestAggregatorsHandling.java       |  48 ++++
+ .../org/apache/giraph/TestAutoCheckpoint.java |   1 +
+ .../java/org/apache/giraph/TestBspBasic.java  |  18 +-
+ .../apache/giraph/TestGraphPartitioner.java   |   6 +
+ .../apache/giraph/TestManualCheckpoint.java   |   4 +
+ .../aggregators/TestBooleanAggregators.java   |  18 +-
+ .../aggregators/TestDoubleAggregators.java    |  32 +--
+ .../aggregators/TestFloatAggregators.java     |  32 +--
+ .../aggregators/TestIntAggregators.java       |  30 +--
+ .../aggregators/TestLongAggregators.java      |  30 +--
+ 59 files changed, 1154 insertions(+), 1534 deletions(-)
+ create mode 100644 src/main/java/org/apache/giraph/aggregators/BasicAggregator.java
+ create mode 100644 src/main/java/org/apache/giraph/examples/AggregatorsTestVertex.java
+ delete mode 100644 src/main/java/org/apache/giraph/graph/AggregatorUsage.java
+ create mode 100644 src/main/java/org/apache/giraph/graph/AggregatorWrapper.java
+ create mode 100644 src/main/java/org/apache/giraph/graph/MasterAggregatorUsage.java
+ create mode 100644 src/main/java/org/apache/giraph/graph/WorkerAggregatorUsage.java
+ create mode 100644 src/test/java/org/apache/giraph/TestAggregatorsHandling.java
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 894deed75..17a11e6ef 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -2,6 +2,8 @@ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
+ 
++  GIRAPH-259: TestBspBasic.testBspPageRank is broken (majakabiljo via apresta)
++
+   GIRAPH-256: Partitioning outgoing graph data during INPUT_SUPERSTEP by # of 
+   vertices results in wide variance in RPC message sizes. (Eli Reisman via jghoman)
+   
+diff --git a/src/main/java/org/apache/giraph/aggregators/BasicAggregator.java b/src/main/java/org/apache/giraph/aggregators/BasicAggregator.java
+new file mode 100644
+index 000000000..621000199
+--- /dev/null
++++ b/src/main/java/org/apache/giraph/aggregators/BasicAggregator.java
+@@ -0,0 +1,58 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.giraph.aggregators;
++
++import org.apache.giraph.graph.Aggregator;
++import org.apache.hadoop.io.Writable;
++
++/**
++ * Abstract class for {@link Aggregator}.
++ * Implements get value, set value and reset methods and has internal value
++ * object.
++ *
++ * @param <A> Aggregated value
++ */
++public abstract class BasicAggregator<A extends Writable> implements
++    Aggregator<A> {
++  /** Internal value */
++  private A value;
++
++  /**
++   * Default constructor.
++   * Creates new value object and resets the aggregator
++   */
++  public BasicAggregator() {
++    value = createInitialValue();
++  }
++
++  @Override
++  public A getAggregatedValue() {
++    return value;
++  }
++
++  @Override
++  public void setAggregatedValue(A value) {
++    this.value = value;
++  }
++
++  @Override
++  public void reset() {
++    value = createInitialValue();
++  }
++}
+diff --git a/src/main/java/org/apache/giraph/aggregators/BooleanAndAggregator.java b/src/main/java/org/apache/giraph/aggregators/BooleanAndAggregator.java
+index 02060a389..63c580354 100644
+--- a/src/main/java/org/apache/giraph/aggregators/BooleanAndAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/BooleanAndAggregator.java
+@@ -20,51 +20,18 @@
+ 
+ import org.apache.hadoop.io.BooleanWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for calculating the AND function over boolean values.
+  * The default value when nothing is aggregated is true.
+  */
+-public class BooleanAndAggregator implements Aggregator<BooleanWritable> {
+-  /** Internal result */
+-  private boolean result = true;
+-
+-  /**
+-   * Aggregate with a primitive boolean.
+-   *
+-   * @param value Boolean value to aggregate.
+-   */
+-  public void aggregate(boolean value) {
+-    result = result && value;
+-  }
+-
++public class BooleanAndAggregator extends BasicAggregator<BooleanWritable> {
+   @Override
+   public void aggregate(BooleanWritable value) {
+-    result = result && value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive boolean.
+-   *
+-   * @param value Boolean value to set.
+-   */
+-  public void setAggregatedValue(boolean value) {
+-    result = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(BooleanWritable value) {
+-    result = value.get();
+-  }
+-
+-  @Override
+-  public BooleanWritable getAggregatedValue() {
+-    return new BooleanWritable(result);
++    getAggregatedValue().set(getAggregatedValue().get() && value.get());
+   }
+ 
+   @Override
+-  public BooleanWritable createAggregatedValue() {
+-    return new BooleanWritable();
++  public BooleanWritable createInitialValue() {
++    return new BooleanWritable(true);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/BooleanOrAggregator.java b/src/main/java/org/apache/giraph/aggregators/BooleanOrAggregator.java
+index cd5fcbb79..e9944c79f 100644
+--- a/src/main/java/org/apache/giraph/aggregators/BooleanOrAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/BooleanOrAggregator.java
+@@ -20,51 +20,18 @@
+ 
+ import org.apache.hadoop.io.BooleanWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for calculating the OR function over boolean values.
+  * The default value when nothing is aggregated is false.
+  */
+-public class BooleanOrAggregator implements Aggregator<BooleanWritable> {
+-  /** Internal result */
+-  private boolean result = false;
+-
+-  /**
+-   * Aggregate with a primitive boolean.
+-   *
+-   * @param value Boolean value to aggregate.
+-   */
+-  public void aggregate(boolean value) {
+-    result = result || value;
+-  }
+-
++public class BooleanOrAggregator extends BasicAggregator<BooleanWritable> {
+   @Override
+   public void aggregate(BooleanWritable value) {
+-    result = result || value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive boolean.
+-   *
+-   * @param value Boolean value to set.
+-   */
+-  public void setAggregatedValue(boolean value) {
+-    result = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(BooleanWritable value) {
+-    result = value.get();
+-  }
+-
+-  @Override
+-  public BooleanWritable getAggregatedValue() {
+-    return new BooleanWritable(result);
++    getAggregatedValue().set(getAggregatedValue().get() || value.get());
+   }
+ 
+   @Override
+-  public BooleanWritable createAggregatedValue() {
+-    return new BooleanWritable();
++  public BooleanWritable createInitialValue() {
++    return new BooleanWritable(false);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/BooleanOverwriteAggregator.java b/src/main/java/org/apache/giraph/aggregators/BooleanOverwriteAggregator.java
+index 9ee87b4b4..fe67bb8cf 100644
+--- a/src/main/java/org/apache/giraph/aggregators/BooleanOverwriteAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/BooleanOverwriteAggregator.java
+@@ -20,8 +20,6 @@
+ 
+ import org.apache.hadoop.io.BooleanWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator that stores a value that is overwritten once another value is
+  * aggregated. This aggregator is useful for one-to-many communication from
+@@ -29,45 +27,15 @@
+  * to this aggregator, its behavior is non-deterministic. The default value
+  * for this aggregator is false.
+  */
+-public class BooleanOverwriteAggregator implements Aggregator<BooleanWritable> {
+-  /** Internal result */
+-  private boolean result = false;
+-
+-  /**
+-   * Aggregate with a primitive boolean.
+-   *
+-   * @param value Boolean value to aggregate.
+-   */
+-  public void aggregate(boolean value) {
+-    result = value;
+-  }
+-
++public class BooleanOverwriteAggregator extends
++    BasicAggregator<BooleanWritable> {
+   @Override
+   public void aggregate(BooleanWritable value) {
+-    result = value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive boolean.
+-   *
+-   * @param value Boolean value to set.
+-   */
+-  public void setAggregatedValue(boolean value) {
+-    result = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(BooleanWritable value) {
+-    result = value.get();
+-  }
+-
+-  @Override
+-  public BooleanWritable getAggregatedValue() {
+-    return new BooleanWritable(result);
++    getAggregatedValue().set(value.get());
+   }
+ 
+   @Override
+-  public BooleanWritable createAggregatedValue() {
+-    return new BooleanWritable();
++  public BooleanWritable createInitialValue() {
++    return new BooleanWritable(false);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/DoubleMaxAggregator.java b/src/main/java/org/apache/giraph/aggregators/DoubleMaxAggregator.java
+index a3798d803..d925f9f99 100644
+--- a/src/main/java/org/apache/giraph/aggregators/DoubleMaxAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/DoubleMaxAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.DoubleWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting max double value.
+- *
+  */
+-public class DoubleMaxAggregator implements Aggregator<DoubleWritable> {
+-  /** Saved maximum value */
+-  private double max = Double.MIN_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive double.
+-   *
+-   * @param value Double value to aggregate.
+-   */
+-  public void aggregate(double value) {
+-    double val = value;
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
++public class DoubleMaxAggregator extends BasicAggregator<DoubleWritable> {
+   @Override
+   public void aggregate(DoubleWritable value) {
+-    double val = value.get();
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive double.
+-   *
+-   * @param value Double value to set.
+-   */
+-  public void setAggregatedValue(double value) {
+-    max = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(DoubleWritable value) {
+-    max = value.get();
+-  }
+-
+-  @Override
+-  public DoubleWritable getAggregatedValue() {
+-    return new DoubleWritable(max);
++    getAggregatedValue().set(
++        Math.max(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public DoubleWritable createAggregatedValue() {
+-    return new DoubleWritable();
++  public DoubleWritable createInitialValue() {
++    return new DoubleWritable(Double.MIN_VALUE);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/DoubleMinAggregator.java b/src/main/java/org/apache/giraph/aggregators/DoubleMinAggregator.java
+index 23a0177cf..268aa0d2f 100644
+--- a/src/main/java/org/apache/giraph/aggregators/DoubleMinAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/DoubleMinAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.DoubleWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting min double value.
+  */
+-public class DoubleMinAggregator implements Aggregator<DoubleWritable> {
+-  /** Internal aggregator */
+-  private double min = Double.MAX_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive double.
+-   *
+-   * @param value Double value to aggregate.
+-   */
+-  public void aggregate(double value) {
+-    double val = value;
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
++public class DoubleMinAggregator extends BasicAggregator<DoubleWritable> {
+   @Override
+   public void aggregate(DoubleWritable value) {
+-    double val = value.get();
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive double.
+-   *
+-   * @param value Double value to set.
+-   */
+-  public void setAggregatedValue(double value) {
+-    min = value;
++    getAggregatedValue().set(
++        Math.min(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public void setAggregatedValue(DoubleWritable value) {
+-    min = value.get();
++  public DoubleWritable createInitialValue() {
++    return new DoubleWritable(Double.MAX_VALUE);
+   }
+-
+-  @Override
+-  public DoubleWritable getAggregatedValue() {
+-    return new DoubleWritable(min);
+-  }
+-
+-  @Override
+-  public DoubleWritable createAggregatedValue() {
+-    return new DoubleWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/DoubleOverwriteAggregator.java b/src/main/java/org/apache/giraph/aggregators/DoubleOverwriteAggregator.java
+index 424e77147..8aa7820ce 100644
+--- a/src/main/java/org/apache/giraph/aggregators/DoubleOverwriteAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/DoubleOverwriteAggregator.java
+@@ -20,53 +20,21 @@
+ 
+ import org.apache.hadoop.io.DoubleWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator that stores a value that is overwritten once another value is
+  * aggregated. This aggregator is useful for one-to-many communication from
+  * master.compute() or from a special vertex. In case multiple vertices write
+  * to this aggregator, its behavior is non-deterministic.
+  */
+-public class DoubleOverwriteAggregator implements Aggregator<DoubleWritable> {
+-  /** Internal result */
+-  private double result = 0.0;
+-
+-  /**
+-   * Aggregate with a primitive double.
+-   *
+-   * @param value Double value to aggregate.
+-   */
+-  public void aggregate(double value) {
+-    result = value;
+-  }
+-
++public class DoubleOverwriteAggregator extends
++    BasicAggregator<DoubleWritable> {
+   @Override
+   public void aggregate(DoubleWritable value) {
+-    result = value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive double.
+-   *
+-   * @param value Double value to set.
+-   */
+-  public void setAggregatedValue(double value) {
+-    result = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(DoubleWritable value) {
+-    result = value.get();
+-  }
+-
+-  @Override
+-  public DoubleWritable getAggregatedValue() {
+-    return new DoubleWritable(result);
++    getAggregatedValue().set(value.get());
+   }
+ 
+   @Override
+-  public DoubleWritable createAggregatedValue() {
+-    return new DoubleWritable();
++  public DoubleWritable createInitialValue() {
++    return new DoubleWritable(0);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/DoubleProductAggregator.java b/src/main/java/org/apache/giraph/aggregators/DoubleProductAggregator.java
+index 9d028a3dd..3bdc9e58d 100644
+--- a/src/main/java/org/apache/giraph/aggregators/DoubleProductAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/DoubleProductAggregator.java
+@@ -20,51 +20,17 @@
+ 
+ import org.apache.hadoop.io.DoubleWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for calculating products of double values.
+  */
+-public class DoubleProductAggregator implements Aggregator<DoubleWritable> {
+-  /** Aggregated product */
+-  private double product = 1.0;
+-
+-  /**
+-   * Aggregate a primitive double.
+-   *
+-   * @param value Double value to aggregate.
+-   */
+-  public void aggregate(double value) {
+-    product *= value;
+-  }
+-
++public class DoubleProductAggregator extends BasicAggregator<DoubleWritable> {
+   @Override
+   public void aggregate(DoubleWritable value) {
+-    product *= value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive double.
+-   *
+-   * @param value Double value to set.
+-   */
+-  public void setAggregatedValue(double value) {
+-    product = value;
++    getAggregatedValue().set(getAggregatedValue().get() * value.get());
+   }
+ 
+   @Override
+-  public void setAggregatedValue(DoubleWritable value) {
+-    product = value.get();
++  public DoubleWritable createInitialValue() {
++    return new DoubleWritable(1);
+   }
+-
+-  @Override
+-  public DoubleWritable getAggregatedValue() {
+-    return new DoubleWritable(product);
+-  }
+-
+-  @Override
+-  public DoubleWritable createAggregatedValue() {
+-    return new DoubleWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/DoubleSumAggregator.java b/src/main/java/org/apache/giraph/aggregators/DoubleSumAggregator.java
+index a7426ce5e..79d45ff8e 100644
+--- a/src/main/java/org/apache/giraph/aggregators/DoubleSumAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/DoubleSumAggregator.java
+@@ -20,51 +20,15 @@
+ 
+ import org.apache.hadoop.io.DoubleWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+-/**
+- * Aggregator for summing up double values.
+- */
+-public class DoubleSumAggregator implements Aggregator<DoubleWritable> {
+-  /** Aggregated sum */
+-  private double sum = 0;
+-
+-  /**
+-   * Aggregate a primitive double.
+-   *
+-   * @param value Double value to aggregate.
+-   */
+-  public void aggregate(double value) {
+-    sum += value;
+-  }
+-
++/** Aggregator for summing up double values. */
++public class DoubleSumAggregator extends BasicAggregator<DoubleWritable> {
+   @Override
+   public void aggregate(DoubleWritable value) {
+-    sum += value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive double.
+-   *
+-   * @param value Double value to set.
+-   */
+-  public void setAggregatedValue(double value) {
+-    sum = value;
++    getAggregatedValue().set(getAggregatedValue().get() + value.get());
+   }
+ 
+   @Override
+-  public void setAggregatedValue(DoubleWritable value) {
+-    sum = value.get();
++  public DoubleWritable createInitialValue() {
++    return new DoubleWritable(0);
+   }
+-
+-  @Override
+-  public DoubleWritable getAggregatedValue() {
+-    return new DoubleWritable(sum);
+-  }
+-
+-  @Override
+-  public DoubleWritable createAggregatedValue() {
+-    return new DoubleWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/FloatMaxAggregator.java b/src/main/java/org/apache/giraph/aggregators/FloatMaxAggregator.java
+index 2b5dcbcec..6ee111108 100644
+--- a/src/main/java/org/apache/giraph/aggregators/FloatMaxAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/FloatMaxAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.FloatWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting max float value.
+- *
+  */
+-public class FloatMaxAggregator implements Aggregator<FloatWritable> {
+-  /** Saved maximum value */
+-  private float max = Float.MIN_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive float.
+-   *
+-   * @param value Float value to aggregate.
+-   */
+-  public void aggregate(float value) {
+-    float val = value;
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
++public class FloatMaxAggregator extends BasicAggregator<FloatWritable> {
+   @Override
+   public void aggregate(FloatWritable value) {
+-    float val = value.get();
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive float.
+-   *
+-   * @param value Float value to set.
+-   */
+-  public void setAggregatedValue(float value) {
+-    max = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(FloatWritable value) {
+-    max = value.get();
+-  }
+-
+-  @Override
+-  public FloatWritable getAggregatedValue() {
+-    return new FloatWritable(max);
++    getAggregatedValue().set(
++        Math.max(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public FloatWritable createAggregatedValue() {
+-    return new FloatWritable();
++  public FloatWritable createInitialValue() {
++    return new FloatWritable(Float.MIN_VALUE);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/FloatMinAggregator.java b/src/main/java/org/apache/giraph/aggregators/FloatMinAggregator.java
+index af26e9082..feb879143 100644
+--- a/src/main/java/org/apache/giraph/aggregators/FloatMinAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/FloatMinAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.FloatWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting min float value.
+  */
+-public class FloatMinAggregator implements Aggregator<FloatWritable> {
+-  /** Internal aggregator */
+-  private float min = Float.MAX_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive float.
+-   *
+-   * @param value Float value to aggregate.
+-   */
+-  public void aggregate(float value) {
+-    float val = value;
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
++public class FloatMinAggregator extends BasicAggregator<FloatWritable> {
+   @Override
+   public void aggregate(FloatWritable value) {
+-    float val = value.get();
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive float.
+-   *
+-   * @param value Float value to set.
+-   */
+-  public void setAggregatedValue(float value) {
+-    min = value;
++    getAggregatedValue().set(
++        Math.min(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public void setAggregatedValue(FloatWritable value) {
+-    min = value.get();
++  public FloatWritable createInitialValue() {
++    return new FloatWritable(Float.MAX_VALUE);
+   }
+-
+-  @Override
+-  public FloatWritable getAggregatedValue() {
+-    return new FloatWritable(min);
+-  }
+-
+-  @Override
+-  public FloatWritable createAggregatedValue() {
+-    return new FloatWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/FloatOverwriteAggregator.java b/src/main/java/org/apache/giraph/aggregators/FloatOverwriteAggregator.java
+index 70ce3c24b..0a4d94872 100644
+--- a/src/main/java/org/apache/giraph/aggregators/FloatOverwriteAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/FloatOverwriteAggregator.java
+@@ -20,53 +20,20 @@
+ 
+ import org.apache.hadoop.io.FloatWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator that stores a value that is overwritten once another value is
+  * aggregated. This aggregator is useful for one-to-many communication from
+  * master.compute() or from a special vertex. In case multiple vertices write
+  * to this aggregator, its behavior is non-deterministic.
+  */
+-public class FloatOverwriteAggregator implements Aggregator<FloatWritable> {
+-  /** Internal result */
+-  private float result = 0.0f;
+-
+-  /**
+-   * Aggregate with a primitive float.
+-   *
+-   * @param value Float value to aggregate.
+-   */
+-  public void aggregate(float value) {
+-    result = value;
+-  }
+-
++public class FloatOverwriteAggregator extends BasicAggregator<FloatWritable> {
+   @Override
+   public void aggregate(FloatWritable value) {
+-    result = value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive float.
+-   *
+-   * @param value Float value to set.
+-   */
+-  public void setAggregatedValue(float value) {
+-    result = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(FloatWritable value) {
+-    result = value.get();
+-  }
+-
+-  @Override
+-  public FloatWritable getAggregatedValue() {
+-    return new FloatWritable(result);
++    getAggregatedValue().set(value.get());
+   }
+ 
+   @Override
+-  public FloatWritable createAggregatedValue() {
+-    return new FloatWritable();
++  public FloatWritable createInitialValue() {
++    return new FloatWritable(0);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/FloatProductAggregator.java b/src/main/java/org/apache/giraph/aggregators/FloatProductAggregator.java
+index c163c0299..e1fc6c5ab 100644
+--- a/src/main/java/org/apache/giraph/aggregators/FloatProductAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/FloatProductAggregator.java
+@@ -20,51 +20,17 @@
+ 
+ import org.apache.hadoop.io.FloatWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for calculating products of float values.
+  */
+-public class FloatProductAggregator implements Aggregator<FloatWritable> {
+-  /** Aggregated product */
+-  private float product = 1.0f;
+-
+-  /**
+-   * Aggregate a primitive float.
+-   *
+-   * @param value Float value to aggregate.
+-   */
+-  public void aggregate(float value) {
+-    product *= value;
+-  }
+-
++public class FloatProductAggregator extends BasicAggregator<FloatWritable> {
+   @Override
+   public void aggregate(FloatWritable value) {
+-    product *= value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive float.
+-   *
+-   * @param value Float value to set.
+-   */
+-  public void setAggregatedValue(float value) {
+-    product = value;
++    getAggregatedValue().set(getAggregatedValue().get() * value.get());
+   }
+ 
+   @Override
+-  public void setAggregatedValue(FloatWritable value) {
+-    product = value.get();
++  public FloatWritable createInitialValue() {
++    return new FloatWritable(1);
+   }
+-
+-  @Override
+-  public FloatWritable getAggregatedValue() {
+-    return new FloatWritable(product);
+-  }
+-
+-  @Override
+-  public FloatWritable createAggregatedValue() {
+-    return new FloatWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/FloatSumAggregator.java b/src/main/java/org/apache/giraph/aggregators/FloatSumAggregator.java
+index 5a1d98e11..c66d8650a 100644
+--- a/src/main/java/org/apache/giraph/aggregators/FloatSumAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/FloatSumAggregator.java
+@@ -20,51 +20,17 @@
+ 
+ import org.apache.hadoop.io.FloatWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for summing up float values.
+  */
+-public class FloatSumAggregator implements Aggregator<FloatWritable> {
+-  /** Aggregated sum */
+-  private float sum = 0;
+-
+-  /**
+-   * Aggregate a primitive float.
+-   *
+-   * @param value Float value to aggregate.
+-   */
+-  public void aggregate(float value) {
+-    sum += value;
+-  }
+-
++public class FloatSumAggregator extends BasicAggregator<FloatWritable> {
+   @Override
+   public void aggregate(FloatWritable value) {
+-    sum += value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive float.
+-   *
+-   * @param value Float value to set.
+-   */
+-  public void setAggregatedValue(float value) {
+-    sum = value;
++    getAggregatedValue().set(getAggregatedValue().get() + value.get());
+   }
+ 
+   @Override
+-  public void setAggregatedValue(FloatWritable value) {
+-    sum = value.get();
++  public FloatWritable createInitialValue() {
++    return new FloatWritable(0);
+   }
+-
+-  @Override
+-  public FloatWritable getAggregatedValue() {
+-    return new FloatWritable(sum);
+-  }
+-
+-  @Override
+-  public FloatWritable createAggregatedValue() {
+-    return new FloatWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/IntMaxAggregator.java b/src/main/java/org/apache/giraph/aggregators/IntMaxAggregator.java
+index bbd0fe346..271c7d6fc 100644
+--- a/src/main/java/org/apache/giraph/aggregators/IntMaxAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/IntMaxAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.IntWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting max integer value.
+- *
+  */
+-public class IntMaxAggregator implements Aggregator<IntWritable> {
+-  /** Saved maximum value */
+-  private int max = Integer.MIN_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive integer.
+-   *
+-   * @param value Integer value to aggregate.
+-   */
+-  public void aggregate(int value) {
+-    int val = value;
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
++public class IntMaxAggregator extends BasicAggregator<IntWritable> {
+   @Override
+   public void aggregate(IntWritable value) {
+-    int val = value.get();
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive integer.
+-   *
+-   * @param value Integer value to set.
+-   */
+-  public void setAggregatedValue(int value) {
+-    max = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(IntWritable value) {
+-    max = value.get();
+-  }
+-
+-  @Override
+-  public IntWritable getAggregatedValue() {
+-    return new IntWritable(max);
++    getAggregatedValue().set(
++        Math.max(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public IntWritable createAggregatedValue() {
+-    return new IntWritable();
++  public IntWritable createInitialValue() {
++    return new IntWritable(Integer.MIN_VALUE);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/IntMinAggregator.java b/src/main/java/org/apache/giraph/aggregators/IntMinAggregator.java
+index d0bb29a11..a170514e9 100644
+--- a/src/main/java/org/apache/giraph/aggregators/IntMinAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/IntMinAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.IntWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting min integer value.
+  */
+-public class IntMinAggregator implements Aggregator<IntWritable> {
+-  /** Internal aggregator */
+-  private int min = Integer.MAX_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive integer.
+-   *
+-   * @param value Integer value to aggregate.
+-   */
+-  public void aggregate(int value) {
+-    int val = value;
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
++public class IntMinAggregator extends BasicAggregator<IntWritable> {
+   @Override
+   public void aggregate(IntWritable value) {
+-    int val = value.get();
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive integer.
+-   *
+-   * @param value Integer value to set.
+-   */
+-  public void setAggregatedValue(int value) {
+-    min = value;
++    getAggregatedValue().set(
++        Math.min(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public void setAggregatedValue(IntWritable value) {
+-    min = value.get();
++  public IntWritable createInitialValue() {
++    return new IntWritable(Integer.MAX_VALUE);
+   }
+-
+-  @Override
+-  public IntWritable getAggregatedValue() {
+-    return new IntWritable(min);
+-  }
+-
+-  @Override
+-  public IntWritable createAggregatedValue() {
+-    return new IntWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/IntOverwriteAggregator.java b/src/main/java/org/apache/giraph/aggregators/IntOverwriteAggregator.java
+index cbb543f47..eccded00a 100644
+--- a/src/main/java/org/apache/giraph/aggregators/IntOverwriteAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/IntOverwriteAggregator.java
+@@ -20,53 +20,20 @@
+ 
+ import org.apache.hadoop.io.IntWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator that stores a value that is overwritten once another value is
+  * aggregated. This aggregator is useful for one-to-many communication from
+  * master.compute() or from a special vertex. In case multiple vertices write
+  * to this aggregator, its behavior is non-deterministic.
+  */
+-public class IntOverwriteAggregator implements Aggregator<IntWritable> {
+-  /** Internal result */
+-  private int result = 0;
+-
+-  /**
+-   * Aggregate with a primitive integer.
+-   *
+-   * @param value Integer value to aggregate.
+-   */
+-  public void aggregate(int value) {
+-    result = value;
+-  }
+-
++public class IntOverwriteAggregator extends BasicAggregator<IntWritable> {
+   @Override
+   public void aggregate(IntWritable value) {
+-    result = value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive integer.
+-   *
+-   * @param value Integer value to set.
+-   */
+-  public void setAggregatedValue(int value) {
+-    result = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(IntWritable value) {
+-    result = value.get();
+-  }
+-
+-  @Override
+-  public IntWritable getAggregatedValue() {
+-    return new IntWritable(result);
++    getAggregatedValue().set(value.get());
+   }
+ 
+   @Override
+-  public IntWritable createAggregatedValue() {
+-    return new IntWritable();
++  public IntWritable createInitialValue() {
++    return new IntWritable(0);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/IntProductAggregator.java b/src/main/java/org/apache/giraph/aggregators/IntProductAggregator.java
+index c9f826863..90771baee 100644
+--- a/src/main/java/org/apache/giraph/aggregators/IntProductAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/IntProductAggregator.java
+@@ -20,50 +20,17 @@
+ 
+ import org.apache.hadoop.io.IntWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for calculating products of long and integer values.
+  */
+-public class IntProductAggregator implements Aggregator<IntWritable> {
+-  /** Internal product */
+-  private int product = 1;
+-
+-  /**
+-   * Aggregate a primitive integer.
+-   *
+-   * @param value Integer value to aggregate.
+-   */
+-  public void aggregate(int value) {
+-    product *= value;
+-  }
+-
++public class IntProductAggregator extends BasicAggregator<IntWritable> {
+   @Override
+   public void aggregate(IntWritable value) {
+-    product *= value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive integer.
+-   *
+-   * @param value Integer value to set.
+-   */
+-  public void setAggregatedValue(int value) {
+-    product = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(IntWritable value) {
+-    product = value.get();
+-  }
+-
+-  @Override
+-  public IntWritable getAggregatedValue() {
+-    return new IntWritable(product);
++    getAggregatedValue().set(getAggregatedValue().get() * value.get());
+   }
+ 
+   @Override
+-  public IntWritable createAggregatedValue() {
+-    return new IntWritable();
++  public IntWritable createInitialValue() {
++    return new IntWritable(1);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/IntSumAggregator.java b/src/main/java/org/apache/giraph/aggregators/IntSumAggregator.java
+index 5cd7779fc..e6955f924 100644
+--- a/src/main/java/org/apache/giraph/aggregators/IntSumAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/IntSumAggregator.java
+@@ -20,50 +20,17 @@
+ 
+ import org.apache.hadoop.io.IntWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for summing up integer values.
+  */
+-public class IntSumAggregator implements Aggregator<IntWritable> {
+-  /** Internal sum */
+-  private int sum = 0;
+-
+-  /**
+-   * Aggregate a primitive integer.
+-   *
+-   * @param value Integer value to aggregate.
+-   */
+-  public void aggregate(int value) {
+-    sum += value;
+-  }
+-
++public class IntSumAggregator extends BasicAggregator<IntWritable> {
+   @Override
+   public void aggregate(IntWritable value) {
+-    sum += value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive integer.
+-   *
+-   * @param value Integer value to set.
+-   */
+-  public void setAggregatedValue(int value) {
+-    sum = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(IntWritable value) {
+-    sum = value.get();
+-  }
+-
+-  @Override
+-  public IntWritable getAggregatedValue() {
+-    return new IntWritable(sum);
++    getAggregatedValue().set(getAggregatedValue().get() + value.get());
+   }
+ 
+   @Override
+-  public IntWritable createAggregatedValue() {
+-    return new IntWritable();
++  public IntWritable createInitialValue() {
++    return new IntWritable(0);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/LongMaxAggregator.java b/src/main/java/org/apache/giraph/aggregators/LongMaxAggregator.java
+index 047f629a8..b3d032b4d 100644
+--- a/src/main/java/org/apache/giraph/aggregators/LongMaxAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/LongMaxAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.LongWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting max long value.
+- *
+  */
+-public class LongMaxAggregator implements Aggregator<LongWritable> {
+-  /** Saved maximum value */
+-  private long max = Long.MIN_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive long.
+-   *
+-   * @param value Long value to aggregate.
+-   */
+-  public void aggregate(long value) {
+-    long val = value;
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
++public class LongMaxAggregator extends BasicAggregator<LongWritable> {
+   @Override
+   public void aggregate(LongWritable value) {
+-    long val = value.get();
+-    if (val > max) {
+-      max = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive long.
+-   *
+-   * @param value Long value to set.
+-   */
+-  public void setAggregatedValue(long value) {
+-    max = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(LongWritable value) {
+-    max = value.get();
+-  }
+-
+-  @Override
+-  public LongWritable getAggregatedValue() {
+-    return new LongWritable(max);
++    getAggregatedValue().set(
++        Math.max(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public LongWritable createAggregatedValue() {
+-    return new LongWritable();
++  public LongWritable createInitialValue() {
++    return new LongWritable(Long.MIN_VALUE);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/LongMinAggregator.java b/src/main/java/org/apache/giraph/aggregators/LongMinAggregator.java
+index 2f7d40e3e..d8d5a5c4d 100644
+--- a/src/main/java/org/apache/giraph/aggregators/LongMinAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/LongMinAggregator.java
+@@ -20,57 +20,18 @@
+ 
+ import org.apache.hadoop.io.LongWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for getting min long value.
+  */
+-public class LongMinAggregator implements Aggregator<LongWritable> {
+-  /** Internal aggregator */
+-  private long min = Long.MAX_VALUE;
+-
+-  /**
+-   * Aggregate with a primitive long.
+-   *
+-   * @param value Long value to aggregate.
+-   */
+-  public void aggregate(long value) {
+-    long val = value;
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
++public class LongMinAggregator extends BasicAggregator<LongWritable> {
+   @Override
+   public void aggregate(LongWritable value) {
+-    long val = value.get();
+-    if (val < min) {
+-      min = val;
+-    }
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive long.
+-   *
+-   * @param value Long value to set.
+-   */
+-  public void setAggregatedValue(long value) {
+-    min = value;
++    getAggregatedValue().set(
++        Math.min(getAggregatedValue().get(), value.get()));
+   }
+ 
+   @Override
+-  public void setAggregatedValue(LongWritable value) {
+-    min = value.get();
++  public LongWritable createInitialValue() {
++    return new LongWritable(Long.MAX_VALUE);
+   }
+-
+-  @Override
+-  public LongWritable getAggregatedValue() {
+-    return new LongWritable(min);
+-  }
+-
+-  @Override
+-  public LongWritable createAggregatedValue() {
+-    return new LongWritable();
+-  }
+-
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/LongOverwriteAggregator.java b/src/main/java/org/apache/giraph/aggregators/LongOverwriteAggregator.java
+index ece4915b3..4a71f7228 100644
+--- a/src/main/java/org/apache/giraph/aggregators/LongOverwriteAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/LongOverwriteAggregator.java
+@@ -20,53 +20,20 @@
+ 
+ import org.apache.hadoop.io.LongWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator that stores a value that is overwritten once another value is
+  * aggregated. This aggregator is useful for one-to-many communication from
+  * master.compute() or from a special vertex. In case multiple vertices write
+  * to this aggregator, its behavior is non-deterministic.
+  */
+-public class LongOverwriteAggregator implements Aggregator<LongWritable> {
+-  /** Internal result */
+-  private long result = 0L;
+-
+-  /**
+-   * Aggregate with a primitive long.
+-   *
+-   * @param value Long value to aggregate.
+-   */
+-  public void aggregate(long value) {
+-    result = value;
+-  }
+-
++public class LongOverwriteAggregator extends BasicAggregator<LongWritable> {
+   @Override
+   public void aggregate(LongWritable value) {
+-    result = value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive long.
+-   *
+-   * @param value Long value to set.
+-   */
+-  public void setAggregatedValue(long value) {
+-    result = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(LongWritable value) {
+-    result = value.get();
+-  }
+-
+-  @Override
+-  public LongWritable getAggregatedValue() {
+-    return new LongWritable(result);
++    getAggregatedValue().set(value.get());
+   }
+ 
+   @Override
+-  public LongWritable createAggregatedValue() {
+-    return new LongWritable();
++  public LongWritable createInitialValue() {
++    return new LongWritable(0);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/LongProductAggregator.java b/src/main/java/org/apache/giraph/aggregators/LongProductAggregator.java
+index e435d20bd..3926d042e 100644
+--- a/src/main/java/org/apache/giraph/aggregators/LongProductAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/LongProductAggregator.java
+@@ -20,50 +20,17 @@
+ 
+ import org.apache.hadoop.io.LongWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for calculating products of long values.
+  */
+-public class LongProductAggregator implements Aggregator<LongWritable> {
+-  /** Internal product */
+-  private long product = 1L;
+-
+-  /**
+-   * Aggregate a primitive long.
+-   *
+-   * @param value Long value to aggregate.
+-   */
+-  public void aggregate(long value) {
+-    product *= value;
+-  }
+-
++public class LongProductAggregator extends BasicAggregator<LongWritable> {
+   @Override
+   public void aggregate(LongWritable value) {
+-    product *= value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive long.
+-   *
+-   * @param value Long value to set.
+-   */
+-  public void setAggregatedValue(long value) {
+-    product = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(LongWritable value) {
+-    product = value.get();
+-  }
+-
+-  @Override
+-  public LongWritable getAggregatedValue() {
+-    return new LongWritable(product);
++    getAggregatedValue().set(getAggregatedValue().get() * value.get());
+   }
+ 
+   @Override
+-  public LongWritable createAggregatedValue() {
+-    return new LongWritable();
++  public LongWritable createInitialValue() {
++    return new LongWritable(1);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/aggregators/LongSumAggregator.java b/src/main/java/org/apache/giraph/aggregators/LongSumAggregator.java
+index 0a1d06d24..32ed72406 100644
+--- a/src/main/java/org/apache/giraph/aggregators/LongSumAggregator.java
++++ b/src/main/java/org/apache/giraph/aggregators/LongSumAggregator.java
+@@ -20,50 +20,17 @@
+ 
+ import org.apache.hadoop.io.LongWritable;
+ 
+-import org.apache.giraph.graph.Aggregator;
+-
+ /**
+  * Aggregator for summing up long values.
+  */
+-public class LongSumAggregator implements Aggregator<LongWritable> {
+-  /** Internal sum */
+-  private long sum = 0;
+-
+-  /**
+-   * Aggregate a primitive long.
+-   *
+-   * @param value Long value to aggregate.
+-   */
+-  public void aggregate(long value) {
+-    sum += value;
+-  }
+-
++public class LongSumAggregator extends BasicAggregator<LongWritable> {
+   @Override
+   public void aggregate(LongWritable value) {
+-    sum += value.get();
+-  }
+-
+-  /**
+-   * Set aggregated value using a primitive long.
+-   *
+-   * @param value Long value to set.
+-   */
+-  public void setAggregatedValue(long value) {
+-    sum = value;
+-  }
+-
+-  @Override
+-  public void setAggregatedValue(LongWritable value) {
+-    sum = value.get();
+-  }
+-
+-  @Override
+-  public LongWritable getAggregatedValue() {
+-    return new LongWritable(sum);
++    getAggregatedValue().set(getAggregatedValue().get() + value.get());
+   }
+ 
+   @Override
+-  public LongWritable createAggregatedValue() {
+-    return new LongWritable();
++  public LongWritable createInitialValue() {
++    return new LongWritable(0);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/benchmark/RandomMessageBenchmark.java b/src/main/java/org/apache/giraph/benchmark/RandomMessageBenchmark.java
+index 8466e1a58..6e1ce2622 100644
+--- a/src/main/java/org/apache/giraph/benchmark/RandomMessageBenchmark.java
++++ b/src/main/java/org/apache/giraph/benchmark/RandomMessageBenchmark.java
+@@ -24,6 +24,7 @@
+ import org.apache.commons.cli.Options;
+ import org.apache.commons.cli.PosixParser;
+ import org.apache.giraph.aggregators.LongSumAggregator;
++import org.apache.giraph.graph.DefaultMasterCompute;
+ import org.apache.giraph.graph.EdgeListVertex;
+ import org.apache.giraph.graph.GiraphJob;
+ import org.apache.giraph.graph.WorkerContext;
+@@ -115,26 +116,17 @@ public void preApplication()
+               DEFAULT_NUM_MESSAGES_PER_EDGE);
+       numSupersteps = getContext().getConfiguration().
+           getInt(SUPERSTEP_COUNT, -1);
+-      registerAggregator(AGG_SUPERSTEP_TOTAL_BYTES,
+-          LongSumAggregator.class);
+-      registerAggregator(AGG_SUPERSTEP_TOTAL_MESSAGES,
+-          LongSumAggregator.class);
+-      registerAggregator(AGG_SUPERSTEP_TOTAL_MILLIS,
+-          LongSumAggregator.class);
+-      registerAggregator(WORKERS,
+-          LongSumAggregator.class);
+     }
+ 
+     @Override
+     public void preSuperstep() {
+-      LongSumAggregator superstepBytesAggregator =
+-          (LongSumAggregator) getAggregator(AGG_SUPERSTEP_TOTAL_BYTES);
+-      LongSumAggregator superstepMessagesAggregator =
+-          (LongSumAggregator) getAggregator(AGG_SUPERSTEP_TOTAL_MESSAGES);
+-      LongSumAggregator superstepMillisAggregator =
+-          (LongSumAggregator) getAggregator(AGG_SUPERSTEP_TOTAL_MILLIS);
+-      LongSumAggregator workersAggregator =
+-          (LongSumAggregator) getAggregator(WORKERS);
++      long superstepBytes = this.<LongWritable>
++          getAggregatedValue(AGG_SUPERSTEP_TOTAL_BYTES).get();
++      long superstepMessages = this.<LongWritable>
++          getAggregatedValue(AGG_SUPERSTEP_TOTAL_MESSAGES).get();
++      long superstepMillis = this.<LongWritable>
++          getAggregatedValue(AGG_SUPERSTEP_TOTAL_MILLIS).get();
++      long workers = this.<LongWritable>getAggregatedValue(WORKERS).get();
+ 
+       // For timing and tracking the supersteps
+       // - superstep 0 starts the time, but cannot display any stats
+@@ -143,41 +135,26 @@ public void preSuperstep() {
+       if (getSuperstep() == 0) {
+         startSuperstepMillis = System.currentTimeMillis();
+       } else {
+-        totalBytes +=
+-            superstepBytesAggregator.getAggregatedValue().get();
+-        totalMessages +=
+-            superstepMessagesAggregator.getAggregatedValue().get();
+-        totalMillis +=
+-            superstepMillisAggregator.getAggregatedValue().get();
++        totalBytes += superstepBytes;
++        totalMessages += superstepMessages;
++        totalMillis += superstepMillis;
+         double superstepMegabytesPerSecond =
+-            superstepBytesAggregator.getAggregatedValue().get() *
+-            workersAggregator.getAggregatedValue().get() *
+-            1000d / 1024d / 1024d /
+-            superstepMillisAggregator.getAggregatedValue().get();
++            superstepBytes * workers * 1000d / 1024d / 1024d / superstepMillis;
+         double megabytesPerSecond = totalBytes *
+-            workersAggregator.getAggregatedValue().get() *
+-            1000d / 1024d / 1024d / totalMillis;
++            workers * 1000d / 1024d / 1024d / totalMillis;
+         double superstepMessagesPerSecond =
+-            superstepMessagesAggregator.getAggregatedValue().get() *
+-            workersAggregator.getAggregatedValue().get() * 1000d /
+-            superstepMillisAggregator.getAggregatedValue().get();
+-        double messagesPerSecond = totalMessages *
+-            workersAggregator.getAggregatedValue().get() * 1000d /
+-            totalMillis;
++            superstepMessages * workers * 1000d / superstepMillis;
++        double messagesPerSecond =
++            totalMessages * workers * 1000d / totalMillis;
+         if (LOG.isInfoEnabled()) {
+-          LOG.info("Outputing statistics for superstep " +
+-              getSuperstep());
+-          LOG.info(AGG_SUPERSTEP_TOTAL_BYTES + " : " +
+-              superstepBytesAggregator.getAggregatedValue());
++          LOG.info("Outputing statistics for superstep " + getSuperstep());
++          LOG.info(AGG_SUPERSTEP_TOTAL_BYTES + " : " + superstepBytes);
+           LOG.info(AGG_TOTAL_BYTES + " : " + totalBytes);
+-          LOG.info(AGG_SUPERSTEP_TOTAL_MESSAGES + " : " +
+-              superstepMessagesAggregator.getAggregatedValue());
++          LOG.info(AGG_SUPERSTEP_TOTAL_MESSAGES + " : " + superstepMessages);
+           LOG.info(AGG_TOTAL_MESSAGES + " : " + totalMessages);
+-          LOG.info(AGG_SUPERSTEP_TOTAL_MILLIS + " : " +
+-              superstepMillisAggregator.getAggregatedValue());
++          LOG.info(AGG_SUPERSTEP_TOTAL_MILLIS + " : " + superstepMillis);
+           LOG.info(AGG_TOTAL_MILLIS + " : " + totalMillis);
+-          LOG.info(WORKERS + " : " +
+-              workersAggregator.getAggregatedValue());
++          LOG.info(WORKERS + " : " + workers);
+           LOG.info("Superstep megabytes / second = " +
+               superstepMegabytesPerSecond);
+           LOG.info("Total megabytes / second = " +
+@@ -187,41 +164,25 @@ public void preSuperstep() {
+           LOG.info("Total messages / second = " +
+               messagesPerSecond);
+           LOG.info("Superstep megabytes / second / worker = " +
+-              superstepMegabytesPerSecond /
+-              workersAggregator.getAggregatedValue().get());
++              superstepMegabytesPerSecond / workers);
+           LOG.info("Total megabytes / second / worker = " +
+-              megabytesPerSecond /
+-              workersAggregator.getAggregatedValue().get());
++              megabytesPerSecond / workers);
+           LOG.info("Superstep messages / second / worker = " +
+-              superstepMessagesPerSecond /
+-              workersAggregator.getAggregatedValue().get());
++              superstepMessagesPerSecond / workers);
+           LOG.info("Total messages / second / worker = " +
+-              messagesPerSecond /
+-              workersAggregator.getAggregatedValue().get());
++              messagesPerSecond / workers);
+         }
+       }
+ 
+-      superstepBytesAggregator.setAggregatedValue(
+-          new LongWritable(0L));
+-      superstepMessagesAggregator.setAggregatedValue(
+-          new LongWritable(0L));
+-      workersAggregator.setAggregatedValue(
+-          new LongWritable(1L));
+-      useAggregator(AGG_SUPERSTEP_TOTAL_BYTES);
+-      useAggregator(AGG_SUPERSTEP_TOTAL_MILLIS);
+-      useAggregator(AGG_SUPERSTEP_TOTAL_MESSAGES);
+-      useAggregator(WORKERS);
++      aggregate(WORKERS, new LongWritable(1));
+     }
+ 
+     @Override
+     public void postSuperstep() {
+-      LongSumAggregator superstepMillisAggregator =
+-          (LongSumAggregator) getAggregator(AGG_SUPERSTEP_TOTAL_MILLIS);
+       long endSuperstepMillis = System.currentTimeMillis();
+       long superstepMillis = endSuperstepMillis - startSuperstepMillis;
+       startSuperstepMillis = endSuperstepMillis;
+-      superstepMillisAggregator.setAggregatedValue(
+-          new LongWritable(superstepMillis));
++      aggregate(AGG_SUPERSTEP_TOTAL_MILLIS, new LongWritable(superstepMillis));
+     }
+ 
+     @Override
+@@ -262,6 +223,26 @@ public void randomizeMessageBytes() {
+     }
+   }
+ 
++  /**
++   * Master compute associated with {@link RandomMessageBenchmark}.
++   * It registers required aggregators.
++   */
++  public static class RandomMessageBenchmarkMasterCompute extends
++      DefaultMasterCompute {
++    @Override
++    public void initialize() throws InstantiationException,
++        IllegalAccessException {
++      registerAggregator(AGG_SUPERSTEP_TOTAL_BYTES,
++          LongSumAggregator.class);
++      registerAggregator(AGG_SUPERSTEP_TOTAL_MESSAGES,
++          LongSumAggregator.class);
++      registerAggregator(AGG_SUPERSTEP_TOTAL_MILLIS,
++          LongSumAggregator.class);
++      registerAggregator(WORKERS,
++          LongSumAggregator.class);
++    }
++  }
++
+   /**
+    * Actual message computation (messaging in this case)
+    */
+@@ -271,10 +252,6 @@ public static class RandomMessageVertex extends EdgeListVertex<
+     public void compute(Iterable<BytesWritable> messages) {
+       RandomMessageBenchmarkWorkerContext workerContext =
+           (RandomMessageBenchmarkWorkerContext) getWorkerContext();
+-      LongSumAggregator superstepBytesAggregator =
+-          (LongSumAggregator) getAggregator(AGG_SUPERSTEP_TOTAL_BYTES);
+-      LongSumAggregator superstepMessagesAggregator =
+-          (LongSumAggregator) getAggregator(AGG_SUPERSTEP_TOTAL_MESSAGES);
+       if (getSuperstep() < workerContext.getNumSupersteps()) {
+         for (int i = 0; i < workerContext.getNumMessagePerEdge(); i++) {
+           workerContext.randomizeMessageBytes();
+@@ -282,8 +259,9 @@ public void compute(Iterable<BytesWritable> messages) {
+               new BytesWritable(workerContext.getMessageBytes()));
+           long bytesSent = workerContext.getMessageBytes().length *
+               getNumEdges();
+-          superstepBytesAggregator.aggregate(bytesSent);
+-          superstepMessagesAggregator.aggregate(getNumEdges());
++          aggregate(AGG_SUPERSTEP_TOTAL_BYTES, new LongWritable(bytesSent));
++          aggregate(AGG_SUPERSTEP_TOTAL_MESSAGES,
++              new LongWritable(getNumEdges()));
+         }
+       } else {
+         voteToHalt();
+@@ -377,6 +355,7 @@ public int run(String[] args) throws Exception {
+     job.setVertexClass(RandomMessageVertex.class);
+     job.setVertexInputFormatClass(PseudoRandomVertexInputFormat.class);
+     job.setWorkerContextClass(RandomMessageBenchmarkWorkerContext.class);
++    job.setMasterComputeClass(RandomMessageBenchmarkMasterCompute.class);
+     job.setWorkerConfiguration(workers, workers, 100.0f);
+     job.getConfiguration().setLong(
+         PseudoRandomVertexInputFormat.AGGREGATE_VERTICES,
+diff --git a/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java b/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java
+index fa7764d52..4ba60361b 100644
+--- a/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java
++++ b/src/main/java/org/apache/giraph/bsp/CentralizedServiceMaster.java
+@@ -20,7 +20,7 @@
+ 
+ import java.io.IOException;
+ 
+-import org.apache.giraph.graph.AggregatorUsage;
++import org.apache.giraph.graph.MasterAggregatorUsage;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
+ import org.apache.zookeeper.KeeperException;
+@@ -35,9 +35,9 @@
+  * @param <M> Message data
+  */
+ @SuppressWarnings("rawtypes")
+-public interface CentralizedServiceMaster<
+-  I extends WritableComparable, V extends Writable, E extends Writable,
+-  M extends Writable> extends CentralizedService<I, V, E, M>, AggregatorUsage {
++public interface CentralizedServiceMaster<I extends WritableComparable,
++    V extends Writable, E extends Writable, M extends Writable> extends
++    CentralizedService<I, V, E, M>, MasterAggregatorUsage {
+   /**
+    * Become the master.
+    * @return true if became the master, false if the application is done.
+diff --git a/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java b/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+index e3c3a42e6..20fa5b0da 100644
+--- a/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
++++ b/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+@@ -24,10 +24,10 @@
+ import java.util.Map;
+ 
+ import org.apache.giraph.comm.ServerData;
++import org.apache.giraph.graph.WorkerAggregatorUsage;
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.io.WritableComparable;
+ 
+-import org.apache.giraph.graph.AggregatorUsage;
+ import org.apache.giraph.graph.Vertex;
+ import org.apache.giraph.graph.GraphMapper;
+ import org.apache.giraph.graph.partition.Partition;
+@@ -48,7 +48,7 @@
+ @SuppressWarnings("rawtypes")
+ public interface CentralizedServiceWorker<I extends WritableComparable,
+   V extends Writable, E extends Writable, M extends Writable>
+-  extends CentralizedService<I, V, E, M>, AggregatorUsage {
++  extends CentralizedService<I, V, E, M>, WorkerAggregatorUsage {
+   /**
+    * Get the worker information
+    *
+diff --git a/src/main/java/org/apache/giraph/examples/AggregatorsTestVertex.java b/src/main/java/org/apache/giraph/examples/AggregatorsTestVertex.java
+new file mode 100644
+index 000000000..8f220cbcd
+--- /dev/null
++++ b/src/main/java/org/apache/giraph/examples/AggregatorsTestVertex.java
+@@ -0,0 +1,115 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.giraph.examples;
++
++import org.apache.giraph.aggregators.LongSumAggregator;
++import org.apache.giraph.graph.DefaultMasterCompute;
++import org.apache.giraph.graph.EdgeListVertex;
++import org.apache.hadoop.io.DoubleWritable;
++import org.apache.hadoop.io.FloatWritable;
++import org.apache.hadoop.io.LongWritable;
++
++import java.io.IOException;
++
++/** Vertex which uses aggrergators. To be used for testing. */
++public class AggregatorsTestVertex extends
++    EdgeListVertex<LongWritable, DoubleWritable, FloatWritable,
++        DoubleWritable> {
++
++  /** Name of regular aggregator */
++  private static final String REGULAR_AGG = "regular";
++  /** Name of persistent aggregator */
++  private static final String PERSISTENT_AGG = "persistent";
++  /** Name of master overwriting aggregator */
++  private static final String MASTER_WRITE_AGG = "master";
++  /** Value which master compute will use */
++  private static final long MASTER_VALUE = 12345;
++
++  @Override
++  public void compute(Iterable<DoubleWritable> messages) throws IOException {
++    long superstep = getSuperstep();
++
++    LongWritable myValue = new LongWritable(1L << superstep);
++    aggregate(REGULAR_AGG, myValue);
++    aggregate(PERSISTENT_AGG, myValue);
++
++    long nv = getTotalNumVertices();
++    if (superstep > 0) {
++      assertEquals(nv * (1L << (superstep - 1)),
++          ((LongWritable) getAggregatedValue(REGULAR_AGG)).get());
++    } else {
++      assertEquals(0,
++          ((LongWritable) getAggregatedValue(REGULAR_AGG)).get());
++    }
++    assertEquals(nv * ((1L << superstep) - 1),
++        ((LongWritable) getAggregatedValue(PERSISTENT_AGG)).get());
++    assertEquals(MASTER_VALUE * (1L << superstep),
++        ((LongWritable) getAggregatedValue(MASTER_WRITE_AGG)).get());
++
++    if (getSuperstep() == 10) {
++      voteToHalt();
++    }
++  }
++
++  /** Master compute which uses aggregators. To be used for testing. */
++  public static class AggregatorsTestMasterCompute extends
++      DefaultMasterCompute {
++    @Override
++    public void compute() {
++      long superstep = getSuperstep();
++
++      LongWritable myValue =
++          new LongWritable(MASTER_VALUE * (1L << superstep));
++      setAggregatedValue(MASTER_WRITE_AGG, myValue);
++
++      long nv = getTotalNumVertices();
++      if (superstep > 0) {
++        assertEquals(nv * (1L << (superstep - 1)),
++            ((LongWritable) getAggregatedValue(REGULAR_AGG)).get());
++      } else {
++        assertEquals(0,
++            ((LongWritable) getAggregatedValue(REGULAR_AGG)).get());
++      }
++      assertEquals(nv * ((1L << superstep) - 1),
++          ((LongWritable) getAggregatedValue(PERSISTENT_AGG)).get());
++    }
++
++    @Override
++    public void initialize() throws InstantiationException,
++        IllegalAccessException {
++      registerAggregator(REGULAR_AGG, LongSumAggregator.class);
++      registerPersistentAggregator(PERSISTENT_AGG,
++          LongSumAggregator.class);
++      registerAggregator(MASTER_WRITE_AGG, LongSumAggregator.class);
++    }
++  }
++
++  /**
++   * Throws exception if values are not equal.
++   *
++   * @param expected Expected value
++   * @param actual   Actual value
++   */
++  private static void assertEquals(long expected, long actual) {
++    if (expected != actual) {
++      throw new RuntimeException("expected: " + expected +
++          ", actual: " + actual);
++    }
++  }
++}
+diff --git a/src/main/java/org/apache/giraph/examples/SimpleAggregatorWriter.java b/src/main/java/org/apache/giraph/examples/SimpleAggregatorWriter.java
+index 06c125063..e22ecba18 100644
+--- a/src/main/java/org/apache/giraph/examples/SimpleAggregatorWriter.java
++++ b/src/main/java/org/apache/giraph/examples/SimpleAggregatorWriter.java
+@@ -19,10 +19,8 @@
+ package org.apache.giraph.examples;
+ 
+ import java.io.IOException;
+-import java.util.Map;
+ import java.util.Map.Entry;
+ 
+-import org.apache.giraph.graph.Aggregator;
+ import org.apache.giraph.graph.AggregatorWriter;
+ import org.apache.hadoop.fs.FSDataOutputStream;
+ import org.apache.hadoop.fs.FileSystem;
+@@ -57,11 +55,11 @@ public void initialize(Context context, long applicationAttempt)
+   }
+ 
+   @Override
+-  public void writeAggregator(Map<String, Aggregator<Writable>> map,
++  public void writeAggregator(
++      Iterable<Entry<String, Writable>> aggregatorMap,
+       long superstep) throws IOException {
+-
+-    for (Entry<String, Aggregator<Writable>> aggregator: map.entrySet()) {
+-      aggregator.getValue().getAggregatedValue().write(output);
++    for (Entry<String, Writable> entry : aggregatorMap) {
++      entry.getValue().write(output);
+     }
+     output.flush();
+   }
+diff --git a/src/main/java/org/apache/giraph/examples/SimpleCheckpointVertex.java b/src/main/java/org/apache/giraph/examples/SimpleCheckpointVertex.java
+index 352e359a6..dc4cfd20d 100644
+--- a/src/main/java/org/apache/giraph/examples/SimpleCheckpointVertex.java
++++ b/src/main/java/org/apache/giraph/examples/SimpleCheckpointVertex.java
+@@ -24,6 +24,7 @@
+ import org.apache.commons.cli.Options;
+ import org.apache.commons.cli.PosixParser;
+ import org.apache.giraph.aggregators.LongSumAggregator;
++import org.apache.giraph.graph.DefaultMasterCompute;
+ import org.apache.giraph.graph.Edge;
+ import org.apache.giraph.graph.EdgeListVertex;
+ import org.apache.giraph.graph.GiraphJob;
+@@ -67,9 +68,6 @@ public void compute(Iterable<FloatWritable> messages) {
+     SimpleCheckpointVertexWorkerContext workerContext =
+         (SimpleCheckpointVertexWorkerContext) getWorkerContext();
+ 
+-    LongSumAggregator sumAggregator = (LongSumAggregator)
+-        getAggregator(LongSumAggregator.class.getName());
+-
+     boolean enableFault = workerContext.getEnableFault();
+     int supersteps = workerContext.getSupersteps();
+ 
+@@ -86,10 +84,12 @@ public void compute(Iterable<FloatWritable> messages) {
+       voteToHalt();
+       return;
+     }
+-    LOG.info("compute: " + sumAggregator);
+-    sumAggregator.aggregate(getId().get());
+-    LOG.info("compute: sum = " +
+-        sumAggregator.getAggregatedValue().get() +
++    long sumAgg = this.<LongWritable>getAggregatedValue(
++        LongSumAggregator.class.getName()).get();
++    LOG.info("compute: " + sumAgg);
++    aggregate(LongSumAggregator.class.getName(),
++        new LongWritable(getId().get()));
++    LOG.info("compute: sum = " + sumAgg +
+         " for vertex " + getId());
+     float msgValue = 0.0f;
+     for (FloatWritable message : messages) {
+@@ -139,11 +139,6 @@ public static long getFinalSum() {
+     @Override
+     public void preApplication()
+       throws InstantiationException, IllegalAccessException {
+-      registerAggregator(LongSumAggregator.class.getName(),
+-          LongSumAggregator.class);
+-      LongSumAggregator sumAggregator = (LongSumAggregator)
+-          getAggregator(LongSumAggregator.class.getName());
+-      sumAggregator.setAggregatedValue(0);
+       supersteps = getContext().getConfiguration()
+           .getInt(SUPERSTEP_COUNT, supersteps);
+       enableFault = getContext().getConfiguration()
+@@ -152,15 +147,13 @@ public void preApplication()
+ 
+     @Override
+     public void postApplication() {
+-      LongSumAggregator sumAggregator = (LongSumAggregator)
+-          getAggregator(LongSumAggregator.class.getName());
+-      FINAL_SUM = sumAggregator.getAggregatedValue().get();
++      FINAL_SUM = this.<LongWritable>getAggregatedValue(
++          LongSumAggregator.class.getName()).get();
+       LOG.info("FINAL_SUM=" + FINAL_SUM);
+     }
+ 
+     @Override
+     public void preSuperstep() {
+-      useAggregator(LongSumAggregator.class.getName());
+     }
+ 
+     @Override
+@@ -221,6 +214,7 @@ public int run(String[] args) throws Exception {
+     bspJob.setVertexInputFormatClass(GeneratedVertexInputFormat.class);
+     bspJob.setVertexOutputFormatClass(SimpleTextVertexOutputFormat.class);
+     bspJob.setWorkerContextClass(SimpleCheckpointVertexWorkerContext.class);
++    bspJob.setMasterComputeClass(SimpleCheckpointVertexMasterCompute.class);
+     int minWorkers = Integer.parseInt(cmd.getOptionValue('w'));
+     int maxWorkers = Integer.parseInt(cmd.getOptionValue('w'));
+     bspJob.setWorkerConfiguration(minWorkers, maxWorkers, 100.0f);
+@@ -242,6 +236,20 @@ public int run(String[] args) throws Exception {
+     }
+   }
+ 
++  /**
++   * Master compute associated with {@link SimpleCheckpointVertex}.
++   * It registers required aggregators.
++   */
++  public static class SimpleCheckpointVertexMasterCompute extends
++      DefaultMasterCompute {
++    @Override
++    public void initialize() throws InstantiationException,
++        IllegalAccessException {
++      registerAggregator(LongSumAggregator.class.getName(),
++          LongSumAggregator.class);
++    }
++  }
++
+   /**
+    * Executable from the command line.
+    *
+diff --git a/src/main/java/org/apache/giraph/examples/SimpleMasterComputeVertex.java b/src/main/java/org/apache/giraph/examples/SimpleMasterComputeVertex.java
+index 94239ef95..a70e5cc94 100644
+--- a/src/main/java/org/apache/giraph/examples/SimpleMasterComputeVertex.java
++++ b/src/main/java/org/apache/giraph/examples/SimpleMasterComputeVertex.java
+@@ -19,16 +19,12 @@
+ package org.apache.giraph.examples;
+ 
+ import org.apache.giraph.aggregators.DoubleOverwriteAggregator;
++import org.apache.giraph.graph.DefaultMasterCompute;
+ import org.apache.giraph.graph.LongDoubleFloatDoubleVertex;
+-import org.apache.giraph.graph.MasterCompute;
+ import org.apache.giraph.graph.WorkerContext;
+ import org.apache.hadoop.io.DoubleWritable;
+ import org.apache.log4j.Logger;
+ 
+-import java.io.DataInput;
+-import java.io.DataOutput;
+-import java.io.IOException;
+-
+ /**
+  * Demonstrates a computation with a centralized part implemented via a
+  * MasterCompute.
+@@ -42,10 +38,8 @@ public class SimpleMasterComputeVertex extends LongDoubleFloatDoubleVertex {
+ 
+   @Override
+   public void compute(Iterable<DoubleWritable> messages) {
+-    DoubleOverwriteAggregator agg =
+-        (DoubleOverwriteAggregator) getAggregator(SMC_AGG);
+     double oldSum = getSuperstep() == 0 ? 0 : getValue().get();
+-    double newValue = agg.getAggregatedValue().get();
++    double newValue = this.<DoubleWritable>getAggregatedValue(SMC_AGG).get();
+     double newSum = oldSum + newValue;
+     setValue(new DoubleWritable(newSum));
+     SimpleMasterComputeWorkerContext workerContext =
+@@ -65,12 +59,10 @@ public static class SimpleMasterComputeWorkerContext
+     @Override
+     public void preApplication()
+       throws InstantiationException, IllegalAccessException {
+-      registerAggregator(SMC_AGG, DoubleOverwriteAggregator.class);
+     }
+ 
+     @Override
+     public void preSuperstep() {
+-      useAggregator(SMC_AGG);
+     }
+ 
+     @Override
+@@ -94,20 +86,11 @@ public static double getFinalSum() {
+    * MasterCompute used with {@link SimpleMasterComputeVertex}.
+    */
+   public static class SimpleMasterCompute
+-      extends MasterCompute {
+-    @Override
+-    public void write(DataOutput out) throws IOException {
+-    }
+-
+-    @Override
+-    public void readFields(DataInput in) throws IOException {
+-    }
+-
++      extends DefaultMasterCompute {
+     @Override
+     public void compute() {
+-      DoubleOverwriteAggregator agg =
+-          (DoubleOverwriteAggregator) getAggregator(SMC_AGG);
+-      agg.aggregate(((double) getSuperstep()) / 2 + 1);
++      setAggregatedValue(SMC_AGG,
++          new DoubleWritable(((double) getSuperstep()) / 2 + 1));
+       if (getSuperstep() == 10) {
+         haltComputation();
+       }
+diff --git a/src/main/java/org/apache/giraph/examples/SimplePageRankVertex.java b/src/main/java/org/apache/giraph/examples/SimplePageRankVertex.java
+index 9807e9497..9d72c8c40 100644
+--- a/src/main/java/org/apache/giraph/examples/SimplePageRankVertex.java
++++ b/src/main/java/org/apache/giraph/examples/SimplePageRankVertex.java
+@@ -22,6 +22,7 @@
+ import org.apache.giraph.aggregators.DoubleMinAggregator;
+ import org.apache.giraph.aggregators.LongSumAggregator;
+ import org.apache.giraph.graph.BspUtils;
++import org.apache.giraph.graph.DefaultMasterCompute;
+ import org.apache.giraph.graph.LongDoubleFloatDoubleVertex;
+ import org.apache.giraph.graph.Vertex;
+ import org.apache.giraph.graph.VertexReader;
+@@ -55,13 +56,15 @@ public class SimplePageRankVertex extends LongDoubleFloatDoubleVertex {
+   /** Logger */
+   private static final Logger LOG =
+       Logger.getLogger(SimplePageRankVertex.class);
++  /** Sum aggregator name */
++  private static String SUM_AGG = "sum";
++  /** Min aggregator name */
++  private static String MIN_AGG = "min";
++  /** Max aggregator name */
++  private static String MAX_AGG = "max";
+ 
+   @Override
+   public void compute(Iterable<DoubleWritable> messages) {
+-    LongSumAggregator sumAggreg = (LongSumAggregator) getAggregator("sum");
+-    DoubleMinAggregator minAggreg = (DoubleMinAggregator) getAggregator("min");
+-    DoubleMaxAggregator maxAggreg = (DoubleMaxAggregator) getAggregator("max");
+-
+     if (getSuperstep() >= 1) {
+       double sum = 0;
+       for (DoubleWritable message : messages) {
+@@ -70,12 +73,12 @@ public void compute(Iterable<DoubleWritable> messages) {
+       DoubleWritable vertexValue =
+           new DoubleWritable((0.15f / getTotalNumVertices()) + 0.85f * sum);
+       setValue(vertexValue);
+-      maxAggreg.aggregate(vertexValue);
+-      minAggreg.aggregate(vertexValue);
+-      sumAggreg.aggregate(1L);
++      aggregate(MAX_AGG, vertexValue);
++      aggregate(MIN_AGG, vertexValue);
++      aggregate(SUM_AGG, new LongWritable(1));
+       LOG.info(getId() + ": PageRank=" + vertexValue +
+-          " max=" + maxAggreg.getAggregatedValue() +
+-          " min=" + minAggreg.getAggregatedValue());
++          " max=" + getAggregatedValue(MAX_AGG) +
++          " min=" + getAggregatedValue(MIN_AGG));
+     }
+ 
+     if (getSuperstep() < MAX_SUPERSTEPS) {
+@@ -114,24 +117,13 @@ public static long getFinalSum() {
+     @Override
+     public void preApplication()
+       throws InstantiationException, IllegalAccessException {
+-      registerAggregator("sum", LongSumAggregator.class);
+-      registerAggregator("min", DoubleMinAggregator.class);
+-      registerAggregator("max", DoubleMaxAggregator.class);
+     }
+ 
+     @Override
+     public void postApplication() {
+-
+-      LongSumAggregator sumAggreg =
+-          (LongSumAggregator) getAggregator("sum");
+-      DoubleMinAggregator minAggreg =
+-          (DoubleMinAggregator) getAggregator("min");
+-      DoubleMaxAggregator maxAggreg =
+-          (DoubleMaxAggregator) getAggregator("max");
+-
+-      FINAL_SUM = sumAggreg.getAggregatedValue().get();
+-      FINAL_MAX = maxAggreg.getAggregatedValue().get();
+-      FINAL_MIN = minAggreg.getAggregatedValue().get();
++      FINAL_SUM = this.<LongWritable>getAggregatedValue(SUM_AGG).get();
++      FINAL_MAX = this.<DoubleWritable>getAggregatedValue(MAX_AGG).get();
++      FINAL_MIN = this.<DoubleWritable>getAggregatedValue(MIN_AGG).get();
+ 
+       LOG.info("aggregatedNumVertices=" + FINAL_SUM);
+       LOG.info("aggregatedMaxPageRank=" + FINAL_MAX);
+@@ -140,37 +132,42 @@ public void postApplication() {
+ 
+     @Override
+     public void preSuperstep() {
+-
+-      LongSumAggregator sumAggreg = (LongSumAggregator) getAggregator("sum");
+-      DoubleMinAggregator minAggreg =
+-          (DoubleMinAggregator) getAggregator("min");
+-      DoubleMaxAggregator maxAggreg =
+-          (DoubleMaxAggregator) getAggregator("max");
+-
+       if (getSuperstep() >= 3) {
+         LOG.info("aggregatedNumVertices=" +
+-            sumAggreg.getAggregatedValue() +
++            getAggregatedValue(SUM_AGG) +
+             " NumVertices=" + getTotalNumVertices());
+-        if (sumAggreg.getAggregatedValue().get() != getTotalNumVertices()) {
++        if (this.<LongWritable>getAggregatedValue(SUM_AGG).get() !=
++            getTotalNumVertices()) {
+           throw new RuntimeException("wrong value of SumAggreg: " +
+-              sumAggreg.getAggregatedValue() + ", should be: " +
++              getAggregatedValue(SUM_AGG) + ", should be: " +
+               getTotalNumVertices());
+         }
+-        DoubleWritable maxPagerank = maxAggreg.getAggregatedValue();
++        DoubleWritable maxPagerank = getAggregatedValue(MAX_AGG);
+         LOG.info("aggregatedMaxPageRank=" + maxPagerank.get());
+-        DoubleWritable minPagerank = minAggreg.getAggregatedValue();
++        DoubleWritable minPagerank = getAggregatedValue(MIN_AGG);
+         LOG.info("aggregatedMinPageRank=" + minPagerank.get());
+       }
+-      useAggregator("sum");
+-      useAggregator("min");
+-      useAggregator("max");
+-      sumAggreg.setAggregatedValue(0L);
+     }
+ 
+     @Override
+     public void postSuperstep() { }
+   }
+ 
++  /**
++   * Master compute associated with {@link SimplePageRankVertex}.
++   * It registers required aggregators.
++   */
++  public static class SimplePageRankVertexMasterCompute extends
++      DefaultMasterCompute {
++    @Override
++    public void initialize() throws InstantiationException,
++        IllegalAccessException {
++      registerAggregator(SUM_AGG, LongSumAggregator.class);
++      registerPersistentAggregator(MIN_AGG, DoubleMinAggregator.class);
++      registerPersistentAggregator(MAX_AGG, DoubleMaxAggregator.class);
++    }
++  }
++
+   /**
+    * Simple VertexReader that supports {@link SimplePageRankVertex}
+    */
+diff --git a/src/main/java/org/apache/giraph/examples/VerifyMessage.java b/src/main/java/org/apache/giraph/examples/VerifyMessage.java
+index eaf7a24c1..efc22f5db 100644
+--- a/src/main/java/org/apache/giraph/examples/VerifyMessage.java
++++ b/src/main/java/org/apache/giraph/examples/VerifyMessage.java
+@@ -19,6 +19,7 @@
+ package org.apache.giraph.examples;
+ 
+ import org.apache.giraph.aggregators.LongSumAggregator;
++import org.apache.giraph.graph.DefaultMasterCompute;
+ import org.apache.giraph.graph.Edge;
+ import org.apache.giraph.graph.EdgeListVertex;
+ import org.apache.giraph.graph.WorkerContext;
+@@ -116,25 +117,19 @@ public static class VerifyMessageVertexWorkerContext extends
+       @Override
+       public void preApplication() throws InstantiationException,
+       IllegalAccessException {
+-        registerAggregator(LongSumAggregator.class.getName(),
+-            LongSumAggregator.class);
+-        LongSumAggregator sumAggregator = (LongSumAggregator)
+-            getAggregator(LongSumAggregator.class.getName());
+-        sumAggregator.setAggregatedValue(0);
+         SUPERSTEPS = getContext().getConfiguration().getInt(
+             SUPERSTEP_COUNT, SUPERSTEPS);
+       }
+ 
+       @Override
+       public void postApplication() {
+-        LongSumAggregator sumAggregator = (LongSumAggregator)
+-            getAggregator(LongSumAggregator.class.getName());
+-        FINAL_SUM = sumAggregator.getAggregatedValue().get();
++        LongWritable sumAggregatorValue =
++            getAggregatedValue(LongSumAggregator.class.getName());
++        FINAL_SUM = sumAggregatorValue.get();
+       }
+ 
+       @Override
+       public void preSuperstep() {
+-        useAggregator(LongSumAggregator.class.getName());
+       }
+ 
+       @Override
+@@ -143,19 +138,18 @@ public void postSuperstep() { }
+ 
+     @Override
+     public void compute(Iterable<VerifiableMessage> messages) {
+-      LongSumAggregator sumAggregator = (LongSumAggregator)
+-          getAggregator(LongSumAggregator.class.getName());
++      String sumAggregatorName = LongSumAggregator.class.getName();
+       if (getSuperstep() > SUPERSTEPS) {
+         voteToHalt();
+         return;
+       }
+       if (LOG.isDebugEnabled()) {
+-        LOG.debug("compute: " + sumAggregator);
++        LOG.debug("compute: " + getAggregatedValue(sumAggregatorName));
+       }
+-      sumAggregator.aggregate(getId().get());
++      aggregate(sumAggregatorName, new LongWritable(getId().get()));
+       if (LOG.isDebugEnabled()) {
+         LOG.debug("compute: sum = " +
+-            sumAggregator.getAggregatedValue().get() +
++            this.<LongWritable>getAggregatedValue(sumAggregatorName).get() +
+             " for vertex " + getId());
+       }
+       float msgValue = 0.0f;
+@@ -206,4 +200,18 @@ public void compute(Iterable<VerifiableMessage> messages) {
+       }
+     }
+   }
++
++  /**
++   * Master compute associated with {@link VerifyMessageVertex}.
++   * It registers required aggregators.
++   */
++  public static class VerifyMessageMasterCompute extends
++      DefaultMasterCompute {
++    @Override
++    public void initialize() throws InstantiationException,
++        IllegalAccessException {
++      registerAggregator(LongSumAggregator.class.getName(),
++          LongSumAggregator.class);
++    }
++  }
+ }
+diff --git a/src/main/java/org/apache/giraph/graph/Aggregator.java b/src/main/java/org/apache/giraph/graph/Aggregator.java
+index 8cda4af11..3fe4c38a6 100644
+--- a/src/main/java/org/apache/giraph/graph/Aggregator.java
++++ b/src/main/java/org/apache/giraph/graph/Aggregator.java
+@@ -36,12 +36,12 @@ public interface Aggregator<A extends Writable> {
+   void aggregate(A value);
+ 
+   /**
+-   * Set aggregated value.
+-   * Can be used for initialization or reset.
++   * Return new aggregated value which is neutral to aggregate operation.
++   * Must be changeable without affecting internals of Aggregator
+    *
+-   * @param value Value to be set.
++   * @return Neutral value
+    */
+-  void setAggregatedValue(A value);
++  A createInitialValue();
+ 
+   /**
+    * Return current aggregated value.
+@@ -53,10 +53,15 @@ public interface Aggregator<A extends Writable> {
+   A getAggregatedValue();
+ 
+   /**
+-   * Return new aggregated value.
+-   * Must be changeable without affecting internals of Aggregator
++   * Set aggregated value.
++   * Can be used for initialization or reset.
+    *
+-   * @return Writable
++   * @param value Value to be set.
++   */
++  void setAggregatedValue(A value);
++
++  /**
++   * Reset the value of aggregator to neutral value
+    */
+-  A createAggregatedValue();
++  void reset();
+ }
+diff --git a/src/main/java/org/apache/giraph/graph/AggregatorUsage.java b/src/main/java/org/apache/giraph/graph/AggregatorUsage.java
+deleted file mode 100644
+index e66f7a394..000000000
+--- a/src/main/java/org/apache/giraph/graph/AggregatorUsage.java
++++ /dev/null
+@@ -1,58 +0,0 @@
+-/*
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements.  See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership.  The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License.  You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-
+-package org.apache.giraph.graph;
+-
+-import org.apache.hadoop.io.Writable;
+-
+-/**
+- * Vertex classes can use this interface to register and use aggregators
+- */
+-public interface AggregatorUsage {
+-  /**
+-   * Register an aggregator in preSuperstep() and/or preApplication().
+-   *
+-   * @param <A> Aggregator type
+-   * @param name of aggregator
+-   * @param aggregatorClass Class type of the aggregator
+-   * @return created Aggregator or null when already registered
+-   */
+-  <A extends Writable> Aggregator<A> registerAggregator(
+-    String name,
+-    Class<? extends Aggregator<A>> aggregatorClass)
+-    throws InstantiationException, IllegalAccessException;
+-
+-  /**
+-   * Get a registered aggregator.
+-   *
+-   * @param name Name of aggregator
+-   * @return Aggregator (null when not registered)
+-   */
+-  Aggregator<? extends Writable> getAggregator(String name);
+-
+-  /**
+-   * Use a registered aggregator in current superstep.
+-   * Even when the same aggregator should be used in the next
+-   * superstep, useAggregator needs to be called at the beginning
+-   * of that superstep in preSuperstep().
+-   *
+-   * @param name Name of aggregator
+-   * @return boolean (false when not registered)
+-   */
+-  boolean useAggregator(String name);
+-}
+diff --git a/src/main/java/org/apache/giraph/graph/AggregatorWrapper.java b/src/main/java/org/apache/giraph/graph/AggregatorWrapper.java
+new file mode 100644
+index 000000000..8366570cf
+--- /dev/null
++++ b/src/main/java/org/apache/giraph/graph/AggregatorWrapper.java
+@@ -0,0 +1,146 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.giraph.graph;
++
++import org.apache.hadoop.io.Writable;
++
++/**
++ * Wrapper for aggregators. Keeps two instances of an aggregator - one for
++ * the value from previous super step, and one for the value which is being
++ * generated in current super step.
++ *
++ * @param <A> Aggregated value
++ */
++public class AggregatorWrapper<A extends Writable> {
++  /** False iff aggregator should be reset at the end of each super step */
++  private final boolean persistent;
++  /** Value aggregated in previous super step */
++  private A previousAggregatedValue;
++  /** Aggregator for next super step */
++  private final Aggregator<A> currentAggregator;
++  /** Whether anyone changed current value since the moment it was reset */
++  private boolean changed;
++
++  /**
++   * @param aggregatorClass Class type of the aggregator
++   * @param persistent      False iff aggregator should be reset at the end of
++   *                        each super step
++   * @throws IllegalAccessException
++   * @throws InstantiationException
++   */
++  public AggregatorWrapper(Class<? extends Aggregator<A>> aggregatorClass,
++      boolean persistent) throws IllegalAccessException,
++      InstantiationException {
++    this.persistent = persistent;
++    currentAggregator = aggregatorClass.newInstance();
++    changed = false;
++    previousAggregatedValue = currentAggregator.createInitialValue();
++  }
++
++  /**
++   * Get aggregated value from previous super step
++   *
++   * @return Aggregated value from previous super step
++   */
++  public A getPreviousAggregatedValue() {
++    return previousAggregatedValue;
++  }
++
++  /**
++   * Set aggregated value for previous super step
++   *
++   * @param value Aggregated value to set
++   */
++  public void setPreviousAggregatedValue(A value) {
++    previousAggregatedValue = value;
++  }
++
++  /**
++   * Check if aggregator is persistent
++   *
++   * @return False iff aggregator should be reset at the end of each super step
++   */
++  public boolean isPersistent() {
++    return persistent;
++  }
++
++  /**
++   * Check if current aggregator was changed
++   *
++   * @return Whether anyone changed current value since the moment it was reset
++   */
++  public boolean isChanged() {
++    return changed;
++  }
++
++  /**
++   * Add a new value to current aggregator
++   *
++   * @param value Value to be aggregated
++   */
++  public void aggregateCurrent(A value) {
++    changed = true;
++    currentAggregator.aggregate(value);
++  }
++
++  /**
++   * Get current aggregated value
++   *
++   * @return Current aggregated value
++   */
++  public A getCurrentAggregatedValue() {
++    return currentAggregator.getAggregatedValue();
++  }
++
++  /**
++   * Set aggregated value of current aggregator
++   *
++   * @param value Value to set it to
++   */
++  public void setCurrentAggregatedValue(A value) {
++    changed = true;
++    currentAggregator.setAggregatedValue(value);
++  }
++
++  /**
++   * Reset the value of current aggregator to neutral value
++   */
++  public void resetCurrentAggregator() {
++    changed = false;
++    currentAggregator.reset();
++  }
++
++  /**
++   * Return new aggregated value which is neutral to aggregate operation
++   *
++   * @return Neutral value
++   */
++  public A createInitialValue() {
++    return currentAggregator.createInitialValue();
++  }
++
++  /**
++   * Get class of wrapped aggregator
++   *
++   * @return Aggregator class
++   */
++  public Class<? extends Aggregator> getAggregatorClass() {
++    return currentAggregator.getClass();
++  }
++}
+diff --git a/src/main/java/org/apache/giraph/graph/AggregatorWriter.java b/src/main/java/org/apache/giraph/graph/AggregatorWriter.java
+index c998ccc65..fbb1855db 100644
+--- a/src/main/java/org/apache/giraph/graph/AggregatorWriter.java
++++ b/src/main/java/org/apache/giraph/graph/AggregatorWriter.java
+@@ -19,7 +19,7 @@
+ package org.apache.giraph.graph;
+ 
+ import java.io.IOException;
+-import java.util.Map;
++import java.util.Map.Entry;
+ 
+ import org.apache.hadoop.io.Writable;
+ import org.apache.hadoop.mapreduce.Mapper.Context;
+@@ -28,7 +28,7 @@
+  *  An AggregatorWriter is used to export Aggregators during or at the end of
+  *  each computation. It runs on the master and it's called at the end of each
+  *  superstep. The special signal {@link AggregatorWriter#LAST_SUPERSTEP} is
+- *  passed to {@link AggregatorWriter#writeAggregator(Map, long)} as the
++ *  passed to {@link AggregatorWriter#writeAggregator(Iterable, long)} as the
+  *  superstep value to signal the end of computation.
+  */
+ public interface AggregatorWriter {
+@@ -53,19 +53,19 @@ public interface AggregatorWriter {
+    * whether to write the aggregators values for the current superstep. For
+    * the last superstep, {@link AggregatorWriter#LAST_SUPERSTEP} is passed.
+    *
+-   * @param aggregatorMap Map of aggregators to write
++   * @param aggregatorMap Map from aggregator name to aggregator value
+    * @param superstep Current superstep
+    * @throws IOException
+    */
+   void writeAggregator(
+-      Map<String, Aggregator<Writable>> aggregatorMap,
++      Iterable<Entry<String, Writable>> aggregatorMap,
+       long superstep) throws IOException;
+ 
+   /**
+    * The method is called at the end of a successful computation. The method
+    * is not called when the job fails and a new master is elected. For this
+    * reason it's advised to flush data at the end of
+-   * {@link AggregatorWriter#writeAggregator(Map, long)}.
++   * {@link AggregatorWriter#writeAggregator(Iterable, long)}.
+    *
+    * @throws IOException
+    */
+diff --git a/src/main/java/org/apache/giraph/graph/BspService.java b/src/main/java/org/apache/giraph/graph/BspService.java
+index 70b07973b..57faa38b6 100644
+--- a/src/main/java/org/apache/giraph/graph/BspService.java
++++ b/src/main/java/org/apache/giraph/graph/BspService.java
+@@ -259,8 +259,8 @@ public abstract class BspService<I extends WritableComparable,
+   /** Checkpoint frequency */
+   private final int checkpointFrequency;
+   /** Map of aggregators */
+-  private Map<String, Aggregator<Writable>> aggregatorMap =
+-      new TreeMap<String, Aggregator<Writable>>();
++  private Map<String, AggregatorWrapper<Writable>> aggregatorMap =
++      new TreeMap<String, AggregatorWrapper<Writable>>();
+ 
+   /**
+    * Constructor.
+@@ -884,22 +884,23 @@ public final void setApplicationAttempt(long applicationAttempt) {
+    * @param <A> Aggregator type
+    * @param name Name of the aggregator
+    * @param aggregatorClass Class of the aggregator
++   * @param persistent False iff aggregator should be reset at the end of
++   *                   every super step
+    * @return Aggregator
+    * @throws IllegalAccessException
+    * @throws InstantiationException
+    */
+-  public final <A extends Writable> Aggregator<A> registerAggregator(
+-    String name,
+-    Class<? extends Aggregator<A>> aggregatorClass)
+-    throws InstantiationException, IllegalAccessException {
++  protected <A extends Writable> AggregatorWrapper<A> registerAggregator(
++      String name, Class<? extends Aggregator<A>> aggregatorClass,
++      boolean persistent) throws InstantiationException,
++      IllegalAccessException {
+     if (aggregatorMap.get(name) != null) {
+       return null;
+     }
+-    Aggregator<A> aggregator =
+-        (Aggregator<A>) aggregatorClass.newInstance();
+-    @SuppressWarnings("unchecked")
+-    Aggregator<Writable> writableAggregator =
+-      (Aggregator<Writable>) aggregator;
++    AggregatorWrapper<A> aggregator =
++        new AggregatorWrapper<A>(aggregatorClass, persistent);
++    AggregatorWrapper<Writable> writableAggregator =
++        (AggregatorWrapper<Writable>) aggregator;
+     aggregatorMap.put(name, writableAggregator);
+     if (LOG.isInfoEnabled()) {
+       LOG.info("registerAggregator: registered " + name);
+@@ -913,16 +914,32 @@ public final <A extends Writable> Aggregator<A> registerAggregator(
+    * @param name Name of aggregator
+    * @return Aggregator or null when not registered
+    */
+-  public final Aggregator<? extends Writable> getAggregator(String name) {
++  protected AggregatorWrapper<? extends Writable> getAggregator(String name) {
+     return aggregatorMap.get(name);
+   }
+ 
++  /**
++   * Get value of an aggregator.
++   *
++   * @param name Name of aggregator
++   * @param <A> Aggregated value
++   * @return Value of the aggregator
++   */
++  public <A extends Writable> A getAggregatedValue(String name) {
++    AggregatorWrapper<? extends Writable> aggregator = getAggregator(name);
++    if (aggregator == null) {
++      return null;
++    } else {
++      return (A) aggregator.getPreviousAggregatedValue();
++    }
++  }
++
+   /**
+    * Get the aggregator map.
+    *
+    * @return Map of aggregator names to aggregator
+    */
+-  public Map<String, Aggregator<Writable>> getAggregatorMap() {
++  protected Map<String, AggregatorWrapper<Writable>> getAggregatorMap() {
+     return aggregatorMap;
+   }
+ 
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceMaster.java b/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+index b6ad60dd9..94a63d6a4 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceMaster.java
+@@ -48,7 +48,6 @@
+ import org.apache.zookeeper.WatchedEvent;
+ import org.apache.zookeeper.Watcher.Event.EventType;
+ import org.apache.zookeeper.ZooDefs.Ids;
+-import org.json.JSONArray;
+ import org.json.JSONException;
+ import org.json.JSONObject;
+ 
+@@ -60,7 +59,7 @@
+ import java.io.DataOutput;
+ import java.io.DataOutputStream;
+ import java.io.IOException;
+-import java.io.InputStream;
++import java.util.AbstractMap;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+@@ -68,11 +67,15 @@
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Map.Entry;
+ import java.util.Set;
+ import java.util.TreeSet;
+ 
++import com.google.common.base.Function;
++import com.google.common.collect.Iterables;
++
+ /**
+- * ZooKeeper-based implementation of {@link CentralizedService}.
++ * ZooKeeper-based implementation of {@link CentralizedServiceMaster}.
+  *
+  * @param <I> Vertex id
+  * @param <V> Vertex data
+@@ -869,7 +872,7 @@ private void collectAndProcessAggregatorValues(long superstep) {
+ 
+     for (String hostnameIdPath : hostnameIdPathList) {
+       JSONObject workerFinishedInfoObj = null;
+-      JSONArray aggregatorArray = null;
++      byte[] aggregatorArray = null;
+       try {
+         byte [] zkData =
+             getZkExt().getData(hostnameIdPath, false, null);
+@@ -886,88 +889,56 @@ private void collectAndProcessAggregatorValues(long superstep) {
+             "collectAndProcessAggregatorValues: JSONException", e);
+       }
+       try {
+-        aggregatorArray = workerFinishedInfoObj.getJSONArray(
+-            JSONOBJ_AGGREGATOR_VALUE_ARRAY_KEY);
++        aggregatorArray = Base64.decode(workerFinishedInfoObj.getString(
++            JSONOBJ_AGGREGATOR_VALUE_ARRAY_KEY));
+       } catch (JSONException e) {
+         if (LOG.isDebugEnabled()) {
+           LOG.debug("collectAndProcessAggregatorValues: " +
+               "No aggregators" + " for " + hostnameIdPath);
+         }
+         continue;
++      } catch (IOException e) {
++        throw new IllegalStateException(
++            "collectAndProcessAggregatorValues: IOException", e);
+       }
+-      for (int i = 0; i < aggregatorArray.length(); ++i) {
+-        try {
+-          if (LOG.isInfoEnabled()) {
+-            LOG.info("collectAndProcessAggregatorValues: " +
+-                "Getting aggregators from " +
+-                aggregatorArray.getJSONObject(i));
+-          }
+-          String aggregatorName =
+-              aggregatorArray.getJSONObject(i).getString(
+-                  AGGREGATOR_NAME_KEY);
+-          String aggregatorClassName =
+-              aggregatorArray.getJSONObject(i).getString(
+-                  AGGREGATOR_CLASS_NAME_KEY);
+-          @SuppressWarnings("unchecked")
+-          Aggregator<Writable> aggregator =
+-            (Aggregator<Writable>) getAggregator(aggregatorName);
+-          boolean firstTime = false;
++
++      DataInputStream input =
++          new DataInputStream(new ByteArrayInputStream(aggregatorArray));
++      try {
++        while (input.available() > 0) {
++          String aggregatorName = input.readUTF();
++          AggregatorWrapper<Writable> aggregator =
++              getAggregatorMap().get(aggregatorName);
+           if (aggregator == null) {
+-            @SuppressWarnings("unchecked")
+-            Class<? extends Aggregator<Writable>> aggregatorClass =
+-              (Class<? extends Aggregator<Writable>>)
+-              Class.forName(aggregatorClassName);
+-            aggregator = registerAggregator(
+-                aggregatorName,
+-                aggregatorClass);
+-            firstTime = true;
+-          }
+-          Writable aggregatorValue =
+-              aggregator.createAggregatedValue();
+-          InputStream input =
+-              new ByteArrayInputStream(
+-                  Base64.decode(
+-                      aggregatorArray.getJSONObject(i).
+-                      getString(AGGREGATOR_VALUE_KEY)));
+-          aggregatorValue.readFields(new DataInputStream(input));
+-          if (LOG.isDebugEnabled()) {
+-            LOG.debug("collectAndProcessAggregatorValues: " +
+-                "aggregator value size=" + input.available() +
+-                " for aggregator=" + aggregatorName +
+-                " value=" + aggregatorValue);
+-          }
+-          if (firstTime) {
+-            aggregator.setAggregatedValue(aggregatorValue);
+-          } else {
+-            aggregator.aggregate(aggregatorValue);
++            throw new IllegalStateException(
++                "collectAndProcessAggregatorValues: " +
++                    "Master received aggregator which isn't registered: " +
++                    aggregatorName);
+           }
+-        } catch (IOException e) {
+-          throw new IllegalStateException(
+-              "collectAndProcessAggregatorValues: " +
+-                  "IOException when reading aggregator data " +
+-                  aggregatorArray, e);
+-        } catch (JSONException e) {
+-          throw new IllegalStateException(
+-              "collectAndProcessAggregatorValues: " +
+-                  "JSONException when reading aggregator data " +
+-                  aggregatorArray, e);
+-        } catch (ClassNotFoundException e) {
+-          throw new IllegalStateException(
+-              "collectAndProcessAggregatorValues: " +
+-                  "ClassNotFoundException when reading aggregator data " +
+-                  aggregatorArray, e);
+-        } catch (InstantiationException e) {
+-          throw new IllegalStateException(
+-              "collectAndProcessAggregatorValues: " +
+-                  "InstantiationException when reading aggregator data " +
+-                  aggregatorArray, e);
+-        } catch (IllegalAccessException e) {
+-          throw new IllegalStateException(
+-              "collectAndProcessAggregatorValues: " +
+-                  "IOException when reading aggregator data " +
+-                  aggregatorArray, e);
++          Writable aggregatorValue = aggregator.createInitialValue();
++          aggregatorValue.readFields(input);
++          aggregator.aggregateCurrent(aggregatorValue);
+         }
++      } catch (IOException e) {
++        throw new IllegalStateException(
++            "collectAndProcessAggregatorValues: " +
++                "IOException when reading aggregator data", e);
++      }
++    }
++
++    if (LOG.isInfoEnabled()) {
++      LOG.info("collectAndProcessAggregatorValues: Processed aggregators");
++    }
++
++    // prepare aggregators for master compute
++    for (AggregatorWrapper<Writable> aggregator :
++        getAggregatorMap().values()) {
++      if (aggregator.isPersistent()) {
++        aggregator.aggregateCurrent(aggregator.getPreviousAggregatedValue());
+       }
++      aggregator.setPreviousAggregatedValue(
++          aggregator.getCurrentAggregatedValue());
++      aggregator.resetCurrentAggregator();
+     }
+   }
+ 
+@@ -977,48 +948,45 @@ private void collectAndProcessAggregatorValues(long superstep) {
+    * @param superstep superstep for which to save values
+    */
+   private void saveAggregatorValues(long superstep) {
+-    Map<String, Aggregator<Writable>> aggregatorMap = getAggregatorMap();
++    Map<String, AggregatorWrapper<Writable>> aggregatorMap =
++        getAggregatorMap();
++
++    for (AggregatorWrapper<Writable> aggregator : aggregatorMap.values()) {
++      if (aggregator.isChanged()) {
++        // if master compute changed the value, use the one he chose
++        aggregator.setPreviousAggregatedValue(
++            aggregator.getCurrentAggregatedValue());
++        // reset aggregator for the next superstep
++        aggregator.resetCurrentAggregator();
++      }
++    }
++
+     if (aggregatorMap.size() > 0) {
+       String mergedAggregatorPath =
+           getMergedAggregatorPath(getApplicationAttempt(), superstep);
+-      byte [] zkData = null;
+-      JSONArray aggregatorArray = new JSONArray();
+-      for (Map.Entry<String, Aggregator<Writable>> entry :
+-        aggregatorMap.entrySet()) {
++
++      ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
++      DataOutput output = new DataOutputStream(outputStream);
++      try {
++        output.writeInt(aggregatorMap.size());
++      } catch (IOException e) {
++        e.printStackTrace();
++      }
++      for (Map.Entry<String, AggregatorWrapper<Writable>> entry :
++          aggregatorMap.entrySet()) {
+         try {
+-          ByteArrayOutputStream outputStream =
+-              new ByteArrayOutputStream();
+-          DataOutput output = new DataOutputStream(outputStream);
+-          entry.getValue().getAggregatedValue().write(output);
+-
+-          JSONObject aggregatorObj = new JSONObject();
+-          aggregatorObj.put(AGGREGATOR_NAME_KEY,
+-              entry.getKey());
+-          aggregatorObj.put(
+-              AGGREGATOR_VALUE_KEY,
+-              Base64.encodeBytes(outputStream.toByteArray()));
+-          aggregatorArray.put(aggregatorObj);
+-          if (LOG.isInfoEnabled()) {
+-            LOG.info("saveAggregatorValues: " +
+-                "Trying to add aggregatorObj " +
+-                aggregatorObj + "(" +
+-                    entry.getValue().getAggregatedValue() +
+-                    ") to merged aggregator path " +
+-                    mergedAggregatorPath);
+-          }
++          output.writeUTF(entry.getKey());
++          output.writeUTF(entry.getValue().getAggregatorClass().getName());
++          entry.getValue().getPreviousAggregatedValue().write(output);
+         } catch (IOException e) {
+-          throw new IllegalStateException(
+-              "saveAggregatorValues: " +
+-                  "IllegalStateException", e);
+-        } catch (JSONException e) {
+-          throw new IllegalStateException(
+-              "saveAggregatorValues: JSONException", e);
++          throw new IllegalStateException("saveAggregatorValues: " +
++              "IllegalStateException", e);
+         }
+       }
++
+       try {
+-        zkData = aggregatorArray.toString().getBytes();
+         getZkExt().createExt(mergedAggregatorPath,
+-            zkData,
++            outputStream.toByteArray(),
+             Ids.OPEN_ACL_UNSAFE,
+             CreateMode.PERSISTENT,
+             true);
+@@ -1034,10 +1002,8 @@ private void saveAggregatorValues(long superstep) {
+             e);
+       }
+       if (LOG.isInfoEnabled()) {
+-        LOG.info("saveAggregatorValues: Finished " +
+-            "loading " +
+-            mergedAggregatorPath + " with aggregator values " +
+-            aggregatorArray);
++        LOG.info("saveAggregatorValues: Finished loading " +
++            mergedAggregatorPath);
+       }
+     }
+   }
+@@ -1534,7 +1500,20 @@ public SuperstepState coordinateSuperstep() throws
+       superstepState = SuperstepState.THIS_SUPERSTEP_DONE;
+     }
+     try {
+-      aggregatorWriter.writeAggregator(getAggregatorMap(),
++      Iterable<Map.Entry<String, Writable>> iter =
++          Iterables.transform(
++              getAggregatorMap().entrySet(),
++              new Function<Entry<String, AggregatorWrapper<Writable>>,
++                  Entry<String, Writable>>() {
++                @Override
++                public Entry<String, Writable> apply(
++                    Entry<String, AggregatorWrapper<Writable>> entry) {
++                  return new AbstractMap.SimpleEntry<String,
++                      Writable>(entry.getKey(),
++                      entry.getValue().getPreviousAggregatedValue());
++                }
++              });
++      aggregatorWriter.writeAggregator(iter,
+           (superstepState == SuperstepState.ALL_SUPERSTEPS_DONE) ?
+               AggregatorWriter.LAST_SUPERSTEP : getSuperstep());
+     } catch (IOException e) {
+@@ -1787,14 +1766,28 @@ public boolean processEvent(WatchedEvent event) {
+     return foundEvent;
+   }
+ 
+-  /**
+-   * Use an aggregator in this superstep. Note that the master uses all
+-   * aggregators by default, so calling this function is not neccessary.
+-   *
+-   * @param name Name of aggregator (should be unique)
+-   * @return boolean (always true)
+-   */
+-  public boolean useAggregator(String name) {
+-    return true;
++  @Override
++  public <A extends Writable> boolean registerAggregator(String name,
++      Class<? extends Aggregator<A>> aggregatorClass) throws
++      InstantiationException, IllegalAccessException {
++    return registerAggregator(name, aggregatorClass, false) != null;
++  }
++
++  @Override
++  public <A extends Writable> boolean registerPersistentAggregator(String name,
++      Class<? extends Aggregator<A>> aggregatorClass) throws
++      InstantiationException, IllegalAccessException {
++    return registerAggregator(name, aggregatorClass, true) != null;
++  }
++
++  @Override
++  public <A extends Writable> void setAggregatedValue(String name, A value) {
++    AggregatorWrapper<? extends Writable> aggregator = getAggregator(name);
++    if (aggregator == null) {
++      throw new IllegalStateException(
++          "setAggregatedValue: Tried to set value of aggregator which wasn't" +
++              " registered " + name);
++    }
++    ((AggregatorWrapper<A>) aggregator).setCurrentAggregatedValue(value);
+   }
+ }
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+index 974b8bac9..d4c0f6dbf 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+@@ -57,11 +57,11 @@
+ 
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
++import java.io.DataInput;
+ import java.io.DataInputStream;
+ import java.io.DataOutput;
+ import java.io.DataOutputStream;
+ import java.io.IOException;
+-import java.io.InputStream;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Collections;
+@@ -71,7 +71,6 @@
+ import java.util.Map;
+ import java.util.Map.Entry;
+ import java.util.Set;
+-import java.util.TreeSet;
+ 
+ /**
+  * ZooKeeper-based implementation of {@link CentralizedServiceWorker}.
+@@ -92,8 +91,6 @@ public class BspServiceWorker<I extends WritableComparable,
+   private int inputSplitCount = -1;
+   /** My process health znode */
+   private String myHealthZnode;
+-  /** List of aggregators currently in use */
+-  private Set<String> aggregatorInUse = new TreeSet<String>();
+   /** Worker info */
+   private final WorkerInfo workerInfo;
+   /** Worker graph partitioner */
+@@ -130,7 +127,6 @@ public class BspServiceWorker<I extends WritableComparable,
+    * @param context Mapper context
+    * @param graphMapper Graph mapper
+    * @param graphState Global graph state
+-   * @throws UnknownHostException
+    * @throws IOException
+    * @throws InterruptedException
+    */
+@@ -193,21 +189,6 @@ public boolean isHealthy() {
+     return true;
+   }
+ 
+-  /**
+-   * Use an aggregator in this superstep.
+-   *
+-   * @param name Name of aggregator (should be unique)
+-   * @return boolean (false when aggregator not registered)
+-   */
+-  public boolean useAggregator(String name) {
+-    if (getAggregatorMap().get(name) == null) {
+-      LOG.error("userAggregator: Aggregator=" + name + " not registered");
+-      return false;
+-    }
+-    aggregatorInUse.add(name);
+-    return true;
+-  }
+-
+   /**
+    * Try to reserve an InputSplit for loading.  While InputSplits exists that
+    * are not finished, wait until they are.
+@@ -692,57 +673,49 @@ public void setup() {
+     finishSuperstep(partitionStatsList);
+   }
+ 
++  @Override
++  public <A extends Writable> void aggregate(String name, A value) {
++    AggregatorWrapper<? extends Writable> aggregator = getAggregator(name);
++    if (aggregator != null) {
++      ((AggregatorWrapper<A>) aggregator).aggregateCurrent(value);
++    } else {
++      throw new IllegalStateException("aggregate: Tried to aggregate value " +
++          "to unregistered aggregator " + name);
++    }
++  }
++
+   /**
+-   *  Marshal the aggregator values of to a JSONArray that will later be
+-   *  aggregated by master.  Reset the 'use' of aggregators in the next
+-   *  superstep
++   *  Marshal the aggregator values of the worker to a byte array that will
++   *  later be aggregated by master.
+    *
+    * @param superstep Superstep to marshall on
+-   * @return JSON array of the aggreagtor values
++   * @return Byte array of the aggreagtor values
+    */
+-  private JSONArray marshalAggregatorValues(long superstep) {
+-    JSONArray aggregatorArray = new JSONArray();
+-    if ((superstep == INPUT_SUPERSTEP) || (aggregatorInUse.size() == 0)) {
+-      return aggregatorArray;
++  private byte[] marshalAggregatorValues(long superstep) {
++    if (superstep == INPUT_SUPERSTEP) {
++      return new byte[0];
+     }
+ 
+-    for (String name : aggregatorInUse) {
+-      try {
+-        Aggregator<Writable> aggregator = getAggregatorMap().get(name);
+-        ByteArrayOutputStream outputStream =
+-            new ByteArrayOutputStream();
+-        DataOutput output = new DataOutputStream(outputStream);
+-        aggregator.getAggregatedValue().write(output);
+-
+-        JSONObject aggregatorObj = new JSONObject();
+-        aggregatorObj.put(AGGREGATOR_NAME_KEY, name);
+-        aggregatorObj.put(AGGREGATOR_CLASS_NAME_KEY,
+-            aggregator.getClass().getName());
+-        aggregatorObj.put(
+-            AGGREGATOR_VALUE_KEY,
+-            Base64.encodeBytes(outputStream.toByteArray()));
+-        aggregatorArray.put(aggregatorObj);
+-        if (LOG.isInfoEnabled()) {
+-          LOG.info("marshalAggregatorValues: " +
+-              "Found aggregatorObj " +
+-              aggregatorObj + ", value (" +
+-              aggregator.getAggregatedValue() + ")");
++    ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
++    DataOutputStream output = new DataOutputStream(outputStream);
++    for (Entry<String, AggregatorWrapper<Writable>> entry :
++        getAggregatorMap().entrySet()) {
++      if (entry.getValue().isChanged()) {
++        try {
++          output.writeUTF(entry.getKey());
++          entry.getValue().getCurrentAggregatedValue().write(output);
++        } catch (IOException e) {
++          throw new IllegalStateException("Failed to marshall aggregator " +
++              "with IOException " + entry.getKey(), e);
+         }
+-      } catch (JSONException e) {
+-        throw new IllegalStateException("Failed to marshall aggregator " +
+-            "with JSONException " + name, e);
+-      } catch (IOException e) {
+-        throw new IllegalStateException("Failed to marshall aggregator " +
+-            "with IOException " + name, e);
+       }
+     }
+ 
+     if (LOG.isInfoEnabled()) {
+-      LOG.info("marshalAggregatorValues: Finished assembling " +
+-          "aggregator values in JSONArray - " + aggregatorArray);
++      LOG.info(
++          "marshalAggregatorValues: Finished assembling aggregator values");
+     }
+-    aggregatorInUse.clear();
+-    return aggregatorArray;
++    return outputStream.toByteArray();
+   }
+ 
+   /**
+@@ -751,13 +724,18 @@ private JSONArray marshalAggregatorValues(long superstep) {
+    * @param superstep Superstep to get the aggregated values from
+    */
+   private void getAggregatorValues(long superstep) {
++    // prepare aggregators for reading and next superstep
++    for (AggregatorWrapper<Writable> aggregator :
++        getAggregatorMap().values()) {
++      aggregator.setPreviousAggregatedValue(aggregator.createInitialValue());
++      aggregator.resetCurrentAggregator();
++    }
+     String mergedAggregatorPath =
+         getMergedAggregatorPath(getApplicationAttempt(), superstep - 1);
+-    JSONArray aggregatorArray = null;
++
++    byte[] aggregatorArray = null;
+     try {
+-      byte[] zkData =
+-          getZkExt().getData(mergedAggregatorPath, false, null);
+-      aggregatorArray = new JSONArray(new String(zkData));
++      aggregatorArray = getZkExt().getData(mergedAggregatorPath, false, null);
+     } catch (KeeperException.NoNodeException e) {
+       LOG.info("getAggregatorValues: no aggregators in " +
+           mergedAggregatorPath + " on superstep " + superstep);
+@@ -768,49 +746,58 @@ private void getAggregatorValues(long superstep) {
+     } catch (InterruptedException e) {
+       throw new IllegalStateException("Failed to get data for " +
+           mergedAggregatorPath + " with InterruptedException", e);
+-    } catch (JSONException e) {
+-      throw new IllegalStateException("Failed to get data for " +
+-          mergedAggregatorPath + " with JSONException", e);
+     }
+-    for (int i = 0; i < aggregatorArray.length(); ++i) {
++
++    DataInput input =
++        new DataInputStream(new ByteArrayInputStream(aggregatorArray));
++    int numAggregators = 0;
++
++    try {
++      numAggregators = input.readInt();
++    } catch (IOException e) {
++      throw new IllegalStateException("getAggregatorValues: " +
++          "Failed to decode data", e);
++    }
++
++    for (int i = 0; i < numAggregators; i++) {
+       try {
+-        if (LOG.isDebugEnabled()) {
+-          LOG.debug("getAggregatorValues: " +
+-              "Getting aggregators from " +
+-              aggregatorArray.getJSONObject(i));
+-        }
+-        String aggregatorName = aggregatorArray.getJSONObject(i).
+-            getString(AGGREGATOR_NAME_KEY);
+-        Aggregator<Writable> aggregator =
++        String aggregatorName = input.readUTF();
++        String aggregatorClassName = input.readUTF();
++        AggregatorWrapper<Writable> aggregatorWrapper =
+             getAggregatorMap().get(aggregatorName);
+-        if (aggregator == null) {
+-          continue;
+-        }
+-        Writable aggregatorValue = aggregator.getAggregatedValue();
+-        InputStream input =
+-            new ByteArrayInputStream(
+-                Base64.decode(aggregatorArray.getJSONObject(i).
+-                    getString(AGGREGATOR_VALUE_KEY)));
+-        aggregatorValue.readFields(
+-            new DataInputStream(input));
+-        aggregator.setAggregatedValue(aggregatorValue);
+-        if (LOG.isDebugEnabled()) {
+-          LOG.debug("getAggregatorValues: " +
+-              "Got aggregator=" + aggregatorName + " value=" +
+-              aggregatorValue);
++        if (aggregatorWrapper == null) {
++          try {
++            Class<? extends Aggregator<Writable>> aggregatorClass =
++                (Class<? extends Aggregator<Writable>>)
++                    Class.forName(aggregatorClassName);
++            aggregatorWrapper =
++                registerAggregator(aggregatorName, aggregatorClass, false);
++          } catch (ClassNotFoundException e) {
++            throw new IllegalStateException("Failed to create aggregator " +
++                aggregatorName + " of class " + aggregatorClassName +
++                " with ClassNotFoundException", e);
++          } catch (InstantiationException e) {
++            throw new IllegalStateException("Failed to create aggregator " +
++                aggregatorName + " of class " + aggregatorClassName +
++                " with InstantiationException", e);
++          } catch (IllegalAccessException e) {
++            throw new IllegalStateException("Failed to create aggregator " +
++                aggregatorName + " of class " + aggregatorClassName +
++                " with IllegalAccessException", e);
++          }
+         }
+-      } catch (JSONException e) {
+-        throw new IllegalStateException("Failed to decode data for index " +
+-            i + " with KeeperException", e);
++        Writable aggregatorValue = aggregatorWrapper.createInitialValue();
++        aggregatorValue.readFields(input);
++        aggregatorWrapper.setPreviousAggregatedValue(aggregatorValue);
+       } catch (IOException e) {
+-        throw new IllegalStateException("Failed to decode data for index " +
+-            i + " with KeeperException", e);
++        throw new IllegalStateException(
++            "Failed to decode data for index " + i, e);
+       }
+     }
++
+     if (LOG.isInfoEnabled()) {
+       LOG.info("getAggregatorValues: Finished loading " +
+-          mergedAggregatorPath + " with aggregator values " +
+-          aggregatorArray);
++          mergedAggregatorPath);
+     }
+   }
+ 
+@@ -988,7 +975,7 @@ public boolean finishSuperstep(List<PartitionStats> partitionStatsList) {
+           MemoryUtils.getRuntimeMemoryStats());
+     }
+ 
+-    JSONArray aggregatorValueArray =
++    byte[] aggregatorArray =
+         marshalAggregatorValues(getSuperstep());
+     Collection<PartitionStats> finalizedPartitionStats =
+         workerGraphPartitioner.finalizePartitionStats(
+@@ -1000,7 +987,7 @@ public boolean finishSuperstep(List<PartitionStats> partitionStatsList) {
+     JSONObject workerFinishedInfoObj = new JSONObject();
+     try {
+       workerFinishedInfoObj.put(JSONOBJ_AGGREGATOR_VALUE_ARRAY_KEY,
+-          aggregatorValueArray);
++          Base64.encodeBytes(aggregatorArray));
+       workerFinishedInfoObj.put(JSONOBJ_PARTITION_STATS_KEY,
+           Base64.encodeBytes(partitionStatsBytes));
+       workerFinishedInfoObj.put(JSONOBJ_NUM_MESSAGES_KEY,
+diff --git a/src/main/java/org/apache/giraph/graph/GraphMapper.java b/src/main/java/org/apache/giraph/graph/GraphMapper.java
+index fa5372797..2026af774 100644
+--- a/src/main/java/org/apache/giraph/graph/GraphMapper.java
++++ b/src/main/java/org/apache/giraph/graph/GraphMapper.java
+@@ -111,19 +111,21 @@ public MapFunctions getMapFunctions() {
+   }
+ 
+   /**
+-   * Get the aggregator usage, a subset of the functionality
++   * Get worker aggregator usage, a subset of the functionality
+    *
+-   * @return Aggregator usage interface
++   * @return Worker aggregator usage interface
+    */
+-  public final AggregatorUsage getAggregatorUsage() {
+-    AggregatorUsage result = null;
+-    if (serviceWorker != null) {
+-      result = serviceWorker;
+-    }
+-    if (serviceMaster != null) {
+-      result = serviceMaster;
+-    }
+-    return result;
++  public final WorkerAggregatorUsage getWorkerAggregatorUsage() {
++    return serviceWorker;
++  }
++
++  /**
++   * Get master aggregator usage, a subset of the functionality
++   *
++   * @return Master aggregator usage interface
++   */
++  public final MasterAggregatorUsage getMasterAggregatorUsage() {
++    return serviceMaster;
+   }
+ 
+   public final WorkerContext getWorkerContext() {
+diff --git a/src/main/java/org/apache/giraph/graph/MasterAggregatorUsage.java b/src/main/java/org/apache/giraph/graph/MasterAggregatorUsage.java
+new file mode 100644
+index 000000000..6e6571b0a
+--- /dev/null
++++ b/src/main/java/org/apache/giraph/graph/MasterAggregatorUsage.java
+@@ -0,0 +1,71 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.giraph.graph;
++
++import org.apache.hadoop.io.Writable;
++
++/**
++ * Master compute can access and change aggregators through this interface
++ */
++public interface MasterAggregatorUsage {
++  /**
++   * Register an aggregator in preSuperstep() and/or preApplication(). This
++   * aggregator will have its value reset at the end of each super step.
++   *
++   * @param name of aggregator
++   * @param aggregatorClass Class type of the aggregator
++   * @param <A> Aggregator type
++   * @return True iff aggregator wasn't already registered
++   */
++  <A extends Writable> boolean registerAggregator(String name,
++      Class<? extends Aggregator<A>> aggregatorClass) throws
++      InstantiationException, IllegalAccessException;
++
++  /**
++   * Register persistent aggregator in preSuperstep() and/or
++   * preApplication(). This aggregator will not reset value at the end of
++   * super step.
++   *
++   * @param name of aggregator
++   * @param aggregatorClass Class type of the aggregator
++   * @param <A> Aggregator type
++   * @return True iff aggregator wasn't already registered
++   */
++  <A extends Writable> boolean registerPersistentAggregator(String name,
++      Class<? extends Aggregator<A>> aggregatorClass) throws
++      InstantiationException, IllegalAccessException;
++
++  /**
++   * Get value of an aggregator.
++   *
++   * @param name Name of aggregator
++   * @param <A> Aggregated value
++   * @return Value of the aggregator
++   */
++  <A extends Writable> A getAggregatedValue(String name);
++
++  /**
++   * Sets value of an aggregator.
++   *
++   * @param name Name of aggregator
++   * @param value Value to set
++   * @param <A> Aggregated value
++   */
++  <A extends Writable> void setAggregatedValue(String name, A value);
++}
+diff --git a/src/main/java/org/apache/giraph/graph/MasterCompute.java b/src/main/java/org/apache/giraph/graph/MasterCompute.java
+index 08da52124..f04789657 100644
+--- a/src/main/java/org/apache/giraph/graph/MasterCompute.java
++++ b/src/main/java/org/apache/giraph/graph/MasterCompute.java
+@@ -40,7 +40,7 @@
+  * not have to be called.
+  */
+ @SuppressWarnings("rawtypes")
+-public abstract class MasterCompute implements AggregatorUsage, Writable,
++public abstract class MasterCompute implements MasterAggregatorUsage, Writable,
+     Configurable {
+   /** If true, do not do anymore computation on this vertex. */
+   private boolean halt = false;
+@@ -135,23 +135,32 @@ public Mapper.Context getContext() {
+   }
+ 
+   @Override
+-  public final <A extends Writable> Aggregator<A> registerAggregator(
++  public final <A extends Writable> boolean registerAggregator(
+     String name, Class<? extends Aggregator<A>> aggregatorClass)
+     throws InstantiationException, IllegalAccessException {
+-    return getGraphState().getGraphMapper().getAggregatorUsage().
++    return getGraphState().getGraphMapper().getMasterAggregatorUsage().
+         registerAggregator(name, aggregatorClass);
+   }
+ 
+   @Override
+-  public final Aggregator<? extends Writable> getAggregator(String name) {
+-    return getGraphState().getGraphMapper().getAggregatorUsage().
+-      getAggregator(name);
++  public final <A extends Writable> boolean registerPersistentAggregator(
++      String name,
++      Class<? extends Aggregator<A>> aggregatorClass) throws
++      InstantiationException, IllegalAccessException {
++    return getGraphState().getGraphMapper().getMasterAggregatorUsage().
++        registerPersistentAggregator(name, aggregatorClass);
+   }
+ 
+   @Override
+-  public final boolean useAggregator(String name) {
+-    return getGraphState().getGraphMapper().getAggregatorUsage().
+-      useAggregator(name);
++  public <A extends Writable> A getAggregatedValue(String name) {
++    return getGraphState().getGraphMapper().getMasterAggregatorUsage().
++        getAggregatedValue(name);
++  }
++
++  @Override
++  public <A extends Writable> void setAggregatedValue(String name, A value) {
++    getGraphState().getGraphMapper().getMasterAggregatorUsage().
++        setAggregatedValue(name, value);
+   }
+ 
+   @Override
+diff --git a/src/main/java/org/apache/giraph/graph/TextAggregatorWriter.java b/src/main/java/org/apache/giraph/graph/TextAggregatorWriter.java
+index 4727cb6df..abdba449f 100644
+--- a/src/main/java/org/apache/giraph/graph/TextAggregatorWriter.java
++++ b/src/main/java/org/apache/giraph/graph/TextAggregatorWriter.java
+@@ -19,7 +19,6 @@
+ package org.apache.giraph.graph;
+ 
+ import java.io.IOException;
+-import java.util.Map;
+ import java.util.Map.Entry;
+ 
+ import com.google.common.base.Charsets;
+@@ -77,13 +76,13 @@ public void initialize(Context context, long attempt) throws IOException {
+   }
+ 
+   @Override
+-  public final void writeAggregator(
+-      Map<String, Aggregator<Writable>> aggregators,
++  public void writeAggregator(
++      Iterable<Entry<String, Writable>> aggregatorMap,
+       long superstep) throws IOException {
+     if (shouldWrite(superstep)) {
+-      for (Entry<String, Aggregator<Writable>> a: aggregators.entrySet()) {
+-        byte[] bytes = aggregatorToString(a.getKey(), a.getValue(), superstep)
+-            .getBytes(Charsets.UTF_8);
++      for (Entry<String, Writable> entry : aggregatorMap) {
++        byte[] bytes = aggregatorToString(entry.getKey(), entry.getValue(),
++            superstep).getBytes(Charsets.UTF_8);
+         output.write(bytes, 0, bytes.length);
+       }
+       output.flush();
+@@ -95,17 +94,15 @@ public final void writeAggregator(
+    * Override this if you want to implement your own text format.
+    *
+    * @param aggregatorName Name of the aggregator
+-   * @param a Aggregator
++   * @param value Value of aggregator
+    * @param superstep Current superstep
+    * @return The String representation for the aggregator
+    */
+   protected String aggregatorToString(String aggregatorName,
+-      Aggregator<Writable> a,
++      Writable value,
+       long superstep) {
+-
+     return new StringBuilder("superstep=").append(superstep).append("\t")
+-        .append(aggregatorName).append("=").append(a.getAggregatedValue())
+-        .append("\t").append(a.getClass().getCanonicalName()).append("\n")
++        .append(aggregatorName).append("=").append(value).append("\n")
+         .toString();
+   }
+ 
+diff --git a/src/main/java/org/apache/giraph/graph/Vertex.java b/src/main/java/org/apache/giraph/graph/Vertex.java
+index c9f7c3b6d..eeb23852a 100644
+--- a/src/main/java/org/apache/giraph/graph/Vertex.java
++++ b/src/main/java/org/apache/giraph/graph/Vertex.java
+@@ -45,7 +45,7 @@
+ @SuppressWarnings("rawtypes")
+ public abstract class Vertex<I extends WritableComparable,
+     V extends Writable, E extends Writable, M extends Writable>
+-    implements AggregatorUsage, Writable, Configurable {
++    implements WorkerAggregatorUsage, Writable, Configurable {
+   /** Vertex id. */
+   private I id;
+   /** Vertex value. */
+@@ -315,23 +315,15 @@ public WorkerContext getWorkerContext() {
+   }
+ 
+   @Override
+-  public final <A extends Writable> Aggregator<A> registerAggregator(
+-    String name, Class<? extends Aggregator<A>> aggregatorClass)
+-    throws InstantiationException, IllegalAccessException {
+-    return getGraphState().getGraphMapper().getAggregatorUsage().
+-        registerAggregator(name, aggregatorClass);
++  public <A extends Writable> void aggregate(String name, A value) {
++    getGraphState().getGraphMapper().getWorkerAggregatorUsage().
++        aggregate(name, value);
+   }
+ 
+   @Override
+-  public final Aggregator<? extends Writable> getAggregator(String name) {
+-    return getGraphState().getGraphMapper().getAggregatorUsage().
+-      getAggregator(name);
+-  }
+-
+-  @Override
+-  public final boolean useAggregator(String name) {
+-    return getGraphState().getGraphMapper().getAggregatorUsage().
+-      useAggregator(name);
++  public <A extends Writable> A getAggregatedValue(String name) {
++    return getGraphState().getGraphMapper().getWorkerAggregatorUsage().
++        getAggregatedValue(name);
+   }
+ 
+   @Override
+diff --git a/src/main/java/org/apache/giraph/graph/WorkerAggregatorUsage.java b/src/main/java/org/apache/giraph/graph/WorkerAggregatorUsage.java
+new file mode 100644
+index 000000000..b7b98cd3d
+--- /dev/null
++++ b/src/main/java/org/apache/giraph/graph/WorkerAggregatorUsage.java
+@@ -0,0 +1,44 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.giraph.graph;
++
++import org.apache.hadoop.io.Writable;
++
++/**
++ * Vertex classes can access and change aggregators through this interface
++ */
++public interface WorkerAggregatorUsage {
++  /**
++   * Add a new value
++   *
++   * @param name Name of aggregator
++   * @param value Value to add
++   * @param <A> Aggregated value
++   */
++  <A extends Writable> void aggregate(String name, A value);
++
++  /**
++   * Get value of an aggregator.
++   *
++   * @param name Name of aggregator
++   * @param <A> Aggregated value
++   * @return Value of the aggregator
++   */
++  <A extends Writable> A getAggregatedValue(String name);
++}
+diff --git a/src/main/java/org/apache/giraph/graph/WorkerContext.java b/src/main/java/org/apache/giraph/graph/WorkerContext.java
+index 5fe8b82cc..4fcab8819 100644
+--- a/src/main/java/org/apache/giraph/graph/WorkerContext.java
++++ b/src/main/java/org/apache/giraph/graph/WorkerContext.java
+@@ -26,7 +26,7 @@
+  * on a per-worker basis. There's one WorkerContext per worker.
+  */
+ @SuppressWarnings("rawtypes")
+-public abstract class WorkerContext implements AggregatorUsage {
++public abstract class WorkerContext implements WorkerAggregatorUsage {
+   /** Global graph state */
+   private GraphState graphState;
+ 
+@@ -110,23 +110,14 @@ public Mapper.Context getContext() {
+   }
+ 
+   @Override
+-  public final <A extends Writable> Aggregator<A> registerAggregator(
+-    String name,
+-    Class<? extends Aggregator<A>> aggregatorClass)
+-    throws InstantiationException, IllegalAccessException {
+-    return graphState.getGraphMapper().getAggregatorUsage().
+-        registerAggregator(name, aggregatorClass);
++  public <A extends Writable> void aggregate(String name, A value) {
++    graphState.getGraphMapper().getWorkerAggregatorUsage().
++        aggregate(name, value);
+   }
+ 
+   @Override
+-  public final Aggregator<? extends Writable> getAggregator(String name) {
+-    return graphState.getGraphMapper().getAggregatorUsage().
+-        getAggregator(name);
+-  }
+-
+-  @Override
+-  public final boolean useAggregator(String name) {
+-    return graphState.getGraphMapper().getAggregatorUsage().
+-        useAggregator(name);
++  public <A extends Writable> A getAggregatedValue(String name) {
++    return graphState.getGraphMapper().getWorkerAggregatorUsage().
++        getAggregatedValue(name);
+   }
+ }
+diff --git a/src/test/java/org/apache/giraph/BspCase.java b/src/test/java/org/apache/giraph/BspCase.java
+index 5e451a317..61be92ff4 100644
+--- a/src/test/java/org/apache/giraph/BspCase.java
++++ b/src/test/java/org/apache/giraph/BspCase.java
+@@ -174,6 +174,27 @@ protected GiraphJob prepareJob(String name, Class<?> vertexClass,
+   protected GiraphJob prepareJob(String name, Class<?> vertexClass,
+       Class<?> workerContextClass, Class<?> vertexInputFormatClass,
+       Class<?> vertexOutputFormatClass, Path outputPath) throws IOException {
++    return prepareJob(name, vertexClass, workerContextClass, null,
++        vertexInputFormatClass, vertexOutputFormatClass, outputPath);
++  }
++
++  /**
++   * Prepare a GiraphJob for test purposes
++   *
++   * @param name  identifying name for the job
++   * @param vertexClass class of the vertex to run
++   * @param workerContextClass class of the workercontext to use
++   * @param masterComputeClass class of mastercompute to use
++   * @param vertexInputFormatClass  inputformat to use
++   * @param vertexOutputFormatClass outputformat to use
++   * @param outputPath  destination path for the output
++   * @return  fully configured job instance
++   * @throws IOException
++   */
++  protected GiraphJob prepareJob(String name, Class<?> vertexClass,
++      Class<?> workerContextClass, Class<?> masterComputeClass,
++      Class<?> vertexInputFormatClass, Class<?> vertexOutputFormatClass,
++      Path outputPath) throws IOException {
+     GiraphJob job = new GiraphJob(name);
+     setupConfiguration(job);
+     job.setVertexClass(vertexClass);
+@@ -182,6 +203,9 @@ protected GiraphJob prepareJob(String name, Class<?> vertexClass,
+     if (workerContextClass != null) {
+       job.setWorkerContextClass(workerContextClass);
+     }
++    if (masterComputeClass != null) {
++      job.setMasterComputeClass(masterComputeClass);
++    }
+     if (vertexOutputFormatClass != null) {
+       job.setVertexOutputFormatClass(vertexOutputFormatClass);
+     }
+diff --git a/src/test/java/org/apache/giraph/TestAggregatorsHandling.java b/src/test/java/org/apache/giraph/TestAggregatorsHandling.java
+new file mode 100644
+index 000000000..15f60198c
+--- /dev/null
++++ b/src/test/java/org/apache/giraph/TestAggregatorsHandling.java
+@@ -0,0 +1,48 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.giraph;
++
++import org.apache.giraph.examples.AggregatorsTestVertex;
++import org.apache.giraph.examples.SimplePageRankVertex;
++import org.apache.giraph.graph.GiraphJob;
++import org.junit.Test;
++
++import static org.junit.Assert.assertTrue;
++
++import java.io.IOException;
++
++/** Tests if aggregators are handled on a proper way during supersteps */
++public class TestAggregatorsHandling extends BspCase {
++
++  public TestAggregatorsHandling() {
++    super(TestAggregatorsHandling.class.getName());
++  }
++
++  @Test
++  public void testAggregatorsHandling() throws IOException,
++      ClassNotFoundException, InterruptedException {
++    GiraphJob job = prepareJob(getCallingMethodName(),
++        AggregatorsTestVertex.class,
++        SimplePageRankVertex.SimplePageRankVertexInputFormat.class);
++    job.setMasterComputeClass(
++        AggregatorsTestVertex.AggregatorsTestMasterCompute.class);
++    job.getConfiguration().setBoolean(GiraphJob.USE_NETTY, true);
++    assertTrue(job.run(true));
++  }
++}
+diff --git a/src/test/java/org/apache/giraph/TestAutoCheckpoint.java b/src/test/java/org/apache/giraph/TestAutoCheckpoint.java
+index 2aaa810cd..0e8c6842f 100644
+--- a/src/test/java/org/apache/giraph/TestAutoCheckpoint.java
++++ b/src/test/java/org/apache/giraph/TestAutoCheckpoint.java
+@@ -59,6 +59,7 @@ public void testSingleFault()
+     GiraphJob job = prepareJob(getCallingMethodName(),
+         SimpleCheckpointVertex.class,
+         SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class,
++        SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class,
+         SimpleSuperstepVertexInputFormat.class,
+         SimpleSuperstepVertexOutputFormat.class,
+         outputPath);
+diff --git a/src/test/java/org/apache/giraph/TestBspBasic.java b/src/test/java/org/apache/giraph/TestBspBasic.java
+index 9467af155..9ccd9c3ba 100644
+--- a/src/test/java/org/apache/giraph/TestBspBasic.java
++++ b/src/test/java/org/apache/giraph/TestBspBasic.java
+@@ -301,6 +301,8 @@ public void testBspPageRank()
+         SimplePageRankVertex.class, SimplePageRankVertexInputFormat.class);
+     job.setWorkerContextClass(
+         SimplePageRankVertex.SimplePageRankVertexWorkerContext.class);
++    job.setMasterComputeClass(
++        SimplePageRankVertex.SimplePageRankVertexMasterCompute.class);
+     assertTrue(job.run(true));
+     if (!runningInDistributedMode()) {
+       double maxPageRank =
+@@ -362,6 +364,8 @@ public void testBspPageRankWithAggregatorWriter()
+         outputPath);
+     job.setWorkerContextClass(
+         SimplePageRankVertex.SimplePageRankVertexWorkerContext.class);
++    job.setMasterComputeClass(
++        SimplePageRankVertex.SimplePageRankVertexMasterCompute.class);
+ 
+     Configuration conf = job.getConfiguration();
+ 
+@@ -401,23 +405,23 @@ public void testBspPageRankWithAggregatorWriter()
+             String[] tokens = line.split("\t");
+             int superstep = Integer.parseInt(tokens[0].split("=")[1]);
+             String value = (tokens[1].split("=")[1]);
+-            String aggregatorName = tokens[2];
++            String aggregatorName = (tokens[1].split("=")[0]);
+ 
+-            if (DoubleMinAggregator.class.getName().equals(aggregatorName)) {
++            if ("min".equals(aggregatorName)) {
+               minValues.put(superstep, Double.parseDouble(value));
+             }
+-            if (DoubleMaxAggregator.class.getName().equals(aggregatorName)) {
++            if ("max".equals(aggregatorName)) {
+               maxValues.put(superstep, Double.parseDouble(value));
+             }
+-            if (LongSumAggregator.class.getName().equals(aggregatorName)) {
++            if ("sum".equals(aggregatorName)) {
+               vertexCounts.put(superstep, Long.parseLong(value));
+             }
+           }
+ 
+           int maxSuperstep = SimplePageRankVertex.MAX_SUPERSTEPS;
+-          assertEquals(maxSuperstep + 1, minValues.size());
+-          assertEquals(maxSuperstep + 1, maxValues.size());
+-          assertEquals(maxSuperstep + 1, vertexCounts.size());
++          assertEquals(maxSuperstep + 2, minValues.size());
++          assertEquals(maxSuperstep + 2, maxValues.size());
++          assertEquals(maxSuperstep + 2, vertexCounts.size());
+ 
+           assertEquals(maxPageRank, maxValues.get(maxSuperstep));
+           assertEquals(minPageRank, minValues.get(maxSuperstep));
+diff --git a/src/test/java/org/apache/giraph/TestGraphPartitioner.java b/src/test/java/org/apache/giraph/TestGraphPartitioner.java
+index 2106238ac..fc0fc5168 100644
+--- a/src/test/java/org/apache/giraph/TestGraphPartitioner.java
++++ b/src/test/java/org/apache/giraph/TestGraphPartitioner.java
+@@ -77,6 +77,7 @@ public void testPartitioners()
+         GiraphJob job = prepareJob("testVertexBalancer",
+             SimpleCheckpointVertex.class,
+             SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class,
++            SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class,
+             SimpleSuperstepVertexInputFormat.class,
+             SimpleSuperstepVertexOutputFormat.class, outputPath);
+ 
+@@ -91,6 +92,7 @@ public void testPartitioners()
+         outputPath = getTempPath("testHashPartitioner");
+         job = prepareJob("testHashPartitioner", SimpleCheckpointVertex.class,
+             SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class,
++            SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class,
+             SimpleSuperstepVertexInputFormat.class,
+             SimpleSuperstepVertexOutputFormat.class, outputPath);
+         assertTrue(job.run(true));
+@@ -100,6 +102,7 @@ public void testPartitioners()
+         job = prepareJob("testSuperstepHashPartitioner",
+             SimpleCheckpointVertex.class,
+             SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class,
++            SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class,
+             SimpleSuperstepVertexInputFormat.class,
+             SimpleSuperstepVertexOutputFormat.class,
+             outputPath);
+@@ -115,6 +118,8 @@ public void testPartitioners()
+         job.setVertexClass(SimpleCheckpointVertex.class);
+         job.setWorkerContextClass(
+             SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class);
++        job.setMasterComputeClass(
++            SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class);
+         job.setVertexInputFormatClass(SimpleSuperstepVertexInputFormat.class);
+         job.setVertexOutputFormatClass(SimpleSuperstepVertexOutputFormat.class);
+         job.setGraphPartitionerFactoryClass(
+@@ -128,6 +133,7 @@ public void testPartitioners()
+         job = prepareJob("testReverseIdSuperstepHashPartitioner",
+             SimpleCheckpointVertex.class,
+             SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class,
++            SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class,
+             SimpleSuperstepVertexInputFormat.class,
+             SimpleSuperstepVertexOutputFormat.class, outputPath);
+         job.setGraphPartitionerFactoryClass(
+diff --git a/src/test/java/org/apache/giraph/TestManualCheckpoint.java b/src/test/java/org/apache/giraph/TestManualCheckpoint.java
+index 82ec6a565..757b90508 100644
+--- a/src/test/java/org/apache/giraph/TestManualCheckpoint.java
++++ b/src/test/java/org/apache/giraph/TestManualCheckpoint.java
+@@ -53,6 +53,7 @@ public void testBspCheckpoint()
+     GiraphJob job = prepareJob(getCallingMethodName(),
+         SimpleCheckpointVertex.class,
+         SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class,
++        SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class,
+         SimpleSuperstepVertexInputFormat.class,
+         SimpleSuperstepVertexOutputFormat.class, outputPath);
+ 
+@@ -81,8 +82,11 @@ public void testBspCheckpoint()
+     GiraphJob restartedJob = prepareJob(getCallingMethodName() + "Restarted",
+         SimpleCheckpointVertex.class,
+         SimpleCheckpointVertex.SimpleCheckpointVertexWorkerContext.class,
++        SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class,
+         SimpleSuperstepVertexInputFormat.class,
+         SimpleSuperstepVertexOutputFormat.class, outputPath);
++    job.setMasterComputeClass(
++        SimpleCheckpointVertex.SimpleCheckpointVertexMasterCompute.class);
+     restartedJob.getConfiguration().set(GiraphJob.CHECKPOINT_DIRECTORY,
+         checkpointsDir.toString());
+ 
+diff --git a/src/test/java/org/apache/giraph/aggregators/TestBooleanAggregators.java b/src/test/java/org/apache/giraph/aggregators/TestBooleanAggregators.java
+index 203f39f5a..3fc3a30b5 100644
+--- a/src/test/java/org/apache/giraph/aggregators/TestBooleanAggregators.java
++++ b/src/test/java/org/apache/giraph/aggregators/TestBooleanAggregators.java
+@@ -29,13 +29,13 @@ public class TestBooleanAggregators {
+   public void testAndAggregator() {
+     BooleanAndAggregator and = new BooleanAndAggregator();
+     assertEquals(true, and.getAggregatedValue().get());
+-    and.aggregate(true);
++    and.aggregate(new BooleanWritable(true));
+     assertEquals(true, and.getAggregatedValue().get());
+     and.aggregate(new BooleanWritable(false));
+     assertEquals(false, and.getAggregatedValue().get());
+-    and.setAggregatedValue(true);
++    and.setAggregatedValue(new BooleanWritable(true));
+     assertEquals(true, and.getAggregatedValue().get());
+-    BooleanWritable bw = and.createAggregatedValue();
++    BooleanWritable bw = and.createInitialValue();
+     assertNotNull(bw);
+   }
+ 
+@@ -43,26 +43,26 @@ public void testAndAggregator() {
+   public void testOrAggregator() {
+     BooleanOrAggregator or = new BooleanOrAggregator();
+     assertEquals(false, or.getAggregatedValue().get());
+-    or.aggregate(false);
++    or.aggregate(new BooleanWritable(false));
+     assertEquals(false, or.getAggregatedValue().get());
+     or.aggregate(new BooleanWritable(true));
+     assertEquals(true, or.getAggregatedValue().get());
+-    or.setAggregatedValue(false);
++    or.setAggregatedValue(new BooleanWritable(false));
+     assertEquals(false, or.getAggregatedValue().get());
+-    BooleanWritable bw = or.createAggregatedValue();
++    BooleanWritable bw = or.createInitialValue();
+     assertNotNull(bw);
+   }
+ 
+   @Test
+   public void testOverwriteAggregator() {
+     BooleanOverwriteAggregator overwrite = new BooleanOverwriteAggregator();
+-    overwrite.aggregate(true);
++    overwrite.aggregate(new BooleanWritable(true));
+     assertEquals(true, overwrite.getAggregatedValue().get());
+     overwrite.aggregate(new BooleanWritable(false));
+     assertEquals(false, overwrite.getAggregatedValue().get());
+-    overwrite.setAggregatedValue(true);
++    overwrite.setAggregatedValue(new BooleanWritable(true));
+     assertEquals(true, overwrite.getAggregatedValue().get());
+-    BooleanWritable bw = overwrite.createAggregatedValue();
++    BooleanWritable bw = overwrite.createInitialValue();
+     assertNotNull(bw);
+   }
+ 
+diff --git a/src/test/java/org/apache/giraph/aggregators/TestDoubleAggregators.java b/src/test/java/org/apache/giraph/aggregators/TestDoubleAggregators.java
+index 2ebdd93e6..bac9b8ac8 100644
+--- a/src/test/java/org/apache/giraph/aggregators/TestDoubleAggregators.java
++++ b/src/test/java/org/apache/giraph/aggregators/TestDoubleAggregators.java
+@@ -28,61 +28,61 @@ public class TestDoubleAggregators {
+   @Test
+   public void testMaxAggregator() {
+     DoubleMaxAggregator max = new DoubleMaxAggregator();
+-    max.aggregate(2.0);
++    max.aggregate(new DoubleWritable(2.0));
+     max.aggregate(new DoubleWritable(3.0));
+     assertEquals(3.0, max.getAggregatedValue().get());
+-    max.setAggregatedValue(1.0);
++    max.setAggregatedValue(new DoubleWritable(1.0));
+     assertEquals(1.0, max.getAggregatedValue().get());
+-    DoubleWritable dw = max.createAggregatedValue();
++    DoubleWritable dw = max.createInitialValue();
+     assertNotNull(dw);
+   }
+ 
+   @Test
+   public void testMinAggregator() {
+     DoubleMinAggregator min = new DoubleMinAggregator();
+-    min.aggregate(3.0);
++    min.aggregate(new DoubleWritable(3.0));
+     min.aggregate(new DoubleWritable(2.0));
+     assertEquals(2.0, min.getAggregatedValue().get());
+-    min.setAggregatedValue(3.0);
++    min.setAggregatedValue(new DoubleWritable(3.0));
+     assertEquals(3.0, min.getAggregatedValue().get());
+-    DoubleWritable dw = min.createAggregatedValue();
++    DoubleWritable dw = min.createInitialValue();
+     assertNotNull(dw);
+   }
+ 
+   @Test
+   public void testOverwriteAggregator() {
+     DoubleOverwriteAggregator overwrite = new DoubleOverwriteAggregator();
+-    overwrite.aggregate(1.0);
++    overwrite.aggregate(new DoubleWritable(1.0));
+     assertEquals(1.0, overwrite.getAggregatedValue().get());
+     overwrite.aggregate(new DoubleWritable(2.0));
+     assertEquals(2.0, overwrite.getAggregatedValue().get());
+-    overwrite.setAggregatedValue(3.0);
++    overwrite.setAggregatedValue(new DoubleWritable(3.0));
+     assertEquals(3.0, overwrite.getAggregatedValue().get());
+-    DoubleWritable dw = overwrite.createAggregatedValue();
++    DoubleWritable dw = overwrite.createInitialValue();
+     assertNotNull(dw);
+   }
+-  
++
+   @Test
+   public void testProductAggregator() {
+     DoubleProductAggregator product = new DoubleProductAggregator();
+-    product.aggregate(6.0);
++    product.aggregate(new DoubleWritable(6.0));
+     product.aggregate(new DoubleWritable(7.0));
+     assertEquals(42.0, product.getAggregatedValue().get());
+-    product.setAggregatedValue(1.0);
++    product.setAggregatedValue(new DoubleWritable(1.0));
+     assertEquals(1.0, product.getAggregatedValue().get());
+-    DoubleWritable dw = product.createAggregatedValue();
++    DoubleWritable dw = product.createInitialValue();
+     assertNotNull(dw);
+   }
+ 
+   @Test
+   public void testSumAggregator() {
+     DoubleSumAggregator sum = new DoubleSumAggregator();
+-    sum.aggregate(1.0);
++    sum.aggregate(new DoubleWritable(1.0));
+     sum.aggregate(new DoubleWritable(2.0));
+     assertEquals(3.0, sum.getAggregatedValue().get());
+-    sum.setAggregatedValue(4.0);
++    sum.setAggregatedValue(new DoubleWritable(4.0));
+     assertEquals(4.0, sum.getAggregatedValue().get());
+-    DoubleWritable dw = sum.createAggregatedValue();
++    DoubleWritable dw = sum.createInitialValue();
+     assertNotNull(dw);
+   }
+ 
+diff --git a/src/test/java/org/apache/giraph/aggregators/TestFloatAggregators.java b/src/test/java/org/apache/giraph/aggregators/TestFloatAggregators.java
+index 8970ae47d..5a2ad63cb 100644
+--- a/src/test/java/org/apache/giraph/aggregators/TestFloatAggregators.java
++++ b/src/test/java/org/apache/giraph/aggregators/TestFloatAggregators.java
+@@ -28,61 +28,61 @@ public class TestFloatAggregators {
+   @Test
+   public void testMaxAggregator() {
+     FloatMaxAggregator max = new FloatMaxAggregator();
+-    max.aggregate(2.0f);
++    max.aggregate(new FloatWritable(2.0f));
+     max.aggregate(new FloatWritable(3.0f));
+     assertEquals(3.0f, max.getAggregatedValue().get());
+-    max.setAggregatedValue(1.0f);
++    max.setAggregatedValue(new FloatWritable(1.0f));
+     assertEquals(1.0f, max.getAggregatedValue().get());
+-    FloatWritable fw = max.createAggregatedValue();
++    FloatWritable fw = max.createInitialValue();
+     assertNotNull(fw);
+   }
+ 
+   @Test
+   public void testMinAggregator() {
+     FloatMinAggregator min = new FloatMinAggregator();
+-    min.aggregate(3.0f);
++    min.aggregate(new FloatWritable(3.0f));
+     min.aggregate(new FloatWritable(2.0f));
+     assertEquals(2.0f, min.getAggregatedValue().get());
+-    min.setAggregatedValue(3.0f);
++    min.setAggregatedValue(new FloatWritable(3.0f));
+     assertEquals(3.0f, min.getAggregatedValue().get());
+-    FloatWritable fw = min.createAggregatedValue();
++    FloatWritable fw = min.createInitialValue();
+     assertNotNull(fw);
+   }
+ 
+   @Test
+   public void testOverwriteAggregator() {
+     FloatOverwriteAggregator overwrite = new FloatOverwriteAggregator();
+-    overwrite.aggregate(1.0f);
++    overwrite.aggregate(new FloatWritable(1.0f));
+     assertEquals(1.0f, overwrite.getAggregatedValue().get());
+     overwrite.aggregate(new FloatWritable(2.0f));
+     assertEquals(2.0f, overwrite.getAggregatedValue().get());
+-    overwrite.setAggregatedValue(3.0f);
++    overwrite.setAggregatedValue(new FloatWritable(3.0f));
+     assertEquals(3.0f, overwrite.getAggregatedValue().get());
+-    FloatWritable fw = overwrite.createAggregatedValue();
++    FloatWritable fw = overwrite.createInitialValue();
+     assertNotNull(fw);
+   }
+-  
++
+   @Test
+   public void testProductAggregator() {
+     FloatProductAggregator product = new FloatProductAggregator();
+-    product.aggregate(6.0f);
++    product.aggregate(new FloatWritable(6.0f));
+     product.aggregate(new FloatWritable(7.0f));
+     assertEquals(42.0f, product.getAggregatedValue().get());
+-    product.setAggregatedValue(1.0f);
++    product.setAggregatedValue(new FloatWritable(1.0f));
+     assertEquals(1.0f, product.getAggregatedValue().get());
+-    FloatWritable fw = product.createAggregatedValue();
++    FloatWritable fw = product.createInitialValue();
+     assertNotNull(fw);
+   }
+ 
+   @Test
+   public void testSumAggregator() {
+     FloatSumAggregator sum = new FloatSumAggregator();
+-    sum.aggregate(1.0f);
++    sum.aggregate(new FloatWritable(1.0f));
+     sum.aggregate(new FloatWritable(2.0f));
+     assertEquals(3.0f, sum.getAggregatedValue().get());
+-    sum.setAggregatedValue(4.0f);
++    sum.setAggregatedValue(new FloatWritable(4.0f));
+     assertEquals(4.0f, sum.getAggregatedValue().get());
+-    FloatWritable fw = sum.createAggregatedValue();
++    FloatWritable fw = sum.createInitialValue();
+     assertNotNull(fw);
+   }
+ 
+diff --git a/src/test/java/org/apache/giraph/aggregators/TestIntAggregators.java b/src/test/java/org/apache/giraph/aggregators/TestIntAggregators.java
+index 557355a2c..5ddd220df 100644
+--- a/src/test/java/org/apache/giraph/aggregators/TestIntAggregators.java
++++ b/src/test/java/org/apache/giraph/aggregators/TestIntAggregators.java
+@@ -28,61 +28,61 @@ public class TestIntAggregators {
+   @Test
+   public void testMaxAggregator() {
+     IntMaxAggregator max = new IntMaxAggregator();
+-    max.aggregate(2);
++    max.aggregate(new IntWritable(2));
+     max.aggregate(new IntWritable(3));
+     assertEquals(3, max.getAggregatedValue().get());
+-    max.setAggregatedValue(1);
++    max.setAggregatedValue(new IntWritable(1));
+     assertEquals(1, max.getAggregatedValue().get());
+-    IntWritable iw = max.createAggregatedValue();
++    IntWritable iw = max.createInitialValue();
+     assertNotNull(iw);
+   }
+ 
+   @Test
+   public void testMinAggregator() {
+     IntMinAggregator min = new IntMinAggregator();
+-    min.aggregate(3);
++    min.aggregate(new IntWritable(3));
+     min.aggregate(new IntWritable(2));
+     assertEquals(2, min.getAggregatedValue().get());
+-    min.setAggregatedValue(3);
++    min.setAggregatedValue(new IntWritable(3));
+     assertEquals(3, min.getAggregatedValue().get());
+-    IntWritable iw = min.createAggregatedValue();
++    IntWritable iw = min.createInitialValue();
+     assertNotNull(iw);
+   }
+ 
+   @Test
+   public void testOverwriteAggregator() {
+     IntOverwriteAggregator overwrite = new IntOverwriteAggregator();
+-    overwrite.aggregate(1);
++    overwrite.aggregate(new IntWritable(1));
+     assertEquals(1, overwrite.getAggregatedValue().get());
+     overwrite.aggregate(new IntWritable(2));
+     assertEquals(2, overwrite.getAggregatedValue().get());
+-    overwrite.setAggregatedValue(3);
++    overwrite.setAggregatedValue(new IntWritable(3));
+     assertEquals(3, overwrite.getAggregatedValue().get());
+-    IntWritable iw = overwrite.createAggregatedValue();
++    IntWritable iw = overwrite.createInitialValue();
+     assertNotNull(iw);
+   }
+   
+   @Test
+   public void testProductAggregator() {
+     IntProductAggregator product = new IntProductAggregator();
+-    product.aggregate(6);
++    product.aggregate(new IntWritable(6));
+     product.aggregate(new IntWritable(7));
+     assertEquals(42, product.getAggregatedValue().get());
+-    product.setAggregatedValue(1);
++    product.setAggregatedValue(new IntWritable(1));
+     assertEquals(1, product.getAggregatedValue().get());
+-    IntWritable iw = product.createAggregatedValue();
++    IntWritable iw = product.createInitialValue();
+     assertNotNull(iw);
+   }
+ 
+   @Test
+   public void testSumAggregator() {
+     IntSumAggregator sum = new IntSumAggregator();
+-    sum.aggregate(1);
++    sum.aggregate(new IntWritable(1));
+     sum.aggregate(new IntWritable(2));
+     assertEquals(3, sum.getAggregatedValue().get());
+-    sum.setAggregatedValue(4);
++    sum.setAggregatedValue(new IntWritable(4));
+     assertEquals(4, sum.getAggregatedValue().get());
+-    IntWritable iw = sum.createAggregatedValue();
++    IntWritable iw = sum.createInitialValue();
+     assertNotNull(iw);
+   }
+ 
+diff --git a/src/test/java/org/apache/giraph/aggregators/TestLongAggregators.java b/src/test/java/org/apache/giraph/aggregators/TestLongAggregators.java
+index 28976828c..4838cedfc 100644
+--- a/src/test/java/org/apache/giraph/aggregators/TestLongAggregators.java
++++ b/src/test/java/org/apache/giraph/aggregators/TestLongAggregators.java
+@@ -28,61 +28,61 @@ public class TestLongAggregators {
+   @Test
+   public void testMaxAggregator() {
+     LongMaxAggregator max = new LongMaxAggregator();
+-    max.aggregate(2L);
++    max.aggregate(new LongWritable(2L));
+     max.aggregate(new LongWritable(3L));
+     assertEquals(3L, max.getAggregatedValue().get());
+-    max.setAggregatedValue(1L);
++    max.setAggregatedValue(new LongWritable(1L));
+     assertEquals(1L, max.getAggregatedValue().get());
+-    LongWritable lw = max.createAggregatedValue();
++    LongWritable lw = max.createInitialValue();
+     assertNotNull(lw);
+   }
+ 
+   @Test
+   public void testMinAggregator() {
+     LongMinAggregator min = new LongMinAggregator();
+-    min.aggregate(3L);
++    min.aggregate(new LongWritable(3L));
+     min.aggregate(new LongWritable(2L));
+     assertEquals(2L, min.getAggregatedValue().get());
+-    min.setAggregatedValue(3L);
++    min.setAggregatedValue(new LongWritable(3L));
+     assertEquals(3L, min.getAggregatedValue().get());
+-    LongWritable lw = min.createAggregatedValue();
++    LongWritable lw = min.createInitialValue();
+     assertNotNull(lw);
+   }
+ 
+   @Test
+   public void testOverwriteAggregator() {
+     LongOverwriteAggregator overwrite = new LongOverwriteAggregator();
+-    overwrite.aggregate(1L);
++    overwrite.aggregate(new LongWritable(1L));
+     assertEquals(1L, overwrite.getAggregatedValue().get());
+     overwrite.aggregate(new LongWritable(2L));
+     assertEquals(2L, overwrite.getAggregatedValue().get());
+-    overwrite.setAggregatedValue(3L);
++    overwrite.setAggregatedValue(new LongWritable(3L));
+     assertEquals(3L, overwrite.getAggregatedValue().get());
+-    LongWritable lw = overwrite.createAggregatedValue();
++    LongWritable lw = overwrite.createInitialValue();
+     assertNotNull(lw);
+   }
+   
+   @Test
+   public void testProductAggregator() {
+     LongProductAggregator product = new LongProductAggregator();
+-    product.aggregate(6L);
++    product.aggregate(new LongWritable(6L));
+     product.aggregate(new LongWritable(7L));
+     assertEquals(42L, product.getAggregatedValue().get());
+-    product.setAggregatedValue(1L);
++    product.setAggregatedValue(new LongWritable(1L));
+     assertEquals(1L, product.getAggregatedValue().get());
+-    LongWritable lw = product.createAggregatedValue();
++    LongWritable lw = product.createInitialValue();
+     assertNotNull(lw);
+   }
+ 
+   @Test
+   public void testSumAggregator() {
+     LongSumAggregator sum = new LongSumAggregator();
+-    sum.aggregate(1L);
++    sum.aggregate(new LongWritable(1L));
+     sum.aggregate(new LongWritable(2L));
+     assertEquals(3L, sum.getAggregatedValue().get());
+-    sum.setAggregatedValue(4L);
++    sum.setAggregatedValue(new LongWritable(4L));
+     assertEquals(4L, sum.getAggregatedValue().get());
+-    LongWritable lw = sum.createAggregatedValue();
++    LongWritable lw = sum.createInitialValue();
+     assertNotNull(lw);
+   }
+ 

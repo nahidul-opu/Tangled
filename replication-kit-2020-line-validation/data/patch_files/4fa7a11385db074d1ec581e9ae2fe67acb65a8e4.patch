@@ -1,0 +1,86 @@
+From 4fa7a11385db074d1ec581e9ae2fe67acb65a8e4 Mon Sep 17 00:00:00 2001
+From: Marc Giger <giger@apache.org>
+Date: Wed, 4 Feb 2015 19:58:56 +0000
+Subject: [PATCH] SANTUARIO-412: Revert C14N changes and add static check if we
+ have a functional IdentityTransformer. If not fallback to DocumentSerializer.
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1657393 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../Canonicalizer20010315Excl.java            |  5 ++-
+ .../xml/security/encryption/XMLCipher.java    | 33 ++++++++++++++++++-
+ 2 files changed, 34 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java b/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java
+index de0659a787..c872d38a43 100644
+--- a/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java
++++ b/src/main/java/org/apache/xml/security/c14n/implementations/Canonicalizer20010315Excl.java
+@@ -181,11 +181,10 @@ protected Iterator<Attr> handleAttributesSubtree(Element element, NameSpaceSymbT
+             int attrsLength = attrs.getLength();
+             for (int i = 0; i < attrsLength; i++) {
+                 Attr attribute = (Attr) attrs.item(i);
+-                String NName = attribute.getLocalName() == null ? "" : attribute.getLocalName();
++                String NName = attribute.getLocalName();
+                 String NNodeValue = attribute.getNodeValue();
+                 
+-                if (!(XMLNS_URI.equals(attribute.getNamespaceURI())
+-                    || XMLNS.equals(attribute.getName()))) {
++                if (!XMLNS_URI.equals(attribute.getNamespaceURI())) {
+                     // Not a namespace definition.
+                     // The Element is output element, add the prefix (if used) to 
+                     // visiblyUtilized
+diff --git a/src/main/java/org/apache/xml/security/encryption/XMLCipher.java b/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
+index 71b1ad46a6..01757390e2 100644
+--- a/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
++++ b/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
+@@ -252,6 +252,8 @@ public Boolean run() {
+     CAMELLIA_128_KeyWrap + "\n" + CAMELLIA_192_KeyWrap + "\n" + CAMELLIA_256_KeyWrap + "\n" +
+     SEED_128_KeyWrap + "\n";
+ 
++    private static final boolean HAVE_FUNCTIONAL_IDENTITY_TRANSFORMER = haveFunctionalIdentityTransformer();
++
+     /** Cipher created during initialisation that is used for encryption */
+     private Cipher contextCipher;
+     
+@@ -357,7 +359,11 @@ private XMLCipher(
+         }
+ 
+         if (serializer == null) {
+-            serializer = new TransformSerializer();
++            if (HAVE_FUNCTIONAL_IDENTITY_TRANSFORMER) {
++                serializer = new TransformSerializer();
++            } else {
++                serializer = new DocumentSerializer();
++            }
+         }
+         serializer.setCanonicalizer(this.canon);
+         
+@@ -3668,4 +3674,29 @@ public String getType() {
+             }
+         }
+     }
++
++    private static boolean haveFunctionalIdentityTransformer() {
++        final String xml =
++                "<a:e1 xmlns:a=\"a\" xmlns:b=\"b\">"
++                        + "<a xmlns=\"a\" xmlns:b=\"b\"/>"
++                        + "</a:e1>";
++
++        try {
++            final javax.xml.transform.dom.DOMResult domResult = new javax.xml.transform.dom.DOMResult();
++            final javax.xml.transform.TransformerFactory transformerFactory =
++                    javax.xml.transform.TransformerFactory.newInstance();
++            transformerFactory.newTransformer().transform(
++                    new javax.xml.transform.stream.StreamSource(
++                            new java.io.ByteArrayInputStream(xml.getBytes("UTF-8"))), domResult);
++
++            final boolean result = "http://www.w3.org/2000/xmlns/".equals(
++                    domResult.getNode().getFirstChild().getFirstChild().getAttributes().item(1).getNamespaceURI());
++            log.debug("Have functional IdentityTransformer: " + result);
++            return result;
++
++        } catch (Exception e) {
++            log.debug(e.getMessage(), e);
++            return false;
++        }
++    }
+ }

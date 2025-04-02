@@ -1,0 +1,229 @@
+From 364232f781d0cc91cd4b83012e1f49e62fa81190 Mon Sep 17 00:00:00 2001
+From: William D C M SILVA <colen@apache.org>
+Date: Mon, 9 Jan 2017 10:48:58 -0200
+Subject: [PATCH] Restores type parameter in NameFinder
+
+This closes #34
+See issue OPENNLP-719
+---
+ .../tools/namefind/NameFinderEventStream.java |  30 +++--
+ .../namefind/NameFinderEventStreamTest.java   | 107 +++++++++++++++---
+ 2 files changed, 115 insertions(+), 22 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java b/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java
+index aadfcc530..8739b1f09 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java
+@@ -21,6 +21,7 @@
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Objects;
+ 
+ import opennlp.tools.ml.model.Event;
+ import opennlp.tools.util.ObjectStream;
+@@ -41,13 +42,15 @@ public class NameFinderEventStream extends opennlp.tools.util.AbstractEventStrea
+ 
+   private SequenceCodec<String> codec;
+ 
++  private final String defaultType;
++
+   /**
+    * Creates a new name finder event stream using the specified data stream and context generator.
+    * @param dataStream The data stream of events.
+    * @param type null or overrides the type parameter in the provided samples
+    * @param contextGenerator The context generator used to generate features for the event stream.
+    */
+-  public NameFinderEventStream(ObjectStream<NameSample> dataStream, String type, NameContextGenerator contextGenerator, SequenceCodec codec) {
++  public NameFinderEventStream(ObjectStream<NameSample> dataStream, String type, NameContextGenerator contextGenerator, SequenceCodec<String> codec) {
+     super(dataStream);
+ 
+     this.codec = codec;
+@@ -59,11 +62,7 @@ public NameFinderEventStream(ObjectStream<NameSample> dataStream, String type, N
+     this.contextGenerator = contextGenerator;
+     this.contextGenerator.addFeatureGenerator(new WindowFeatureGenerator(additionalContextFeatureGenerator, 8, 8));
+ 
+-    String type1;
+-    if (type != null)
+-      type1 = type;
+-    else
+-      type1 = "default";
++    this.defaultType = type;
+   }
+ 
+   public NameFinderEventStream(ObjectStream<NameSample> dataStream) {
+@@ -107,7 +106,7 @@ public static String[] generateOutcomes(Span[] names, String type, int length) {
+   }
+ 
+   public static List<Event> generateEvents(String[] sentence, String[] outcomes, NameContextGenerator cg) {
+-    List<Event> events = new ArrayList<Event>(outcomes.length);
++    List<Event> events = new ArrayList<>(outcomes.length);
+     for (int i = 0; i < outcomes.length; i++) {
+       events.add(new Event(outcomes[i], cg.getContext(i, sentence, outcomes,null)));
+     }
+@@ -124,7 +123,12 @@ protected Iterator<Event> createEvents(NameSample sample) {
+       contextGenerator.clearAdaptiveData();
+     }
+ 
+-    String outcomes[] = codec.encode(sample.getNames(), sample.getSentence().length);
++    Span[] names = sample.getNames();
++    if (!Objects.isNull(this.defaultType)) {
++      overrideDefaultType(names);
++    }
++
++    String outcomes[] = codec.encode(names, sample.getSentence().length);
+     // String outcomes[] = generateOutcomes(sample.getNames(), type, sample.getSentence().length);
+     additionalContextFeatureGenerator.setCurrentContext(sample.getAdditionalContext());
+     String[] tokens = new String[sample.getSentence().length];
+@@ -136,6 +140,16 @@ protected Iterator<Event> createEvents(NameSample sample) {
+     return generateEvents(tokens, outcomes, contextGenerator).iterator();
+   }
+ 
++  private void overrideDefaultType(Span[] names) {
++    for (int i = 0; i < names.length; i++) {
++      Span n = names[i];
++      if (Objects.isNull(n.getType())) {
++        names[i] = new Span(n.getStart(), n.getEnd(), this.defaultType,
++                n.getProb());
++      }
++    }
++  }
++
+ 
+   /**
+    * Generated previous decision features for each token based on contents of the specified map.
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java b/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java
+index a3150e367..8de73fbd5 100644
+--- a/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java
++++ b/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java
+@@ -21,6 +21,7 @@
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.ObjectStreamUtils;
+ import opennlp.tools.util.Span;
++import opennlp.tools.util.featuregen.AdaptiveFeatureGenerator;
+ import org.junit.Assert;
+ import org.junit.Test;
+ 
+@@ -31,25 +32,20 @@
+  */
+ public class NameFinderEventStreamTest {
+ 
++  private static final String[] SENTENCE = {"Elise", "Wendel", "appreciated",
++          "the", "hint", "and", "enjoyed", "a", "delicious", "traditional", "meal",
++          "."};
++
++  private static final NameContextGenerator CG = new DefaultNameContextGenerator(
++          (AdaptiveFeatureGenerator[]) null);
++
+   /**
+    * Tests the correctly generated outcomes for a test sentence.
+    */
+   @Test
+   public void testOutcomesForSingleTypeSentence() throws IOException {
+-    String sentence[] = {"Elise",
+-        "Wendel",
+-        "appreciated",
+-        "the",
+-        "hint",
+-        "and",
+-        "enjoyed",
+-        "a",
+-        "delicious",
+-        "traditional",
+-        "meal",
+-        "."};
+-
+-    NameSample nameSample = new NameSample(sentence,
++
++    NameSample nameSample = new NameSample(SENTENCE,
+         new Span[]{new Span(0, 2, "person")}, false);
+ 
+     ObjectStream<Event> eventStream = new NameFinderEventStream(
+@@ -64,4 +60,87 @@ public void testOutcomesForSingleTypeSentence() throws IOException {
+ 
+     Assert.assertNull(eventStream.read());
+   }
++
++
++  /**
++   * Tests the correctly generated outcomes for a test sentence. If the Span
++   * declares its type, passing the type to event stream has no effect
++   */
++  @Test
++  public void testOutcomesTypeCantOverride() throws IOException {
++    String type = "XYZ";
++
++    NameSample nameSample = new NameSample(SENTENCE,
++            new Span[] { new Span(0, 2, "person") }, false);
++
++    ObjectStream<Event> eventStream = new NameFinderEventStream(
++            ObjectStreamUtils.createObjectStream(nameSample), type, CG, null);
++
++    String prefix = "person-";
++    Assert.assertEquals(prefix + NameFinderME.START, eventStream.read().getOutcome());
++    Assert.assertEquals(prefix + NameFinderME.CONTINUE,
++            eventStream.read().getOutcome());
++
++    for (int i = 0; i < 10; i++) {
++      Assert.assertEquals(NameFinderME.OTHER, eventStream.read().getOutcome());
++    }
++
++    Assert.assertNull(eventStream.read());
++    eventStream.close();
++  }
++
++  /**
++   * Tests the correctly generated outcomes for a test sentence. If the Span
++   * does not declare its type and the user passed a type, use the type from
++   * user
++   */
++  @Test
++  public void testOutcomesWithType() throws IOException {
++    String type = "XYZ";
++
++    NameSample nameSample = new NameSample(SENTENCE,
++            new Span[] { new Span(0, 2) }, false);
++
++    ObjectStream<Event> eventStream = new NameFinderEventStream(
++            ObjectStreamUtils.createObjectStream(nameSample), type, CG, null);
++
++    String prefix = type + "-";
++    Assert.assertEquals(prefix + NameFinderME.START, eventStream.read().getOutcome());
++    Assert.assertEquals(prefix + NameFinderME.CONTINUE,
++            eventStream.read().getOutcome());
++
++    for (int i = 0; i < 10; i++) {
++      Assert.assertEquals(NameFinderME.OTHER, eventStream.read().getOutcome());
++    }
++
++    Assert.assertNull(eventStream.read());
++    eventStream.close();
++  }
++
++  /**
++   * Tests the correctly generated outcomes for a test sentence. If the Span
++   * does not declare its type and the user did not set a type, it will use
++   * "default".
++   */
++  @Test
++  public void testOutcomesTypeEmpty() throws IOException {
++
++    NameSample nameSample = new NameSample(SENTENCE,
++            new Span[] { new Span(0, 2) }, false);
++
++    ObjectStream<Event> eventStream = new NameFinderEventStream(
++            ObjectStreamUtils.createObjectStream(nameSample), null, CG, null);
++
++    String prefix = "default-";
++    Assert.assertEquals(prefix + NameFinderME.START, eventStream.read().getOutcome());
++    Assert.assertEquals(prefix + NameFinderME.CONTINUE,
++            eventStream.read().getOutcome());
++
++    for (int i = 0; i < 10; i++) {
++      Assert.assertEquals(NameFinderME.OTHER, eventStream.read().getOutcome());
++    }
++
++    Assert.assertNull(eventStream.read());
++    eventStream.close();
++  }
+ }

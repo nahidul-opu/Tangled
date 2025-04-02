@@ -1,0 +1,283 @@
+From 321f19d89724cd17a8f3ca07c00373297dd65de5 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Mon, 27 Oct 2014 23:13:05 +0000
+Subject: [PATCH] OPENNLP-676 Fixed bug in the AnnotationComboIterator. The
+ iterators was crahsing or skipping valid tokens if the CAS contained tokens
+ which are outside of the upper annotation bounds. Added a test case to
+ reproduce the observed bug.
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1634734 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../uima/util/AnnotationComboIterator.java    |   2 +-
+ .../util/AnnotationComboIteratorTest.java     |  77 ++++++++++++
+ .../test/java/opennlp/uima/util/CasUtil.java  | 118 ++++++++++++++++++
+ .../src/test/resources/cas/OPENNLP-676.xmi    |  38 ++++++
+ 4 files changed, 234 insertions(+), 1 deletion(-)
+ create mode 100644 opennlp-uima/src/test/java/opennlp/uima/util/AnnotationComboIteratorTest.java
+ create mode 100644 opennlp-uima/src/test/java/opennlp/uima/util/CasUtil.java
+ create mode 100644 opennlp-uima/src/test/resources/cas/OPENNLP-676.xmi
+
+diff --git a/opennlp-uima/src/main/java/opennlp/uima/util/AnnotationComboIterator.java b/opennlp-uima/src/main/java/opennlp/uima/util/AnnotationComboIterator.java
+index 54cbd1912..c7ca4ec34 100644
+--- a/opennlp-uima/src/main/java/opennlp/uima/util/AnnotationComboIterator.java
++++ b/opennlp-uima/src/main/java/opennlp/uima/util/AnnotationComboIterator.java
+@@ -91,7 +91,7 @@ public boolean hasNext() {
+         while (lowerBegin < AnnotationComboIterator.this.upperBegin) {
+           AnnotationComboIterator.this.lowerIt.moveToNext();
+           if (AnnotationComboIterator.this.lowerIt.isValid()) {
+-            lowerFS = (AnnotationFS) AnnotationComboIterator.this.lowerIt.next();
++            lowerFS = (AnnotationFS) AnnotationComboIterator.this.lowerIt.get();
+             lowerBegin = lowerFS.getBegin();
+           } else {
+             return false;
+diff --git a/opennlp-uima/src/test/java/opennlp/uima/util/AnnotationComboIteratorTest.java b/opennlp-uima/src/test/java/opennlp/uima/util/AnnotationComboIteratorTest.java
+new file mode 100644
+index 000000000..9d5db3fd9
+--- /dev/null
++++ b/opennlp-uima/src/test/java/opennlp/uima/util/AnnotationComboIteratorTest.java
+@@ -0,0 +1,77 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.uima.util;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++
++import org.apache.uima.cas.CAS;
++import org.apache.uima.cas.text.AnnotationFS;
++import org.apache.uima.resource.metadata.TypeSystemDescription;
++import org.junit.Assert;
++import org.junit.Test;
++
++public class AnnotationComboIteratorTest {
++
++  /**
++   * Tests ensures that the bug observed in OPENNLP 676 is fixed. The described
++   * bug occurs if there are tokens which are out side of the sentence bounds.
++   * In that case an uncommon code path in the iterator is used to skip the
++   * out-of-sentence tokens until it again finds tokens which are inside a sentence.
++   * <p>
++   * The iterator was either crashing with a NoSuchElementException or it just left
++   * out the first token in the next sentence.
++   * 
++   * @throws IOException
++   */
++  @Test
++  public void OPENNLP_676() throws IOException {
++    TypeSystemDescription ts = CasUtil
++        .createTypeSystemDescription(AnnotationComboIteratorTest.class
++            .getResourceAsStream("/test-descriptors/TypeSystem.xml"));
++
++    CAS cas = CasUtil.createEmptyCAS(ts);
++
++    CasUtil.deserializeXmiCAS(cas, AnnotationComboIteratorTest.class
++        .getResourceAsStream("/cas/OPENNLP-676.xmi"));
++
++    AnnotationComboIterator comboIterator = new AnnotationComboIterator(cas,
++        cas.getTypeSystem().getType("opennlp.uima.Sentence"), cas
++            .getTypeSystem().getType("opennlp.uima.Token"));
++
++    List<List<String>> tokensBySentence = new ArrayList<>();
++
++    for (AnnotationIteratorPair annotationIteratorPair : comboIterator) {
++
++      final List<String> tokens = new ArrayList<>();
++
++      for (AnnotationFS tokenAnnotation : annotationIteratorPair
++          .getSubIterator()) {
++        tokens.add(tokenAnnotation.getCoveredText());
++      }
++
++      tokensBySentence.add(tokens);
++    }
++
++    Assert.assertEquals(Arrays.asList("A"), tokensBySentence.get(0));
++    Assert.assertEquals(Arrays.asList("H", "I"), tokensBySentence.get(1));
++  }
++
++}
+diff --git a/opennlp-uima/src/test/java/opennlp/uima/util/CasUtil.java b/opennlp-uima/src/test/java/opennlp/uima/util/CasUtil.java
+new file mode 100644
+index 000000000..660406e35
+--- /dev/null
++++ b/opennlp-uima/src/test/java/opennlp/uima/util/CasUtil.java
+@@ -0,0 +1,118 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.uima.util;
++
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStream;
++
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.parsers.SAXParser;
++import javax.xml.parsers.SAXParserFactory;
++
++import org.apache.uima.ResourceSpecifierFactory;
++import org.apache.uima.UIMAFramework;
++import org.apache.uima.cas.CAS;
++import org.apache.uima.cas.impl.XmiCasDeserializer;
++import org.apache.uima.resource.ResourceInitializationException;
++import org.apache.uima.resource.metadata.FsIndexDescription;
++import org.apache.uima.resource.metadata.TypePriorities;
++import org.apache.uima.resource.metadata.TypeSystemDescription;
++import org.apache.uima.resource.metadata.impl.FsIndexDescription_impl;
++import org.apache.uima.util.CasCreationUtils;
++import org.apache.uima.util.InvalidXMLException;
++import org.apache.uima.util.XMLInputSource;
++import org.apache.uima.util.XMLParser;
++import org.xml.sax.SAXException;
++
++public class CasUtil {
++
++  public static TypeSystemDescription createTypeSystemDescription(InputStream in) {
++
++    // Note:
++    // Type System location is not set correctly,
++    // resolving a referenced type system will fail
++
++    XMLInputSource xmlTypeSystemSource = new XMLInputSource(in, new File(""));
++
++    XMLParser xmlParser = UIMAFramework.getXMLParser();
++
++    TypeSystemDescription typeSystemDesciptor;
++
++    try {
++      typeSystemDesciptor = (TypeSystemDescription) xmlParser
++          .parse(xmlTypeSystemSource);
++
++      typeSystemDesciptor.resolveImports();
++    } catch (InvalidXMLException e) {
++      e.printStackTrace();
++      typeSystemDesciptor = null;
++    }
++
++    return typeSystemDesciptor;
++  }
++
++  public static CAS createEmptyCAS(TypeSystemDescription typeSystem) {
++    ResourceSpecifierFactory resourceSpecifierFactory = UIMAFramework
++        .getResourceSpecifierFactory();
++    TypePriorities typePriorities = resourceSpecifierFactory
++        .createTypePriorities();
++
++    FsIndexDescription indexDesciptor = new FsIndexDescription_impl();
++    indexDesciptor.setLabel("TOPIndex");
++    indexDesciptor.setTypeName("uima.cas.TOP");
++    indexDesciptor.setKind(FsIndexDescription.KIND_SORTED);
++
++    CAS cas;
++    try {
++      cas = CasCreationUtils.createCas(typeSystem, typePriorities,
++          new FsIndexDescription[] { indexDesciptor });
++    } catch (ResourceInitializationException e) {
++      e.printStackTrace();
++      cas = null;
++    }
++
++    return cas;
++  }
++
++  public static void deserializeXmiCAS(CAS cas, InputStream xmiIn) throws IOException {
++
++    SAXParserFactory saxParserFactory = SAXParserFactory.newInstance();
++    saxParserFactory.setValidating(false);
++
++    SAXParser saxParser;
++
++    try {
++      saxParser = saxParserFactory.newSAXParser();
++    } catch (ParserConfigurationException e) {
++      throw new IllegalStateException(
++          "SAXParser should be configured correctly!", e);
++    } catch (SAXException e) {
++      throw new IllegalStateException("SAX error while creating parser!", e);
++    }
++
++    XmiCasDeserializer dezerializer = new XmiCasDeserializer(
++        cas.getTypeSystem());
++
++    try {
++      saxParser.parse(xmiIn, dezerializer.getXmiCasHandler(cas));
++    } catch (SAXException e) {
++      throw new IOException("Invalid XMI input!", e);
++    }
++  }
++}
+diff --git a/opennlp-uima/src/test/resources/cas/OPENNLP-676.xmi b/opennlp-uima/src/test/resources/cas/OPENNLP-676.xmi
+new file mode 100644
+index 000000000..90fee8e45
+--- /dev/null
++++ b/opennlp-uima/src/test/resources/cas/OPENNLP-676.xmi
+@@ -0,0 +1,38 @@
++<?xml version="1.0" encoding="UTF-8"?>
++
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++
++<xmi:XMI xmlns:tcas="http:///uima/tcas.ecore" xmlns:xmi="http://www.omg.org/XMI" xmlns:cas="http:///uima/cas.ecore" xmlns:ts="http:///opennlp/uima.ecore" xmi:version="2.0">
++  <cas:NULL xmi:id="0"/>
++  <cas:Sofa xmi:id="1" sofaNum="1" sofaID="_InitialView" mimeType="text" sofaString="ABCDEFGHI"/>
++  <tcas:DocumentAnnotation xmi:id="88" sofa="1" begin="0" end="9" language="x-unspecified"/>
++  <ts:Token xmi:id="4585" sofa="1" begin="0" end="1"/>
++  <ts:Token xmi:id="5100" sofa="1" begin="1" end="2"/>
++  <ts:Token xmi:id="5105" sofa="1" begin="2" end="3"/>
++  <ts:Token xmi:id="5110" sofa="1" begin="3" end="4"/>
++  <ts:Token xmi:id="5115" sofa="1" begin="4" end="5"/>
++  <ts:Token xmi:id="5120" sofa="1" begin="5" end="6"/>
++  <ts:Token xmi:id="5125" sofa="1" begin="6" end="7"/>
++  <ts:Token xmi:id="5130" sofa="1" begin="7" end="8"/>
++  <ts:Token xmi:id="5135" sofa="1" begin="8" end="9"/>
++  <ts:Sentence xmi:id="5180" sofa="1" begin="0" end="1"/>
++  <ts:Sentence xmi:id="5190" sofa="1" begin="7" end="9"/>
++  <cas:View sofa="1" members="88 4585 5100 5105 5110 5115 5120 5125 5130 5135 5180 5190"/>
++</xmi:XMI>

@@ -1,0 +1,120 @@
+From f11bea50aa42035f426343e1d0e5058e75e0d928 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Sat, 6 Feb 2016 17:56:22 +0000
+Subject: [PATCH] JCS-159 Fix: BlockDiskCache overwrites data after loading
+ from disk
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1728860 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../jcs/auxiliary/disk/block/BlockDisk.java   | 14 +++++-----
+ .../block/BlockDiskCacheUnitTestAbstract.java | 26 +++++++++++++++++++
+ src/changes/changes.xml                       |  3 +++
+ 3 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDisk.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDisk.java
+index 1e918da24..1ba89a871 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDisk.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDisk.java
+@@ -21,7 +21,6 @@
+ 
+ import java.io.ByteArrayOutputStream;
+ import java.io.File;
+-import java.io.FileNotFoundException;
+ import java.io.IOException;
+ import java.io.RandomAccessFile;
+ import java.io.Serializable;
+@@ -86,10 +85,10 @@ public class BlockDisk
+      * <p>
+      * @param file
+      * @param elementSerializer
+-     * @throws FileNotFoundException
++     * @throws IOException
+      */
+     public BlockDisk( File file, IElementSerializer elementSerializer )
+-        throws FileNotFoundException
++        throws IOException
+     {
+         this( file, DEFAULT_BLOCK_SIZE_BYTES, elementSerializer );
+     }
+@@ -99,10 +98,10 @@ public BlockDisk( File file, IElementSerializer elementSerializer )
+      * <p>
+      * @param file
+      * @param blockSizeBytes
+-     * @throws FileNotFoundException
++     * @throws IOException
+      */
+     public BlockDisk( File file, int blockSizeBytes )
+-        throws FileNotFoundException
++        throws IOException
+     {
+         this( file, blockSizeBytes, new StandardSerializer() );
+     }
+@@ -113,14 +112,15 @@ public BlockDisk( File file, int blockSizeBytes )
+      * @param file
+      * @param blockSizeBytes
+      * @param elementSerializer
+-     * @throws FileNotFoundException
++     * @throws IOException
+      */
+     public BlockDisk( File file, int blockSizeBytes, IElementSerializer elementSerializer )
+-        throws FileNotFoundException
++        throws IOException
+     {
+         this.filepath = file.getAbsolutePath();
+         RandomAccessFile raf = new RandomAccessFile( filepath, "rw" );
+         this.fc = raf.getChannel();
++        this.numberOfBlocks.set((int) Math.ceil(1f * this.fc.size() / blockSizeBytes));
+ 
+         if ( log.isInfoEnabled() )
+         {
+diff --git a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java
+index 521d34cb7..baf2645fe 100644
+--- a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java
++++ b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCacheUnitTestAbstract.java
+@@ -327,6 +327,32 @@ public void testLoadFromDisk() throws Exception
+             oneLoadFromDisk();
+         }
+     }
++    
++    public void testAppendToDisk() throws Exception 
++    {
++        String cacheName = "testAppendToDisk";
++        BlockDiskCacheAttributes cattr = getCacheAttributes();
++        cattr.setCacheName(cacheName);
++        cattr.setMaxKeySize(100);
++        cattr.setBlockSizeBytes(500);
++        cattr.setDiskPath("target/test-sandbox/BlockDiskCacheUnitTest");
++        BlockDiskCache<String, X> diskCache = new BlockDiskCache<String, X>(cattr);
++        diskCache.removeAll();
++        X value1 = new X();
++        value1.string = "1234567890";
++        X value2 = new X();
++        value2.string = "0987654321";
++        diskCache.update(new CacheElement<String, X>(cacheName, "1", value1));
++        diskCache.dispose();
++        diskCache = new BlockDiskCache<String, X>(cattr);
++        diskCache.update(new CacheElement<String, X>(cacheName, "2", value2));
++        diskCache.dispose();
++        diskCache = new BlockDiskCache<String, X>(cattr);
++        assertTrue(diskCache.verifyDisk());
++        assertEquals(2, diskCache.getKeySet().size());
++        assertEquals(value1.string, diskCache.get("1").getVal().string);
++        assertEquals(value2.string, diskCache.get("2").getVal().string);
++    }
+ 
+     public void oneLoadFromDisk() throws Exception
+     {
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index fa85602e2..20c601bec 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,9 @@
+ 	</properties>
+ 	<body>
+         <release version="2.0" date="unreleased" description="JDK 1.6 based major release">
++            <action issue="JCS-159" dev="tv" type="fix" due-to="Wiktor Niesiobedzki">
++                Fix: BlockDiskCache overwrites data after loading from disk
++            </action>
+             <action dev="tv" type="fix" due-to="Mat Jaggard">
+                 Fix Javadoc for Java 8
+             </action>

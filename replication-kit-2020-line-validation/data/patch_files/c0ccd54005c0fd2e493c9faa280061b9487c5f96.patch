@@ -1,0 +1,223 @@
+From c0ccd54005c0fd2e493c9faa280061b9487c5f96 Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran@apache.org>
+Date: Tue, 25 Jul 2017 10:55:06 +0530
+Subject: [PATCH] IVY-1336 Add a testcase to make sure that the HTTP handler
+ (backed by the httpclient library) doesn't end in a loop while dealing with
+ 401 errors from the server
+
+---
+ .../ivy/util/url/HttpClientHandler.java       |  3 +-
+ test/java/org/apache/ivy/TestHelper.java      | 58 ++++++++++++++
+ .../util/url/HttpclientURLHandlerTest.java    | 75 +++++++++++++++++--
+ 3 files changed, 129 insertions(+), 7 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index 2d4e3fc57..e9bc6994a 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -278,7 +278,8 @@ private void requireSuccessStatus(final String httpMethod, final URL sourceURL,
+             // log and move on
+             Message.debug("Could not close the HTTP response for url=" + sourceURL, e);
+         }
+-        throw new IOException("Response to request '" + httpMethod + " " + sourceURL + "' did not indicate a success (see debug log for details)");
++        throw new IOException("Failed response to request '" + httpMethod + " " + sourceURL + "' " + response.getStatusLine().getStatusCode()
++                + " - '" + response.getStatusLine().getReasonPhrase());
+     }
+ 
+     private Header getContentEncoding(final HttpResponse response) {
+diff --git a/test/java/org/apache/ivy/TestHelper.java b/test/java/org/apache/ivy/TestHelper.java
+index a908fbd00..ebd632a10 100644
+--- a/test/java/org/apache/ivy/TestHelper.java
++++ b/test/java/org/apache/ivy/TestHelper.java
+@@ -17,6 +17,8 @@
+  */
+ package org.apache.ivy;
+ 
++import com.sun.net.httpserver.BasicAuthenticator;
++import com.sun.net.httpserver.HttpContext;
+ import com.sun.net.httpserver.HttpServer;
+ import org.apache.ivy.core.cache.DefaultRepositoryCacheManager;
+ import org.apache.ivy.core.event.EventManager;
+@@ -38,6 +40,7 @@
+ import org.apache.tools.ant.DefaultLogger;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Delete;
++import sun.net.httpserver.AuthFilter;
+ 
+ import java.io.File;
+ import java.io.IOException;
+@@ -49,6 +52,7 @@
+ import java.util.Collection;
+ import java.util.Date;
+ import java.util.LinkedHashSet;
++import java.util.Map;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+ 
+@@ -403,4 +407,58 @@ public void close() throws Exception {
+             }
+         };
+     }
++
++    /**
++     * Creates a HTTP server, backed by a local file system, which can be used as a repository to serve Ivy module descriptors
++     * and artifacts. The context within the server will be backed by {@code BASIC} authentication mechanism with {@code realm}
++     * as the realm and {@code validCredentials} as the credentials that the server will recognize. The server will allow
++     * access to resources, only if the credentials that are provided by the request, belong to these credentials.
++     * <p>
++     * NOTE: This is supposed to be used only in test cases and only a limited functionality is added in the handler(s) backing the
++     * server
++     *
++     * @param serverAddress           The address to which the server will be bound
++     * @param webAppContext           The context root of the application which will be handling the requests to the server
++     * @param localFilesystemRepoRoot The path to the root directory containing the module descriptors and artifacts
++     * @param realm                   The realm to use for the {@code BASIC} auth mechanism
++     * @param validCredentials        A {@link Map} of valid credentials, the key being the user name and the value being the password,
++     *                                that the server will use during the authentication process of the incoming requests
++     * @return
++     * @throws IOException
++     */
++    public static AutoCloseable createBasicAuthHttpServerBackedRepo(final InetSocketAddress serverAddress, final String webAppContext,
++                                                                    final Path localFilesystemRepoRoot, final String realm,
++                                                                    final Map<String, String> validCredentials) throws IOException {
++        final LocalFileRepoOverHttp handler = new LocalFileRepoOverHttp(webAppContext, localFilesystemRepoRoot);
++        final HttpServer server = HttpServer.create(serverAddress, -1);
++        // setup the handler
++        final HttpContext context = server.createContext(webAppContext, handler);
++        // setup basic auth on this context
++        final com.sun.net.httpserver.Authenticator authenticator = new BasicAuthenticator(realm) {
++            @Override
++            public boolean checkCredentials(final String user, final String pass) {
++                if (validCredentials == null) {
++                    return false;
++                }
++                if (!validCredentials.containsKey(user)) {
++                    return false;
++                }
++                final String expectedPass = validCredentials.get(user);
++                return expectedPass != null && expectedPass.equals(pass);
++            }
++        };
++        context.setAuthenticator(authenticator);
++        // setup a auth filter backed by the authenticator
++        context.getFilters().add(new AuthFilter(authenticator));
++        // start the server
++        server.start();
++        return new AutoCloseable() {
++            @Override
++            public void close() throws Exception {
++                final int delaySeconds = 0;
++                server.stop(delaySeconds);
++            }
++        };
++    }
++
+ }
+diff --git a/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java b/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java
+index 0690c3ece..24eb086fe 100644
+--- a/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java
++++ b/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java
+@@ -17,18 +17,25 @@
+  */
+ package org.apache.ivy.util.url;
+ 
+-import java.io.File;
+-import java.net.URL;
+-
++import org.apache.ivy.TestHelper;
+ import org.apache.ivy.core.settings.NamedTimeoutConstraint;
+ import org.apache.ivy.core.settings.TimeoutConstraint;
+ import org.apache.ivy.util.FileUtil;
+ import org.apache.ivy.util.url.URLHandler.URLInfo;
+-
+ import org.junit.After;
++import org.junit.Assert;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
++import java.io.File;
++import java.io.IOException;
++import java.net.InetSocketAddress;
++import java.net.URL;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.Collections;
++import java.util.Random;
++
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ import static org.junit.Assert.assertTrue;
+@@ -91,7 +98,7 @@ public void testContentEncoding() throws Exception {
+                 "http://carsten.codimi.de/gzip.yaws/daniels.html?deflate=on&zlib=on"), new File(
+                 testDir, "deflate-zlib.txt"));
+         assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/daniels.html?deflate=on"),
+-            new File(testDir, "deflate.txt"));
++                new File(testDir, "deflate.txt"));
+         assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/a5.ps"), new File(testDir,
+                 "a5-gzip.ps"));
+         assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/a5.ps?deflate=on"), new File(
+@@ -99,7 +106,63 @@ public void testContentEncoding() throws Exception {
+         assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/nh80.pdf"), new File(testDir,
+                 "nh80-gzip.pdf"));
+         assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/nh80.pdf?deflate=on"),
+-            new File(testDir, "nh80-deflate.pdf"));
++                new File(testDir, "nh80-deflate.pdf"));
++    }
++
++    /**
++     * Tests that the {@link HttpClientHandler}, backed by {@link CredentialsStore Ivy credentials store}
++     * works as expected when it interacts with a HTTP server which requires authentication for accessing resources.
++     *
++     * @throws Exception
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1336">IVY-1336</a>
++     */
++    @Test
++    public void testCredentials() throws Exception {
++        final CredentialsStore credentialsStore = CredentialsStore.INSTANCE;
++        final String realm = "test-http-client-handler-realm";
++        final String host = "localhost";
++        final Random random = new Random();
++        final String userName = "test-http-user-" + random.nextInt();
++        final String password = "pass-" + random.nextInt();
++        credentialsStore.addCredentials(realm, host, userName, password);
++        final InetSocketAddress serverBindAddr = new InetSocketAddress("localhost", 12345);
++        final String contextRoot = "/testHttpClientHandler";
++        final Path repoRoot = new File("test/repositories").toPath();
++        assertTrue(repoRoot + " is not a directory", Files.isDirectory(repoRoot));
++        // create a server backed by BASIC auth with the set of "allowed" credentials
++        try (final AutoCloseable server = TestHelper.createBasicAuthHttpServerBackedRepo(serverBindAddr, contextRoot,
++                repoRoot, realm, Collections.singletonMap(userName, password))) {
++
++            final File target = new File(testDir, "downloaded.xml");
++            assertFalse("File " + target + " already exists", target.exists());
++            final URL src = new URL("http://localhost:" + serverBindAddr.getPort() + "/"
++                    + contextRoot + "/ivysettings.xml");
++            // download it
++            handler.download(src, target, null, defaultTimeoutConstraint);
++            assertTrue("File " + target + " was not downloaded from " + src, target.isFile());
++        }
++        // now create a server backed by BASIC auth with a set of credentials that do *not* match with what the
++        // Ivy credentials store will return for a given realm+host combination. i.e. Ivy credentials store
++        // will return back invalid credentials and the server will reject them
++        try (final AutoCloseable server = TestHelper.createBasicAuthHttpServerBackedRepo(serverBindAddr, contextRoot,
++                repoRoot, realm, Collections.singletonMap("other-" + userName, "other-" + password))) {
++
++            final File target = new File(testDir, "should-not-have-been-downloaded.xml");
++            assertFalse("File " + target + " already exists", target.exists());
++            final URL src = new URL("http://localhost:" + serverBindAddr.getPort() + "/"
++                    + contextRoot + "/ivysettings.xml");
++            // download it (expected to fail)
++            try {
++                handler.download(src, target, null, defaultTimeoutConstraint);
++                Assert.fail("Download from " + src + " was expected to fail due to invalid credentials");
++            } catch (IOException ioe) {
++                // we catch it and check for presence of 401 in the exception message.
++                // It's not exactly an contract that the IOException will have the 401 message but for now
++                // that's how it's implemented and it's fine to check for the presence of that message at the
++                // moment
++                assertTrue("Expected to find 401 error message in exception", ioe.getMessage().contains("401"));
++            }
++        }
+     }
+ 
+     private void assertDownloadOK(final URL url, final File file) throws Exception {

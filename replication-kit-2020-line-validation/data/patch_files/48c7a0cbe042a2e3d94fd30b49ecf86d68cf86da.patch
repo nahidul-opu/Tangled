@@ -1,0 +1,420 @@
+From 48c7a0cbe042a2e3d94fd30b49ecf86d68cf86da Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sat, 5 Jun 2010 21:25:26 +0000
+Subject: [PATCH] IMPROVEMENT: added support for 'deflate' HTTP
+ Content-Encoding (IVY-1194)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@951772 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +-
+ .../ivy/util/url/AbstractURLHandler.java      | 46 ++++++++++
+ .../apache/ivy/util/url/BasicURLHandler.java  | 42 +++++----
+ .../ivy/util/url/HttpClientHandler.java       | 85 ++-----------------
+ .../ivy/util/url/BasicURLHandlerTest.java     | 32 ++++++-
+ .../util/url/HttpclientURLHandlerTest.java    | 32 ++++++-
+ 6 files changed, 136 insertions(+), 103 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 28f0be2f1..aad2ebc9d 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -115,7 +115,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - NEW: Support ivy.xml parent mechanism (IVY-742) (thanks to Jason Trump and Jean-Louis Boudart)
+ - NEW: Make ivy.xml <conf description> available (IVY-1158)
+ 
+-- IMPROVEMENT: added support for 'gzip' HTTP Content-Encoding (IVY-1194)
++- IMPROVEMENT: added support for 'gzip' and 'deflate' HTTP Content-Encoding (IVY-1194)
+ - IMPROVEMENT: retrieve doesn't retrive files if the current one is more recent (IVY-1044)
+ - IMPROVEMENT: better diagnostics when reporting bad ivy file in cache (IVY-1190)
+ - IMPROVEMENT: Support changing="true" for inline retrieve (IVY-1180)
+diff --git a/src/java/org/apache/ivy/util/url/AbstractURLHandler.java b/src/java/org/apache/ivy/util/url/AbstractURLHandler.java
+index 9eac4eea1..c2613ca97 100644
+--- a/src/java/org/apache/ivy/util/url/AbstractURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/AbstractURLHandler.java
+@@ -17,13 +17,19 @@
+  */
+ package org.apache.ivy.util.url;
+ 
++import java.io.BufferedInputStream;
+ import java.io.IOException;
++import java.io.InputStream;
+ import java.net.HttpURLConnection;
+ import java.net.MalformedURLException;
+ import java.net.URI;
+ import java.net.URISyntaxException;
+ import java.net.URL;
+ import java.util.regex.Pattern;
++import java.util.zip.DataFormatException;
++import java.util.zip.GZIPInputStream;
++import java.util.zip.Inflater;
++import java.util.zip.InflaterInputStream;
+ 
+ public abstract class AbstractURLHandler implements URLHandler {
+     
+@@ -118,4 +124,44 @@ protected URL normalizeToURL(URL url) throws IOException {
+         
+         return new URL(normalizeToString(url));
+     }
++    
++    protected InputStream getDecodingInputStream(String encoding, InputStream in) 
++            throws IOException {
++        InputStream result = null;
++        
++        if ("gzip".equals(encoding)) {
++            result = new GZIPInputStream(in);
++        } else if ("deflate".equals(encoding)) {
++            // There seems to be 2 variants of the "deflate"-encoding.
++            // I couldn't find a way to auto-detect which variant was
++            // used, so as (a not really good) work-around we try do
++            // decompress the first 100 bytes using the "zlib"-variant.
++            BufferedInputStream bStream = new BufferedInputStream(in);
++            bStream.mark(100);
++            byte[] bytes = new byte[100];
++            int nbBytes = bStream.read(bytes);
++            bStream.reset();
++            
++            Inflater inflater = new Inflater();
++            inflater.setInput(bytes, 0, nbBytes);
++            try {
++                inflater.inflate(new byte[1000]);
++                
++                // no error decompressing the first 100 bytes, so we
++                // assume the "zlib"-variant was used.
++                result = new InflaterInputStream(bStream);
++            } catch (DataFormatException e) {
++                // there was an error decompressing the first 100 bytes,
++                // so we assume the "gzip/raw"-variant was used.
++                result = new InflaterInputStream(bStream, new Inflater(true));
++            } finally {
++                inflater.end();
++            }
++        } else {
++            result = in;
++        }
++        
++        return result;
++    }
++
+ }
+diff --git a/src/java/org/apache/ivy/util/url/BasicURLHandler.java b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+index 58e0ec059..63d223ef0 100644
+--- a/src/java/org/apache/ivy/util/url/BasicURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+@@ -28,7 +28,6 @@
+ import java.net.URL;
+ import java.net.URLConnection;
+ import java.net.UnknownHostException;
+-import java.util.zip.GZIPInputStream;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.util.CopyProgressListener;
+@@ -117,7 +116,7 @@ public InputStream openStream(URL url) throws IOException {
+             url = normalizeToURL(url);
+             conn = url.openConnection();
+             conn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
+-            conn.setRequestProperty("Accept-Encoding", "gzip");
++            conn.setRequestProperty("Accept-Encoding", "gzip,deflate");
+             if (conn instanceof HttpURLConnection) {
+                 HttpURLConnection httpCon = (HttpURLConnection) conn;
+                 if (!checkStatusCode(url, httpCon)) {
+@@ -126,12 +125,8 @@ public InputStream openStream(URL url) throws IOException {
+                                 + " See log for more detail.");
+                 }
+             }
+-            InputStream inStream;
+-            if ("gzip".equals(conn.getContentEncoding())) {
+-                inStream = new GZIPInputStream(conn.getInputStream());
+-            } else {
+-                inStream = conn.getInputStream();
+-            }
++            InputStream inStream = getDecodingInputStream(conn.getContentEncoding(),
++                                                          conn.getInputStream());
+             ByteArrayOutputStream outStream = new ByteArrayOutputStream();
+ 
+             byte[] buffer = new byte[BUFFER_SIZE];
+@@ -154,7 +149,7 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+             src = normalizeToURL(src);
+             srcConn = src.openConnection();
+             srcConn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
+-            srcConn.setRequestProperty("Accept-Encoding", "gzip");
++            srcConn.setRequestProperty("Accept-Encoding", "gzip,deflate");
+             if (srcConn instanceof HttpURLConnection) {
+                 HttpURLConnection httpCon = (HttpURLConnection) srcConn;
+                 if (!checkStatusCode(src, httpCon)) {
+@@ -163,23 +158,24 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+                                 + " See log for more detail.");
+                 }
+             }
+-            int contentLength = srcConn.getContentLength();
+-
+-            InputStream inStream;
+-            if ("gzip".equals(srcConn.getContentEncoding())) {
+-                inStream = new GZIPInputStream(srcConn.getInputStream());
+-                contentLength = -1;
+-            } else {
+-                inStream = srcConn.getInputStream();
+-            }
+ 
++            // do the download
++            InputStream inStream = getDecodingInputStream(srcConn.getContentEncoding(),
++                                                          srcConn.getInputStream());
+             FileUtil.copy(inStream, dest, l);
+-            if (dest.length() != contentLength && contentLength != -1) {
+-                dest.delete();
+-                throw new IOException(
+-                        "Downloaded file size doesn't match expected Content Length for " + src
+-                                + ". Please retry.");
++
++            // check content length only if content was not encoded
++            if (srcConn.getContentEncoding() == null) {
++                int contentLength = srcConn.getContentLength();
++                if (contentLength != -1 && dest.length() != contentLength) {
++                    dest.delete();
++                    throw new IOException(
++                            "Downloaded file size doesn't match expected Content Length for " + src
++                                    + ". Please retry.");
++                }
+             }
++            
++            // update modification date
+             long lastModified = srcConn.getLastModified();
+             if (lastModified > 0) {
+                 dest.setLastModified(lastModified);
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index 266386abb..b031fcac7 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -28,7 +28,6 @@
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Locale;
+-import java.util.zip.GZIPInputStream;
+ 
+ import org.apache.commons.httpclient.Credentials;
+ import org.apache.commons.httpclient.Header;
+@@ -101,7 +100,10 @@ public InputStream openStream(URL url) throws IOException {
+             throw new IOException("The HTTP response code for " + url
+                     + " did not indicate a success." + " See log for more detail.");
+         }
+-        return new GETInputStream(get);
++        
++        Header encoding = get.getResponseHeader("Content-Encoding");
++        return getDecodingInputStream(encoding == null ? null : encoding.getValue(),
++                                      get.getResponseBodyAsStream());
+     }
+ 
+     public void download(URL src, File dest, CopyProgressListener l) throws IOException {
+@@ -113,14 +115,9 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+                         + " did not indicate a success." + " See log for more detail.");
+             }
+             
+-            InputStream is;
+-            Header[] contentEncodings = get.getResponseHeaders("Content-Encoding");
+-            if ((contentEncodings.length > 0) && "gzip".equals(contentEncodings[0].getValue())) {
+-                is = new GZIPInputStream(get.getResponseBodyAsStream());
+-            } else {
+-                is = get.getResponseBodyAsStream();
+-            }
+-
++            Header encoding = get.getResponseHeader("Content-Encoding");
++            InputStream is = getDecodingInputStream(encoding == null ? null : encoding.getValue(),
++                                                    get.getResponseBodyAsStream());
+             FileUtil.copy(is, dest, l);
+             dest.setLastModified(getLastModified(get));
+         } finally {
+@@ -255,7 +252,7 @@ private GetMethod doGet(URL url, int timeout) throws IOException {
+ 
+         GetMethod get = new GetMethod(normalizeToString(url));
+         get.setDoAuthentication(useAuthentication(url) || useProxyAuthentication());
+-        get.setRequestHeader("Accept-Encoding", "gzip");
++        get.setRequestHeader("Accept-Encoding", "gzip,deflate");
+         client.executeMethod(get);
+         return get;
+     }
+@@ -321,72 +318,6 @@ private boolean useProxyAuthentication() {
+         return (proxyUserName != null && proxyUserName.trim().length() > 0);
+     }
+ 
+-    private static final class GETInputStream extends InputStream {
+-        private InputStream is;
+-
+-        private GetMethod get;
+-
+-        private GETInputStream(GetMethod get) throws IOException {
+-            this.get = get;
+-            
+-            Header[] contentEncodings = get.getResponseHeaders("Content-Encoding");
+-            if ((contentEncodings.length > 0) && "gzip".equals(contentEncodings[0].getValue())) {
+-                is = new GZIPInputStream(get.getResponseBodyAsStream());
+-            } else {
+-                is = get.getResponseBodyAsStream();
+-            }
+-        }
+-
+-        public int available() throws IOException {
+-            return is.available();
+-        }
+-
+-        public void close() throws IOException {
+-            is.close();
+-            get.releaseConnection();
+-        }
+-
+-        public boolean equals(Object obj) {
+-            return is.equals(obj);
+-        }
+-
+-        public int hashCode() {
+-            return is.hashCode();
+-        }
+-
+-        public void mark(int readlimit) {
+-            is.mark(readlimit);
+-        }
+-
+-        public boolean markSupported() {
+-            return is.markSupported();
+-        }
+-
+-        public int read() throws IOException {
+-            return is.read();
+-        }
+-
+-        public int read(byte[] b, int off, int len) throws IOException {
+-            return is.read(b, off, len);
+-        }
+-
+-        public int read(byte[] b) throws IOException {
+-            return is.read(b);
+-        }
+-
+-        public void reset() throws IOException {
+-            is.reset();
+-        }
+-
+-        public long skip(long n) throws IOException {
+-            return is.skip(n);
+-        }
+-
+-        public String toString() {
+-            return is.toString();
+-        }
+-    }
+-
+     private static final class HttpClientHelper3x implements HttpClientHelper {
+         private static final int VERSION = 3;
+ 
+diff --git a/test/java/org/apache/ivy/util/url/BasicURLHandlerTest.java b/test/java/org/apache/ivy/util/url/BasicURLHandlerTest.java
+index 4127993fd..640fe8e04 100644
+--- a/test/java/org/apache/ivy/util/url/BasicURLHandlerTest.java
++++ b/test/java/org/apache/ivy/util/url/BasicURLHandlerTest.java
+@@ -20,6 +20,8 @@
+ import java.io.File;
+ import java.net.URL;
+ 
++import org.apache.ivy.util.FileUtil;
++
+ import junit.framework.TestCase;
+ 
+ /**
+@@ -27,8 +29,21 @@
+  */
+ public class BasicURLHandlerTest extends TestCase {
+     // remote.test
++    private File testDir;
++    private BasicURLHandler handler;
++    
++    protected void setUp() throws Exception {
++        testDir = new File("build/BasicURLHandlerTest");
++        testDir.mkdirs();
++        
++        handler = new BasicURLHandler();
++    }
++    
++    protected void tearDown() throws Exception {
++        FileUtil.forceDelete(testDir);
++    }
++    
+     public void testIsReachable() throws Exception {
+-        URLHandler handler = new BasicURLHandler();
+         assertTrue(handler.isReachable(new URL("http://www.google.fr/")));
+         assertFalse(handler.isReachable(new URL("http://www.google.fr/unknownpage.html")));
+ 
+@@ -39,4 +54,19 @@ public void testIsReachable() throws Exception {
+         // assertTrue(handler.isReachable(new URL("ftp://ftp.mozilla.org/pub/dir.sizes")));
+         assertFalse(handler.isReachable(new URL("ftp://ftp.mozilla.org/unknown.file")));
+     }
++    
++    public void testContentEncoding() throws Exception {
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/daniels.html"), new File(testDir, "gzip.txt"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/daniels.html?deflate=on&zlib=on"), new File(testDir, "deflate-zlib.txt"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/daniels.html?deflate=on"), new File(testDir, "deflate.txt"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/a5.ps"), new File(testDir, "a5-gzip.ps"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/a5.ps?deflate=on"), new File(testDir, "a5-deflate.ps"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/nh80.pdf"), new File(testDir, "nh80-gzip.pdf"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/nh80.pdf?deflate=on"), new File(testDir, "nh80-deflate.pdf"));
++    }
++    
++    private void assertDownloadOK(URL url, File file) throws Exception {
++        handler.download(url, file, null);
++        assertTrue(file.exists());        
++    }
+ }
+diff --git a/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java b/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java
+index e87b62ecf..4ccba7870 100644
+--- a/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java
++++ b/test/java/org/apache/ivy/util/url/HttpclientURLHandlerTest.java
+@@ -17,8 +17,10 @@
+  */
+ package org.apache.ivy.util.url;
+ 
++import java.io.File;
+ import java.net.URL;
+ 
++import org.apache.ivy.util.FileUtil;
+ import org.apache.ivy.util.url.URLHandler.URLInfo;
+ 
+ import junit.framework.TestCase;
+@@ -28,8 +30,21 @@
+  */
+ public class HttpclientURLHandlerTest extends TestCase {
+     // remote.test
++    private File testDir;
++    private HttpClientHandler handler;
++    
++    protected void setUp() throws Exception {
++        testDir = new File("build/HttpclientURLHandlerTest");
++        testDir.mkdirs();
++        
++        handler = new HttpClientHandler();
++    }
++    
++    protected void tearDown() throws Exception {
++        FileUtil.forceDelete(testDir);
++    }
++    
+     public void testIsReachable() throws Exception {
+-        URLHandler handler = new HttpClientHandler();
+         assertTrue(handler.isReachable(new URL("http://www.google.fr/")));
+         assertFalse(handler.isReachable(new URL("http://www.google.fr/unknownpage.html")));
+     }
+@@ -43,4 +58,19 @@ public void testGetURLInfo() throws Exception {
+         
+         assertEquals(URLHandler.UNAVAILABLE, info);
+     }
++    
++    public void testContentEncoding() throws Exception {
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/daniels.html"), new File(testDir, "gzip.txt"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/daniels.html?deflate=on&zlib=on"), new File(testDir, "deflate-zlib.txt"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/daniels.html?deflate=on"), new File(testDir, "deflate.txt"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/a5.ps"), new File(testDir, "a5-gzip.ps"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/a5.ps?deflate=on"), new File(testDir, "a5-deflate.ps"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/nh80.pdf"), new File(testDir, "nh80-gzip.pdf"));
++        assertDownloadOK(new URL("http://carsten.codimi.de/gzip.yaws/nh80.pdf?deflate=on"), new File(testDir, "nh80-deflate.pdf"));
++    }
++    
++    private void assertDownloadOK(URL url, File file) throws Exception {
++        handler.download(url, file, null);
++        assertTrue(file.exists());        
++    }
+ }

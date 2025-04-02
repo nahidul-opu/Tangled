@@ -1,0 +1,103 @@
+From 96099eec30e81f16efd94f385b45707bed515ed2 Mon Sep 17 00:00:00 2001
+From: Ate Douma <ate@apache.org>
+Date: Wed, 11 Feb 2015 22:51:56 +0000
+Subject: [PATCH] SCXML-101: add support for using a 'single' global Context,
+ required for some of the (datamodel specific) IRP tests of the W3C
+ specification.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/scxml/trunk@1659105 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../org/apache/commons/scxml2/SCInstance.java | 33 +++++++++++++++----
+ .../apache/commons/scxml2/SCXMLExecutor.java  |  8 +++++
+ .../apache/commons/scxml2/w3c/W3CTests.java   |  1 +
+ 3 files changed, 36 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/scxml2/SCInstance.java b/src/main/java/org/apache/commons/scxml2/SCInstance.java
+index e3f77195f..7aa2ceea2 100644
+--- a/src/main/java/org/apache/commons/scxml2/SCInstance.java
++++ b/src/main/java/org/apache/commons/scxml2/SCInstance.java
+@@ -128,6 +128,11 @@ public class SCInstance implements Serializable {
+      */
+     private Context globalContext;
+ 
++    /**
++     * Flag indicating if the globalContext is shared between all states (a single flat context, default false)
++     */
++    private boolean singleContext;
++
+     /**
+      * Constructor
+      * @param internalIOProcessor The I/O Processor for the internal event queue
+@@ -259,6 +264,17 @@ protected void setStateMachine(SCXML stateMachine) throws ModelException {
+         initialize();
+     }
+ 
++    public void setSingleContext(boolean singleContext) throws ModelException {
++        if (initialized) {
++            throw new ModelException("SCInstance: already initialized");
++        }
++        this.singleContext = singleContext;
++    }
++
++    public boolean isSingleContext() {
++        return singleContext;
++    }
++
+     /**
+      * Clone data model.
+      *
+@@ -438,12 +454,17 @@ public Context getGlobalContext() {
+     public Context getContext(final EnterableState state) {
+         Context context = contexts.get(state);
+         if (context == null) {
+-            EnterableState parent = state.getParent();
+-            if (parent == null) {
+-                // docroot
+-                context = evaluator.newContext(getGlobalContext());
+-            } else {
+-                context = evaluator.newContext(getContext(parent));
++            if (singleContext) {
++                context = getGlobalContext();
++            }
++            else {
++                EnterableState parent = state.getParent();
++                if (parent == null) {
++                    // docroot
++                    context = evaluator.newContext(getGlobalContext());
++                } else {
++                    context = evaluator.newContext(getContext(parent));
++                }
+             }
+             if (state instanceof TransitionalState) {
+                 Datamodel datamodel = ((TransitionalState)state).getDatamodel();
+diff --git a/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java b/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java
+index 2a6c76027..6a268c0c2 100644
+--- a/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java
++++ b/src/main/java/org/apache/commons/scxml2/SCXMLExecutor.java
+@@ -191,6 +191,14 @@ public void setRootContext(final Context rootContext) {
+         exctx.getScInstance().setRootContext(rootContext);
+     }
+ 
++    public void setSingleContext(boolean singleContext) throws ModelException {
++        getSCInstance().setSingleContext(singleContext);
++    }
++
++    public boolean isSingleContext() {
++        return getSCInstance().isSingleContext();
++    }
++
+     /**
+      * Get the state machine that is being executed.
+      * <b>NOTE:</b> This is the state machine definition or model used by this
+diff --git a/src/test/java/org/apache/commons/scxml2/w3c/W3CTests.java b/src/test/java/org/apache/commons/scxml2/w3c/W3CTests.java
+index f70c25b04..026210985 100644
+--- a/src/test/java/org/apache/commons/scxml2/w3c/W3CTests.java
++++ b/src/test/java/org/apache/commons/scxml2/w3c/W3CTests.java
+@@ -728,6 +728,7 @@ protected boolean runTest(final Assertions.TestCase testCase, final Tests.Test t
+                 return false;
+             }
+             final SCXMLExecutor exec = new SCXMLExecutor(null, null, trc);
++            exec.setSingleContext(true);
+             exec.setStateMachine(doc);
+             exec.addListener(doc, trc);
+             exec.registerInvokerClass("scxml", SimpleSCXMLInvoker.class);

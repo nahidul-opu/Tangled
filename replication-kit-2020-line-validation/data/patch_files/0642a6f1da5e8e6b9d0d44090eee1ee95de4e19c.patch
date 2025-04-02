@@ -1,0 +1,141 @@
+From 0642a6f1da5e8e6b9d0d44090eee1ee95de4e19c Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 5 Mar 2009 23:17:41 +0000
+Subject: [PATCH] FIX: Ivy doesn't handle the classifier attribute of artifacts
+ inside dependency elements (IVY-1041)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@750671 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../descriptor/DefaultModuleDescriptor.java   |  2 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 28 ++++++++++++-
+ .../2.0/test-classified-2.0-asl.jar           |  1 +
+ .../2.0/test-classifier-2.0.pom               | 40 +++++++++++++++++++
+ 5 files changed, 70 insertions(+), 2 deletions(-)
+ create mode 100644 test/repositories/m2/org/apache/test-classified/2.0/test-classified-2.0-asl.jar
+ create mode 100644 test/repositories/m2/org/apache/test-classifier/2.0/test-classifier-2.0.pom
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index fda741591..66100805b 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -99,6 +99,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Error message is not clear when specifying an invalid value for checksums (IVY-977)
+ - IMPROVEMENT: catch AccessControlException on System.getProperties() (IVY-1015)
+ 
++- FIX: Ivy doesn't handle the classifier attribute of artifacts inside dependency elements (IVY-1041)
+ - FIX: Buildnumber task does not work for chained resolvers (IVY-1037)
+ - FIX: Dependencies don't inherit exclusions from dependencyManagement (IVY-974) (thanks to John Gibson)
+ - FIX: Dependency Configuration Negation does not work (IVY-982)
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+index 449570e87..dc1c32c74 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+@@ -105,7 +105,7 @@ public static DefaultModuleDescriptor newDefaultInstance(ModuleRevisionId mrid,
+             for (int i = 0; i < artifacts.length; i++) {
+                 moduleDescriptor.addArtifact(DEFAULT_CONFIGURATION, new MDArtifact(
+                         moduleDescriptor, artifacts[i].getName(), artifacts[i].getType(),
+-                        artifacts[i].getExt(), artifacts[i].getUrl(), null));
++                        artifacts[i].getExt(), artifacts[i].getUrl(), artifacts[i].getExtraAttributes()));
+             }
+         } else {
+             moduleDescriptor.addArtifact(DEFAULT_CONFIGURATION, new MDArtifact(moduleDescriptor,
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 9eb361b6e..aec1ee20b 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3830,7 +3830,6 @@ public void testResolveTransitivelyToPomRelocatedToNewVersion() throws Exception
+         }
+     }
+ 
+-    
+     public void testResolveMaven2Classifiers() throws Exception {
+         // test case for IVY-418
+         // test-classifier depends on test-classified with classifier asl
+@@ -3858,6 +3857,33 @@ public void testResolveMaven2Classifiers() throws Exception {
+                     , "1.0", "test-classified", "jar", "jar", cmap).exists());
+     }
+ 
++    public void testResolveMaven2ClassifiersWithoutPOM() throws Exception {
++        // test case for IVY-1041
++        // test-classifier depends on test-classified with classifier asl
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml").toURL());
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/m2/org/apache/test-classifier/2.0/test-classifier-2.0.pom")
++                .toURL(), getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId
++                .newInstance("org.apache", "test-classifier", "2.0");
++        assertEquals(mrid, md.getModuleRevisionId());
++
++        assertTrue(getResolvedIvyFileInCache(mrid).exists());
++
++        // dependencies
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org.apache", "test-classified", "2.0")).exists());
++        
++        Map cmap = new HashMap();
++        cmap.put("classifier", "asl");
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test-classified", null /* branch */
++                    , "2.0", "test-classified", "jar", "jar", cmap).exists());
++    }
++
+     public void testResolveMaven2GetSources() throws Exception {
+         Ivy ivy = new Ivy();
+         ivy.configure(new File("test/repositories/m2/ivysettings.xml").toURL());
+diff --git a/test/repositories/m2/org/apache/test-classified/2.0/test-classified-2.0-asl.jar b/test/repositories/m2/org/apache/test-classified/2.0/test-classified-2.0-asl.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-classified/2.0/test-classified-2.0-asl.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test-classifier/2.0/test-classifier-2.0.pom b/test/repositories/m2/org/apache/test-classifier/2.0/test-classifier-2.0.pom
+new file mode 100644
+index 000000000..1fdd61831
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test-classifier/2.0/test-classifier-2.0.pom
+@@ -0,0 +1,40 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test-classifier</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>2.0</version>
++  <packaging>pom</packaging>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test-classified</artifactId>
++      <version>2.0</version>
++      <classifier>asl</classifier>
++    </dependency>
++  </dependencies>
++</project>

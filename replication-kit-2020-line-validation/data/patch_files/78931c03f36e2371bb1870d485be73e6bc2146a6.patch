@@ -1,0 +1,159 @@
+From 78931c03f36e2371bb1870d485be73e6bc2146a6 Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <majakabiljo@fb.com>
+Date: Tue, 30 Dec 2014 18:51:55 -0800
+Subject: [PATCH] GIRAPH-977: useMessageSizeEncoding is broken
+
+Summary: When useMessageSizeEncoding is set to true, any application using messaging and no combiner will fail. It looks like writing lengths of messages was lost at some point, so we are just trying to read the lengths without ever writing them.
+
+Test Plan: Added a test, it failed without the change but succeeded with it.
+
+Reviewers: sergey.edunov, pavanka
+
+Differential Revision: https://reviews.facebook.net/D30825
+---
+ CHANGELOG                                     |  2 +
+ .../utils/ByteArrayVertexIdMessages.java      | 41 +++++++++++++++++++
+ .../TestIntFloatPrimitiveMessageStores.java   | 27 +++++++-----
+ 3 files changed, 60 insertions(+), 10 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 60f64d1cf..fbefa2f45 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 1.2.0 - unreleased
++  GIRAPH-977: useMessageSizeEncoding is broken (majakabiljo)
++
+   GIRAPH-976: More command line logging (majakabiljo)
+   
+   GIRAPH-972: Race condition in checkpointing (edunov)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/ByteArrayVertexIdMessages.java b/giraph-core/src/main/java/org/apache/giraph/utils/ByteArrayVertexIdMessages.java
+index b3eca3ec5..daad8609d 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/ByteArrayVertexIdMessages.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/ByteArrayVertexIdMessages.java
+@@ -96,6 +96,47 @@ public ByteStructVertexIdMessageIterator<I, M> getVertexIdMessageIterator() {
+     return new ByteStructVertexIdMessageIterator<>(this);
+   }
+ 
++  @Override
++  public void add(I vertexId, M message) {
++    if (!useMessageSizeEncoding) {
++      super.add(vertexId, message);
++    } else {
++      try {
++        vertexId.write(extendedDataOutput);
++        writeMessageWithSize(message);
++      } catch (IOException e) {
++        throw new IllegalStateException("add: IOException occurred");
++      }
++    }
++  }
++
++  @Override
++  public void add(byte[] serializedId, int idPos, M message) {
++    if (!useMessageSizeEncoding) {
++      super.add(serializedId, idPos, message);
++    } else {
++      try {
++        extendedDataOutput.write(serializedId, 0, idPos);
++        writeMessageWithSize(message);
++      } catch (IOException e) {
++        throw new IllegalStateException("add: IOException occurred");
++      }
++    }
++  }
++
++  /**
++   * Write a size of the message and message
++   *
++   * @param message Message to write
++   */
++  private void writeMessageWithSize(M message) throws IOException {
++    int pos = extendedDataOutput.getPos();
++    extendedDataOutput.skipBytes(4);
++    writeData(extendedDataOutput, message);
++    extendedDataOutput.writeInt(
++        pos, extendedDataOutput.getPos() - pos - 4);
++  }
++
+   @Override
+   public ByteStructVertexIdMessageBytesIterator<I, M>
+   getVertexIdMessageBytesIterator() {
+diff --git a/giraph-core/src/test/java/org/apache/giraph/comm/messages/TestIntFloatPrimitiveMessageStores.java b/giraph-core/src/test/java/org/apache/giraph/comm/messages/TestIntFloatPrimitiveMessageStores.java
+index 62a39db49..b8137c045 100644
+--- a/giraph-core/src/test/java/org/apache/giraph/comm/messages/TestIntFloatPrimitiveMessageStores.java
++++ b/giraph-core/src/test/java/org/apache/giraph/comm/messages/TestIntFloatPrimitiveMessageStores.java
+@@ -28,6 +28,7 @@
+ import org.apache.giraph.comm.messages.primitives.IntByteArrayMessageStore;
+ import org.apache.giraph.comm.messages.primitives.IntFloatMessageStore;
+ import org.apache.giraph.conf.GiraphConfiguration;
++import org.apache.giraph.conf.GiraphConstants;
+ import org.apache.giraph.conf.ImmutableClassesGiraphConfiguration;
+ import org.apache.giraph.factories.TestMessageValueFactory;
+ import org.apache.giraph.graph.BasicComputation;
+@@ -52,6 +53,8 @@ public class TestIntFloatPrimitiveMessageStores {
+   private static final int NUM_PARTITIONS = 2;
+   private static CentralizedServiceWorker<IntWritable, Writable, Writable>
+     service;
++  private static ImmutableClassesGiraphConfiguration<IntWritable, Writable,
++      Writable> conf;
+ 
+   @Before
+   public void prepare() throws IOException {
+@@ -74,6 +77,10 @@ public Integer answer(InvocationOnMock invocation) {
+     Mockito.when(partition.getVertexCount()).thenReturn(Long.valueOf(1));
+     Mockito.when(partitionStore.getOrCreatePartition(0)).thenReturn(partition);
+     Mockito.when(partitionStore.getOrCreatePartition(1)).thenReturn(partition);
++
++    GiraphConfiguration initConf = new GiraphConfiguration();
++    initConf.setComputationClass(IntFloatNoOpComputation.class);
++    conf = new ImmutableClassesGiraphConfiguration(initConf);
+   }
+ 
+   private static class IntFloatNoOpComputation extends
+@@ -85,20 +92,12 @@ public void compute(Vertex<IntWritable, NullWritable, NullWritable> vertex,
+     }
+   }
+ 
+-  private static ImmutableClassesGiraphConfiguration<IntWritable, Writable,
+-    Writable> createIntFloatConf() {
+-
+-    GiraphConfiguration initConf = new GiraphConfiguration();
+-    initConf.setComputationClass(IntFloatNoOpComputation.class);
+-    return new ImmutableClassesGiraphConfiguration(initConf);
+-  }
+-
+   private static ByteArrayVertexIdMessages<IntWritable, FloatWritable>
+   createIntFloatMessages() {
+     ByteArrayVertexIdMessages<IntWritable, FloatWritable> messages =
+         new ByteArrayVertexIdMessages<IntWritable, FloatWritable>(
+             new TestMessageValueFactory<FloatWritable>(FloatWritable.class));
+-    messages.setConf(createIntFloatConf());
++    messages.setConf(conf);
+     messages.initialize();
+     return messages;
+   }
+@@ -149,7 +148,7 @@ public void testIntByteArrayMessageStore() throws IOException {
+     IntByteArrayMessageStore<FloatWritable> messageStore =
+         new IntByteArrayMessageStore<FloatWritable>(new
+             TestMessageValueFactory<FloatWritable>(FloatWritable.class),
+-            service, createIntFloatConf());
++            service, conf);
+     insertIntFloatMessages(messageStore);
+ 
+     Iterable<FloatWritable> m0 =
+@@ -173,4 +172,12 @@ public void testIntByteArrayMessageStore() throws IOException {
+     Assert.assertTrue(
+         Iterables.isEmpty(messageStore.getVertexMessages(new IntWritable(3))));
+   }
++
++  @Test
++  public void testIntByteArrayMessageStoreWithMessageEncoding() throws
++      IOException {
++    GiraphConstants.USE_MESSAGE_SIZE_ENCODING.set(conf, true);
++    testIntByteArrayMessageStore();
++    GiraphConstants.USE_MESSAGE_SIZE_ENCODING.set(conf, false);
++  }
+ }

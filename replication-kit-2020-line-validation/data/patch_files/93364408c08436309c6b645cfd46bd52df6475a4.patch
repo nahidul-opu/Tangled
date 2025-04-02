@@ -1,0 +1,188 @@
+From 93364408c08436309c6b645cfd46bd52df6475a4 Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Wed, 29 Jul 2015 12:07:33 +0000
+Subject: [PATCH] [SANTUARIO-424] - Adding some tests
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1693244 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../stax/signature/SignatureCreationTest.java | 82 +++++++++++++++++++
+ .../signature/SignatureVerificationTest.java  | 57 +++++++++++++
+ 2 files changed, 139 insertions(+)
+
+diff --git a/src/test/java/org/apache/xml/security/test/stax/signature/SignatureCreationTest.java b/src/test/java/org/apache/xml/security/test/stax/signature/SignatureCreationTest.java
+index fd66f2359c..60b1937783 100644
+--- a/src/test/java/org/apache/xml/security/test/stax/signature/SignatureCreationTest.java
++++ b/src/test/java/org/apache/xml/security/test/stax/signature/SignatureCreationTest.java
+@@ -19,8 +19,10 @@
+ package org.apache.xml.security.test.stax.signature;
+ 
+ import org.apache.xml.security.exceptions.XMLSecurityException;
++import org.apache.xml.security.signature.XMLSignature;
+ import org.apache.xml.security.stax.ext.*;
+ import org.apache.xml.security.stax.securityToken.SecurityTokenConstants;
++import org.apache.xml.security.test.dom.DSNamespaceContext;
+ import org.apache.xml.security.test.stax.utils.XmlReaderToWriter;
+ import org.apache.xml.security.utils.XMLUtils;
+ import org.junit.Assert;
+@@ -36,6 +38,9 @@
+ import javax.xml.stream.XMLStreamException;
+ import javax.xml.stream.XMLStreamReader;
+ import javax.xml.stream.XMLStreamWriter;
++import javax.xml.xpath.XPath;
++import javax.xml.xpath.XPathConstants;
++import javax.xml.xpath.XPathFactory;
+ 
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+@@ -397,6 +402,83 @@ public void testMultipleElements() throws Exception {
+         verifyUsingDOM(document, cert, properties.getSignatureSecureParts());
+     }
+     
++    @Test
++    public void testMultipleSignatures() throws Exception {
++        // Set up the Configuration
++        XMLSecurityProperties properties = new XMLSecurityProperties();
++        List<XMLSecurityConstants.Action> actions = new ArrayList<XMLSecurityConstants.Action>();
++        actions.add(XMLSecurityConstants.SIGNATURE);
++        properties.setActions(actions);
++        
++        // Set the key up
++        KeyStore keyStore = KeyStore.getInstance("jks");
++        keyStore.load(
++            this.getClass().getClassLoader().getResource("transmitter.jks").openStream(), 
++            "default".toCharArray()
++        );
++        Key key = keyStore.getKey("transmitter", "default".toCharArray());
++        properties.setSignatureKey(key);
++        X509Certificate cert = (X509Certificate)keyStore.getCertificate("transmitter");
++        properties.setSignatureCerts(new X509Certificate[]{cert});
++        
++        SecurePart securePart = 
++               new SecurePart(new QName("urn:example:po", "PaymentInfo"), SecurePart.Modifier.Content);
++        properties.addSignaturePart(securePart);
++        
++        OutboundXMLSec outboundXMLSec = XMLSec.getOutboundXMLSec(properties);
++        ByteArrayOutputStream baos = new ByteArrayOutputStream();
++        XMLStreamWriter xmlStreamWriter = outboundXMLSec.processOutMessage(baos, "UTF-8");
++        
++        InputStream sourceDocument = 
++                this.getClass().getClassLoader().getResourceAsStream(
++                        "ie/baltimore/merlin-examples/merlin-xmlenc-five/plaintext.xml");
++        XMLStreamReader xmlStreamReader = xmlInputFactory.createXMLStreamReader(sourceDocument);
++        
++        XmlReaderToWriter.writeAll(xmlStreamReader, xmlStreamWriter);
++        xmlStreamWriter.close();
++        
++        // Now do second signature
++        sourceDocument = new ByteArrayInputStream(baos.toByteArray());
++        outboundXMLSec = XMLSec.getOutboundXMLSec(properties);
++        baos = new ByteArrayOutputStream();
++        xmlStreamWriter = outboundXMLSec.processOutMessage(baos, "UTF-8");
++        
++        xmlStreamReader = xmlInputFactory.createXMLStreamReader(sourceDocument);
++        
++        XmlReaderToWriter.writeAll(xmlStreamReader, xmlStreamWriter);
++        xmlStreamWriter.close();
++        
++        // System.out.println("Got:\n" + new String(baos.toByteArray(), "UTF-8"));
++        Document document = 
++            XMLUtils.createDocumentBuilder(false).parse(new ByteArrayInputStream(baos.toByteArray()));
++        
++        // Verify using DOM
++        XPathFactory xpf = XPathFactory.newInstance();
++        XPath xpath = xpf.newXPath();
++        xpath.setNamespaceContext(new DSNamespaceContext());
++
++        String expression = "//dsig:Signature";
++        NodeList sigElements =
++                (NodeList) xpath.evaluate(expression, document, XPathConstants.NODESET);
++        Assert.assertTrue(sigElements.getLength() == 2);
++
++        for (SecurePart secPart : properties.getSignatureSecureParts()) {
++            if (secPart.getName() == null) {
++                continue;
++            }
++            expression = "//*[local-name()='" + secPart.getName().getLocalPart() + "']";
++            Element signedElement =
++                    (Element) xpath.evaluate(expression, document, XPathConstants.NODE);
++            Assert.assertNotNull(signedElement);
++            signedElement.setIdAttributeNS(null, "Id", true);
++        }
++
++        for (int i = 0; i < sigElements.getLength(); i++) {
++            XMLSignature signature = new XMLSignature((Element)sigElements.item(i), "");
++            Assert.assertTrue(signature.checkSignatureValue(cert));
++        }
++    }
++    
+     @Test
+     public void testHMACSignatureCreation() throws Exception {
+         // Set up the Configuration
+diff --git a/src/test/java/org/apache/xml/security/test/stax/signature/SignatureVerificationTest.java b/src/test/java/org/apache/xml/security/test/stax/signature/SignatureVerificationTest.java
+index c9c9fffb8c..4fd71566c4 100644
+--- a/src/test/java/org/apache/xml/security/test/stax/signature/SignatureVerificationTest.java
++++ b/src/test/java/org/apache/xml/security/test/stax/signature/SignatureVerificationTest.java
+@@ -243,6 +243,63 @@ public void testMultipleElements() throws Exception {
+                 signatureSecurityEvents.size() + signedElementSecurityEvents1.size() + signedElementSecurityEvents2.size());
+     }
+     
++    @Test
++    @org.junit.Ignore
++    public void testMultipleSignatures() throws Exception {
++        // Read in plaintext document
++        InputStream sourceDocument = 
++                this.getClass().getClassLoader().getResourceAsStream(
++                        "ie/baltimore/merlin-examples/merlin-xmlenc-five/plaintext.xml");
++        DocumentBuilder builder = XMLUtils.createDocumentBuilder(false);
++        Document document = builder.parse(sourceDocument);
++        
++        // Set up the Key
++        KeyStore keyStore = KeyStore.getInstance("jks");
++        keyStore.load(
++            this.getClass().getClassLoader().getResource("transmitter.jks").openStream(), 
++            "default".toCharArray()
++        );
++        Key key = keyStore.getKey("transmitter", "default".toCharArray());
++        X509Certificate cert = (X509Certificate)keyStore.getCertificate("transmitter");
++        
++        // Sign using DOM
++        List<String> localNames = new ArrayList<String>();
++        localNames.add("PaymentInfo");
++        localNames.add("ShippingAddress");
++        XMLSignature sig = signUsingDOM(
++            "http://www.w3.org/2000/09/xmldsig#rsa-sha1", document, localNames, key
++        );
++        
++        // Add KeyInfo
++        sig.addKeyInfo(cert);
++        
++        // Now do second signature
++        sig = signUsingDOM(
++            "http://www.w3.org/2000/09/xmldsig#rsa-sha1", document, localNames, key
++        );
++                       
++        // Add KeyInfo
++        sig.addKeyInfo(cert);
++        
++        // XMLUtils.outputDOM(document, System.out);
++        
++        // Convert Document to a Stream Reader
++        javax.xml.transform.Transformer transformer = transformerFactory.newTransformer();
++        ByteArrayOutputStream baos = new ByteArrayOutputStream();
++        transformer.transform(new DOMSource(document), new StreamResult(baos));
++        final XMLStreamReader xmlStreamReader = 
++                xmlInputFactory.createXMLStreamReader(new ByteArrayInputStream(baos.toByteArray()));
++  
++        // Verify signature
++        XMLSecurityProperties properties = new XMLSecurityProperties();
++        InboundXMLSec inboundXMLSec = XMLSec.getInboundWSSec(properties);
++        TestSecurityEventListener securityEventListener = new TestSecurityEventListener();
++        XMLStreamReader securityStreamReader = 
++            inboundXMLSec.processInMessage(xmlStreamReader, null, securityEventListener);
++
++        StAX2DOM.readDoc(XMLUtils.createDocumentBuilder(false), securityStreamReader);
++    }
++    
+     @Test
+     public void testEnvelopedSignatureVerification() throws Exception {
+         // Read in plaintext document

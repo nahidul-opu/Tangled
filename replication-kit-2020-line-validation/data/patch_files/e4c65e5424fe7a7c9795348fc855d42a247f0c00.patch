@@ -1,0 +1,1010 @@
+From e4c65e5424fe7a7c9795348fc855d42a247f0c00 Mon Sep 17 00:00:00 2001
+From: "Gary D. Gregory" <ggregory@apache.org>
+Date: Tue, 5 Jun 2012 14:48:01 +0000
+Subject: [PATCH] [IO-320] Add XmlStreamReader support for UTF-32. [IO-331]
+ BOMInputStream wrongly detects UTF-32LE_BOM files as UTF-16LE_BOM files in
+ method getBOM().
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/io/trunk@1346400 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |   6 +
+ .../commons/io/input/BOMInputStream.java      | 280 +++++++++++-------
+ .../commons/io/input/XmlStreamReader.java     |  48 ++-
+ .../commons/io/input/XmlStreamReaderTest.java | 169 +++++------
+ .../input/XmlStreamReaderUtilitiesTest.java   |  34 ++-
+ .../input/compatibility/XmlStreamReader.java  |  37 +++
+ ...treamReaderUtilitiesCompatibilityTest.java |   3 +-
+ 7 files changed, 365 insertions(+), 212 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index c0401eb86ce..a1d915f0529 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -47,6 +47,12 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+     <!-- The release date is the date RC is cut -->
+     <release version="2.4" date="2012-TDB-TDB" description="">
++      <action issue="IO-320" dev="ggregory" type="add">
++        Add XmlStreamReader support for UTF-32.
++      </action>            
++      <action issue="IO-331" dev="ggregory" type="add">
++        BOMInputStream wrongly detects UTF-32LE_BOM files as UTF-16LE_BOM files in method getBOM().
++      </action>            
+       <action issue="IO-332" dev="ggregory" type="fix" due-to="liangly">
+         Improve tailer's reading performance.
+       </action>            
+diff --git a/src/main/java/org/apache/commons/io/input/BOMInputStream.java b/src/main/java/org/apache/commons/io/input/BOMInputStream.java
+index 9a09bbda9bb..0326eeee88c 100644
+--- a/src/main/java/org/apache/commons/io/input/BOMInputStream.java
++++ b/src/main/java/org/apache/commons/io/input/BOMInputStream.java
+@@ -19,54 +19,66 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.util.Arrays;
++import java.util.Comparator;
+ import java.util.List;
+ 
+ import org.apache.commons.io.ByteOrderMark;
+ 
+ /**
+- * This class is used to wrap a stream that includes an encoded
+- * {@link ByteOrderMark} as its first bytes.
+- *
+- * This class detects these bytes and, if required, can automatically skip them
+- * and return the subsequent byte as the first byte in the stream.
+- *
++ * This class is used to wrap a stream that includes an encoded {@link ByteOrderMark} as its first bytes.
++ * 
++ * This class detects these bytes and, if required, can automatically skip them and return the subsequent byte as the
++ * first byte in the stream.
++ * 
+  * The {@link ByteOrderMark} implementation has the following pre-defined BOMs:
+  * <ul>
+- *   <li>UTF-8 - {@link ByteOrderMark#UTF_8}</li>
+- *   <li>UTF-16BE - {@link ByteOrderMark#UTF_16LE}</li>
+- *   <li>UTF-16LE - {@link ByteOrderMark#UTF_16BE}</li>
++ * <li>UTF-8 - {@link ByteOrderMark#UTF_8}</li>
++ * <li>UTF-16BE - {@link ByteOrderMark#UTF_16LE}</li>
++ * <li>UTF-16LE - {@link ByteOrderMark#UTF_16BE}</li>
++ * <li>UTF-32BE - {@link ByteOrderMark#UTF_32LE}</li>
++ * <li>UTF-32LE - {@link ByteOrderMark#UTF_32BE}</li>
+  * </ul>
+- *
+- *
++ * 
++ * 
+  * <h3>Example 1 - Detect and exclude a UTF-8 BOM</h3>
++ * 
+  * <pre>
+- *      BOMInputStream bomIn = new BOMInputStream(in);
+- *      if (bomIn.hasBOM()) {
+- *          // has a UTF-8 BOM
+- *      }
++ * BOMInputStream bomIn = new BOMInputStream(in);
++ * if (bomIn.hasBOM()) {
++ *     // has a UTF-8 BOM
++ * }
+  * </pre>
+- *
++ * 
+  * <h3>Example 2 - Detect a UTF-8 BOM (but don't exclude it)</h3>
++ * 
+  * <pre>
+- *      boolean include = true;
+- *      BOMInputStream bomIn = new BOMInputStream(in, include);
+- *      if (bomIn.hasBOM()) {
+- *          // has a UTF-8 BOM
+- *      }
++ * boolean include = true;
++ * BOMInputStream bomIn = new BOMInputStream(in, include);
++ * if (bomIn.hasBOM()) {
++ *     // has a UTF-8 BOM
++ * }
+  * </pre>
+- *
++ * 
+  * <h3>Example 3 - Detect Multiple BOMs</h3>
++ * 
+  * <pre>
+- *      BOMInputStream bomIn = new BOMInputStream(in, ByteOrderMark.UTF_16LE, ByteOrderMark.UTF_16BE);
+- *      if (bomIn.hasBOM() == false) {
+- *          // No BOM found
+- *      } else if (bomIn.hasBOM(ByteOrderMark.UTF_16LE)) {
+- *          // has a UTF-16LE BOM
+- *      } else if (bomIn.hasBOM(ByteOrderMark.UTF_16BE)) {
+- *          // has a UTF-16BE BOM
+- *      }
++ * BOMInputStream bomIn = new BOMInputStream(in, 
++ *   ByteOrderMark.UTF_16LE, ByteOrderMark.UTF_16BE,
++ *   ByteOrderMark.UTF_32LE, ByteOrderMark.UTF_32BE
++ *   );
++ * if (bomIn.hasBOM() == false) {
++ *     // No BOM found
++ * } else if (bomIn.hasBOM(ByteOrderMark.UTF_16LE)) {
++ *     // has a UTF-16LE BOM
++ * } else if (bomIn.hasBOM(ByteOrderMark.UTF_16BE)) {
++ *     // has a UTF-16BE BOM
++ * } else if (bomIn.hasBOM(ByteOrderMark.UTF_32LE)) {
++ *     // has a UTF-32LE BOM
++ * } else if (bomIn.hasBOM(ByteOrderMark.UTF_32BE)) {
++ *     // has a UTF-32BE BOM
++ * }
+  * </pre>
+- *
++ * 
+  * @see org.apache.commons.io.ByteOrderMark
+  * @see <a href="http://en.wikipedia.org/wiki/Byte_order_mark">Wikipedia - Byte Order Mark</a>
+  * @version $Id$
+@@ -74,6 +86,9 @@
+  */
+ public class BOMInputStream extends ProxyInputStream {
+     private final boolean include;
++    /**
++     * BOMs are sorted from longest to shortest.
++     */
+     private final List<ByteOrderMark> boms;
+     private ByteOrderMark byteOrderMark;
+     private int[] firstBytes;
+@@ -83,42 +98,66 @@ public class BOMInputStream extends ProxyInputStream {
+     private boolean markedAtStart;
+ 
+     /**
+-     * Constructs a new BOM InputStream that excludes
+-     * a {@link ByteOrderMark#UTF_8} BOM.
+-     * @param delegate the InputStream to delegate to
++     * Constructs a new BOM InputStream that excludes a {@link ByteOrderMark#UTF_8} BOM.
++     * 
++     * @param delegate
++     *            the InputStream to delegate to
+      */
+     public BOMInputStream(InputStream delegate) {
+         this(delegate, false, ByteOrderMark.UTF_8);
+     }
+ 
+     /**
+-     * Constructs a new BOM InputStream that detects a
+-     * a {@link ByteOrderMark#UTF_8} and optionally includes it.
+-     * @param delegate the InputStream to delegate to
+-     * @param include true to include the UTF-8 BOM or
+-     * false to exclude it
++     * Constructs a new BOM InputStream that detects a a {@link ByteOrderMark#UTF_8} and optionally includes it.
++     * 
++     * @param delegate
++     *            the InputStream to delegate to
++     * @param include
++     *            true to include the UTF-8 BOM or false to exclude it
+      */
+     public BOMInputStream(InputStream delegate, boolean include) {
+         this(delegate, include, ByteOrderMark.UTF_8);
+     }
+ 
+     /**
+-     * Constructs a new BOM InputStream that excludes
+-     * the specified BOMs.
+-     * @param delegate the InputStream to delegate to
+-     * @param boms The BOMs to detect and exclude
++     * Constructs a new BOM InputStream that excludes the specified BOMs.
++     * 
++     * @param delegate
++     *            the InputStream to delegate to
++     * @param boms
++     *            The BOMs to detect and exclude
+      */
+     public BOMInputStream(InputStream delegate, ByteOrderMark... boms) {
+         this(delegate, false, boms);
+     }
+ 
+     /**
+-     * Constructs a new BOM InputStream that detects the
+-     * specified BOMs and optionally includes them.
+-     * @param delegate the InputStream to delegate to
+-     * @param include true to include the specified BOMs or
+-     * false to exclude them
+-     * @param boms The BOMs to detect and optionally exclude
++     * Compares ByteOrderMark objects in descending length order.
++     */
++    private static final Comparator<ByteOrderMark> ByteOrderMarkLengthComparator = new Comparator<ByteOrderMark>() {
++
++        public int compare(ByteOrderMark bom1, ByteOrderMark bom2) {
++            int len1 = bom1.length();
++            int len2 = bom2.length();
++            if (len1 > len2) {
++                return -1;
++            }
++            if (len2 > len1) {
++                return 1;
++            }
++            return 0;
++        }
++    };
++
++    /**
++     * Constructs a new BOM InputStream that detects the specified BOMs and optionally includes them.
++     * 
++     * @param delegate
++     *            the InputStream to delegate to
++     * @param include
++     *            true to include the specified BOMs or false to exclude them
++     * @param boms
++     *            The BOMs to detect and optionally exclude
+      */
+     public BOMInputStream(InputStream delegate, boolean include, ByteOrderMark... boms) {
+         super(delegate);
+@@ -126,15 +165,18 @@ public BOMInputStream(InputStream delegate, boolean include, ByteOrderMark... bo
+             throw new IllegalArgumentException("No BOMs specified");
+         }
+         this.include = include;
++        // Sort the BOMs to match the longest BOM first because some BOMs have the same starting two bytes.
++        Arrays.sort(boms, ByteOrderMarkLengthComparator);
+         this.boms = Arrays.asList(boms);
++
+     }
+ 
+     /**
+      * Indicates whether the stream contains one of the specified BOMs.
+-     *
+-     * @return true if the stream has one of the specified BOMs, otherwise false
+-     * if it does not
+-     * @throws IOException if an error reading the first bytes of the stream occurs
++     * 
++     * @return true if the stream has one of the specified BOMs, otherwise false if it does not
++     * @throws IOException
++     *             if an error reading the first bytes of the stream occurs
+      */
+     public boolean hasBOM() throws IOException {
+         return getBOM() != null;
+@@ -142,13 +184,14 @@ public boolean hasBOM() throws IOException {
+ 
+     /**
+      * Indicates whether the stream contains the specified BOM.
+-     *
+-     * @param bom The BOM to check for
+-     * @return true if the stream has the specified BOM, otherwise false
+-     * if it does not
+-     * @throws IllegalArgumentException if the BOM is not one the stream
+-     * is configured to detect
+-     * @throws IOException if an error reading the first bytes of the stream occurs
++     * 
++     * @param bom
++     *            The BOM to check for
++     * @return true if the stream has the specified BOM, otherwise false if it does not
++     * @throws IllegalArgumentException
++     *             if the BOM is not one the stream is configured to detect
++     * @throws IOException
++     *             if an error reading the first bytes of the stream occurs
+      */
+     public boolean hasBOM(ByteOrderMark bom) throws IOException {
+         if (!boms.contains(bom)) {
+@@ -159,31 +202,34 @@ public boolean hasBOM(ByteOrderMark bom) throws IOException {
+ 
+     /**
+      * Return the BOM (Byte Order Mark).
+-     *
++     * 
+      * @return The BOM or null if none
+-     * @throws IOException if an error reading the first bytes of the stream occurs
++     * @throws IOException
++     *             if an error reading the first bytes of the stream occurs
+      */
+     public ByteOrderMark getBOM() throws IOException {
+         if (firstBytes == null) {
+             fbLength = 0;
+-            int max = 0;
+-            for (ByteOrderMark bom : boms) {
+-                max = Math.max(max, bom.length());
+-            }
+-            firstBytes = new int[max];
++            // BOMs are sorted from longest to shortest
++            final int maxBomSize = boms.get(0).length();
++            firstBytes = new int[maxBomSize];
++            // Read first maxBomSize bytes
+             for (int i = 0; i < firstBytes.length; i++) {
+                 firstBytes[i] = in.read();
+                 fbLength++;
+                 if (firstBytes[i] < 0) {
+                     break;
+                 }
+-
+-                byteOrderMark = find();
+-                if (byteOrderMark != null) {
+-                    if (!include) {
++            }
++            // match BOM in firstBytes
++            byteOrderMark = find();
++            if (byteOrderMark != null) {
++                if (!include) {
++                    if (byteOrderMark.length() < firstBytes.length) {
++                        fbIndex = byteOrderMark.length();
++                    } else {
+                         fbLength = 0;
+                     }
+-                    break;
+                 }
+             }
+         }
+@@ -192,9 +238,10 @@ public ByteOrderMark getBOM() throws IOException {
+ 
+     /**
+      * Return the BOM charset Name - {@link ByteOrderMark#getCharsetName()}.
+-     *
++     * 
+      * @return The BOM charset Name or null if no BOM found
+-     * @throws IOException if an error reading the first bytes of the stream occurs
++     * @throws IOException
++     *             if an error reading the first bytes of the stream occurs
+      * 
+      */
+     public String getBOMCharsetName() throws IOException {
+@@ -203,12 +250,13 @@ public String getBOMCharsetName() throws IOException {
+     }
+ 
+     /**
+-     * This method reads and either preserves or skips the first bytes in the
+-     * stream. It behaves like the single-byte <code>read()</code> method,
+-     * either returning a valid byte or -1 to indicate that the initial bytes
+-     * have been processed already.
++     * This method reads and either preserves or skips the first bytes in the stream. It behaves like the single-byte
++     * <code>read()</code> method, either returning a valid byte or -1 to indicate that the initial bytes have been
++     * processed already.
++     * 
+      * @return the byte read (excluding BOM) or -1 if the end of stream
+-     * @throws IOException if an I/O error occurs
++     * @throws IOException
++     *             if an I/O error occurs
+      */
+     private int readFirstBytes() throws IOException {
+         getBOM();
+@@ -217,7 +265,7 @@ private int readFirstBytes() throws IOException {
+ 
+     /**
+      * Find a BOM with the specified bytes.
+-     *
++     * 
+      * @return The matched BOM or null if none matched
+      */
+     private ByteOrderMark find() {
+@@ -231,14 +279,16 @@ private ByteOrderMark find() {
+ 
+     /**
+      * Check if the bytes match a BOM.
+-     *
+-     * @param bom The BOM
++     * 
++     * @param bom
++     *            The BOM
+      * @return true if the bytes match the bom, otherwise false
+      */
+     private boolean matches(ByteOrderMark bom) {
+-        if (bom.length() != fbLength) {
+-            return false;
+-        }
++        // if (bom.length() != fbLength) {
++        // return false;
++        // }
++        // firstBytes may be bigger than the BOM bytes
+         for (int i = 0; i < bom.length(); i++) {
+             if (bom.get(i) != firstBytes[i]) {
+                 return false;
+@@ -247,15 +297,16 @@ private boolean matches(ByteOrderMark bom) {
+         return true;
+     }
+ 
+-    //----------------------------------------------------------------------------
+-    //  Implementation of InputStream
+-    //----------------------------------------------------------------------------
++    // ----------------------------------------------------------------------------
++    // Implementation of InputStream
++    // ----------------------------------------------------------------------------
+ 
+     /**
+-     * Invokes the delegate's <code>read()</code> method, detecting and
+-     * optionally skipping BOM.
++     * Invokes the delegate's <code>read()</code> method, detecting and optionally skipping BOM.
++     * 
+      * @return the byte read (excluding BOM) or -1 if the end of stream
+-     * @throws IOException if an I/O error occurs
++     * @throws IOException
++     *             if an I/O error occurs
+      */
+     @Override
+     public int read() throws IOException {
+@@ -264,13 +315,17 @@ public int read() throws IOException {
+     }
+ 
+     /**
+-     * Invokes the delegate's <code>read(byte[], int, int)</code> method, detecting
+-     * and optionally skipping BOM.
+-     * @param buf the buffer to read the bytes into
+-     * @param off The start offset
+-     * @param len The number of bytes to read (excluding BOM)
++     * Invokes the delegate's <code>read(byte[], int, int)</code> method, detecting and optionally skipping BOM.
++     * 
++     * @param buf
++     *            the buffer to read the bytes into
++     * @param off
++     *            The start offset
++     * @param len
++     *            The number of bytes to read (excluding BOM)
+      * @return the number of bytes read or -1 if the end of stream
+-     * @throws IOException if an I/O error occurs
++     * @throws IOException
++     *             if an I/O error occurs
+      */
+     @Override
+     public int read(byte[] buf, int off, int len) throws IOException {
+@@ -289,12 +344,13 @@ public int read(byte[] buf, int off, int len) throws IOException {
+     }
+ 
+     /**
+-     * Invokes the delegate's <code>read(byte[])</code> method, detecting and
+-     * optionally skipping BOM.
+-     * @param buf the buffer to read the bytes into
+-     * @return the number of bytes read (excluding BOM)
+-     * or -1 if the end of stream
+-     * @throws IOException if an I/O error occurs
++     * Invokes the delegate's <code>read(byte[])</code> method, detecting and optionally skipping BOM.
++     * 
++     * @param buf
++     *            the buffer to read the bytes into
++     * @return the number of bytes read (excluding BOM) or -1 if the end of stream
++     * @throws IOException
++     *             if an I/O error occurs
+      */
+     @Override
+     public int read(byte[] buf) throws IOException {
+@@ -303,7 +359,9 @@ public int read(byte[] buf) throws IOException {
+ 
+     /**
+      * Invokes the delegate's <code>mark(int)</code> method.
+-     * @param readlimit read ahead limit
++     * 
++     * @param readlimit
++     *            read ahead limit
+      */
+     @Override
+     public synchronized void mark(int readlimit) {
+@@ -314,7 +372,9 @@ public synchronized void mark(int readlimit) {
+ 
+     /**
+      * Invokes the delegate's <code>reset()</code> method.
+-     * @throws IOException if an I/O error occurs
++     * 
++     * @throws IOException
++     *             if an I/O error occurs
+      */
+     @Override
+     public synchronized void reset() throws IOException {
+@@ -327,11 +387,13 @@ public synchronized void reset() throws IOException {
+     }
+ 
+     /**
+-     * Invokes the delegate's <code>skip(long)</code> method, detecting
+-     * and optionallyskipping BOM.
+-     * @param n the number of bytes to skip
++     * Invokes the delegate's <code>skip(long)</code> method, detecting and optionallyskipping BOM.
++     * 
++     * @param n
++     *            the number of bytes to skip
+      * @return the number of bytes to skipped or -1 if the end of stream
+-     * @throws IOException if an I/O error occurs
++     * @throws IOException
++     *             if an I/O error occurs
+      */
+     @Override
+     public long skip(long n) throws IOException {
+diff --git a/src/main/java/org/apache/commons/io/input/XmlStreamReader.java b/src/main/java/org/apache/commons/io/input/XmlStreamReader.java
+index e01843862ae..525a6d1505b 100644
+--- a/src/main/java/org/apache/commons/io/input/XmlStreamReader.java
++++ b/src/main/java/org/apache/commons/io/input/XmlStreamReader.java
+@@ -74,23 +74,36 @@ public class XmlStreamReader extends Reader {
+ 
+     private static final String UTF_16LE = "UTF-16LE";
+ 
++    private static final String UTF_32BE = "UTF-32BE";
++
++    private static final String UTF_32LE = "UTF-32LE";
++
+     private static final String UTF_16 = "UTF-16";
+ 
++    private static final String UTF_32 = "UTF-32";
++
+     private static final String EBCDIC = "CP1047";
+ 
+     private static final ByteOrderMark[] BOMS = new ByteOrderMark[] {
+         ByteOrderMark.UTF_8,
+         ByteOrderMark.UTF_16BE,
+-        ByteOrderMark.UTF_16LE
++        ByteOrderMark.UTF_16LE,
++        ByteOrderMark.UTF_32BE,
++        ByteOrderMark.UTF_32LE
+     };
++    
++    // UTF_16LE and UTF_32LE have the same two starting BOM bytes.
+     private static final ByteOrderMark[] XML_GUESS_BYTES = new ByteOrderMark[] {
+         new ByteOrderMark(UTF_8,    0x3C, 0x3F, 0x78, 0x6D),
+         new ByteOrderMark(UTF_16BE, 0x00, 0x3C, 0x00, 0x3F),
+         new ByteOrderMark(UTF_16LE, 0x3C, 0x00, 0x3F, 0x00),
++        new ByteOrderMark(UTF_32BE, 0x00, 0x00, 0x00, 0x3C, 
++                0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00, 0x6D),
++        new ByteOrderMark(UTF_32LE, 0x3C, 0x00, 0x00, 0x00, 
++                0x3F, 0x00, 0x00, 0x00, 0x78, 0x00, 0x00, 0x00, 0x6D, 0x00, 0x00, 0x00),
+         new ByteOrderMark(EBCDIC,   0x4C, 0x6F, 0xA7, 0x94)
+     };
+ 
+-
+     private final Reader reader;
+ 
+     private final String encoding;
+@@ -532,6 +545,19 @@ String calculateRawEncoding(String bomEnc, String xmlGuessEnc,
+             return bomEnc;
+         }
+ 
++        // BOM is UTF-32BE or UTF-32LE
++        if (bomEnc.equals(UTF_32BE) || bomEnc.equals(UTF_32LE)) {
++            if (xmlGuessEnc != null && !xmlGuessEnc.equals(bomEnc)) {
++                String msg = MessageFormat.format(RAW_EX_1, new Object[] { bomEnc, xmlGuessEnc, xmlEnc });
++                throw new XmlStreamReaderException(msg, bomEnc, xmlGuessEnc, xmlEnc);
++            }
++            if (xmlEnc != null && !xmlEnc.equals(UTF_32) && !xmlEnc.equals(bomEnc)) {
++                String msg = MessageFormat.format(RAW_EX_1, new Object[] { bomEnc, xmlGuessEnc, xmlEnc });
++                throw new XmlStreamReaderException(msg, bomEnc, xmlGuessEnc, xmlEnc);
++            }
++            return bomEnc;
++        }
++
+         // BOM is something else
+         String msg = MessageFormat.format(RAW_EX_2, new Object[] { bomEnc, xmlGuessEnc, xmlEnc });
+         throw new XmlStreamReaderException(msg, bomEnc, xmlGuessEnc, xmlEnc);
+@@ -598,6 +624,24 @@ String calculateHttpEncoding(String httpContentType,
+             throw new XmlStreamReaderException(msg, cTMime, cTEnc, bomEnc, xmlGuessEnc, xmlEnc);
+         }
+ 
++        // UTF-32BE or UTF-132E content type encoding
++        if (cTEnc.equals(UTF_32BE) || cTEnc.equals(UTF_32LE)) {
++            if (bomEnc != null) {
++                String msg = MessageFormat.format(HTTP_EX_1, cTMime, cTEnc, bomEnc, xmlGuessEnc, xmlEnc);
++                throw new XmlStreamReaderException(msg, cTMime, cTEnc, bomEnc, xmlGuessEnc, xmlEnc);
++            }
++            return cTEnc;
++        }
++
++        // UTF-32 content type encoding
++        if (cTEnc.equals(UTF_32)) {
++            if (bomEnc != null && bomEnc.startsWith(UTF_32)) {
++                return bomEnc;
++            }
++            String msg = MessageFormat.format(HTTP_EX_2, cTMime, cTEnc, bomEnc, xmlGuessEnc, xmlEnc);
++            throw new XmlStreamReaderException(msg, cTMime, cTEnc, bomEnc, xmlGuessEnc, xmlEnc);
++        }
++
+         return cTEnc;
+     }
+ 
+diff --git a/src/test/java/org/apache/commons/io/input/XmlStreamReaderTest.java b/src/test/java/org/apache/commons/io/input/XmlStreamReaderTest.java
+index b9b94dd4609..6fd16c072c1 100644
+--- a/src/test/java/org/apache/commons/io/input/XmlStreamReaderTest.java
++++ b/src/test/java/org/apache/commons/io/input/XmlStreamReaderTest.java
+@@ -31,7 +31,6 @@
+ import java.util.Map;
+ 
+ import org.apache.commons.io.IOUtils;
+-import org.junit.Ignore;
+ import org.junit.Test;
+ 
+ /**
+@@ -96,13 +95,11 @@ public void testRawNoBomUtf16LE() throws Exception {
+     }
+ 
+     @Test
+-    @Ignore
+     public void testRawNoBomUtf32BE() throws Exception {
+         _testRawNoBomValid("UTF-32BE");
+     }
+ 
+     @Test
+-    @Ignore
+     public void testRawNoBomUtf32LE() throws Exception {
+         _testRawNoBomValid("UTF-32LE");
+     }
+@@ -121,7 +118,7 @@ protected void _testRawBomValid(String encoding) throws Exception {
+         InputStream is = getXmlStream(encoding + "-bom", XML3, encoding,
+                 encoding);
+         XmlStreamReader xmlReader = new XmlStreamReader(is, false);
+-        if (!encoding.equals("UTF-16")) {
++        if (!encoding.equals("UTF-16") && !encoding.equals("UTF-32")) {
+             assertEquals(xmlReader.getEncoding(), encoding);
+         } else {
+             assertEquals(xmlReader.getEncoding()
+@@ -135,7 +132,7 @@ protected void _testRawBomInvalid(String bomEnc, String streamEnc,
+         try {
+             XmlStreamReader xmlReader = new XmlStreamReader(is, false);
+             String foundEnc = xmlReader.getEncoding();
+-            fail("It should have failed for BOM " + bomEnc + ", streamEnc "
++            fail("Expected IOException for BOM " + bomEnc + ", streamEnc "
+                     + streamEnc + " and prologEnc " + prologEnc + ": found "
+                     + foundEnc);
+         } catch (IOException ex) {
+@@ -154,6 +151,9 @@ public void testRawBomUtf8() throws Exception {
+         _testRawBomInvalid("UTF-16BE-bom", "UTF-16BE", "UTF-16LE");
+         _testRawBomInvalid("UTF-16LE-bom", "UTF-16LE", "UTF-16BE");
+         _testRawBomInvalid("UTF-16LE-bom", "UTF-16LE", "UTF-8");
++        _testRawBomInvalid("UTF-32BE-bom", "UTF-32BE", "UTF-32LE");
++        _testRawBomInvalid("UTF-32LE-bom", "UTF-32LE", "UTF-32BE");
++        _testRawBomInvalid("UTF-32LE-bom", "UTF-32LE", "UTF-8");
+     }
+ 
+     @Test
+@@ -168,114 +168,105 @@ public void testRawBomUtf16() throws Exception {
+     }
+ 
+     @Test
+-    @Ignore
+     public void testRawBomUtf32() throws Exception {
+         _testRawBomValid("UTF-32BE");
+         _testRawBomValid("UTF-32LE");
+         _testRawBomValid("UTF-32");
+-    }
++
++        _testRawBomInvalid("UTF-32BE-bom", "UTF-32BE", "UTF-32LE");
++        _testRawBomInvalid("UTF-32LE-bom", "UTF-32LE", "UTF-32BE");
++        _testRawBomInvalid("UTF-32LE-bom", "UTF-32LE", "UTF-8");
++}
+ 
+ 
+     @Test
+     public void testHttp() throws Exception {
+         // niallp 2010-10-06 - remove following 2 tests - I reinstated
+-        // checks for non-UTF-16 encodings (18 tests) and these failed 
+-        //_testHttpValid("application/xml", "no-bom", "US-ASCII", null);
+-        //_testHttpValid("application/xml", "UTF-8-bom", "US-ASCII", null);
++        // checks for non-UTF-16 encodings (18 tests) and these failed
++        // _testHttpValid("application/xml", "no-bom", "US-ASCII", null);
++        // _testHttpValid("application/xml", "UTF-8-bom", "US-ASCII", null);
+         _testHttpValid("application/xml", "UTF-8-bom", "UTF-8", null);
+         _testHttpValid("application/xml", "UTF-8-bom", "UTF-8", "UTF-8");
+-        _testHttpValid("application/xml;charset=UTF-8", "UTF-8-bom", "UTF-8",
+-                null);
+-        _testHttpValid("application/xml;charset=\"UTF-8\"", "UTF-8-bom",
+-                "UTF-8", null);
+-        _testHttpValid("application/xml;charset='UTF-8'", "UTF-8-bom", "UTF-8",
+-                null);
+-        _testHttpValid("application/xml;charset=UTF-8", "UTF-8-bom", "UTF-8",
+-                "UTF-8");
+-        _testHttpValid("application/xml;charset=UTF-16", "UTF-16BE-bom",
+-                "UTF-16BE", null);
+-        _testHttpValid("application/xml;charset=UTF-16", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16");
+-        _testHttpValid("application/xml;charset=UTF-16", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16BE");
+-
+-        _testHttpInvalid("application/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", null);
+-        _testHttpInvalid("application/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16");
+-        _testHttpInvalid("application/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16BE");
++        _testHttpValid("application/xml;charset=UTF-8", "UTF-8-bom", "UTF-8", null);
++        _testHttpValid("application/xml;charset=\"UTF-8\"", "UTF-8-bom", "UTF-8", null);
++        _testHttpValid("application/xml;charset='UTF-8'", "UTF-8-bom", "UTF-8", null);
++        _testHttpValid("application/xml;charset=UTF-8", "UTF-8-bom", "UTF-8", "UTF-8");
++        _testHttpValid("application/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", null);
++        _testHttpValid("application/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", "UTF-16");
++        _testHttpValid("application/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", "UTF-16BE");
++
++        _testHttpInvalid("application/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", null);
++        _testHttpInvalid("application/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", "UTF-16");
++        _testHttpInvalid("application/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", "UTF-16BE");
++        
++        _testHttpInvalid("application/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", null);
++        _testHttpInvalid("application/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", "UTF-32");
++        _testHttpInvalid("application/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", "UTF-32BE");
++
+         _testHttpInvalid("application/xml", "UTF-8-bom", "US-ASCII", "US-ASCII");
+-        _testHttpInvalid("application/xml;charset=UTF-16", "UTF-16LE", "UTF-8",
+-                "UTF-8");
+-        _testHttpInvalid("application/xml;charset=UTF-16", "no-bom",
+-                "UTF-16BE", "UTF-16BE");
++        _testHttpInvalid("application/xml;charset=UTF-16", "UTF-16LE", "UTF-8", "UTF-8");
++        _testHttpInvalid("application/xml;charset=UTF-16", "no-bom", "UTF-16BE", "UTF-16BE");
++        _testHttpInvalid("application/xml;charset=UTF-32", "UTF-32LE", "UTF-8", "UTF-8");
++        _testHttpInvalid("application/xml;charset=UTF-32", "no-bom", "UTF-32BE", "UTF-32BE");
+ 
+         _testHttpValid("text/xml", "no-bom", "US-ASCII", null);
+         _testHttpValid("text/xml;charset=UTF-8", "UTF-8-bom", "UTF-8", "UTF-8");
+         _testHttpValid("text/xml;charset=UTF-8", "UTF-8-bom", "UTF-8", null);
+-        _testHttpValid("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE",
+-                null);
+-        _testHttpValid("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE",
+-                "UTF-16");
+-        _testHttpValid("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE",
+-                "UTF-16BE");
++        _testHttpValid("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", null);
++        _testHttpValid("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", "UTF-16");
++        _testHttpValid("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", "UTF-16BE");
++        _testHttpValid("text/xml;charset=UTF-32", "UTF-32BE-bom", "UTF-32BE", null);
++        _testHttpValid("text/xml;charset=UTF-32", "UTF-32BE-bom", "UTF-32BE", "UTF-32");
++        _testHttpValid("text/xml;charset=UTF-32", "UTF-32BE-bom", "UTF-32BE", "UTF-32BE");
+         _testHttpValid("text/xml", "UTF-8-bom", "US-ASCII", null);
+ 
+-        _testAlternateDefaultEncoding("application/xml", "UTF-8-bom", "UTF-8",
+-                null, null);
+-        _testAlternateDefaultEncoding("application/xml", "no-bom", "US-ASCII",
+-                null, "US-ASCII");
+-        _testAlternateDefaultEncoding("application/xml", "UTF-8-bom", "UTF-8",
+-                null, "UTF-8");
+-        _testAlternateDefaultEncoding("text/xml", "no-bom", "US-ASCII", null,
+-                null);
+-        _testAlternateDefaultEncoding("text/xml", "no-bom", "US-ASCII", null,
+-                "US-ASCII");
+-        _testAlternateDefaultEncoding("text/xml", "no-bom", "US-ASCII", null,
+-                "UTF-8");
+-
+-        _testHttpInvalid("text/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", null);
+-        _testHttpInvalid("text/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16");
+-        _testHttpInvalid("text/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16BE");
+-        _testHttpInvalid("text/xml;charset=UTF-16", "no-bom", "UTF-16BE",
+-                "UTF-16BE");
++        _testAlternateDefaultEncoding("application/xml", "UTF-8-bom", "UTF-8", null, null);
++        _testAlternateDefaultEncoding("application/xml", "no-bom", "US-ASCII", null, "US-ASCII");
++        _testAlternateDefaultEncoding("application/xml", "UTF-8-bom", "UTF-8", null, "UTF-8");
++        _testAlternateDefaultEncoding("text/xml", "no-bom", "US-ASCII", null, null);
++        _testAlternateDefaultEncoding("text/xml", "no-bom", "US-ASCII", null, "US-ASCII");
++        _testAlternateDefaultEncoding("text/xml", "no-bom", "US-ASCII", null, "UTF-8");
++
++        _testHttpInvalid("text/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", null);
++        _testHttpInvalid("text/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", "UTF-16");
++        _testHttpInvalid("text/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", "UTF-16BE");
++        _testHttpInvalid("text/xml;charset=UTF-16", "no-bom", "UTF-16BE", "UTF-16BE");
+         _testHttpInvalid("text/xml;charset=UTF-16", "no-bom", "UTF-16BE", null);
+ 
++        _testHttpInvalid("text/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", null);
++        _testHttpInvalid("text/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", "UTF-32");
++        _testHttpInvalid("text/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", "UTF-32BE");
++        _testHttpInvalid("text/xml;charset=UTF-32", "no-bom", "UTF-32BE", "UTF-32BE");
++        _testHttpInvalid("text/xml;charset=UTF-32", "no-bom", "UTF-32BE", null);
++
+         _testHttpLenient("text/xml", "no-bom", "US-ASCII", null, "US-ASCII");
+-        _testHttpLenient("text/xml;charset=UTF-8", "UTF-8-bom", "UTF-8",
+-                "UTF-8", "UTF-8");
+-        _testHttpLenient("text/xml;charset=UTF-8", "UTF-8-bom", "UTF-8", null,
+-                "UTF-8");
+-        _testHttpLenient("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE",
+-                null, "UTF-16BE");
+-        _testHttpLenient("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE",
+-                "UTF-16", "UTF-16");
+-        _testHttpLenient("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE",
+-                "UTF-16BE", "UTF-16BE");
++        _testHttpLenient("text/xml;charset=UTF-8", "UTF-8-bom", "UTF-8", "UTF-8", "UTF-8");
++        _testHttpLenient("text/xml;charset=UTF-8", "UTF-8-bom", "UTF-8", null, "UTF-8");
++        _testHttpLenient("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", null, "UTF-16BE");
++        _testHttpLenient("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", "UTF-16", "UTF-16");
++        _testHttpLenient("text/xml;charset=UTF-16", "UTF-16BE-bom", "UTF-16BE", "UTF-16BE", "UTF-16BE");
++        _testHttpLenient("text/xml;charset=UTF-32", "UTF-32BE-bom", "UTF-32BE", null, "UTF-32BE");
++        _testHttpLenient("text/xml;charset=UTF-32", "UTF-32BE-bom", "UTF-32BE", "UTF-32", "UTF-32");
++        _testHttpLenient("text/xml;charset=UTF-32", "UTF-32BE-bom", "UTF-32BE", "UTF-32BE", "UTF-32BE");
+         _testHttpLenient("text/xml", "UTF-8-bom", "US-ASCII", null, "US-ASCII");
+ 
+-        _testHttpLenient("text/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", null, "UTF-16BE");
+-        _testHttpLenient("text/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16", "UTF-16");
+-        _testHttpLenient("text/xml;charset=UTF-16BE", "UTF-16BE-bom",
+-                "UTF-16BE", "UTF-16BE", "UTF-16BE");
+-        _testHttpLenient("text/xml;charset=UTF-16", "no-bom", "UTF-16BE",
+-                "UTF-16BE", "UTF-16BE");
+-        _testHttpLenient("text/xml;charset=UTF-16", "no-bom", "UTF-16BE", null,
+-                "UTF-16");
+-
+-        _testHttpLenient("text/html", "no-bom", "US-ASCII", "US-ASCII",
+-                "US-ASCII");
++        _testHttpLenient("text/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", null, "UTF-16BE");
++        _testHttpLenient("text/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", "UTF-16", "UTF-16");
++        _testHttpLenient("text/xml;charset=UTF-16BE", "UTF-16BE-bom", "UTF-16BE", "UTF-16BE", "UTF-16BE");
++        _testHttpLenient("text/xml;charset=UTF-16", "no-bom", "UTF-16BE", "UTF-16BE", "UTF-16BE");
++        _testHttpLenient("text/xml;charset=UTF-16", "no-bom", "UTF-16BE", null, "UTF-16");
++
++        _testHttpLenient("text/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", null, "UTF-32BE");
++        _testHttpLenient("text/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", "UTF-32", "UTF-32");
++        _testHttpLenient("text/xml;charset=UTF-32BE", "UTF-32BE-bom", "UTF-32BE", "UTF-32BE", "UTF-32BE");
++        _testHttpLenient("text/xml;charset=UTF-32", "no-bom", "UTF-32BE", "UTF-32BE", "UTF-32BE");
++        _testHttpLenient("text/xml;charset=UTF-32", "no-bom", "UTF-32BE", null, "UTF-32");
++
++        _testHttpLenient("text/html", "no-bom", "US-ASCII", "US-ASCII", "US-ASCII");
+         _testHttpLenient("text/html", "no-bom", "US-ASCII", null, "US-ASCII");
+-        _testHttpLenient("text/html;charset=UTF-8", "no-bom", "US-ASCII",
+-                "UTF-8", "UTF-8");
+-        _testHttpLenient("text/html;charset=UTF-16BE", "no-bom", "US-ASCII",
+-                "UTF-8", "UTF-8");
++        _testHttpLenient("text/html;charset=UTF-8", "no-bom", "US-ASCII", "UTF-8", "UTF-8");
++        _testHttpLenient("text/html;charset=UTF-16BE", "no-bom", "US-ASCII", "UTF-8", "UTF-8");
++        _testHttpLenient("text/html;charset=UTF-32BE", "no-bom", "US-ASCII", "UTF-8", "UTF-8");
+     }
+     
+     @Test
+diff --git a/src/test/java/org/apache/commons/io/input/XmlStreamReaderUtilitiesTest.java b/src/test/java/org/apache/commons/io/input/XmlStreamReaderUtilitiesTest.java
+index f945fddd367..c0f9a40a872 100644
+--- a/src/test/java/org/apache/commons/io/input/XmlStreamReaderUtilitiesTest.java
++++ b/src/test/java/org/apache/commons/io/input/XmlStreamReaderUtilitiesTest.java
+@@ -24,7 +24,6 @@
+ import java.io.ByteArrayInputStream;
+ import java.io.IOException;
+ 
+-import org.junit.Ignore;
+ import org.junit.Test;
+ 
+ /**
+@@ -156,12 +155,13 @@ public void testCalculateRawEncodingStandard() throws IOException {
+     
+     /** BOM calculateRawEncoding() Test */
+     @Test
+-    @Ignore
++    //@Ignore
+     public void testCalculateRawEncodingStandardUtf32() throws IOException {
+         // Standard BOM Checks           BOM         Other       Default
++        testCalculateRawEncodingStandard("UTF-8",    "UTF-32BE", "UTF-32LE");
+         testCalculateRawEncodingStandard("UTF-32BE", "UTF-8",    "UTF-32LE");
+         testCalculateRawEncodingStandard("UTF-32LE", "UTF-8",    "UTF-32BE");
+-    }
++}
+     
+     private void testCalculateRawEncodingStandard(String bomEnc, String otherEnc, String defaultEnc) throws IOException {
+         //               Expected   BOM        Guess     XMLEnc    Default
+@@ -178,7 +178,7 @@ private void testCalculateRawEncodingStandard(String bomEnc, String otherEnc, St
+ 
+     /** Additional UTF-16 calculateRawEncoding() Test */
+     @Test
+-    public void testCalculateRawEncodingAdditonalkUTF16() throws IOException {
++    public void testCalculateRawEncodingAdditonalUTF16() throws IOException {
+         //                           BOM         Guess       XML         Default
+         checkRawError(RAWMGS1,       "UTF-16BE", "UTF-16",   null,       null);
+         checkRawEncoding("UTF-16BE", "UTF-16BE", null,       "UTF-16",   null);
+@@ -192,6 +192,22 @@ public void testCalculateRawEncodingAdditonalkUTF16() throws IOException {
+         checkRawError(RAWMGS1,       "UTF-16LE", "UTF-16LE", "UTF-16BE", null);
+     }
+     
++    /** Additional UTF-32 calculateRawEncoding() Test */
++    @Test
++    public void testCalculateRawEncodingAdditonalUTF32() throws IOException {
++        //                           BOM         Guess       XML         Default
++        checkRawError(RAWMGS1,       "UTF-32BE", "UTF-32",   null,       null);
++        checkRawEncoding("UTF-32BE", "UTF-32BE", null,       "UTF-32",   null);
++        checkRawEncoding("UTF-32BE", "UTF-32BE", "UTF-32BE", "UTF-32",   null);
++        checkRawError(RAWMGS1,       "UTF-32BE", null,       "UTF-32LE", null);
++        checkRawError(RAWMGS1,       "UTF-32BE", "UTF-32BE", "UTF-32LE", null);
++        checkRawError(RAWMGS1,       "UTF-32LE", "UTF-32",   null,       null);
++        checkRawEncoding("UTF-32LE", "UTF-32LE", null,       "UTF-32",   null);
++        checkRawEncoding("UTF-32LE", "UTF-32LE", "UTF-32LE", "UTF-32",   null);
++        checkRawError(RAWMGS1,       "UTF-32LE", null,       "UTF-32BE", null);
++        checkRawError(RAWMGS1,       "UTF-32LE", "UTF-32LE", "UTF-32BE", null);
++    }
++    
+     private void checkRawEncoding(String expected,
+             String bomEnc, String xmlGuessEnc, String xmlEnc, String defaultEncoding) throws IOException {
+         StringBuilder builder = new StringBuilder();
+@@ -207,8 +223,7 @@ private void checkRawEncoding(String expected,
+     protected String calculateRawEncoding(String bomEnc, String xmlGuessEnc, String xmlEnc,
+             String defaultEncoding) throws IOException {
+         MockXmlStreamReader mock = new MockXmlStreamReader(defaultEncoding);
+-        String encoding = mock.calculateRawEncoding(bomEnc, xmlGuessEnc, xmlEnc);
+-        return encoding;
++        return mock.calculateRawEncoding(bomEnc, xmlGuessEnc, xmlEnc);
+     }
+     
+     private void checkRawError(String msgSuffix,
+@@ -257,7 +272,7 @@ public void testCalculateHttpEncoding() throws IOException {
+     
+     /** Test calculate HTTP Encoding */
+     @Test
+-    @Ignore
++    //@Ignore
+     public void testCalculateHttpEncodingUtf32() throws IOException {
+         // No BOM        Expected     Lenient cType           BOM         Guess       XML         Default
+         checkHttpEncoding("UTF-32LE", true,   null,           null,       null,       "UTF-32LE", null);
+@@ -277,7 +292,7 @@ public void testCalculateHttpEncodingUtf32() throws IOException {
+     private void checkHttpEncoding(String expected, boolean lenient, String httpContentType,
+             String bomEnc, String xmlGuessEnc, String xmlEnc, String defaultEncoding) throws IOException {
+         StringBuilder builder = new StringBuilder();
+-        builder.append("HttpEncoding: ").append(bomEnc).append("], ");
++        builder.append("HttpEncoding=[").append(bomEnc).append("], ");
+         builder.append("lenient=[").append(lenient).append("], ");
+         builder.append("httpContentType=[").append(httpContentType).append("], ");
+         builder.append("bomEnc=[").append(bomEnc).append("], ");
+@@ -291,8 +306,7 @@ private void checkHttpEncoding(String expected, boolean lenient, String httpCont
+     protected String calculateHttpEncoding(String httpContentType, String bomEnc, String xmlGuessEnc,
+             String xmlEnc, boolean lenient, String defaultEncoding) throws IOException {
+         MockXmlStreamReader mock = new MockXmlStreamReader(defaultEncoding);
+-        String encoding = mock.calculateHttpEncoding(httpContentType, bomEnc, xmlGuessEnc, xmlEnc, lenient);
+-        return encoding;
++        return mock.calculateHttpEncoding(httpContentType, bomEnc, xmlGuessEnc, xmlEnc, lenient);
+     }
+     
+     private void checkHttpError(String msgSuffix, boolean lenient, String httpContentType,
+diff --git a/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReader.java b/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReader.java
+index 851ef31ccd5..b59c22b2fa4 100644
+--- a/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReader.java
++++ b/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReader.java
+@@ -74,6 +74,12 @@ public class XmlStreamReader extends Reader {
+ 
+     private static final String UTF_16 = "UTF-16";
+ 
++    private static final String UTF_32BE = "UTF-32BE";
++
++    private static final String UTF_32LE = "UTF-32LE";
++
++    private static final String UTF_32 = "UTF-32";
++
+     private static final String EBCDIC = "CP1047";
+ 
+     private static String staticDefaultEncoding = null;
+@@ -447,6 +453,10 @@ String calculateRawEncoding(String bomEnc, String xmlGuessEnc,
+                     && (xmlGuessEnc.equals(UTF_16BE) || xmlGuessEnc
+                             .equals(UTF_16LE))) {
+                 encoding = xmlGuessEnc;
++            } else if (xmlEnc.equals(UTF_32)
++                    && (xmlGuessEnc.equals(UTF_32BE) || xmlGuessEnc
++                            .equals(UTF_32LE))) {
++                encoding = xmlGuessEnc;
+             } else {
+                 encoding = xmlEnc;
+             }
+@@ -474,6 +484,18 @@ String calculateRawEncoding(String bomEnc, String xmlGuessEnc,
+                         bomEnc, xmlGuessEnc, xmlEnc, is);
+             }
+             encoding = bomEnc;
++        } else if (bomEnc.equals(UTF_32BE) || bomEnc.equals(UTF_32LE)) {
++            if (xmlGuessEnc != null && !xmlGuessEnc.equals(bomEnc)) {
++                throw new XmlStreamReaderException(RAW_EX_1.format(new Object[] { bomEnc,
++                        xmlGuessEnc, xmlEnc }), bomEnc, xmlGuessEnc, xmlEnc, is);
++            }
++            if (xmlEnc != null && !xmlEnc.equals(UTF_32)
++                    && !xmlEnc.equals(bomEnc)) {
++                throw new XmlStreamReaderException(RAW_EX_1
++                        .format(new Object[] { bomEnc, xmlGuessEnc, xmlEnc }),
++                        bomEnc, xmlGuessEnc, xmlEnc, is);
++            }
++            encoding = bomEnc;
+         } else {
+             throw new XmlStreamReaderException(RAW_EX_2.format(new Object[] {
+                     bomEnc, xmlGuessEnc, xmlEnc }), bomEnc, xmlGuessEnc,
+@@ -516,6 +538,21 @@ String calculateHttpEncoding(String cTMime, String cTEnc,
+                                         xmlGuessEnc, xmlEnc }), cTMime, cTEnc,
+                                 bomEnc, xmlGuessEnc, xmlEnc, is);
+                     }
++                } else if (bomEnc != null
++                        && (cTEnc.equals(UTF_32BE) || cTEnc.equals(UTF_32LE))) {
++                    throw new XmlStreamReaderException(HTTP_EX_1
++                            .format(new Object[] { cTMime, cTEnc, bomEnc,
++                                    xmlGuessEnc, xmlEnc }), cTMime, cTEnc,
++                            bomEnc, xmlGuessEnc, xmlEnc, is);
++                } else if (cTEnc.equals(UTF_32)) {
++                    if (bomEnc != null && bomEnc.startsWith(UTF_32)) {
++                        encoding = bomEnc;
++                    } else {
++                        throw new XmlStreamReaderException(HTTP_EX_2
++                                .format(new Object[] { cTMime, cTEnc, bomEnc,
++                                        xmlGuessEnc, xmlEnc }), cTMime, cTEnc,
++                                bomEnc, xmlGuessEnc, xmlEnc, is);
++                    }
+                 } else {
+                     encoding = cTEnc;
+                 }
+diff --git a/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReaderUtilitiesCompatibilityTest.java b/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReaderUtilitiesCompatibilityTest.java
+index 6e0b7eae6d5..9d4a632b7ac 100644
+--- a/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReaderUtilitiesCompatibilityTest.java
++++ b/src/test/java/org/apache/commons/io/input/compatibility/XmlStreamReaderUtilitiesCompatibilityTest.java
+@@ -36,11 +36,10 @@ protected String calculateRawEncoding(String bomEnc, String xmlGuessEnc, String
+     protected String calculateHttpEncoding(String httpContentType, String bomEnc, String xmlGuessEnc,
+             String xmlEnc, boolean lenient, String defaultEncoding) throws IOException {
+         MockXmlStreamReader mock = new MockXmlStreamReader(defaultEncoding);
+-        String encoding = mock.calculateHttpEncoding(
++        return mock.calculateHttpEncoding(
+                 XmlStreamReader.getContentTypeMime(httpContentType),
+                 XmlStreamReader.getContentTypeEncoding(httpContentType),
+                 bomEnc, xmlGuessEnc, xmlEnc, null, lenient);
+-        return encoding;
+     }
+ 
+     /** Mock {@link XmlStreamReader} implementation */

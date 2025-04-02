@@ -1,0 +1,774 @@
+From 655068d0cbcf3d25d2ae0a7ee7a8666c29ac230b Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Wed, 18 Jun 2014 10:13:18 +0000
+Subject: [PATCH] [SANTUARIO-307] - utf8 encode is broken. Thanks to TH Heung
+ for the patch.
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1603390 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../implementations/CanonicalizerBase.java    |  33 +-
+ .../c14n/implementations/UtfHelpper.java      | 444 +++++++++++-------
+ .../canonicalizer/CanonicalizerBase.java      |  48 +-
+ .../c14n/implementations/UtfHelperTest.java   |  32 +-
+ 4 files changed, 336 insertions(+), 221 deletions(-)
+
+diff --git a/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java b/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
+index d1c71745fe..92208d18ce 100644
+--- a/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
++++ b/src/main/java/org/apache/xml/security/c14n/implementations/CanonicalizerBase.java
+@@ -693,7 +693,8 @@ protected static final void outputAttrToWriter(
+         final int length = value.length();
+         int i = 0;
+         while (i < length) {        
+-            char c = value.charAt(i++);
++            int c = value.codePointAt(i);
++            i += Character.charCount(c);
+ 
+             switch (c) {
+ 
+@@ -725,7 +726,7 @@ protected static final void outputAttrToWriter(
+                 if (c < 0x80) {
+                     writer.write(c);
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }
+                 continue;
+             }
+@@ -753,15 +754,16 @@ protected void outputPItoWriter(
+         final String target = currentPI.getTarget();
+         int length = target.length();
+ 
+-        for (int i = 0; i < length; i++) {         
+-            char c = target.charAt(i);
++        for (int i = 0; i < length; ) {
++            int c = target.codePointAt(i);
++            i += Character.charCount(c);
+             if (c == 0x0D) {
+                 writer.write(XD.clone());
+             } else {
+                 if (c < 0x80) {
+                     writer.write(c);
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }     
+             }
+         }
+@@ -773,12 +775,13 @@ protected void outputPItoWriter(
+         if (length > 0) {
+             writer.write(' ');
+ 
+-            for (int i = 0; i < length; i++) {            
+-                char c = data.charAt(i);
++            for (int i = 0; i < length; ) {
++                int c = data.codePointAt(i);
++                i += Character.charCount(c);
+                 if (c == 0x0D) {
+                     writer.write(XD.clone());
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);               
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }
+             }
+         }
+@@ -807,15 +810,16 @@ protected void outputCommentToWriter(
+         final String data = currentComment.getData();
+         final int length = data.length();      
+ 
+-        for (int i = 0; i < length; i++) {         
+-            char c = data.charAt(i);
++        for (int i = 0; i < length; ) {
++            int c = data.codePointAt(i);
++            i += Character.charCount(c);
+             if (c == 0x0D) {
+                 writer.write(XD.clone());
+             } else {
+                 if (c < 0x80) {
+                     writer.write(c);
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }    
+             }      
+         }
+@@ -838,8 +842,9 @@ protected static final void outputTextToWriter(
+     ) throws IOException {
+         final int length = text.length();
+         byte[] toWrite;
+-        for (int i = 0; i < length; i++) {
+-            char c = text.charAt(i);
++        for (int i = 0; i < length; ) {
++            int c = text.codePointAt(i);
++            i += Character.charCount(c);
+ 
+             switch (c) {
+ 
+@@ -863,7 +868,7 @@ protected static final void outputTextToWriter(
+                 if (c < 0x80) {
+                     writer.write(c);
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }
+                 continue;
+             }
+diff --git a/src/main/java/org/apache/xml/security/c14n/implementations/UtfHelpper.java b/src/main/java/org/apache/xml/security/c14n/implementations/UtfHelpper.java
+index 8924145b4d..15822ee7d8 100644
+--- a/src/main/java/org/apache/xml/security/c14n/implementations/UtfHelpper.java
++++ b/src/main/java/org/apache/xml/security/c14n/implementations/UtfHelpper.java
+@@ -1,179 +1,265 @@
+-/**
+- * Licensed to the Apache Software Foundation (ASF) under one
+- * or more contributor license agreements. See the NOTICE file
+- * distributed with this work for additional information
+- * regarding copyright ownership. The ASF licenses this file
+- * to you under the Apache License, Version 2.0 (the
+- * "License"); you may not use this file except in compliance
+- * with the License. You may obtain a copy of the License at
+- *
+- * http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing,
+- * software distributed under the License is distributed on an
+- * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+- * KIND, either express or implied. See the License for the
+- * specific language governing permissions and limitations
+- * under the License.
+- */
+-package org.apache.xml.security.c14n.implementations;
+-
+-import java.io.IOException;
+-import java.io.OutputStream;
+-import java.util.Map;
+-
+-public final class UtfHelpper {
+-    
+-    private UtfHelpper() {
+-        // complete
+-    }
+-
+-    public static void writeByte(
+-        final String str,
+-        final OutputStream out,
+-        Map<String, byte[]> cache
+-    ) throws IOException {
+-        byte[] result = cache.get(str);	 
+-        if (result == null) {
+-            result = getStringInUtf8(str);
+-            cache.put(str, result);
+-        }
+-
+-        out.write(result);
+-    }
+-
+-    public static void writeCharToUtf8(final char c, final OutputStream out) throws IOException {   	
+-        if (c < 0x80) {
+-            out.write(c);
+-            return;
+-        }
+-        if (c >= 0xD800 && c <= 0xDBFF || c >= 0xDC00 && c <= 0xDFFF) {
+-            //No Surrogates in sun java
+-            out.write(0x3f);
+-            return;
+-        }
+-        int bias;
+-        int write;
+-        char ch;
+-        if (c > 0x07FF) {
+-            ch = (char)(c>>>12);      
+-            write = 0xE0;
+-            if (ch > 0) {
+-                write |= ch & 0x0F;
+-            } 
+-            out.write(write);
+-            write = 0x80;
+-            bias = 0x3F;        
+-        } else {
+-            write = 0xC0;
+-            bias = 0x1F;
+-        }
+-        ch = (char)(c>>>6);
+-        if (ch > 0) {
+-            write |= ch & bias;
+-        } 
+-        out.write(write);
+-        out.write(0x80 | ((c) & 0x3F));    
+-
+-    }
+-
+-    public static void writeStringToUtf8(
+-        final String str,
+-        final OutputStream out
+-    ) throws IOException{	   
+-        final int length = str.length();
+-        int i = 0;
+-        char c;    
+-        while (i < length) {
+-            c = str.charAt(i++);        
+-            if (c < 0x80)  {
+-                out.write(c);
+-                continue;
+-            }
+-            if (c >= 0xD800 && c <= 0xDBFF || c >= 0xDC00 && c <= 0xDFFF) {
+-                //No Surrogates in sun java
+-                out.write(0x3f);
+-                continue;
+-            }
+-            char ch;
+-            int bias;
+-            int write;
+-            if (c > 0x07FF) {
+-                ch = (char)(c>>>12);      
+-                write = 0xE0;
+-                if (ch > 0) {
+-                    write |= ch & 0x0F;
+-                } 
+-                out.write(write);
+-                write = 0x80;
+-                bias = 0x3F;        
+-            } else {
+-                write = 0xC0;
+-                bias = 0x1F;
+-            }
+-            ch = (char)(c>>>6);
+-            if (ch > 0) {
+-                write |= ch & bias;
+-            } 
+-            out.write(write);
+-            out.write(0x80 | ((c) & 0x3F));       
+-
+-        }
+-
+-    }
+-    
+-    public static byte[] getStringInUtf8(final String str) {
+-        final int length = str.length();
+-        boolean expanded = false;
+-        byte[] result = new byte[length];
+-        int i = 0;
+-        int out = 0;
+-        char c;    
+-        while (i < length) {
+-            c = str.charAt(i++);        
+-            if (c < 0x80) {
+-                result[out++] = (byte)c;
+-                continue;
+-            }
+-            if (c >= 0xD800 && c <= 0xDBFF || c >= 0xDC00 && c <= 0xDFFF) {  	
+-                //No Surrogates in sun java
+-                result[out++] = 0x3f;
+-                continue;
+-            }
+-            if (!expanded) {
+-                byte newResult[] = new byte[3*length];
+-                System.arraycopy(result, 0, newResult, 0, out);				   	    	
+-                result = newResult;
+-                expanded = true;
+-            } 
+-            char ch;
+-            int bias;
+-            byte write;
+-            if (c > 0x07FF) {
+-                ch = (char)(c>>>12);      
+-                write = (byte)0xE0;
+-                if (ch > 0) {
+-                    write |= ch & 0x0F;
+-                } 
+-                result[out++] = write;
+-                write = (byte)0x80;
+-                bias = 0x3F;        
+-            } else {
+-                write = (byte)0xC0;
+-                bias = 0x1F;
+-            }
+-            ch = (char)(c>>>6);
+-            if (ch > 0) {
+-                write |= ch & bias;
+-            } 
+-            result[out++] = write;
+-            result[out++] = (byte)(0x80 | ((c) & 0x3F)); 
+-        }
+-        if (expanded) {
+-            byte newResult[] = new byte[out];
+-            System.arraycopy(result, 0, newResult, 0, out);
+-            result = newResult;
+-        }
+-        return result;
+-    }
+-}
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.xml.security.c14n.implementations;
++
++import java.io.IOException;
++import java.io.OutputStream;
++import java.security.AccessController;
++import java.security.PrivilegedAction;
++import java.util.Map;
++
++public final class UtfHelpper {
++
++    /**
++     * Revert to the old behavior (version 2 or before), i.e. surrogate pairs characters becomes 
++     * '??' in output. Set system property org.apache.xml.security.c14n.oldUtf8=true if you want
++     * to verify signatures generated by version 2 or before that contains 32 bit chars in the 
++     * XML document.
++     */
++    private static final boolean oldUtf8 =
++        AccessController.doPrivileged(new PrivilegedAction<Boolean>() {
++            public Boolean run() {
++                return Boolean.getBoolean
++                    ("org.apache.xml.security.c14n.oldUtf8");
++            }
++        });
++
++    private UtfHelpper() {
++        // complete
++    }
++
++    public static void writeByte(
++        final String str,
++        final OutputStream out,
++        Map<String, byte[]> cache
++    ) throws IOException {
++        byte[] result = cache.get(str);
++        if (result == null) {
++            result = getStringInUtf8(str);
++            cache.put(str, result);
++        }
++
++        out.write(result);
++    }
++
++    public static void writeCodePointToUtf8(final int c, final OutputStream out) throws IOException {
++        if (!Character.isValidCodePoint(c) || c >= 0xD800 && c <= 0xDBFF || c >= 0xDC00 && c <= 0xDFFF) {
++            // valid code point: c >= 0x0000 && c <= 0x10FFFF
++            out.write(0x3f);
++            return;
++        }
++        if (oldUtf8 && c >= Character.MIN_SUPPLEMENTARY_CODE_POINT) {
++            // version 2 or before output 2 question mark characters for 32 bit chars
++            out.write(0x3f);
++            out.write(0x3f);
++            return;
++        }
++
++        if (c < 0x80) {
++            // 0x00000000 - 0x0000007F
++            // 0xxxxxxx
++            out.write(c);
++            return;
++        }
++        byte extraByte = 0;
++        if (c < 0x800) {
++            // 0x00000080 - 0x000007FF
++            // 110xxxxx 10xxxxxx
++            extraByte = 1;
++        } else if (c < 0x10000) {
++            // 0x00000800 - 0x0000FFFF
++            // 1110xxxx 10xxxxxx 10xxxxxx
++            extraByte = 2;
++        } else if (c < 0x200000) {
++            // 0x00010000 - 0x001FFFFF
++            // 11110xxx 10xxxxx 10xxxxxx 10xxxxxx
++            extraByte = 3;
++        } else if (c < 0x4000000) {
++            // 0x00200000 - 0x03FFFFFF
++            // 111110xx 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx
++            // already outside valid Character range, just for completeness
++            extraByte = 4;
++        } else if (c <= 0x7FFFFFFF) {
++            // 0x04000000 - 0x7FFFFFFF
++            // 1111110x 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx
++            // already outside valid Character range, just for completeness
++            extraByte = 5;
++        } else {
++            // 0x80000000 - 0xFFFFFFFF
++            // case not possible as java has no unsigned int
++            out.write(0x3f);
++            return;
++        }
++        
++        byte write;
++        int shift = 6 * extraByte;
++        write = (byte)((0xFE << (6 - extraByte)) | (c >>> shift));
++        out.write(write);
++        for (int i = extraByte - 1; i >= 0; i--) {
++            shift -= 6;
++            write = (byte)(0x80 | ((c >>> shift) & 0x3F));
++            out.write(write);
++        }
++    }
++
++    public static void writeStringToUtf8(
++        final String str, final OutputStream out
++    ) throws IOException {
++        final int length = str.length();
++        int i = 0;
++        int c;
++        while (i < length) {
++            c = str.codePointAt(i);
++            i += Character.charCount(c);
++            if (!Character.isValidCodePoint(c) || c >= 0xD800 && c <= 0xDBFF || c >= 0xDC00 && c <= 0xDFFF) {
++                // valid code point: c >= 0x0000 && c <= 0x10FFFF
++                out.write(0x3f);
++                continue;
++            }
++            if (oldUtf8 && c >= Character.MIN_SUPPLEMENTARY_CODE_POINT) {
++                // version 2 or before output 2 question mark characters for 32 bit chars
++                out.write(0x3f);
++                out.write(0x3f);
++                continue;
++            }
++            if (c < 0x80)  {
++                out.write(c);
++                continue;
++            }
++            byte extraByte = 0;
++            if (c < 0x800) {
++                // 0x00000080 - 0x000007FF
++                // 110xxxxx 10xxxxxx
++                extraByte = 1;
++            } else if (c < 0x10000) {
++                // 0x00000800 - 0x0000FFFF
++                // 1110xxxx 10xxxxxx 10xxxxxx
++                extraByte = 2;
++            } else if (c < 0x200000) {
++                // 0x00010000 - 0x001FFFFF
++                // 11110xxx 10xxxxx 10xxxxxx 10xxxxxx
++                extraByte = 3;
++            } else if (c < 0x4000000) {
++                // 0x00200000 - 0x03FFFFFF
++                // 111110xx 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx
++                // already outside valid Character range, just for completeness
++                extraByte = 4;
++            } else if (c <= 0x7FFFFFFF) {
++                // 0x04000000 - 0x7FFFFFFF
++                // 1111110x 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx
++                // already outside valid Character range, just for completeness
++                extraByte = 5;
++            } else {
++                // 0x80000000 - 0xFFFFFFFF
++                // case not possible as java has no unsigned int
++                out.write(0x3f);
++                continue;
++            }
++            byte write;
++            int shift = 6 * extraByte;
++            write = (byte)((0xFE << (6 - extraByte)) | (c >>> shift));
++            out.write(write);
++            for (int j = extraByte - 1; j >= 0; j--) {
++                shift -= 6;
++                write = (byte)(0x80 | ((c >>> shift) & 0x3F));
++                out.write(write);
++            }
++
++        }
++
++    }
++
++    public static byte[] getStringInUtf8(final String str) {
++        final int length = str.length();
++        boolean expanded = false;
++        byte[] result = new byte[length];
++        int i = 0;
++        int out = 0;
++        int c;
++        while (i < length) {
++            c = str.codePointAt(i);
++            i += Character.charCount(c);
++            if (!Character.isValidCodePoint(c) || c >= 0xD800 && c <= 0xDBFF || c >= 0xDC00 && c <= 0xDFFF) {
++                // valid code point: c >= 0x0000 && c <= 0x10FFFF
++                result[out++] = (byte)0x3f;
++                continue;
++            }
++            if (oldUtf8 && c >= Character.MIN_SUPPLEMENTARY_CODE_POINT) {
++                // version 2 or before output 2 question mark characters for 32 bit chars
++                result[out++] = (byte)0x3f;
++                result[out++] = (byte)0x3f;
++                continue;
++            }
++            if (c < 0x80) {
++                result[out++] = (byte)c;
++                continue;
++            }
++            if (!expanded) {
++                byte newResult[] = new byte[6*length];
++                System.arraycopy(result, 0, newResult, 0, out);
++                result = newResult;
++                expanded = true;
++            }
++            byte extraByte = 0;
++            if (c < 0x800) {
++                // 0x00000080 - 0x000007FF
++                // 110xxxxx 10xxxxxx
++                extraByte = 1;
++            } else if (c < 0x10000) {
++                // 0x00000800 - 0x0000FFFF
++                // 1110xxxx 10xxxxxx 10xxxxxx
++                extraByte = 2;
++            } else if (c < 0x200000) {
++                // 0x00010000 - 0x001FFFFF
++                // 11110xxx 10xxxxx 10xxxxxx 10xxxxxx
++                extraByte = 3;
++            } else if (c < 0x4000000) {
++                // 0x00200000 - 0x03FFFFFF
++                // 111110xx 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx
++                // already outside valid Character range, just for completeness
++                extraByte = 4;
++            } else if (c <= 0x7FFFFFFF) {
++                // 0x04000000 - 0x7FFFFFFF
++                // 1111110x 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx
++                // already outside valid Character range, just for completeness
++                extraByte = 5;
++            } else {
++                // 0x80000000 - 0xFFFFFFFF
++                // case not possible as java has no unsigned int
++                result[out++] = 0x3f;
++                continue;
++            }
++            byte write;
++            int shift = 6 * extraByte;
++            write = (byte)((0xFE << (6 - extraByte)) | (c >>> shift));
++            result[out++] = write;
++            for (int j = extraByte - 1; j >= 0; j--) {
++                shift -= 6;
++                write = (byte)(0x80 | ((c >>> shift) & 0x3F));
++                result[out++] = write;
++            }
++        }
++        if (expanded) {
++            byte newResult[] = new byte[out];
++            System.arraycopy(result, 0, newResult, 0, out);
++            result = newResult;
++        }
++        return result;
++    }
++}
+diff --git a/src/main/java/org/apache/xml/security/stax/impl/transformer/canonicalizer/CanonicalizerBase.java b/src/main/java/org/apache/xml/security/stax/impl/transformer/canonicalizer/CanonicalizerBase.java
+index 97dcd94def..faa3de3836 100644
+--- a/src/main/java/org/apache/xml/security/stax/impl/transformer/canonicalizer/CanonicalizerBase.java
++++ b/src/main/java/org/apache/xml/security/stax/impl/transformer/canonicalizer/CanonicalizerBase.java
+@@ -35,8 +35,8 @@
+ import java.util.*;
+ 
+ /**
+- * @author $Author$
+- * @version $Revision$ $Date$
++ * @author $Author: coheigea $
++ * @version $Revision: 1556187 $ $Date: 2014-01-07 11:46:31 +0000 (Tue, 07 Jan 2014) $
+  */
+ public abstract class CanonicalizerBase extends TransformIdentity {
+ 
+@@ -401,7 +401,7 @@ protected static void outputAttrToWriter(final String prefix, final String name,
+         writer.write(' ');
+         if (prefix != null) {
+             UtfHelpper.writeByte(prefix, writer, cache);
+-            UtfHelpper.writeCharToUtf8(DOUBLEPOINT, writer);
++            UtfHelpper.writeCodePointToUtf8(DOUBLEPOINT, writer);
+         }
+         UtfHelpper.writeByte(name, writer, cache);
+         writer.write(EQUAL_STRING);
+@@ -409,7 +409,8 @@ protected static void outputAttrToWriter(final String prefix, final String name,
+         final int length = value.length();
+         int i = 0;
+         while (i < length) {
+-            final char c = value.charAt(i++);
++            final int c = value.codePointAt(i);
++            i += Character.charCount(c);
+ 
+             switch (c) {
+ 
+@@ -441,7 +442,7 @@ protected static void outputAttrToWriter(final String prefix, final String name,
+                     if (c < 0x80) {
+                         writer.write(c);
+                     } else {
+-                        UtfHelpper.writeCharToUtf8(c, writer);
++                        UtfHelpper.writeCodePointToUtf8(c, writer);
+                     }
+                     continue;
+             }
+@@ -461,8 +462,9 @@ protected static void outputAttrToWriter(final String prefix, final String name,
+     protected static void outputTextToWriter(final String text, final OutputStream writer) throws IOException {
+         final int length = text.length();
+         byte[] toWrite;
+-        for (int i = 0; i < length; i++) {
+-            final char c = text.charAt(i);
++        for (int i = 0; i < length; ) {
++            final int c = text.codePointAt(i);
++            i += Character.charCount(c);
+ 
+             switch (c) {
+ 
+@@ -486,7 +488,7 @@ protected static void outputTextToWriter(final String text, final OutputStream w
+                     if (c < 0x80) {
+                         writer.write(c);
+                     } else {
+-                        UtfHelpper.writeCharToUtf8(c, writer);
++                        UtfHelpper.writeCodePointToUtf8(c, writer);
+                     }
+                     continue;
+             }
+@@ -498,7 +500,12 @@ protected static void outputTextToWriter(final char[] text, final OutputStream w
+         final int length = text.length;
+         byte[] toWrite;
+         for (int i = 0; i < length; i++) {
+-            final char c = text[i];
++            int c;
++            if (Character.isHighSurrogate(text[i]) && i + 1 != length && Character.isLowSurrogate(text[i+1])) {
++                c = Character.toCodePoint(text[i], text[++i]);
++            } else {
++                c = text[i];
++            }
+ 
+             switch (c) {
+ 
+@@ -522,7 +529,7 @@ protected static void outputTextToWriter(final char[] text, final OutputStream w
+                     if (c < 0x80) {
+                         writer.write(c);
+                     } else {
+-                        UtfHelpper.writeCharToUtf8(c, writer);
++                        UtfHelpper.writeCodePointToUtf8(c, writer);
+                     }
+                     continue;
+             }
+@@ -546,15 +553,16 @@ protected static void outputPItoWriter(XMLSecProcessingInstruction currentPI, Ou
+         final String target = currentPI.getTarget();
+         int length = target.length();
+ 
+-        for (int i = 0; i < length; i++) {
+-            final char c = target.charAt(i);
++        for (int i = 0; i < length; ) {
++            final int c = target.codePointAt(i);
++            i += Character.charCount(c);
+             if (c == 0x0D) {
+                 writer.write(__XD_);
+             } else {
+                 if (c < 0x80) {
+                     writer.write(c);
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }
+             }
+         }
+@@ -566,12 +574,13 @@ protected static void outputPItoWriter(XMLSecProcessingInstruction currentPI, Ou
+         if (length > 0) {
+             writer.write(' ');
+ 
+-            for (int i = 0; i < length; i++) {
+-                char c = data.charAt(i);
++            for (int i = 0; i < length; ) {
++                int c = data.codePointAt(i);
++                i += Character.charCount(c);
+                 if (c == 0x0D) {
+                     writer.write(__XD_);
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }
+             }
+         }
+@@ -598,15 +607,16 @@ protected static void outputCommentToWriter(XMLSecComment currentComment, Output
+         final String data = currentComment.getText();
+         final int length = data.length();
+ 
+-        for (int i = 0; i < length; i++) {
+-            final char c = data.charAt(i);
++        for (int i = 0; i < length; ) {
++            final int c = data.codePointAt(i);
++            i += Character.charCount(c);
+             if (c == 0x0D) {
+                 writer.write(__XD_);
+             } else {
+                 if (c < 0x80) {
+                     writer.write(c);
+                 } else {
+-                    UtfHelpper.writeCharToUtf8(c, writer);
++                    UtfHelpper.writeCodePointToUtf8(c, writer);
+                 }
+             }
+         }
+diff --git a/src/test/java/org/apache/xml/security/test/dom/c14n/implementations/UtfHelperTest.java b/src/test/java/org/apache/xml/security/test/dom/c14n/implementations/UtfHelperTest.java
+index 514b770fdb..8283a4fe7f 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/c14n/implementations/UtfHelperTest.java
++++ b/src/test/java/org/apache/xml/security/test/dom/c14n/implementations/UtfHelperTest.java
+@@ -25,7 +25,7 @@
+ import org.apache.xml.security.c14n.implementations.UtfHelpper;
+ 
+ public class UtfHelperTest extends org.junit.Assert {
+-    
++
+     @org.junit.Test
+     public void testBug40156() {
+         String s = "\u00e4\u00f6\u00fc";
+@@ -39,24 +39,38 @@ public void testBug40156() {
+             e.printStackTrace();
+         }
+     }
+-    
++
+     @org.junit.Test
+     public void testUtf() throws Exception {
+-        int chunk = 1 << 16; 
++        // if system property org.apache.xml.security.c14n.oldUtf8=true, can only validate 
++        // 16bit chars against String.getBytes("UTF8");
++        int chunk = (Boolean.getBoolean("org.apache.xml.security.c14n.oldUtf8")) ? (1 << 16)
++            : (Character.MAX_CODE_POINT + 1);
+         int j = 0;
+         ByteArrayOutputStream charByCharOs = new ByteArrayOutputStream();
+         ByteArrayOutputStream strOs = new ByteArrayOutputStream();
+ 
+-        char chs[] = new char[chunk];
++        char chs[] = new char[chunk * 2];
++        int pos = 0;
+         for (int i = 0; i < chunk; i++) {
+             int ch = (chunk * j) + i;
++            int offset = Character.toChars(ch, chs, pos);
++            pos += offset;
+             if (ch == 0xDBFF) {
+-                ch = 1;
++                // since 0xDBFF with next character 0xDC00 will form a surrogate pair, so insert a space character in between
++                offset = Character.toChars(Character.SPACE_SEPARATOR, chs, pos);
++                pos += offset;
+             }
+-            chs[i] = (char)ch;
+-            UtfHelpper.writeCharToUtf8((char)ch, charByCharOs);
+         }
+-        String str = new String(chs);
++        char newResult[] = new char[pos];
++        System.arraycopy(chs, 0, newResult, 0, pos);
++        for (int i = 0; i < pos; ) {
++            int ch = Character.codePointAt(newResult, i);
++            i += Character.charCount(ch);
++            UtfHelpper.writeCodePointToUtf8(ch, charByCharOs);
++        }
++
++        String str = new String(newResult);
+         byte a[] = UtfHelpper.getStringInUtf8(str);
+         try {
+             // System.out.println("chunk:"+j);
+@@ -75,5 +89,5 @@ public void testUtf() throws Exception {
+             e.printStackTrace();
+         }
+     }
+-    
++
+ }

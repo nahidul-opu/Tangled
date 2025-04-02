@@ -1,0 +1,67 @@
+From eb19eaaf33695abbdb032f8f60e121a73a33b6d4 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Tue, 24 Jan 2017 17:24:44 +0100
+Subject: [PATCH] OPENNLP-959: Correct sentence segmenations in labeld names
+
+---
+ .../formats/brat/BratNameSampleStream.java    | 31 +++++++++++++------
+ 1 file changed, 21 insertions(+), 10 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratNameSampleStream.java b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratNameSampleStream.java
+index 499b99d99..a56999242 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratNameSampleStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/brat/BratNameSampleStream.java
+@@ -68,24 +68,35 @@ protected List<NameSample> read(BratDocument sample) throws IOException {
+     // to check if all entities have been used up after the matching is done
+ 
+     Set<String> entityIdSet = new HashSet<>();
++    Map<Integer, Span> coveredIndexes = new HashMap<>();
+ 
+     for (BratAnnotation ann : sample.getAnnotations()) {
+       if (ann instanceof SpanAnnotation) {
+         entityIdSet.add(ann.getId());
++
++        Span span = ((SpanAnnotation) ann).getSpan();
++        for (int i = span.getStart(); i < span.getEnd(); i++) {
++          coveredIndexes.put(i, span);
++        }
+       }
+     }
+ 
+-    Span sentences[] = sentDetector.sentPosDetect(sample.getText());
+-
+-    // TODO: Sentence breaks should be avoided inside name annotations
+-    // a) Merge two sentences, if an end/begin pair is part of a name annotation
+-    // b) Implement a custom sentence validator which can be injected into the SD
++    List<Span> sentences = new ArrayList<>();
++    for (Span sentence : sentDetector.sentPosDetect(sample.getText())) {
++      Span conflictingName = coveredIndexes.get(sentence.getStart());
+ 
+-    // How could a custom validator be injected into an already instantiated sentence detector ?1
+-    // Via a set method ...
+-    // Via constructor ... probably best option, but a bit tricky to work with the SD interface then
+-    //
++      if (sentences.size() > 0 && conflictingName != null &&
++          conflictingName.getStart() < sentence.getStart()) {
++        Span lastSentence = sentences.remove(sentences.size() - 1);
++        sentences.add(new Span(lastSentence.getStart(), sentence.getEnd()));
+ 
++        System.out.println("Correcting sentence segmentation in document " +
++            sample.getId());
++      }
++      else {
++        sentences.add(sentence);
++      }
++    }
+ 
+     // TODO: Token breaks should be enforced on name span boundaries
+     // a) Just split tokens
+@@ -93,7 +104,7 @@ protected List<NameSample> read(BratDocument sample) throws IOException {
+ 
+     // Currently we are missing all
+ 
+-    List<NameSample> samples = new ArrayList<>(sentences.length);
++    List<NameSample> samples = new ArrayList<>(sentences.size());
+ 
+     for (Span sentence : sentences) {
+ 

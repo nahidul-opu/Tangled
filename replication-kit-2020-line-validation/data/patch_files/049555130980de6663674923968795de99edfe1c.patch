@@ -1,0 +1,650 @@
+From 049555130980de6663674923968795de99edfe1c Mon Sep 17 00:00:00 2001
+From: Lewis John McGibbney <lewis.mcgibbney@gmail.com>
+Date: Mon, 9 May 2016 10:04:26 -0700
+Subject: [PATCH] GORA-474 bug in
+ org.apache.gora.solr.store.SolrStore#getDatumWriter & #getDatumReader
+
+---
+ .../test/resources/gora-accumulo-mapping.xml  |   2 +
+ .../src/test/conf/gora-cassandra-mapping.xml  |   2 +
+ gora-core/src/examples/avro/webpage.json      |   4 +-
+ .../gora/examples/generated/Employee.java     |   3 +-
+ .../gora/examples/generated/Metadata.java     |  17 +-
+ .../gora/examples/generated/WebPage.java      | 183 ++++++++++++++++--
+ .../gora/memory/store/MemStoreTest.java       |   2 +-
+ .../apache/gora/store/DataStoreTestBase.java  |   6 +
+ .../apache/gora/store/DataStoreTestUtil.java  |  14 +-
+ .../src/test/conf/gora-hbase-mapping.xml      |   2 +
+ gora-infinispan/pom.xml                       |  13 +-
+ .../src/test/conf/gora-mongodb-mapping.xml    |   2 +
+ .../org/apache/gora/solr/store/SolrStore.java |  28 ++-
+ gora-solr/src/test/conf/gora-solr-mapping.xml |   2 +
+ .../test/conf/solr/WebPage/conf/schema.xml    |   2 +
+ .../tutorial/log/generated/MetricDatum.java   |   1 -
+ 16 files changed, 227 insertions(+), 56 deletions(-)
+
+diff --git a/gora-accumulo/src/test/resources/gora-accumulo-mapping.xml b/gora-accumulo/src/test/resources/gora-accumulo-mapping.xml
+index 2f0978604..4d036c635 100644
+--- a/gora-accumulo/src/test/resources/gora-accumulo-mapping.xml
++++ b/gora-accumulo/src/test/resources/gora-accumulo-mapping.xml
+@@ -49,6 +49,8 @@
+     <field name="outlinks" family="outlinks"/>
+     <field name="headers" family="headers"/>
+     <field name="metadata" family="common" qualifier="metadata"/>
++    <field name="byteData" family="byteData" qualifier="byteData"/>
++    <field name="stringData" family="stringData" qualifier="stringData"/>
+   </class>
+ 
+   <class name="org.apache.gora.examples.generated.TokenDatum" keyClass="java.lang.String">
+diff --git a/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml b/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml
+index 8d45768e8..8437b4889 100644
+--- a/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml
++++ b/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml
+@@ -84,6 +84,8 @@
+     <field name="outlinks" family="sc" qualifier="p:outlinks" ttl="10"/>
+     <field name="headers" family="sc" qualifier="p:headers" ttl="10"/>
+     <field name="metadata" family="p" qualifier="c:mt" ttl="10"/>
++    <field name="byteData" family="sc" qualifier="p:byteData" ttl="10"/>
++    <field name="stringData" family="sc" qualifier="p:stringData" ttl="10"/>
+   </class>
+ 
+   <class name="org.apache.gora.examples.generated.TokenDatum" keyClass="java.lang.String" keyspace="TokenDatum">
+diff --git a/gora-core/src/examples/avro/webpage.json b/gora-core/src/examples/avro/webpage.json
+index f4e4aaf8b..2066dc6d2 100644
+--- a/gora-core/src/examples/avro/webpage.json
++++ b/gora-core/src/examples/avro/webpage.json
+@@ -16,6 +16,8 @@
+         {"name":"version","type":"int","default":0},
+         {"name":"data","type":{"type":"map","values":"string"}, "default":null}
+       ]
+-    }}
++    }},
++    {"name": "byteData", "type": {"type":"map", "values":"bytes"}, "default":{}},
++    {"name": "stringData", "type": {"type":"map", "values":"string"}, "default":{}}
+   ]
+ }
+\ No newline at end of file
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java b/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java
+index db014ceca..e6e1c4c5c 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/generated/Employee.java
+@@ -15,7 +15,6 @@
+  * limitations under the License.
+  */
+ package org.apache.gora.examples.generated;  
+-@SuppressWarnings("all")
+ public class Employee extends org.apache.gora.persistency.impl.PersistentBase implements org.apache.avro.specific.SpecificRecord, org.apache.gora.persistency.Persistent {
+   public static final org.apache.avro.Schema SCHEMA$ = new org.apache.avro.Schema.Parser().parse("{\"type\":\"record\",\"name\":\"Employee\",\"namespace\":\"org.apache.gora.examples.generated\",\"fields\":[{\"name\":\"name\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"dateOfBirth\",\"type\":\"long\",\"default\":0},{\"name\":\"ssn\",\"type\":\"string\",\"default\":\"\"},{\"name\":\"salary\",\"type\":\"int\",\"default\":0},{\"name\":\"boss\",\"type\":[\"null\",\"Employee\",\"string\"],\"default\":null},{\"name\":\"webpage\",\"type\":[\"null\",{\"type\":\"record\",\"name\":\"WebPage\",\"fields\":[{\"name\":\"url\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"content\",\"type\":[\"null\",\"bytes\"],\"default\":null},{\"name\":\"parsedContent\",\"type\":{\"type\":\"array\",\"items\":\"string\"},\"default\":{}},{\"name\":\"outlinks\",\"type\":{\"type\":\"map\",\"values\":[\"null\",\"string\"]},\"default\":{}},{\"name\":\"headers\",\"type\":[\"null\",{\"type\":\"map\",\"values\":[\"null\",\"string\"]}],\"default\":null},{\"name\":\"metadata\",\"type\":{\"type\":\"record\",\"name\":\"Metadata\",\"fields\":[{\"name\":\"version\",\"type\":\"int\",\"default\":0},{\"name\":\"data\",\"type\":{\"type\":\"map\",\"values\":\"string\"},\"default\":{}}]},\"default\":null}]}],\"default\":null}],\"default\":null}");
+ 
+@@ -102,7 +101,6 @@ public java.lang.Object get(int field$) {
+   }
+   
+   // Used by DatumReader.  Applications should not call. 
+-  @SuppressWarnings(value="unchecked")
+   public void put(int field$, java.lang.Object value) {
+     switch (field$) {
+     case 0: name = (java.lang.CharSequence)(value); break;
+@@ -274,6 +272,7 @@ public static org.apache.gora.examples.generated.Employee.Builder newBuilder(org
+     return new org.apache.gora.examples.generated.Employee.Builder(other);
+   }
+   
++  @SuppressWarnings("unused")
+   private static java.nio.ByteBuffer deepCopyToReadOnlyBuffer(
+       java.nio.ByteBuffer input) {
+     java.nio.ByteBuffer copy = java.nio.ByteBuffer.allocate(input.capacity());
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java b/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java
+index 8554be3b3..a09f16a5e 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/generated/Metadata.java
+@@ -1,23 +1,12 @@
+ /**
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
++ * Autogenerated by Avro
+  * 
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * DO NOT EDIT DIRECTLY
+  */
+ package org.apache.gora.examples.generated;  
+ @SuppressWarnings("all")
+ public class Metadata extends org.apache.gora.persistency.impl.PersistentBase implements org.apache.avro.specific.SpecificRecord, org.apache.gora.persistency.Persistent {
+-  public static final org.apache.avro.Schema SCHEMA$ = new org.apache.avro.Schema.Parser().parse("{\"type\":\"record\",\"name\":\"Metadata\",\"namespace\":\"org.apache.gora.examples.generated\",\"fields\":[{\"name\":\"version\",\"type\":\"int\",\"default\":0},{\"name\":\"data\",\"type\":{\"type\":\"map\",\"values\":\"string\"},\"default\":{}}]}");
++  public static final org.apache.avro.Schema SCHEMA$ = new org.apache.avro.Schema.Parser().parse("{\"type\":\"record\",\"name\":\"Metadata\",\"namespace\":\"org.apache.gora.examples.generated\",\"fields\":[{\"name\":\"version\",\"type\":\"int\",\"default\":0},{\"name\":\"data\",\"type\":{\"type\":\"map\",\"values\":\"string\"},\"default\":null}]}");
+ 
+   /** Enum containing all data bean's fields. */
+   public static enum Field {
+diff --git a/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java b/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java
+index b43a08d6d..dd74df6e8 100644
+--- a/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java
++++ b/gora-core/src/examples/java/org/apache/gora/examples/generated/WebPage.java
+@@ -1,23 +1,12 @@
+ /**
+- * Licensed to the Apache Software Foundation (ASF) under one or more
+- * contributor license agreements.  See the NOTICE file distributed with
+- * this work for additional information regarding copyright ownership.
+- * The ASF licenses this file to You under the Apache License, Version 2.0
+- * (the "License"); you may not use this file except in compliance with
+- * the License.  You may obtain a copy of the License at
++ * Autogenerated by Avro
+  * 
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * DO NOT EDIT DIRECTLY
+  */
+ package org.apache.gora.examples.generated;  
+ @SuppressWarnings("all")
+ public class WebPage extends org.apache.gora.persistency.impl.PersistentBase implements org.apache.avro.specific.SpecificRecord, org.apache.gora.persistency.Persistent {
+-  public static final org.apache.avro.Schema SCHEMA$ = new org.apache.avro.Schema.Parser().parse("{\"type\":\"record\",\"name\":\"WebPage\",\"namespace\":\"org.apache.gora.examples.generated\",\"fields\":[{\"name\":\"url\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"content\",\"type\":[\"null\",\"bytes\"],\"default\":null},{\"name\":\"parsedContent\",\"type\":{\"type\":\"array\",\"items\":\"string\"},\"default\":{}},{\"name\":\"outlinks\",\"type\":{\"type\":\"map\",\"values\":[\"null\",\"string\"]},\"default\":{}},{\"name\":\"headers\",\"type\":[\"null\",{\"type\":\"map\",\"values\":[\"null\",\"string\"]}],\"default\":null},{\"name\":\"metadata\",\"type\":{\"type\":\"record\",\"name\":\"Metadata\",\"fields\":[{\"name\":\"version\",\"type\":\"int\",\"default\":0},{\"name\":\"data\",\"type\":{\"type\":\"map\",\"values\":\"string\"},\"default\":{}}]},\"default\":null}]}");
++  public static final org.apache.avro.Schema SCHEMA$ = new org.apache.avro.Schema.Parser().parse("{\"type\":\"record\",\"name\":\"WebPage\",\"namespace\":\"org.apache.gora.examples.generated\",\"fields\":[{\"name\":\"url\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"content\",\"type\":[\"null\",\"bytes\"],\"default\":null},{\"name\":\"parsedContent\",\"type\":{\"type\":\"array\",\"items\":\"string\"},\"default\":null},{\"name\":\"outlinks\",\"type\":{\"type\":\"map\",\"values\":\"string\"},\"default\":{}},{\"name\":\"headers\",\"type\":[\"null\",{\"type\":\"map\",\"values\":[\"null\",\"string\"]}],\"default\":null},{\"name\":\"metadata\",\"type\":{\"type\":\"record\",\"name\":\"Metadata\",\"fields\":[{\"name\":\"version\",\"type\":\"int\",\"default\":0},{\"name\":\"data\",\"type\":{\"type\":\"map\",\"values\":\"string\"},\"default\":null}]},\"default\":null},{\"name\":\"byteData\",\"type\":{\"type\":\"map\",\"values\":\"bytes\"},\"default\":{}},{\"name\":\"stringData\",\"type\":{\"type\":\"map\",\"values\":\"string\"},\"default\":{}}],\"default\":null}");
+ 
+   /** Enum containing all data bean's fields. */
+   public static enum Field {
+@@ -27,6 +16,8 @@ public static enum Field {
+     OUTLINKS(3, "outlinks"),
+     HEADERS(4, "headers"),
+     METADATA(5, "metadata"),
++    BYTE_DATA(6, "byteData"),
++    STRING_DATA(7, "stringData"),
+     ;
+     /**
+      * Field's index.
+@@ -71,6 +62,8 @@ public static enum Field {
+   "outlinks",
+   "headers",
+   "metadata",
++  "byteData",
++  "stringData",
+   };
+ 
+   /**
+@@ -87,6 +80,8 @@ public int getFieldsCount() {
+   private java.util.Map<java.lang.CharSequence,java.lang.CharSequence> outlinks;
+   private java.util.Map<java.lang.CharSequence,java.lang.CharSequence> headers;
+   private org.apache.gora.examples.generated.Metadata metadata;
++  private java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> byteData;
++  private java.util.Map<java.lang.CharSequence,java.lang.CharSequence> stringData;
+   public org.apache.avro.Schema getSchema() { return SCHEMA$; }
+   // Used by DatumWriter.  Applications should not call. 
+   public java.lang.Object get(int field$) {
+@@ -97,6 +92,8 @@ public java.lang.Object get(int field$) {
+     case 3: return outlinks;
+     case 4: return headers;
+     case 5: return metadata;
++    case 6: return byteData;
++    case 7: return stringData;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+@@ -111,6 +108,8 @@ public void put(int field$, java.lang.Object value) {
+     case 3: outlinks = (java.util.Map<java.lang.CharSequence,java.lang.CharSequence>)((value instanceof org.apache.gora.persistency.Dirtyable) ? value : new org.apache.gora.persistency.impl.DirtyMapWrapper((java.util.Map)value)); break;
+     case 4: headers = (java.util.Map<java.lang.CharSequence,java.lang.CharSequence>)(value); break;
+     case 5: metadata = (org.apache.gora.examples.generated.Metadata)(value); break;
++    case 6: byteData = (java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer>)((value instanceof org.apache.gora.persistency.Dirtyable) ? value : new org.apache.gora.persistency.impl.DirtyMapWrapper((java.util.Map)value)); break;
++    case 7: stringData = (java.util.Map<java.lang.CharSequence,java.lang.CharSequence>)((value instanceof org.apache.gora.persistency.Dirtyable) ? value : new org.apache.gora.persistency.impl.DirtyMapWrapper((java.util.Map)value)); break;
+     default: throw new org.apache.avro.AvroRuntimeException("Bad index");
+     }
+   }
+@@ -259,6 +258,54 @@ public boolean isMetadataDirty() {
+     return isDirty(5);
+   }
+ 
++  /**
++   * Gets the value of the 'byteData' field.
++   */
++  public java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> getByteData() {
++    return byteData;
++  }
++
++  /**
++   * Sets the value of the 'byteData' field.
++   * @param value the value to set.
++   */
++  public void setByteData(java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> value) {
++    this.byteData = (value instanceof org.apache.gora.persistency.Dirtyable) ? value : new org.apache.gora.persistency.impl.DirtyMapWrapper(value);
++    setDirty(6);
++  }
++  
++  /**
++   * Checks the dirty status of the 'byteData' field. A field is dirty if it represents a change that has not yet been written to the database.
++   * @param value the value to set.
++   */
++  public boolean isByteDataDirty() {
++    return isDirty(6);
++  }
++
++  /**
++   * Gets the value of the 'stringData' field.
++   */
++  public java.util.Map<java.lang.CharSequence,java.lang.CharSequence> getStringData() {
++    return stringData;
++  }
++
++  /**
++   * Sets the value of the 'stringData' field.
++   * @param value the value to set.
++   */
++  public void setStringData(java.util.Map<java.lang.CharSequence,java.lang.CharSequence> value) {
++    this.stringData = (value instanceof org.apache.gora.persistency.Dirtyable) ? value : new org.apache.gora.persistency.impl.DirtyMapWrapper(value);
++    setDirty(7);
++  }
++  
++  /**
++   * Checks the dirty status of the 'stringData' field. A field is dirty if it represents a change that has not yet been written to the database.
++   * @param value the value to set.
++   */
++  public boolean isStringDataDirty() {
++    return isDirty(7);
++  }
++
+   /** Creates a new WebPage RecordBuilder */
+   public static org.apache.gora.examples.generated.WebPage.Builder newBuilder() {
+     return new org.apache.gora.examples.generated.WebPage.Builder();
+@@ -309,6 +356,8 @@ public static class Builder extends org.apache.avro.specific.SpecificRecordBuild
+     private java.util.Map<java.lang.CharSequence,java.lang.CharSequence> outlinks;
+     private java.util.Map<java.lang.CharSequence,java.lang.CharSequence> headers;
+     private org.apache.gora.examples.generated.Metadata metadata;
++    private java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> byteData;
++    private java.util.Map<java.lang.CharSequence,java.lang.CharSequence> stringData;
+ 
+     /** Creates a new Builder */
+     private Builder() {
+@@ -347,6 +396,14 @@ private Builder(org.apache.gora.examples.generated.WebPage other) {
+         this.metadata = (org.apache.gora.examples.generated.Metadata) data().deepCopy(fields()[5].schema(), other.metadata);
+         fieldSetFlags()[5] = true;
+       }
++      if (isValidValue(fields()[6], other.byteData)) {
++        this.byteData = (java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer>) data().deepCopy(fields()[6].schema(), other.byteData);
++        fieldSetFlags()[6] = true;
++      }
++      if (isValidValue(fields()[7], other.stringData)) {
++        this.stringData = (java.util.Map<java.lang.CharSequence,java.lang.CharSequence>) data().deepCopy(fields()[7].schema(), other.stringData);
++        fieldSetFlags()[7] = true;
++      }
+     }
+ 
+     /** Gets the value of the 'url' field */
+@@ -499,6 +556,56 @@ public org.apache.gora.examples.generated.WebPage.Builder clearMetadata() {
+       return this;
+     }
+     
++    /** Gets the value of the 'byteData' field */
++    public java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> getByteData() {
++      return byteData;
++    }
++    
++    /** Sets the value of the 'byteData' field */
++    public org.apache.gora.examples.generated.WebPage.Builder setByteData(java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> value) {
++      validate(fields()[6], value);
++      this.byteData = value;
++      fieldSetFlags()[6] = true;
++      return this; 
++    }
++    
++    /** Checks whether the 'byteData' field has been set */
++    public boolean hasByteData() {
++      return fieldSetFlags()[6];
++    }
++    
++    /** Clears the value of the 'byteData' field */
++    public org.apache.gora.examples.generated.WebPage.Builder clearByteData() {
++      byteData = null;
++      fieldSetFlags()[6] = false;
++      return this;
++    }
++    
++    /** Gets the value of the 'stringData' field */
++    public java.util.Map<java.lang.CharSequence,java.lang.CharSequence> getStringData() {
++      return stringData;
++    }
++    
++    /** Sets the value of the 'stringData' field */
++    public org.apache.gora.examples.generated.WebPage.Builder setStringData(java.util.Map<java.lang.CharSequence,java.lang.CharSequence> value) {
++      validate(fields()[7], value);
++      this.stringData = value;
++      fieldSetFlags()[7] = true;
++      return this; 
++    }
++    
++    /** Checks whether the 'stringData' field has been set */
++    public boolean hasStringData() {
++      return fieldSetFlags()[7];
++    }
++    
++    /** Clears the value of the 'stringData' field */
++    public org.apache.gora.examples.generated.WebPage.Builder clearStringData() {
++      stringData = null;
++      fieldSetFlags()[7] = false;
++      return this;
++    }
++    
+     @Override
+     public WebPage build() {
+       try {
+@@ -509,6 +616,8 @@ public WebPage build() {
+         record.outlinks = fieldSetFlags()[3] ? this.outlinks : (java.util.Map<java.lang.CharSequence,java.lang.CharSequence>) new org.apache.gora.persistency.impl.DirtyMapWrapper((java.util.Map)defaultValue(fields()[3]));
+         record.headers = fieldSetFlags()[4] ? this.headers : (java.util.Map<java.lang.CharSequence,java.lang.CharSequence>) defaultValue(fields()[4]);
+         record.metadata = fieldSetFlags()[5] ? this.metadata : (org.apache.gora.examples.generated.Metadata) Metadata.newBuilder().build();
++        record.byteData = fieldSetFlags()[6] ? this.byteData : (java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer>) new org.apache.gora.persistency.impl.DirtyMapWrapper((java.util.Map)defaultValue(fields()[6]));
++        record.stringData = fieldSetFlags()[7] ? this.stringData : (java.util.Map<java.lang.CharSequence,java.lang.CharSequence>) new org.apache.gora.persistency.impl.DirtyMapWrapper((java.util.Map)defaultValue(fields()[7]));
+         return record;
+       } catch (Exception e) {
+         throw new org.apache.avro.AvroRuntimeException(e);
+@@ -668,6 +777,52 @@ public boolean isMetadataDirty() {
+ 	    throw new java.lang.UnsupportedOperationException("IsDirty is not supported on tombstones");
+ 	  }
+ 	
++				  /**
++	   * Gets the value of the 'byteData' field.
++		   */
++	  public java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> getByteData() {
++	    throw new java.lang.UnsupportedOperationException("Get is not supported on tombstones");
++	  }
++	
++	  /**
++	   * Sets the value of the 'byteData' field.
++		   * @param value the value to set.
++	   */
++	  public void setByteData(java.util.Map<java.lang.CharSequence,java.nio.ByteBuffer> value) {
++	    throw new java.lang.UnsupportedOperationException("Set is not supported on tombstones");
++	  }
++	  
++	  /**
++	   * Checks the dirty status of the 'byteData' field. A field is dirty if it represents a change that has not yet been written to the database.
++		   * @param value the value to set.
++	   */
++	  public boolean isByteDataDirty() {
++	    throw new java.lang.UnsupportedOperationException("IsDirty is not supported on tombstones");
++	  }
++	
++				  /**
++	   * Gets the value of the 'stringData' field.
++		   */
++	  public java.util.Map<java.lang.CharSequence,java.lang.CharSequence> getStringData() {
++	    throw new java.lang.UnsupportedOperationException("Get is not supported on tombstones");
++	  }
++	
++	  /**
++	   * Sets the value of the 'stringData' field.
++		   * @param value the value to set.
++	   */
++	  public void setStringData(java.util.Map<java.lang.CharSequence,java.lang.CharSequence> value) {
++	    throw new java.lang.UnsupportedOperationException("Set is not supported on tombstones");
++	  }
++	  
++	  /**
++	   * Checks the dirty status of the 'stringData' field. A field is dirty if it represents a change that has not yet been written to the database.
++		   * @param value the value to set.
++	   */
++	  public boolean isStringDataDirty() {
++	    throw new java.lang.UnsupportedOperationException("IsDirty is not supported on tombstones");
++	  }
++	
+ 		  
+   }
+   
+diff --git a/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java b/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java
+index 0c56d8e1f..87eea719f 100644
+--- a/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java
++++ b/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java
+@@ -69,7 +69,7 @@ protected DataStore<String, Employee> createEmployeeDataStore() throws IOExcepti
+   @SuppressWarnings("unchecked")
+   @Override
+   protected DataStore<String, WebPage> createWebPageDataStore() throws IOException {
+-    return DataStoreFactory.getDataStore(MemStore.class, String.class, Employee.class, conf);
++    return DataStoreFactory.getDataStore(MemStore.class, String.class, WebPage.class, conf);
+   }
+ 
+   @Test
+diff --git a/gora-core/src/test/java/org/apache/gora/store/DataStoreTestBase.java b/gora-core/src/test/java/org/apache/gora/store/DataStoreTestBase.java
+index dc06e39c1..adca9632f 100644
+--- a/gora-core/src/test/java/org/apache/gora/store/DataStoreTestBase.java
++++ b/gora-core/src/test/java/org/apache/gora/store/DataStoreTestBase.java
+@@ -205,6 +205,12 @@ public void testPutMap() throws Exception {
+ 
+   public void assertPutMap() throws IOException {
+   }
++  
++  @Test
++  public void testPutMixedMaps() throws Exception {
++	  log.info("Testing put of map objects with different union data types");
++	  DataStoreTestUtil.testPutMixedMapTypes(webPageStore);
++  }
+ 
+   @Test
+   public void testUpdate() throws Exception {
+diff --git a/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java b/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java
+index bbd77ed7f..551b90a56 100644
+--- a/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java
++++ b/gora-core/src/test/java/org/apache/gora/store/DataStoreTestUtil.java
+@@ -109,6 +109,7 @@ private static <K> WebPage createWebPage() {
+     webpage.setParsedContent(new ArrayList<CharSequence>());
+     Metadata metadata = Metadata.newBuilder().build();
+     webpage.setMetadata(metadata);
++    
+     return webpage;
+   }
+ 
+@@ -1101,8 +1102,7 @@ public static void testDeleteByQueryFields(DataStore<String, WebPage> store)
+     }
+ 
+   }
+-
+-
++  
+   public static void testPutNested(DataStore<String, WebPage> store)
+           throws Exception {
+     String revUrl = "foo.com:http/";
+@@ -1173,6 +1173,16 @@ public static void testPutMap(DataStore<String, WebPage> store)
+     store.put("com.example/http", page);
+     store.close();
+   }
++  
++  public static void testPutMixedMapTypes(DataStore<String, WebPage> store) {
++    WebPage webpage = createWebPage();
++    webpage.getByteData().put(new Utf8("byteData"), ByteBuffer.wrap(ByteUtils.toBytes("hello map")));
++    webpage.getStringData().put(new Utf8("stringData"), "hello map");
++    store.createSchema();
++    store.put(webpage.getUrl().toString(), webpage);
++    store.flush();
++    assertNotNull(store.get(webpage.getUrl().toString()));
++  }
+ 
+   private static byte[] toByteArray(ByteBuffer buffer) {
+     int p = buffer.position();
+diff --git a/gora-hbase/src/test/conf/gora-hbase-mapping.xml b/gora-hbase/src/test/conf/gora-hbase-mapping.xml
+index b313cecf9..af3adb169 100644
+--- a/gora-hbase/src/test/conf/gora-hbase-mapping.xml
++++ b/gora-hbase/src/test/conf/gora-hbase-mapping.xml
+@@ -46,6 +46,8 @@
+     <field name="outlinks" family="outlinks"/>
+     <field name="headers" family="headers"/>
+     <field name="metadata" family="common" qualifier="metadata"/>
++    <field name="byteData" family="byteData" qualifier="byteData"/>
++    <field name="stringData" family="stringData" qualifier="stringData"/>
+   </class>
+ 
+ 
+diff --git a/gora-infinispan/pom.xml b/gora-infinispan/pom.xml
+index 3e312d17d..a8307a3a6 100644
+--- a/gora-infinispan/pom.xml
++++ b/gora-infinispan/pom.xml
+@@ -30,11 +30,11 @@
+   <name>Apache Gora :: Infinispan</name>
+   <url>http://gora.apache.org</url>
+   <description>
+-        The Apache Gora open source framework provides an in-memory data model and
+-        persistence for big data. Gora supports persisting to column stores, key value stores,
+-        document stores and RDBMSs, and analyzing the data with extensive Apache Hadoop MapReduce
+-        support. This module provides a Gora support for the Infinispan storage system.
+-    </description>
++    The Apache Gora open source framework provides an in-memory data model and
++    persistence for big data. Gora supports persisting to column stores, key value stores,
++    document stores and RDBMSs, and analyzing the data with extensive Apache Hadoop MapReduce
++    support. This module provides a Gora support for the Infinispan storage system.
++  </description>
+   <inceptionYear>2015</inceptionYear>
+ 
+   <properties>
+@@ -83,6 +83,9 @@
+       <plugin>
+         <groupId>org.apache.maven.plugins</groupId>
+         <artifactId>maven-surefire-plugin</artifactId>
++        <configuration>
++          <argLine>-Xmx512m -XX:MaxPermSize=256m</argLine>
++        </configuration>
+       </plugin>
+       <plugin>
+         <groupId>org.apache.maven.plugins</groupId>
+diff --git a/gora-mongodb/src/test/conf/gora-mongodb-mapping.xml b/gora-mongodb/src/test/conf/gora-mongodb-mapping.xml
+index b977f2d77..8bbe285fd 100644
+--- a/gora-mongodb/src/test/conf/gora-mongodb-mapping.xml
++++ b/gora-mongodb/src/test/conf/gora-mongodb-mapping.xml
+@@ -33,6 +33,8 @@
+         <field name="outlinks" docfield="links.out" type="document"/>
+         <field name="headers" docfield="headers" type="document"/>
+         <field name="metadata" docfield="metadata" type="document"/>
++        <field name="byteData" docfield="byteData" type="document"/>
++        <field name="stringData" docfield="stringData" type="document"/>
+     </class>
+ 
+     <class name="org.apache.gora.examples.generated.TokenDatum" keyClass="java.lang.String" document="TokenDatum">
+diff --git a/gora-solr/src/main/java/org/apache/gora/solr/store/SolrStore.java b/gora-solr/src/main/java/org/apache/gora/solr/store/SolrStore.java
+index a724dd671..350baeff1 100644
+--- a/gora-solr/src/main/java/org/apache/gora/solr/store/SolrStore.java
++++ b/gora-solr/src/main/java/org/apache/gora/solr/store/SolrStore.java
+@@ -174,9 +174,9 @@ public class SolrStore<K, T extends PersistentBase> extends DataStoreBase<K, T>
+    * pair for every schema, instead of one for every thread.
+    */
+ 
+-  public static final ConcurrentHashMap<String, SpecificDatumReader<?>> readerMap = new ConcurrentHashMap<>();
++  public static final ConcurrentHashMap<Schema, SpecificDatumReader<?>> readerMap = new ConcurrentHashMap<>();
+ 
+-  public static final ConcurrentHashMap<String, SpecificDatumWriter<?>> writerMap = new ConcurrentHashMap<>();
++  public static final ConcurrentHashMap<Schema, SpecificDatumWriter<?>> writerMap = new ConcurrentHashMap<>();
+ 
+   @Override
+   public void initialize(Class<K> keyClass, Class<T> persistentClass,
+@@ -487,12 +487,12 @@ public T newInstance(SolrDocument doc, String[] fields) throws IOException {
+   }
+ 
+   @SuppressWarnings("rawtypes")
+-  private SpecificDatumReader getDatumReader(String schemaId, Schema fieldSchema) {
+-    SpecificDatumReader<?> reader = readerMap.get(schemaId);
++  private SpecificDatumReader getDatumReader(Schema fieldSchema) {
++    SpecificDatumReader<?> reader = readerMap.get(fieldSchema);
+     if (reader == null) {
+       reader = new SpecificDatumReader(fieldSchema);// ignore dirty bits
+       SpecificDatumReader localReader = null;
+-      if ((localReader = readerMap.putIfAbsent(schemaId, reader)) != null) {
++      if ((localReader = readerMap.putIfAbsent(fieldSchema, reader)) != null) {
+         reader = localReader;
+       }
+     }
+@@ -500,11 +500,11 @@ private SpecificDatumReader getDatumReader(String schemaId, Schema fieldSchema)
+   }
+ 
+   @SuppressWarnings("rawtypes")
+-  private SpecificDatumWriter getDatumWriter(String schemaId, Schema fieldSchema) {
+-    SpecificDatumWriter writer = writerMap.get(schemaId);
++  private SpecificDatumWriter getDatumWriter(Schema fieldSchema) {
++    SpecificDatumWriter writer = writerMap.get(fieldSchema);
+     if (writer == null) {
+       writer = new SpecificDatumWriter(fieldSchema);// ignore dirty bits
+-      writerMap.put(schemaId, writer);
++      writerMap.put(fieldSchema, writer);
+     }
+ 
+     return writer;
+@@ -519,8 +519,7 @@ private Object deserializeFieldValue(Field field, Schema fieldSchema,
+     case ARRAY:
+     case RECORD:
+       @SuppressWarnings("rawtypes")
+-      SpecificDatumReader reader = getDatumReader(fieldSchema.getFullName(),
+-          fieldSchema);
++      SpecificDatumReader reader = getDatumReader(fieldSchema);
+       fieldValue = IOUtils.deserialize((byte[]) solrValue, reader,
+           persistent.get(field.pos()));
+       break;
+@@ -556,8 +555,7 @@ private Object deserializeFieldValue(Field field, Schema fieldSchema,
+             persistent);
+       } else {
+         @SuppressWarnings("rawtypes")
+-        SpecificDatumReader unionReader = getDatumReader(
+-            String.valueOf(fieldSchema.hashCode()), fieldSchema);
++        SpecificDatumReader unionReader = getDatumReader(fieldSchema);
+         fieldValue = IOUtils.deserialize((byte[]) solrValue, unionReader,
+             persistent.get(field.pos()));
+         break;
+@@ -618,8 +616,7 @@ private Object serializeFieldValue(Schema fieldSchema, Object fieldValue) {
+       byte[] data = null;
+       try {
+         @SuppressWarnings("rawtypes")
+-        SpecificDatumWriter writer = getDatumWriter(fieldSchema.getFullName(),
+-            fieldSchema);
++        SpecificDatumWriter writer = getDatumWriter(fieldSchema);
+         data = IOUtils.serialize(writer, fieldValue);
+       } catch (IOException e) {
+         LOG.error(e.getMessage(), e);
+@@ -644,8 +641,7 @@ private Object serializeFieldValue(Schema fieldSchema, Object fieldValue) {
+         byte[] serilazeData = null;
+         try {
+           @SuppressWarnings("rawtypes")
+-          SpecificDatumWriter writer = getDatumWriter(
+-              String.valueOf(fieldSchema.hashCode()), fieldSchema);
++          SpecificDatumWriter writer = getDatumWriter(fieldSchema);
+           serilazeData = IOUtils.serialize(writer, fieldValue);
+         } catch (IOException e) {
+           LOG.error(e.getMessage(), e);
+diff --git a/gora-solr/src/test/conf/gora-solr-mapping.xml b/gora-solr/src/test/conf/gora-solr-mapping.xml
+index c86098929..78ca39bb5 100644
+--- a/gora-solr/src/test/conf/gora-solr-mapping.xml
++++ b/gora-solr/src/test/conf/gora-solr-mapping.xml
+@@ -33,6 +33,8 @@
+     <field name="outlinks" column="outlinks"/>
+     <field name="headers" column="headers"/>     
+     <field name="metadata" column="metadata"/>
++    <field name="byteData" column="byteData"/>
++    <field name="stringData" column="stringData"/>
+   </class>
+ </gora-otd>
+ 
+diff --git a/gora-solr/src/test/conf/solr/WebPage/conf/schema.xml b/gora-solr/src/test/conf/solr/WebPage/conf/schema.xml
+index fe36abbcd..55765a31f 100644
+--- a/gora-solr/src/test/conf/solr/WebPage/conf/schema.xml
++++ b/gora-solr/src/test/conf/solr/WebPage/conf/schema.xml
+@@ -30,6 +30,8 @@
+     <field name="outlinks"      type="binary" stored="true" /> 
+     <field name="headers"       type="binary" stored="true" />     
+     <field name="metadata"      type="binary" stored="true" />
++    <field name="byteData"      type="binary" stored="true" />
++    <field name="stringData"    type="binary" stored="true" />
+ 
+   </fields>
+ 
+diff --git a/gora-tutorial/src/main/java/org/apache/gora/tutorial/log/generated/MetricDatum.java b/gora-tutorial/src/main/java/org/apache/gora/tutorial/log/generated/MetricDatum.java
+index 297100e42..d99303369 100644
+--- a/gora-tutorial/src/main/java/org/apache/gora/tutorial/log/generated/MetricDatum.java
++++ b/gora-tutorial/src/main/java/org/apache/gora/tutorial/log/generated/MetricDatum.java
+@@ -4,7 +4,6 @@
+  * DO NOT EDIT DIRECTLY
+  */
+ package org.apache.gora.tutorial.log.generated;  
+-@SuppressWarnings("all")
+ public class MetricDatum extends org.apache.gora.persistency.impl.PersistentBase implements org.apache.avro.specific.SpecificRecord, org.apache.gora.persistency.Persistent {
+   public static final org.apache.avro.Schema SCHEMA$ = new org.apache.avro.Schema.Parser().parse("{\"type\":\"record\",\"name\":\"MetricDatum\",\"namespace\":\"org.apache.gora.tutorial.log.generated\",\"fields\":[{\"name\":\"metricDimension\",\"type\":[\"null\",\"string\"],\"default\":null},{\"name\":\"timestamp\",\"type\":\"long\",\"default\":0},{\"name\":\"metric\",\"type\":\"long\",\"default\":0}],\"default\":null}");
+ 

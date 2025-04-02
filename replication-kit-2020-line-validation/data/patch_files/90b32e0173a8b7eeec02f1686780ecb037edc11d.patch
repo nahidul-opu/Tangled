@@ -1,0 +1,419 @@
+From 90b32e0173a8b7eeec02f1686780ecb037edc11d Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 5 Apr 2006 17:00:32 +0000
+Subject: [PATCH] IMPROVE: Log messages do not display most specfic resolver
+ name (IVY-170) + FIX: problem with cache and returnFirst (IVY-207)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484272 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../jayasoft/ivy/DefaultModuleRevision.java   |  8 ++-
+ src/java/fr/jayasoft/ivy/Ivy.java             | 27 ++++++++-
+ src/java/fr/jayasoft/ivy/IvyNode.java         |  3 +-
+ .../jayasoft/ivy/ResolvedModuleRevision.java  |  9 +++
+ .../ivy/namespace/NameSpaceHelper.java        |  2 +-
+ .../ivy/report/XmlReportOutputter.java        |  3 +-
+ .../ivy/resolver/AbstractResolver.java        | 14 ++++-
+ .../ivy/resolver/AbstractURLResolver.java     |  2 +-
+ .../jayasoft/ivy/resolver/BasicResolver.java  |  7 ++-
+ .../jayasoft/ivy/resolver/ChainResolver.java  |  6 +-
+ .../resolver/ResolvedModuleRevisionProxy.java | 16 ++++--
+ .../ivy/resolver/ChainResolverTest.java       | 55 ++++++++++++++++++-
+ .../ivy/resolver/DualResolverTest.java        |  2 +-
+ .../jayasoft/ivy/resolver/MockResolver.java   |  4 ++
+ 15 files changed, 140 insertions(+), 20 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2178cc2f3..1c343be01 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -5,7 +5,9 @@
+ 
+ - IMPROVE: performances improved (IVY-187) (thanks to Karl Baum)
+ - IMPROVE: Change default cache artifact pattern to handle missing extension (IVY-196) (thanks to Johan Stuyts)
++- IMPROVE: Log messages do not display most specfic resolver name (IVY-170)
+ 
++- FIX: problem with cache and returnFirst (IVY-207)
+ - FIX: modules splitted across a chain are not handled correctly (IVY-206)
+ - FIX: Delivered Ivy files with incomplete last line. (IVY-125) (thanks to Matthias Kilian)
+ 
+diff --git a/src/java/fr/jayasoft/ivy/DefaultModuleRevision.java b/src/java/fr/jayasoft/ivy/DefaultModuleRevision.java
+index 05fccdcc4..8d9ddb3f1 100644
+--- a/src/java/fr/jayasoft/ivy/DefaultModuleRevision.java
++++ b/src/java/fr/jayasoft/ivy/DefaultModuleRevision.java
+@@ -14,12 +14,14 @@
+  */
+ public class DefaultModuleRevision implements ResolvedModuleRevision {
+     private DependencyResolver _resolver;
++    private DependencyResolver _artifactResolver;
+     private ModuleDescriptor _descriptor;
+     private boolean _isDownloaded;
+     private boolean _isSearched;
+     
+-    public DefaultModuleRevision(DependencyResolver resolver, ModuleDescriptor descriptor, boolean searched, boolean downloaded) {
++    public DefaultModuleRevision(DependencyResolver resolver, DependencyResolver artifactResolver, ModuleDescriptor descriptor, boolean searched, boolean downloaded) {
+         _resolver = resolver;
++        _artifactResolver = artifactResolver;
+         _descriptor = descriptor;
+         _isSearched = searched;
+         _isDownloaded = downloaded;
+@@ -28,6 +30,10 @@ public DefaultModuleRevision(DependencyResolver resolver, ModuleDescriptor descr
+     public DependencyResolver getResolver() {
+         return _resolver;
+     }
++    
++    public DependencyResolver getArtifactResolver() {
++        return _artifactResolver;
++    }
+ 
+     public ModuleDescriptor getDescriptor() {
+         return _descriptor;
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index 20cc7d113..57dadb2e6 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -817,7 +817,7 @@ private void downloadArtifacts(IvyNode[] dependencies, Filter artifactFilter, Re
+         for (int i = 0; i < dependencies.length; i++) {
+             //download artifacts required in all asked configurations
+             if (!dependencies[i].isCompletelyEvicted() && !dependencies[i].hasProblem()) {
+-                DependencyResolver resolver = dependencies[i].getModuleRevision().getResolver();
++                DependencyResolver resolver = dependencies[i].getModuleRevision().getArtifactResolver();
+                 Artifact[] selectedArtifacts = dependencies[i].getSelectedArtifacts(artifactFilter);
+                 DownloadReport dReport = resolver.download(selectedArtifacts, this, cache);
+                 ArtifactDownloadReport[] adrs = dReport.getArtifactsReports();
+@@ -1318,6 +1318,7 @@ public ResolvedModuleRevision findModuleInCache(ModuleRevisionId mrid, File cach
+                 try {
+                     ModuleDescriptor depMD = XmlModuleDescriptorParser.getInstance().parseDescriptor(this, ivyFile.toURL(), validate);
+                     String resolverName = getSavedResolverName(cache, depMD);
++                    String artResolverName = getSavedArtResolverName(cache, depMD);
+                     DependencyResolver resolver = (DependencyResolver)_resolversMap.get(resolverName);
+                     if (resolver == null) {
+                         Message.debug("\tresolver not found: "+resolverName+" => trying to use the one configured for "+mrid);                                    
+@@ -1327,9 +1328,13 @@ public ResolvedModuleRevision findModuleInCache(ModuleRevisionId mrid, File cach
+                             saveResolver(cache, depMD, resolver.getName());
+                         }
+                     }
++                    DependencyResolver artResolver = (DependencyResolver)_resolversMap.get(artResolverName);
++                    if (artResolver == null) {
++                        artResolver = resolver;
++                    }
+                     if (resolver != null) {
+                         Message.debug("\tfound ivy file in cache for "+mrid+" (resolved by "+resolver.getName()+"): "+ivyFile);
+-                        return new DefaultModuleRevision(resolver, depMD, false, false);
++                        return new DefaultModuleRevision(resolver, artResolver, depMD, false, false);
+                     } else {
+                         Message.debug("\tresolver not found: "+resolverName+" => cannot use cached ivy file for "+mrid);                                    
+                     }
+@@ -2204,11 +2209,29 @@ public void saveResolver(File cache, ModuleDescriptor md, String name) {
+         cdf.save();
+     }
+ 
++    /**
++     * Saves the information of which resolver was used to resolve a md,
++     * so that this info can be retrieve later (even after a jvm restart)
++     * by getSavedArtResolverName(ModuleDescriptor md)
++     * @param md the module descriptor resolved
++     * @param name artifact resolver name
++     */
++    public void saveArtResolver(File cache, ModuleDescriptor md, String name) {
++        PropertiesFile cdf = getCachedDataFile(cache, md);
++        cdf.setProperty("artifact.resolver", name);
++        cdf.save();
++    }
++
+     private String getSavedResolverName(File cache, ModuleDescriptor md) {
+         PropertiesFile cdf = getCachedDataFile(cache, md);
+         return cdf.getProperty("resolver");
+     }
+ 
++    private String getSavedArtResolverName(File cache, ModuleDescriptor md) {
++        PropertiesFile cdf = getCachedDataFile(cache, md);
++        return cdf.getProperty("artifact.resolver");
++    }
++
+     private PropertiesFile getCachedDataFile(File cache, ModuleDescriptor md) {
+         return new PropertiesFile(new File(cache, IvyPatternHelper.substitute(getCacheDataFilePattern(), md.getResolvedModuleRevisionId())), "ivy cached data file for "+md.getResolvedModuleRevisionId());
+     }
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 6ff09c736..db56fdbba 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -590,7 +590,8 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+                     Message.debug("\tusing "+resolver+" to resolve "+getId());
+                     _module = resolver.getDependency(getDependencyDescriptor(getParent()), _data);
+                     if (_module != null) {
+-                        _data.getIvy().saveResolver(_data.getCache(), _module.getDescriptor(), resolver.getName());
++                        _data.getIvy().saveResolver(_data.getCache(), _module.getDescriptor(), _module.getResolver().getName());
++                        _data.getIvy().saveArtResolver(_data.getCache(), _module.getDescriptor(), _module.getArtifactResolver().getName());
+                         if (_data.getIvy().logModuleWhenFound()) {
+                             Message.info("\tfound "+_module.getId()+" in "+_module.getResolver().getName());
+                         } else {
+diff --git a/src/java/fr/jayasoft/ivy/ResolvedModuleRevision.java b/src/java/fr/jayasoft/ivy/ResolvedModuleRevision.java
+index 5b6c0954b..b3c477283 100644
+--- a/src/java/fr/jayasoft/ivy/ResolvedModuleRevision.java
++++ b/src/java/fr/jayasoft/ivy/ResolvedModuleRevision.java
+@@ -12,7 +12,16 @@
+  *
+  */
+ public interface ResolvedModuleRevision {
++    /**
++     * The resolver which resolved this ResolvedModuleRevision
++     * @return The resolver which resolved this ResolvedModuleRevision
++     */
+     DependencyResolver getResolver();
++    /**
++     * The resolver to use to download artifacts
++     * @return The resolver to use to download artifacts
++     */
++    DependencyResolver getArtifactResolver();
+     ModuleRevisionId getId();
+     Date getPublicationDate();
+     ModuleDescriptor getDescriptor();
+diff --git a/src/java/fr/jayasoft/ivy/namespace/NameSpaceHelper.java b/src/java/fr/jayasoft/ivy/namespace/NameSpaceHelper.java
+index 5174c522d..a725aec4d 100644
+--- a/src/java/fr/jayasoft/ivy/namespace/NameSpaceHelper.java
++++ b/src/java/fr/jayasoft/ivy/namespace/NameSpaceHelper.java
+@@ -40,7 +40,7 @@ public static ResolvedModuleRevision toSystem(ResolvedModuleRevision rmr, Namesp
+         if (md.equals(rmr.getDescriptor())) {
+             return rmr;
+         }
+-        return new DefaultModuleRevision(rmr.getResolver(), md, rmr.isSearched(), rmr.isDownloaded());
++        return new DefaultModuleRevision(rmr.getResolver(), rmr.getArtifactResolver(), md, rmr.isSearched(), rmr.isDownloaded());
+     }
+ 
+     public static Artifact transform(Artifact artifact, NamespaceTransformer t) {
+diff --git a/src/java/fr/jayasoft/ivy/report/XmlReportOutputter.java b/src/java/fr/jayasoft/ivy/report/XmlReportOutputter.java
+index 6b3a8c0ea..877871e19 100644
+--- a/src/java/fr/jayasoft/ivy/report/XmlReportOutputter.java
++++ b/src/java/fr/jayasoft/ivy/report/XmlReportOutputter.java
+@@ -67,7 +67,8 @@ public void output(ConfigurationResolveReport report, File destDir) {
+                     if  (dep.isLoaded()) {
+                         details += " status=\""+dep.getDescriptor().getStatus()+"\"" +
+                             " pubdate=\""+Ivy.DATE_FORMAT.format(new Date(dep.getPublication()))+"\"" +
+-                            " resolver=\""+dep.getModuleRevision().getResolver().getName()+"\"";
++                            " resolver=\""+dep.getModuleRevision().getResolver().getName()+"\""+
++                            " artresolver=\""+dep.getModuleRevision().getArtifactResolver().getName()+"\"";
+                     }
+                     if (dep.isEvicted(report.getConfiguration())) {
+                         IvyNode.EvictionData ed = dep.getEvictedData(report.getConfiguration());
+diff --git a/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java b/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
+index 6896b07f6..6e24b3410 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
+@@ -221,7 +221,19 @@ protected IvyNode getSystemNode(ResolveData data, ModuleRevisionId resolvedMrid)
+     }
+ 
+     protected ResolvedModuleRevision findModuleInCache(ResolveData data, ModuleRevisionId mrid) {
+-        return data.getIvy().findModuleInCache(toSystem(mrid), data.getCache(), doValidate(data));
++        ResolvedModuleRevision moduleFromCache = data.getIvy().findModuleInCache(toSystem(mrid), data.getCache(), doValidate(data));
++        if (moduleFromCache == null) {
++            return null;
++        }
++        if ((getName() == null ? 
++                moduleFromCache.getResolver().getName() == null : 
++                    moduleFromCache.getResolver() == null ? false : 
++                        getName().equals(moduleFromCache.getResolver().getName()))) {
++            return moduleFromCache;
++        } else {
++            Message.debug("found module in cache but with a different resolver: discarding: "+moduleFromCache);
++            return null;
++        }
+     }
+ 
+     public String getChangingMatcherName() {
+diff --git a/src/java/fr/jayasoft/ivy/resolver/AbstractURLResolver.java b/src/java/fr/jayasoft/ivy/resolver/AbstractURLResolver.java
+index 5814fd6b9..3b0daf632 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/AbstractURLResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/AbstractURLResolver.java
+@@ -264,7 +264,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+             Message.warn("impossible to copy ivy file to cache : "+ivyURL.getURL());
+         }
+         
+-        return new DefaultModuleRevision(this, md, true, downloaded);
++        return new DefaultModuleRevision(this, this, md, true, downloaded);
+     }
+     
+     public void reportFailure() {
+diff --git a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+index c58f53d6d..b99dbadfe 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+@@ -388,7 +388,8 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+         }
+         
+         data.getIvy().saveResolver(data.getCache(), systemMd, getName());
+-        return new DefaultModuleRevision(this, systemMd, searched, downloaded);
++        data.getIvy().saveArtResolver(data.getCache(), systemMd, getName());
++        return new DefaultModuleRevision(this, this, systemMd, searched, downloaded);
+     }
+ 
+ //    private boolean isResolved(ResolveData data, ModuleRevisionId mrid) {
+@@ -446,6 +447,10 @@ public ModuleRevisionId getId() {
+         
+             public DependencyResolver getResolver() {
+                 return rmr.getResolver();
++            }
++
++            public DependencyResolver getArtifactResolver() {
++                return rmr.getArtifactResolver();
+             }                    
+         };
+     }
+diff --git a/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java b/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java
+index fbf6140d7..539222cf4 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java
+@@ -73,9 +73,9 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                 }
+             }
+             if (mr != null) {
+-                if (!_returnFirst && 
+-                        (!dd.getDependencyRevisionId().isExactRevision() 
+-                         || (ret == null || ret.getDescriptor().isDefault()))) {
++                boolean shouldReturn = _returnFirst;
++                shouldReturn |= dd.getDependencyRevisionId().isExactRevision() && ret != null && !ret.getDescriptor().isDefault();
++                if (!shouldReturn) {
+                     // check if latest is asked and compare to return the most recent
+                     String mrDesc = mr.getId()+(mr.getDescriptor().isDefault()?"[default]":"")+" from "+mr.getResolver().getName();
+                     Message.debug("\tchecking "+mrDesc+" against "+ret);
+diff --git a/src/java/fr/jayasoft/ivy/resolver/ResolvedModuleRevisionProxy.java b/src/java/fr/jayasoft/ivy/resolver/ResolvedModuleRevisionProxy.java
+index 740c758f1..15b12b456 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/ResolvedModuleRevisionProxy.java
++++ b/src/java/fr/jayasoft/ivy/resolver/ResolvedModuleRevisionProxy.java
+@@ -9,25 +9,29 @@
+ 
+ /** 
+  * the same ResolvedModuleRevision except that we say that it is another resolver
+- * which resolved the dependency, so that it's it that is used for artifact download
+- * ==> forward all except getResolver method
++ * the artifact resolver, so that it's it that is used for artifact download
++ * ==> forward all except getArtifactResolver method
+  */
+ public final class ResolvedModuleRevisionProxy implements ResolvedModuleRevision {
+     private final ResolvedModuleRevision _mr;
+     DependencyResolver _resolver;
+ 
+-    public ResolvedModuleRevisionProxy(ResolvedModuleRevision mr, DependencyResolver resolver) {
++    public ResolvedModuleRevisionProxy(ResolvedModuleRevision mr, DependencyResolver artresolver) {
+         if (mr == null) {
+             throw new NullPointerException("null module revision not allowed");
+         }
+-        if (resolver == null) {
++        if (artresolver == null) {
+             throw new NullPointerException("null resolver not allowed");
+         }
+         _mr = mr;
+-        _resolver = resolver;
++        _resolver = artresolver;
+     }
+-
++    
+     public DependencyResolver getResolver() {
++        return _mr.getResolver();
++    }
++
++    public DependencyResolver getArtifactResolver() {
+         return _resolver;
+     }
+ 
+diff --git a/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java b/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java
+index 61be6b9bf..adfb1813a 100644
+--- a/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java
++++ b/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java
+@@ -306,6 +306,58 @@ public void testReturnFirst() throws Exception {
+         }
+     }
+     
++    public void testReturnFirstWithDefaultAndCacheAndRealResolver() throws Exception {
++        // test case for IVY-207
++        
++        // 1 ---- we first do a first resolve which puts a default file in cache
++        ChainResolver chain = new ChainResolver();
++        chain.setName("chain");
++        chain.setIvy(_ivy);
++        
++        // no ivy pattern for resolver: will only find a 'default' module
++        FileSystemResolver resolver = new FileSystemResolver();
++        resolver.setName("old");
++        resolver.setIvy(_ivy);
++        
++        resolver.addArtifactPattern("test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[type]");
++        chain.add(resolver);
++                
++        _ivy.addResolver(chain);
++        
++        DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(ModuleRevisionId.newInstance("org1","mod1.1", "1.0"), false);
++        chain.getDependency(dd, _data);
++        
++        // 2 ---- now we ask to resolve dependencies with a chain in return first mode, in which the first resolver 
++        //        is not able to find the module, but the second is 
++        
++        chain = new ChainResolver();
++        chain.setName("chain");
++        chain.setIvy(_ivy);
++        chain.setReturnFirst(true);
++        
++        // no pattern for first resolver: will not find the module
++        resolver = new FileSystemResolver();
++        resolver.setName("1");
++        resolver.setIvy(_ivy);
++        
++        chain.add(resolver);
++        
++        // second resolver will find the real module, which should be kept
++        resolver = new FileSystemResolver();
++        resolver.setName("2");
++        resolver.setIvy(_ivy);
++        
++        resolver.addIvyPattern("test/repositories/1/[organisation]/[module]/ivys/ivy-[revision].xml");
++        resolver.addArtifactPattern("test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[type]");
++        chain.add(resolver);
++        
++        _ivy.addResolver(chain);
++        
++        ResolvedModuleRevision rmr = chain.getDependency(dd, _data);
++        assertNotNull(rmr);
++        assertEquals("2", rmr.getResolver().getName());
++    }
++    
+     public void testDual() throws Exception {
+         ChainResolver chain = new ChainResolver();
+         chain.setName("chain");
+@@ -325,7 +377,8 @@ public void testDual() throws Exception {
+         DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(ModuleRevisionId.newInstance("org","mod", "rev"), false);
+         ResolvedModuleRevision rmr = chain.getDependency(dd, _data);
+         assertNotNull(rmr);
+-        assertEquals("chain", rmr.getResolver().getName());
++        assertEquals("2", rmr.getResolver().getName());
++        assertEquals("chain", rmr.getArtifactResolver().getName());
+     }
+         
+ }
+diff --git a/test/java/fr/jayasoft/ivy/resolver/DualResolverTest.java b/test/java/fr/jayasoft/ivy/resolver/DualResolverTest.java
+index 351e427a6..d4dd5001f 100644
+--- a/test/java/fr/jayasoft/ivy/resolver/DualResolverTest.java
++++ b/test/java/fr/jayasoft/ivy/resolver/DualResolverTest.java
+@@ -77,7 +77,7 @@ public void testResolve() throws Exception {
+         ResolvedModuleRevision rmr = dual.getDependency(dd, _data);
+         
+         assertNotNull(rmr);
+-        assertEquals(dual, rmr.getResolver());
++        assertEquals(dual, rmr.getArtifactResolver());
+         assertEquals(Arrays.asList(new DependencyDescriptor[] {dd}), ivyResolver.askedDeps);
+         assertTrue(artifactResolver.askedDeps.isEmpty());
+     }
+diff --git a/test/java/fr/jayasoft/ivy/resolver/MockResolver.java b/test/java/fr/jayasoft/ivy/resolver/MockResolver.java
+index b719eeecd..f2cd213d6 100644
+--- a/test/java/fr/jayasoft/ivy/resolver/MockResolver.java
++++ b/test/java/fr/jayasoft/ivy/resolver/MockResolver.java
+@@ -58,6 +58,10 @@ public boolean isDownloaded() {
+                 public boolean isSearched() {
+                     return true;
+                 }
++
++                public DependencyResolver getArtifactResolver() {
++                    return r;
++                }
+             };
+         }
+         return r;

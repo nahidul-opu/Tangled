@@ -1,0 +1,109 @@
+From 5eda1d70605f3407bcae58a77f2c92266e91815c Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Thu, 10 May 2018 17:26:29 +0000
+Subject: [PATCH] CONFIGURATION-687: Creation of child builders is now lazy.
+
+Creating the child configuration builders of a combined configuration
+first breaks interpolation during evaluation of the definition
+configuration. Therefore, the builders are now created when the
+combined configuration is accessed for the first time, immediately
+before their managed configuration is accessed.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1831359 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../CombinedConfigurationBuilder.java         | 53 +++++++++++++------
+ 1 file changed, 36 insertions(+), 17 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/builder/combined/CombinedConfigurationBuilder.java b/src/main/java/org/apache/commons/configuration2/builder/combined/CombinedConfigurationBuilder.java
+index 36f6ef493f..74fae3ad5b 100644
+--- a/src/main/java/org/apache/commons/configuration2/builder/combined/CombinedConfigurationBuilder.java
++++ b/src/main/java/org/apache/commons/configuration2/builder/combined/CombinedConfigurationBuilder.java
+@@ -799,15 +799,26 @@ protected void initResultInstance(CombinedConfiguration result)
+         setUpParentInterpolator(currentConfiguration, config);
+ 
+         ConfigurationSourceData data = getSourceData();
+-        data.createAndAddConfigurations(result, data.getOverrideSources(),
+-                data.overrideBuilders);
++        boolean createBuilders = data.getChildBuilders().isEmpty();
++        List<ConfigurationBuilder<? extends Configuration>> overrideBuilders =
++                data.createAndAddConfigurations(result,
++                        data.getOverrideSources(), data.overrideBuilders);
++        if (createBuilders)
++        {
++            data.overrideBuilders.addAll(overrideBuilders);
++        }
+         if (!data.getUnionSources().isEmpty())
+         {
+             CombinedConfiguration addConfig = createAdditionalsConfiguration(result);
+             result.addConfiguration(addConfig, ADDITIONAL_NAME);
+             initNodeCombinerListNodes(addConfig, config, KEY_ADDITIONAL_LIST);
+-            data.createAndAddConfigurations(addConfig, data.unionDeclarations,
+-                    data.unionBuilders);
++            List<ConfigurationBuilder<? extends Configuration>> unionBuilders =
++                    data.createAndAddConfigurations(addConfig,
++                            data.unionDeclarations, data.unionBuilders);
++            if (createBuilders)
++            {
++                data.unionBuilders.addAll(unionBuilders);
++            }
+         }
+ 
+         result.isEmpty();  // this sets up the node structure
+@@ -1429,36 +1440,44 @@ public void initFromDefinitionConfiguration(
+             overrideDeclarations.addAll(createDeclarations(fetchTopLevelOverrideConfigs(config)));
+             overrideDeclarations.addAll(createDeclarations(config.childConfigurationsAt(KEY_OVERRIDE)));
+             unionDeclarations.addAll(createDeclarations(config.childConfigurationsAt(KEY_UNION)));
+-
+-            for (ConfigurationDeclaration cd : overrideDeclarations)
+-            {
+-                overrideBuilders.add(createConfigurationBuilder(cd));
+-            }
+-            for (ConfigurationDeclaration cd : unionDeclarations)
+-            {
+-                unionBuilders.add(createConfigurationBuilder(cd));
+-            }
+         }
+ 
+         /**
+          * Processes the declaration of configuration builder providers, creates
+-         * the corresponding builder, obtains configurations, and adds them to
+-         * the specified result configuration.
++         * the corresponding builder if necessary, obtains configurations, and
++         * adds them to the specified result configuration.
+          *
+          * @param ccResult the result configuration
+          * @param srcDecl the collection with the declarations of configuration
+          *        sources to process
++         * @return a list with configuration builders
+          * @throws ConfigurationException if an error occurs
+          */
+-        public void createAndAddConfigurations(CombinedConfiguration ccResult,
++        public List<ConfigurationBuilder<? extends Configuration>> createAndAddConfigurations(
++                CombinedConfiguration ccResult,
+                 List<ConfigurationDeclaration> srcDecl,
+                 List<ConfigurationBuilder<? extends Configuration>> builders)
+                 throws ConfigurationException
+         {
++            boolean createBuilders = builders.isEmpty();
++            List<ConfigurationBuilder<? extends Configuration>> newBuilders =
++                    createBuilders ? new ArrayList<>(srcDecl.size()) : builders;
+             for (int i = 0; i < srcDecl.size(); i++)
+             {
+-                addChildConfiguration(ccResult, srcDecl.get(i), builders.get(i));
++                ConfigurationBuilder<? extends Configuration> b;
++                if (createBuilders)
++                {
++                    b = createConfigurationBuilder(srcDecl.get(i));
++                    newBuilders.add(b);
++                }
++                else
++                {
++                    b = builders.get(i);
++                }
++                addChildConfiguration(ccResult, srcDecl.get(i), b);
+             }
++
++            return newBuilders;
+         }
+ 
+         /**

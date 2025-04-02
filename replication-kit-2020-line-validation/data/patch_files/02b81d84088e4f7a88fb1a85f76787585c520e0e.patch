@@ -1,0 +1,148 @@
+From 02b81d84088e4f7a88fb1a85f76787585c520e0e Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 7 Feb 2008 13:58:21 +0000
+Subject: [PATCH] FIX: Branch attribute not set on deliver when using a non
+ default branch (IVY-724)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@619414 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../xml/XmlModuleDescriptorUpdater.java       | 39 +++++++++++++++----
+ .../org/apache/ivy/ant/IvyDeliverTest.java    | 32 +++++++++++++++
+ 3 files changed, 64 insertions(+), 8 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 0729fb7b1..e4dcf55d3 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -77,6 +77,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Downgrade Ant version requirement to 1.6 to build Ivy (IVY-687)
+ - IMPROVEMENT: In the ResolveReport class, add the possibility to filter the evicted module while getting the list of DownloadArtifact (IVY-704) (thanks to Nicolas Lalevée)
+ 
++- FIX: Branch attribute not set on deliver when using a non default branch (IVY-724)
+ - FIX: NullPointerException reported instead of error in ivy:cachepath (IVY-690)
+ - FIX: NPE when calling retrieve if some artifacts are not available locally (IVY-712)
+ - FIX: When in ssh plugin we does not set username in scheme, Ivy always try to connect with guest username, even if we change one in panel. (IVY-710) (thanks to Ruslan Shevchenko)
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index d83fe2794..27dca0aec 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -42,8 +42,10 @@
+ import javax.xml.parsers.ParserConfigurationException;
+ 
+ import org.apache.ivy.Ivy;
++import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.settings.IvySettings;
++import org.apache.ivy.plugins.namespace.NameSpaceHelper;
+ import org.apache.ivy.plugins.namespace.Namespace;
+ import org.apache.ivy.plugins.parser.ParserSettings;
+ import org.apache.ivy.plugins.repository.Resource;
+@@ -373,28 +375,44 @@ private void startElementInDependency(Attributes attributes) {
+             org = org == null ? organisation : org;
+             String module = substitute(settings, attributes.getValue("name"));
+             String branch = substitute(settings, attributes.getValue("branch"));
++            
++            // look for the branch used in resolved revisions
++            if (branch == null) {
++                ModuleId mid = ModuleId.newInstance(org, module);
++                if (ns != null) {
++                    mid = NameSpaceHelper.transform(mid, ns.getToSystemTransformer());
++                }
++                for (Iterator iter = resolvedRevisions.keySet().iterator(); iter.hasNext();) {
++                    ModuleRevisionId mrid = (ModuleRevisionId) iter.next();
++                    if (mrid.getModuleId().equals(mid)) {
++                        branch = mrid.getBranch();
++                        break;
++                    }
++                }
++            }
++            
+             String revision = substitute(settings, attributes.getValue("rev"));
+-            ModuleRevisionId localMid = ModuleRevisionId.newInstance(org, module, branch,
++            ModuleRevisionId localMrid = ModuleRevisionId.newInstance(org, module, branch,
+                 revision, ExtendableItemHelper.getExtraAttributes(attributes,
+                     XmlModuleDescriptorParser.DEPENDENCY_REGULAR_ATTRIBUTES));
+-            ModuleRevisionId systemMid = ns == null ? localMid : ns.getToSystemTransformer()
+-                    .transform(localMid);
++            ModuleRevisionId systemMrid = ns == null ? localMrid : ns.getToSystemTransformer()
++                    .transform(localMrid);
+ 
+             for (int i = 0; i < attributes.getLength(); i++) {
+                 String attName = attributes.getQName(i);
+                 if ("rev".equals(attName)) {
+-                    String rev = (String) resolvedRevisions.get(systemMid);
++                    String rev = (String) resolvedRevisions.get(systemMrid);
+                     if (rev != null) {
+                         write(" rev=\"" + rev + "\"");
+                     } else {
+-                        write(" rev=\"" + systemMid.getRevision() + "\"");
++                        write(" rev=\"" + systemMrid.getRevision() + "\"");
+                     }
+                 } else if ("org".equals(attName)) {
+-                    write(" org=\"" + systemMid.getOrganisation() + "\"");
++                    write(" org=\"" + systemMrid.getOrganisation() + "\"");
+                 } else if ("name".equals(attName)) {
+-                    write(" name=\"" + systemMid.getName() + "\"");
++                    write(" name=\"" + systemMrid.getName() + "\"");
+                 } else if ("branch".equals(attName)) {
+-                    write(" branch=\"" + systemMid.getBranch() + "\"");
++                    write(" branch=\"" + systemMrid.getBranch() + "\"");
+                 } else if ("conf".equals(attName)) {
+                     String oldMapping = substitute(settings, attributes.getValue("conf"));
+                     if (oldMapping.length() > 0) {
+@@ -409,6 +427,11 @@ private void startElementInDependency(Attributes attributes) {
+                             + substitute(settings, attributes.getValue(attName)) + "\"");
+                 }
+             }
++            
++            if (systemMrid.getBranch() != null && attributes.getIndex("branch") == -1) {
++                // this dependency is on a specific branch, we set it explicitly in the updated file
++                write(" branch=\"" + systemMrid.getBranch() + "\"");
++            }
+         }
+ 
+         private void includeStarted(Attributes attributes) throws SAXException {
+diff --git a/test/java/org/apache/ivy/ant/IvyDeliverTest.java b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+index fe0d16ff5..51293b4e7 100644
+--- a/test/java/org/apache/ivy/ant/IvyDeliverTest.java
++++ b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+@@ -202,6 +202,38 @@ public void testWithBranch() throws Exception {
+                 .getDependencyRevisionId());
+     }
+ 
++    public void testReplaceBranch() throws Exception {
++        IvyAntSettings settings = new IvyAntSettings();
++        settings.setProject(project);
++        settings.execute();
++        // change the default branch to use
++        settings.getConfiguredIvyInstance().getSettings().setDefaultBranch("BRANCH1");
++        
++        // resolve a module dependencies
++        project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-latest.xml");
++        IvyResolve res = new IvyResolve();
++        res.setProject(project);
++        res.execute();
++
++        // deliver this module
++        deliver.setPubrevision("1.2");
++        deliver.setDeliverpattern("build/test/deliver/ivy-[revision].xml");
++        deliver.execute();
++
++        // should have done the ivy delivering, including setting the branch according to the 
++        // configured default
++        File deliveredIvyFile = new File("build/test/deliver/ivy-1.2.xml");
++        assertTrue(deliveredIvyFile.exists());
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
++            new IvySettings(), deliveredIvyFile.toURL(), true);
++        assertEquals(ModuleRevisionId.newInstance("apache", "resolve-latest", "1.2"), md
++                .getModuleRevisionId());
++        DependencyDescriptor[] dds = md.getDependencies();
++        assertEquals(1, dds.length);
++        assertEquals(ModuleRevisionId.newInstance("org1", "mod1.2", "BRANCH1", "2.2"), dds[0]
++                .getDependencyRevisionId());
++    }
++
+     public void testWithExtraAttributes() throws Exception {
+         // test case for IVY-415
+         project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-latest-extra.xml");

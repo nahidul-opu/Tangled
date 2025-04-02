@@ -1,0 +1,232 @@
+From 8b9280c8ab2b26ca717c5aaa0b82352f8dcf130f Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Sat, 5 Apr 2008 08:56:51 +0000
+Subject: [PATCH] FIX: Ivy uses the first set of configurations it sees when
+ resolving multiple versions of a module (IVY-681)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@645050 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/resolve/IvyNode.java  | 21 ++++++++++--
+ .../ivy/core/resolve/ResolveEngine.java       | 10 +++---
+ .../apache/ivy/core/resolve/VisitNode.java    |  4 +++
+ .../apache/ivy/core/resolve/ResolveTest.java  | 27 ++++++++++++++++
+ test/repositories/2/mod5.1/art51A-4.3.jar     |  1 +
+ test/repositories/2/mod5.1/ivy-4.3.xml        | 32 +++++++++++++++++++
+ test/repositories/2/mod6.1/ivy-1.4.xml        | 30 +++++++++++++++++
+ 8 files changed, 119 insertions(+), 7 deletions(-)
+ create mode 100644 test/repositories/2/mod5.1/art51A-4.3.jar
+ create mode 100644 test/repositories/2/mod5.1/ivy-4.3.xml
+ create mode 100644 test/repositories/2/mod6.1/ivy-1.4.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e9b6d12b5..d6fc056c6 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -78,6 +78,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: Ivy uses the first set of configurations it sees when resolving multiple versions of a module (IVY-681)
+ - FIX: Eviction fails for libs not providing their ivy configuration and providing artifacts named different between lib versions (IVY-537)
+ - FIX: Memory leak in ModuleRevisionId.java (IVY-791)
+ - FIX: conflict manager scoping does not work as expected (IVY-465)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 2bf01ec98..2b09a2f87 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -386,7 +386,11 @@ private boolean handleConfiguration(boolean loaded, String rootModuleConf, IvyNo
+                 Configuration c = md.getConfiguration(confs[i]);
+                 if (c == null) {
+                     confsToFetch.remove(conf);
+-                    if (!conf.equals(confs[i])) {
++                    if (isConfRequiredByMergedUsageOnly(rootModuleConf, conf)) {
++                        Message.verbose(
++                            "configuration required by evicted revision is not available in "
++                            + "selected revision. skipping " + conf + " in " + this);
++                    } else if (!conf.equals(confs[i])) {
+                         problem = new RuntimeException("configuration(s) not found in " + this
+                                 + ": " + conf + ". Missing configuration: " + confs[i]
+                                 + ". It was required from " + parent + " " + parentConf);
+@@ -399,8 +403,14 @@ private boolean handleConfiguration(boolean loaded, String rootModuleConf, IvyNo
+                 } else if (shouldBePublic && !isRoot()
+                         && c.getVisibility() != Configuration.Visibility.PUBLIC) {
+                     confsToFetch.remove(conf);
+-                    problem = new RuntimeException("configuration not public in " + this + ": " + c
+-                            + ". It was required from " + parent + " " + parentConf);
++                    if (isConfRequiredByMergedUsageOnly(rootModuleConf, conf)) {
++                        Message.verbose(
++                            "configuration required by evicted revision is not visible in "
++                            + "selected revision. skipping " + conf + " in " + this);
++                    } else {
++                        problem = new RuntimeException("configuration not public in " + this + ": " 
++                            + c + ". It was required from " + parent + " " + parentConf);
++                    }
+                     return false;
+                 }
+                 if (loaded) {
+@@ -522,6 +532,11 @@ public String[] getConfigurations(String rootModuleConf) {
+         }
+         return (String[]) depConfs.toArray(new String[depConfs.size()]);
+     }
++    
++    protected boolean isConfRequiredByMergedUsageOnly(String rootModuleConf, String conf) {
++        Set confs = usage.getConfigurations(rootModuleConf);
++        return confs == null || !confs.contains(conf);
++    }
+ 
+     //This is never called.  Could we remove it?
+     public void discardConf(String rootModuleConf, String conf) {
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 6a83a02c4..7a86476d6 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -656,10 +656,12 @@ private void fetchDependencies(VisitNode node, String conf, boolean shouldBePubl
+     private void doFetchDependencies(VisitNode node, String conf) {
+         Configuration c = node.getConfiguration(conf);
+         if (c == null) {
+-            Message.warn("configuration not found '" + conf + "' in " + node.getResolvedId()
+-                    + ": ignoring");
+-            if (node.getParent() != null) {
+-                Message.warn("it was required from " + node.getParent().getResolvedId());
++            if (!node.isConfRequiredByMergedUsageOnly(conf)) {
++                Message.warn("configuration not found '" + conf + "' in " + node.getResolvedId()
++                        + ": ignoring");
++                if (node.getParent() != null) {
++                    Message.warn("it was required from " + node.getParent().getResolvedId());
++                }
+             }
+             return;
+         }
+diff --git a/src/java/org/apache/ivy/core/resolve/VisitNode.java b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+index 5024ba47a..1c64dc9df 100644
+--- a/src/java/org/apache/ivy/core/resolve/VisitNode.java
++++ b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+@@ -473,4 +473,8 @@ public String toString() {
+         return node.toString();
+     }
+ 
++    public boolean isConfRequiredByMergedUsageOnly(String conf) {
++        return node.isConfRequiredByMergedUsageOnly(rootModuleConf, conf);
++    }
++
+ }
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index fe979b975..8c11e5883 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -1958,6 +1958,33 @@ public void testEvictWithConf2() throws Exception {
+         assertFalse(getArchiveFileInCache("org5", "mod5.1", "4.0", "art51B", "jar", "jar").exists());
+     }
+ 
++    public void testEvictWithConf3() throws Exception {
++        // same as first one but the conf requested in evicted module is no longer present in
++        // selected revision
++        // test case for IVY-681
++
++        // mod6.1 r1.4 depends on
++        // mod5.1 r4.3 conf A
++        // mod5.2 r1.0 which depends on mod5.1 r4.0 conf B
++        //
++        // mod5.1 r4.3 has only conf A, not B
++        ResolveReport report = ivy.resolve(new File("test/repositories/2/mod6.1/ivy-1.4.xml")
++                .toURL(), getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++
++        // dependencies
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org5", "mod5.1", "4.3")).exists());
++        assertTrue(getArchiveFileInCache("org5", "mod5.1", "4.3", "art51A", "jar", "jar").exists());
++
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org5", "mod5.2", "1.0")).exists());
++        assertTrue(getArchiveFileInCache("org5", "mod5.2", "1.0", "mod5.2", "jar", "jar").exists());
++
++        assertFalse(getArchiveFileInCache("org5", "mod5.1", "4.0", "art51A", "jar", "jar").exists());
++        assertFalse(getArchiveFileInCache("org5", "mod5.1", "4.0", "art51B", "jar", "jar").exists());
++    }
++
+     public void testEvictWithConfInMultiConf() throws Exception {
+         // same as preceding ones but the conflict appears in several root confs
+         // bug 105 - test #3
+diff --git a/test/repositories/2/mod5.1/art51A-4.3.jar b/test/repositories/2/mod5.1/art51A-4.3.jar
+new file mode 100644
+index 000000000..92c1a7a42
+--- /dev/null
++++ b/test/repositories/2/mod5.1/art51A-4.3.jar
+@@ -0,0 +1 @@
++  
+diff --git a/test/repositories/2/mod5.1/ivy-4.3.xml b/test/repositories/2/mod5.1/ivy-4.3.xml
+new file mode 100644
+index 000000000..fa8097d5b
+--- /dev/null
++++ b/test/repositories/2/mod5.1/ivy-4.3.xml
+@@ -0,0 +1,32 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org5"
++	       module="mod5.1"
++	       revision="4.3"
++	       status="integration"
++	       publication="20070401110000"
++	/>
++	<configurations>
++		<conf name="A"/>
++	</configurations>
++	<publications>
++		<artifact name="art51A" type="jar" conf="A"/>
++	</publications>
++</ivy-module>
+diff --git a/test/repositories/2/mod6.1/ivy-1.4.xml b/test/repositories/2/mod6.1/ivy-1.4.xml
+new file mode 100644
+index 000000000..6bbd6eb10
+--- /dev/null
++++ b/test/repositories/2/mod6.1/ivy-1.4.xml
+@@ -0,0 +1,30 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org6"
++	       module="mod6.1"
++	       revision="1.4"
++	       status="integration"
++	       publication="20070401110000"
++	/>
++	<dependencies>
++		<dependency org="org5" name="mod5.1" rev="4.3" conf="default->A"/>
++		<dependency org="org5" name="mod5.2" rev="1.0" conf="default"/>
++	</dependencies>
++</ivy-module>

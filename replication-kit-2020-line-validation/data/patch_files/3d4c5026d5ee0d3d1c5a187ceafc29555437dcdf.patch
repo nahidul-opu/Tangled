@@ -1,0 +1,296 @@
+From 3d4c5026d5ee0d3d1c5a187ceafc29555437dcdf Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 5 Jul 2007 22:04:11 +0000
+Subject: [PATCH] FIX: Variables not replaced during deliver (IVY-520) (thanks
+ to John Williams)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@553653 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../xml/XmlModuleDescriptorUpdater.java       |  18 +--
+ .../parser/xml/XmlModuleUpdaterTest.java      |  71 +++++++++++
+ .../parser/xml/test-update-withvar.xml        | 110 ++++++++++++++++++
+ 4 files changed, 191 insertions(+), 9 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index af06a9ff2..d29db6ca5 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -64,6 +64,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Javadoc improvements (IVY-544) (with contribution from Tjeerd Verhagen)
+ - IMPROVEMENT: Unit test improvements (IVY-545) (thanks to Tjeerd Verhagen)
+ 
++- FIX: Variables not replaced during deliver (IVY-520) (thanks to John Williams)
+ - FIX: XmlModuleDescriptorWriter does not produce matcher attribute on include and exclude rules (IVY-556)
+ - FIX: pom.groupId is not recognized in maven 2 pom parser (IVY-550)
+ - FIX: Evicted modules report depends on the order of the dependencies (IVY-526)
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index c314f4a99..39dafae22 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -322,13 +322,13 @@ public void startElement(String uri, String localName, String qName,
+                                     _confMappingOverride = Boolean.valueOf(mappingOverride);
+                                 }
+                             } else if ("conf".equals(qName) && _insideConfigurations) {
+-                                String confName = attributes.getValue("name");
++                                String confName = substitute(settings, attributes.getValue("name"));
+                                 if (!confs.contains(confName)) {
+                                     buffer.setPrint(true);
+                                     if (_doIndent) {
+                                         write("/>\n\t\t");
+                                     }
+-                                    String extend = attributes.getValue("extends");
++                                    String extend = substitute(settings, attributes.getValue("extends"));
+                                     if (extend != null) {
+                                         for (StringTokenizer tok = new StringTokenizer(extend, ", "); tok
+                                                 .hasMoreTokens();) {
+@@ -397,7 +397,7 @@ public void endElement(String uri, String localName, String name)
+                     } else if ("branch".equals(attName)) {
+                         write(" branch=\"" + systemMid.getBranch() + "\"");
+                     } else if ("conf".equals(attName)) {
+-                        String oldMapping = attributes.getValue("conf");
++                        String oldMapping = substitute(settings, attributes.getValue("conf"));
+                         if (oldMapping.length() > 0) {
+                             String newMapping = removeConfigurationsFromMapping(oldMapping, confs);
+                             if (newMapping.length() > 0) {
+@@ -416,8 +416,8 @@ public void endElement(String uri, String localName, String name)
+                 for (int i = 0; i < attributes.getLength(); i++) {
+                     String attName = attributes.getQName(i);
+                     if ("defaultconfmapping".equals(attName)) {
+-                        String newMapping = removeConfigurationsFromMapping(attributes
+-                                .getValue("defaultconfmapping"), confs);
++                        String newMapping = removeConfigurationsFromMapping(substitute(settings,
++                            attributes.getValue("defaultconfmapping")), confs);
+                         if (newMapping.length() > 0) {
+                             write(" " + attributes.getQName(i) + "=\"" + newMapping + "\"");
+                         }
+@@ -441,10 +441,10 @@ public void endElement(String uri, String localName, String name)
+                 }
+             } else if ("ivy-module/configurations/conf".equals(getContext())) {
+                 _buffers.push(new ExtendedBuffer(getContext()));
+-                String confName = attributes.getValue("name");
++                String confName = substitute(settings, attributes.getValue("name"));
+                 if (!confs.contains(confName)) {
+                     ((ExtendedBuffer) _buffers.peek()).setPrint(true);
+-                    String extend = attributes.getValue("extends");
++                    String extend = substitute(settings, attributes.getValue("extends"));
+                     if (extend != null) {
+                         for (StringTokenizer tok = new StringTokenizer(extend, ", "); tok
+                                 .hasMoreTokens();) {
+@@ -467,7 +467,7 @@ public void endElement(String uri, String localName, String name)
+                     || "ivy-module/dependencies/dependency/artifact/conf".equals(getContext())) {
+                 _buffers.push(new ExtendedBuffer(getContext()));
+                 ((ExtendedBuffer) _confAttributeBuffers.peek()).setDefaultPrint(false);
+-                String confName = attributes.getValue("name");
++                String confName = substitute(settings, attributes.getValue("name"));
+                 if (!confs.contains(confName)) {
+                     ((ExtendedBuffer) _confAttributeBuffers.peek()).setPrint(true);
+                     ((ExtendedBuffer) _buffers.peek()).setPrint(true);
+@@ -487,7 +487,7 @@ public void endElement(String uri, String localName, String name)
+                 for (int i = 0; i < attributes.getLength(); i++) {
+                     String attName = attributes.getQName(i);
+                     if ("conf".equals(attName)) {
+-                        String confName = attributes.getValue("conf");
++                        String confName = substitute(settings, attributes.getValue("conf"));
+                         String newConf = removeConfigurationsFromList(confName, confs);
+                         if (newConf.length() > 0) {
+                             write(" " + attributes.getQName(i) + "=\"" + newConf + "\"");
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+index 8ca9fa0a3..5abd371e2 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleUpdaterTest.java
+@@ -76,6 +76,77 @@ public void testUpdate() throws Exception {
+         assertEquals(expected, updated);
+     }
+ 
++    public void testVariableReplacement() throws Exception {
++        /*
++         * For updated file to be equals to updated.xml, we have to fix the line separator to the
++         * one used in updated.xml, in order for this test to works in all platforms (default line
++         * separator used in updater being platform dependent
++         */
++        XmlModuleDescriptorUpdater.LINE_SEPARATOR = "\n";
++        File dest = new File("build/updated-test2.xml");
++        dest.deleteOnExit();
++        Map resolvedRevisions = new HashMap();
++        resolvedRevisions.put(ModuleRevisionId.newInstance("yourorg", "yourmodule2", "2+"), "2.5");
++        resolvedRevisions.put(ModuleRevisionId.newInstance("yourorg", "yourmodule6",
++            "latest.integration"), "6.3");
++
++        GregorianCalendar cal = new GregorianCalendar();
++        cal.set(2005, 2, 22, 14, 32, 54);
++
++        Ivy ivy = Ivy.newInstance();
++        ivy.setVariable("myorg", "myorg");
++        ivy.setVariable("mymodule", "mymodule");
++        ivy.setVariable("myrev", "myrev");
++        ivy.setVariable("mystatus", "integration");
++        ivy.setVariable("mypubdate", "20050322143254");
++        ivy.setVariable("mylicense", "MyLicense");
++        ivy.setVariable("mylicenseurl", "http://www.my.org/mymodule/mylicense.html");
++        ivy.setVariable("myorgurl", "http://www.myorg.org/");
++        ivy.setVariable("ivyrep", "ivyrep");
++        ivy.setVariable("ivyrepurl", "http://www.jayasoft.fr/org/ivyrep/");
++        ivy.setVariable("ivyreppattern", "[organisation]/[module]/ivy-[revision].xml");
++        ivy.setVariable("ivys", "true");
++        ivy.setVariable("artifacts", "false");
++        ivy.setVariable("homepage", "http://www.my.org/mymodule/");
++        ivy.setVariable("includefile", "imported-configurations-with-mapping.xml");
++        ivy.setVariable("mydesc", "desc 1");
++        ivy.setVariable("visibility", "public");
++        ivy.setVariable("myvar", "myconf1");
++        ivy.setVariable("deprecated", "20050115");
++        ivy.setVariable("myartifact1", "myartifact1");
++        ivy.setVariable("mytype", "jar");
++        ivy.setVariable("mymodule2", "mymodule2");
++        ivy.setVariable("mymodule2rev", "2.0");
++        ivy.setVariable("changing", "true");
++        ivy.setVariable("transitive", "false");
++        ivy.setVariable("targetconf", "yourconf1");
++        ivy.setVariable("art9-1", "yourartifact9-1");
++        ivy.setVariable("conf3", "myconf3");
++        ivy.setVariable("includename", "your.*");
++        ivy.setVariable("includeext", "xml");
++        ivy.setVariable("excludename", "toexclude");
++        ivy.setVariable("excludemodule", "*servlet*");
++        ivy.setVariable("excludematcher", "glob");
++        ivy.setVariable("excludeorg", "acme");
++        ivy.setVariable("excludeartifact", "test");
++        ivy.setVariable("excludetype", "source");
++        ivy.setVariable("yourorg", "yourorg");
++        ivy.setVariable("yourmodule", ".*");
++        ivy.setVariable("all", "all");
++        ivy.setVariable("regexp", "regexp");
++        ivy.setVariable("theirrev", "1.0, 1.1");
++        
++        XmlModuleDescriptorUpdater.update(ivy.getSettings(), XmlModuleUpdaterTest.class
++                .getResource("test-update-withvar.xml"), dest, resolvedRevisions, "release", "mynewrev",
++            cal.getTime(), null, true, null);
++
++        assertTrue(dest.exists());
++        String expected = FileUtil.readEntirely(new BufferedReader(new InputStreamReader(
++                XmlModuleUpdaterTest.class.getResourceAsStream("updated.xml"))));
++        String updated = FileUtil.readEntirely(new BufferedReader(new FileReader(dest)));
++        assertEquals(expected, updated);
++    }
++
+     public void testUpdateWithImportedMappingOverride() throws Exception {
+         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+         URL settingsUrl = new File("test/java/org/apache/ivy/plugins/parser/xml/" 
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml
+new file mode 100644
+index 000000000..054d86b93
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-update-withvar.xml
+@@ -0,0 +1,110 @@
++<?xml version="1.0" encoding="ISO-8859-1"?>
++<?xml-stylesheet type="text/xsl" href="http://www.somesite.com/ivy-doc.xsl"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<!-- A comment before the first tag -->
++<ivy-module version="2.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://incubator.apache.org/ivy/schemas/ivy.xsd">
++	<!-- A comment with accent é & special characters -->
++	<info organisation="${myorg}"
++	       module="${mymodule}"
++	       revision="${myrev}"
++	       status="${mystatus}"
++	       publication="{mypubdate}">
++	       
++		<license name="${mylicense}" url="${mylicenseurl}"/>
++		
++		<ivyauthor name="jayasoft" url="http://www.jayasoft.org/"/>
++		<ivyauthor name="${myorg}" url="${myorgurl}"/>
++
++		<repository name="${ivyrep}" url="${ivyrepurl}" pattern="${ivyreppattern}" ivys="${ivys}" artifacts="${artifacts}"/>
++
++		<description homepage="${homepage}">	       
++	This module is <b>great</b> !<br/>
++	You can use it especially with myconf1 and myconf2, and myconf4 is not too bad too.
++		</description>
++	</info>
++	<configurations>
++		<include file="${includefile}"/>
++		<conf name="${myvar}" description="${mydesc}"/>
++		<conf name="myconf2" description="desc 2" visibility="${visibility}"/>
++		<conf name="myconf3" description="desc 3" visibility="private"/>
++		<conf name="myconf4" description="desc 4" extends="${myvar}, myconf2"/>		
++		<conf name="myoldconf" description="my old desc" deprecated="${deprecated}"/>
++	</configurations>
++	<publications>
++		<artifact name="${myartifact1}" type="${mytype}"/>
++		<artifact name="myartifact2" type="jar" conf="${myvar}"/>
++		<artifact name="myartifact3" type="jar" conf="myconf1, myconf2, myconf3"/>
++		<artifact name="myartifact4" type="jar">
++			<conf name="${myvar}"/>
++			<conf name="myconf3"/>
++		</artifact>
++	</publications>
++	<dependencies>
++		<dependency name="${mymodule2}" rev="${mymodule2rev}"/>
++		<dependency name="mymodule3" rev="2.0" changing="${changing}" transitive="${transitive}"/>
++		<dependency org="yourorg" name="yourmodule1" rev="1.1" conf="${myvar}"/>
++		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
++		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
++		<dependency org="yourorg" name="yourmodule4" rev="4.1" conf="myconf1, myconf2->yourconf1, yourconf2"/>
++		<dependency org="yourorg" name="yourmodule5" rev="5.1" conf="myconf1->yourconf1;myconf2->yourconf1, yourconf2"/>
++
++		<dependency org="yourorg" name="yourmodule6" rev="latest.integration">
++			<conf name="${myvar}" mapped="${targetconf}"/>
++			<conf name="myconf2" mapped="yourconf1, yourconf2"/>
++		</dependency>
++
++		<dependency org="yourorg" name="yourmodule7" rev="7.1">
++			<conf name="myconf1">
++				<mapped name="yourconf1"/>
++			</conf>
++			<conf name="myconf2">
++				<mapped name="yourconf1"/>
++				<mapped name="yourconf2"/>
++			</conf>
++		</dependency>
++
++		<dependency org="yourorg" name="yourmodule8" rev="8.1">
++			<artifact name="yourartifact8-1" type="jar"/>
++			<artifact name="yourartifact8-2" type="jar"/>
++		</dependency>		
++
++		<dependency org="yourorg" name="yourmodule9" rev="9.1" conf="myconf1,myconf2,myconf3->default">
++			<artifact name="${art9-1}" type="${mytype}" conf="${myvar},myconf2"/>
++			<artifact name="yourartifact9-2" type="jar">
++				<conf name="myconf2"/>
++				<conf name="${conf3}"/>
++			</artifact>
++		</dependency>		
++
++		<dependency org="yourorg" name="yourmodule10" rev="10.1">
++			<include name="${includename}" type="${mytype}"/>
++			<include ext="${includeext}"/>
++			<exclude name="${excludename}"/>
++		</dependency>
++		<dependency org="yourorg" name="yourmodule11" rev="11.1" conf="*->@"/>
++
++		<exclude module="${excludemodule}" matcher="${excludematcher}" conf="${myvar}" /> 
++		<exclude org="${excludeorg}" module="test" artifact="${excludeartifact}" type="${excludetype}" ext="jar" /> 
++	</dependencies>
++	<conflicts>
++		<manager org="${yourorg}" module="${yourmodule}" name="${all}" matcher="${regexp}"/>
++		<manager org="theirorg" module="theirmodule1" rev="${theirrev}"/>
++	</conflicts>
++</ivy-module>

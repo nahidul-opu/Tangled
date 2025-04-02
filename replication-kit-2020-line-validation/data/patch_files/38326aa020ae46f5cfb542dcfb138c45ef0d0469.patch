@@ -1,0 +1,140 @@
+From 38326aa020ae46f5cfb542dcfb138c45ef0d0469 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 30 May 2007 20:39:19 +0000
+Subject: [PATCH] FIX: The deprecated "keep" attribute on post resolve tasks
+ causes an error (IVY-517)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@542927 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../apache/ivy/ant/IvyPostResolveTask.java    | 11 ++++
+ src/java/org/apache/ivy/ant/IvyResolve.java   |  6 ++-
+ .../ivy/ant/IvyPostResolveTaskTest.java       | 51 +++++++++++++++++++
+ 4 files changed, 67 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 5911627a8..303940219 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -56,6 +56,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Remove @author tags (thanks to Stephane Bailliez)
+ - IMPROVEMENT: Remove use of deprecated elements in ivysettings.xml (IVY-505) (with contribution from Jan Materne)
+ 
++- FIX: The deprecated "keep" attribute on post resolve tasks causes an error (IVY-517)
+ - FIX: Some circular dependencies not retrieved (IVY-400)
+ - FIX: ${version} property not recognized in poms (IVY-512)
+ - FIX: Bug on handling dependency artifacts when a module configuration is specified (IVY-507)
+diff --git a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+index 5994a1f0a..b81c8c117 100644
+--- a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
++++ b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+@@ -58,6 +58,8 @@ public abstract class IvyPostResolveTask extends IvyTask {
+     private Filter _artifactFilter = null;
+     private boolean useOrigin = false;
+     
++    private Boolean keep = null;
++    
+     public boolean isUseOrigin() {
+     	return useOrigin;
+     }
+@@ -227,6 +229,7 @@ protected IvyResolve createResolve(boolean haltOnFailure, boolean useOrigin) {
+ 		resolve.setHaltonfailure(haltOnFailure);
+ 		resolve.setUseOrigin(useOrigin);
+ 		resolve.setValidate(isValidate());
++		resolve.setKeep(isKeep());
+ 		return resolve;
+ 	}
+ 
+@@ -327,5 +330,13 @@ public void setFile(File file) {
+ 	public File getFile() {
+ 		return _file;
+ 	}
++	
++	public void setKeep(boolean keep) {
++		this.keep = Boolean.valueOf(keep);
++	}
++	
++	public boolean isKeep() {
++		return this.keep == null ? !isInline() : this.keep.booleanValue();
++	}
+ 
+ }
+diff --git a/src/java/org/apache/ivy/ant/IvyResolve.java b/src/java/org/apache/ivy/ant/IvyResolve.java
+index 2c8787865..143b58a49 100644
+--- a/src/java/org/apache/ivy/ant/IvyResolve.java
++++ b/src/java/org/apache/ivy/ant/IvyResolve.java
+@@ -206,8 +206,10 @@ public void doExecute() throws BuildException {
+ 	                getProject().setProperty("ivy.resolved.configurations", _conf);
+ 	                settings.setVariable("ivy.resolved.configurations", _conf);
+ 	            }
+-	            getProject().setProperty("ivy.resolved.file", _file.getAbsolutePath());
+-	            settings.setVariable("ivy.resolved.file", _file.getAbsolutePath());
++	            if (_file != null) {
++		            getProject().setProperty("ivy.resolved.file", _file.getAbsolutePath());
++		            settings.setVariable("ivy.resolved.file", _file.getAbsolutePath());
++	            }
+ 	            if (_resolveId != null) {
+ 		            getProject().setProperty("ivy.organisation." + _resolveId, md.getModuleRevisionId().getOrganisation());
+ 		            settings.setVariable("ivy.organisation." + _resolveId, md.getModuleRevisionId().getOrganisation());
+diff --git a/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java b/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
+index 3c58e5728..3909ab5fd 100644
+--- a/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
++++ b/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
+@@ -159,6 +159,57 @@ public void testWithPreviousResolveInSameBuildAndMoreConfs() throws Exception {
+     	assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testWithoutKeep() throws Exception {
++    	IvyResolve resolve = new IvyResolve();
++    	resolve.setProject(_project);
++    	resolve.setCache(_cache);
++    	resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-multiconf.xml"));
++    	resolve.setConf("compile");
++    	resolve.execute();
++
++    	ResolveReport reportBefore = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	assertTrue(getArchiveFileInCache("org1", "mod1.1", "2.0", "mod1.1", "jar", "jar").exists());
++    	assertFalse(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++    
++    	_task.setConf("*"); // will trigger a resolve
++    	_task.setKeep(false); // don't keep the resolve results
++    	_task.execute();
++
++    	ResolveReport reportAfter = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	
++    	assertSame("IvyPostResolveTask has kept the resolve report where it should have", reportBefore, reportAfter);
++    	assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++    }
++
++    public void testInlineWithoutKeep() throws Exception {
++    	_task.setOrganisation("org1");
++    	_task.setModule("mod1.1");
++    	_task.setRevision("2.0");
++    	_task.setInline(true);
++    	_task.setConf("*"); // will trigger a resolve
++    	_task.execute();
++
++    	ResolveReport reportAfter = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	
++    	assertNull("IvyPostResolveTask has kept the resolve report where it should have", reportAfter);
++    	assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++
++    public void testInlineWithKeep() throws Exception {
++    	_task.setOrganisation("org1");
++    	_task.setModule("mod1.1");
++    	_task.setRevision("2.0");
++    	_task.setInline(true);
++    	_task.setKeep(true);
++    	_task.setConf("*"); // will trigger a resolve
++    	_task.execute();
++
++    	ResolveReport reportAfter = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	
++    	assertNotNull("IvyPostResolveTask has kept the resolve report where it should have", reportAfter);
++    	assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++
+     public void testWithResolveIdAndPreviousResolveInSameBuildAndLessConfs() throws Exception {
+     	IvyResolve resolve = new IvyResolve();
+     	resolve.setProject(_project);

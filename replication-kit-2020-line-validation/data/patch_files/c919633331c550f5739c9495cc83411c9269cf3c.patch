@@ -1,0 +1,142 @@
+From c919633331c550f5739c9495cc83411c9269cf3c Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 15 Sep 2008 08:54:57 +0000
+Subject: [PATCH] FIX: Publish Ant Task 'warnonmissing' ignored (IVY-867)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@695383 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/org/apache/ivy/ant/IvyPublish.java   | 11 ++------
+ .../ivy/core/publish/PublishEngine.java       | 25 +++++++++++++------
+ .../ivy/core/publish/PublishOptions.java      | 11 ++++++++
+ 4 files changed, 31 insertions(+), 17 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 98f323a81..5434921c9 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -112,6 +112,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Add a memory cache for the module descriptor that are parsed from the cache (IVY-883)
+ - IMPROVEMENT: Improve performance (IVY-872)
+ 
++- FIX: Publish Ant Task 'warnonmissing' ignored (IVY-867)
+ - FIX: Ivy stand-alone ignores -cache argument (IVY-901) (thanks to Chris)
+ - FIX: ivy.cache.dir.${settingsRef} is set to default instead of the defaultCacheDir from the ivysettings.xml after ivy:resolve (IVY-898)
+ - FIX: Ivy ibiblio resolver chokes on variables while checking descriptor consistency (IVY-818)
+diff --git a/src/java/org/apache/ivy/ant/IvyPublish.java b/src/java/org/apache/ivy/ant/IvyPublish.java
+index 36b7a2815..a1e6f27ef 100644
+--- a/src/java/org/apache/ivy/ant/IvyPublish.java
++++ b/src/java/org/apache/ivy/ant/IvyPublish.java
+@@ -23,7 +23,6 @@
+ import java.util.Collection;
+ import java.util.Date;
+ import java.util.HashMap;
+-import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+ 
+@@ -34,7 +33,6 @@
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.publish.PublishOptions;
+ import org.apache.ivy.core.settings.IvySettings;
+-import org.apache.ivy.util.Message;
+ import org.apache.tools.ant.BuildException;
+ 
+ /**
+@@ -298,7 +296,7 @@ public void doExecute() throws BuildException {
+                 deliver.execute();
+             }
+ 
+-            Collection missing = ivy.publish(mrid, artifactspattern, publishResolverName,
++            ivy.publish(mrid, artifactspattern, publishResolverName,
+                 new PublishOptions()
+                     .setPubrevision(getPubrevision())
+                     .setPubbranch(getPubbranch())
+@@ -310,14 +308,9 @@ public void doExecute() throws BuildException {
+                     .setValidate(doValidate(settings))
+                     .setOverwrite(overwrite)
+                     .setUpdate(update)
++                    .setWarnOnMissing(warnonmissing)
+                     .setHaltOnMissing(haltonmissing)
+                     .setConfs(splitConfs(conf)));
+-            if (warnonmissing) {
+-                for (Iterator iter = missing.iterator(); iter.hasNext();) {
+-                    Artifact artifact = (Artifact) iter.next();
+-                    Message.warn("missing artifact: " + artifact);
+-                }
+-            }
+         } catch (Exception e) {
+             if (e instanceof BuildException) {
+                 throw (BuildException) e;
+diff --git a/src/java/org/apache/ivy/core/publish/PublishEngine.java b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+index 144c0b3d6..336ce1d5b 100644
+--- a/src/java/org/apache/ivy/core/publish/PublishEngine.java
++++ b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+@@ -209,12 +209,18 @@ public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+                 }
+             }
+             if (!artifactsFiles.containsKey(artifact)) {
+-                Message.info("missing artifact " + artifact + ":");
++                StringBuffer sb = new StringBuffer();
++                sb.append("missing artifact " + artifact + ":\n");
+                 for (Iterator iterator = srcArtifactPattern.iterator(); iterator.hasNext();) {
+                     String pattern = (String) iterator.next();
+-                    Message.info("\t"
+-                            + settings.resolveFile(IvyPatternHelper.substitute(pattern, artifact))
+-                            + " file does not exist");
++                    sb.append("\t"
++                          + settings.resolveFile(IvyPatternHelper.substitute(pattern, artifact))
++                          + " file does not exist\n");
++                }
++                if (options.isWarnOnMissing() || options.isHaltOnMissing()) {
++                    Message.warn(sb.toString());
++                } else {
++                    Message.verbose(sb.toString());
+                 }
+                 if (options.isHaltOnMissing()) {
+                     throw new IOException("missing artifact " + artifact);
+@@ -227,10 +233,13 @@ public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+             File artifactFile = settings.resolveFile(
+                 IvyPatternHelper.substitute(options.getSrcIvyPattern(), artifact));
+             if (!artifactFile.exists()) {
+-                Message.info("missing ivy file for "
+-                        + md.getModuleRevisionId()
+-                        + ": "
+-                        + artifactFile + " file does not exist");
++                String msg = "missing ivy file for " + md.getModuleRevisionId() + ": \n"
++                                + artifactFile + " file does not exist";
++                if (options.isWarnOnMissing() || options.isHaltOnMissing()) {
++                    Message.warn(msg);
++                } else {
++                    Message.verbose(msg);
++                }
+                 if (options.isHaltOnMissing()) {
+                     throw new IOException("missing ivy artifact " + artifact);
+                 }
+diff --git a/src/java/org/apache/ivy/core/publish/PublishOptions.java b/src/java/org/apache/ivy/core/publish/PublishOptions.java
+index b98231ab9..6f68f1828 100644
+--- a/src/java/org/apache/ivy/core/publish/PublishOptions.java
++++ b/src/java/org/apache/ivy/core/publish/PublishOptions.java
+@@ -59,6 +59,8 @@ public class PublishOptions {
+ 
+     private String pubBranch;
+ 
++    private boolean warnonmissing;
++
+     public String[] getConfs() {
+         return confs;
+     }
+@@ -158,4 +160,13 @@ public PublishOptions setPubbranch(String pubbranch) {
+         return this;
+     }
+ 
++    public boolean isWarnOnMissing() {
++        return warnonmissing;
++    }
++    
++    public PublishOptions setWarnOnMissing(boolean warnonmissing) {
++        this.warnonmissing = warnonmissing;
++        return this;
++    }
++
+ }

@@ -1,0 +1,93 @@
+From 0cee98d0e31548ca8d2ec48b4f754815ff10f6f3 Mon Sep 17 00:00:00 2001
+From: Mario Ivankovits <imario@apache.org>
+Date: Sat, 9 Dec 2006 07:42:06 +0000
+Subject: [PATCH] VFS-69: ftp file system: refetch parents children in case of
+ a refresh to get actual file informations
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/vfs/trunk@484943 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../commons/vfs/impl/DefaultFileMonitor.java  |  8 +---
+ .../vfs/provider/ftp/FtpFileObject.java       | 37 +++++++++++++++++--
+ 2 files changed, 36 insertions(+), 9 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/commons/vfs/impl/DefaultFileMonitor.java b/core/src/main/java/org/apache/commons/vfs/impl/DefaultFileMonitor.java
+index 9b2aef2b41..aee17c1d50 100644
+--- a/core/src/main/java/org/apache/commons/vfs/impl/DefaultFileMonitor.java
++++ b/core/src/main/java/org/apache/commons/vfs/impl/DefaultFileMonitor.java
+@@ -481,12 +481,8 @@ private void refresh()
+         {
+             try
+             {
+-                // this.file = ((AbstractFileSystem) this.file.getFileSystem()).resolveFile(this.file.getName(), false);
+-
+-                // close the file - this will detach and reattach its resources (for this thread) on the
+-                // next access
+-                this.file.close();
+-            }
++				this.file.refresh();
++			}
+             catch (FileSystemException fse)
+             {
+                 log.error(fse.getLocalizedMessage(), fse);
+diff --git a/core/src/main/java/org/apache/commons/vfs/provider/ftp/FtpFileObject.java b/core/src/main/java/org/apache/commons/vfs/provider/ftp/FtpFileObject.java
+index b6500e6234..d2eb62d16c 100644
+--- a/core/src/main/java/org/apache/commons/vfs/provider/ftp/FtpFileObject.java
++++ b/core/src/main/java/org/apache/commons/vfs/provider/ftp/FtpFileObject.java
+@@ -62,7 +62,9 @@ public class FtpFileObject
+     private Map children;
+     private FileObject linkDestination;
+ 
+-    protected FtpFileObject(final FileName name,
++	private boolean inRefresh=false;
++
++	protected FtpFileObject(final FileName name,
+                             final FtpFileSystem fileSystem,
+                             final FileName rootName)
+         throws FileSystemException
+@@ -94,7 +96,7 @@ private FTPFile getChildFile(final String name, final boolean flush) throws IOEx
+     {
+         if (flush)
+         {
+-            children = null;
++ 			children = null;
+         }
+ 
+         // List the children of this file
+@@ -188,7 +190,36 @@ private void getInfo(boolean flush) throws IOException
+         this.fileInfo = newFileInfo;
+     }
+ 
+-    /**
++	/**
++	 *
++	 * @throws FileSystemException
++	 */
++	public void refresh() throws FileSystemException
++	{
++		if (!inRefresh)
++		{
++			try
++			{
++				inRefresh = true;
++				super.refresh();
++				try
++				{
++					// this will tell the parent to recreate its children collection
++					getInfo(true);
++				}
++				catch (IOException e)
++				{
++					throw new FileSystemException(e);
++				}
++			}
++			finally
++			{
++				inRefresh = false;
++			}
++		}
++	}
++
++	/**
+      * Detaches this file object from its file resource.
+      */
+     protected void doDetach()

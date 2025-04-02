@@ -1,0 +1,161 @@
+From 75b2d209c5ab7d1cf3aec51254fe93056aee2135 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sat, 16 Apr 2016 15:02:02 +0000
+Subject: [PATCH] [CONFIGURATION-622] Fixed handling of escaped keys in
+ INIConfiguration.write.
+
+Separator characters contained in keys were duplicated when the
+configuration was saved.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1739471 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration2/INIConfiguration.java      | 69 +++++++++++--------
+ .../configuration2/TestINIConfiguration.java  | 19 +++++
+ 2 files changed, 59 insertions(+), 29 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/INIConfiguration.java b/src/main/java/org/apache/commons/configuration2/INIConfiguration.java
+index 59a64fd159..613e0a877f 100644
+--- a/src/main/java/org/apache/commons/configuration2/INIConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/INIConfiguration.java
+@@ -23,7 +23,6 @@
+ import java.io.Writer;
+ import java.util.ArrayList;
+ import java.util.Collection;
+-import java.util.Iterator;
+ import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+ import java.util.List;
+@@ -280,47 +279,44 @@ public INIConfiguration(HierarchicalConfiguration<ImmutableNode> c)
+     public void write(Writer writer) throws ConfigurationException, IOException
+     {
+         PrintWriter out = new PrintWriter(writer);
+-        for (String section : getSections())
+-        {
+-            if (section != null)
+-            {
+-                out.print("[");
+-                out.print(section);
+-                out.print("]");
+-                out.println();
+-            }
+-            Configuration subset = getSection(section);
++        boolean first = true;
+ 
+-            Iterator<String> keys = subset.getKeys();
+-            while (keys.hasNext())
++        beginRead(false);
++        try
++        {
++            for (ImmutableNode node : getModel().getNodeHandler().getRootNode()
++                    .getChildren())
+             {
+-                String key = keys.next();
+-                Object value = subset.getProperty(key);
+-                if (value instanceof Collection)
++                if (isSectionNode(node))
+                 {
+-                    Iterator<?> values = ((Collection<?>) value).iterator();
+-                    while (values.hasNext())
++                    if (!first)
+                     {
+-                        value = values.next();
+-                        out.print(key);
+-                        out.print(" = ");
+-                        out.print(escapeValue(value.toString()));
+                         out.println();
+                     }
++                    out.print("[");
++                    out.print(node.getNodeName());
++                    out.print("]");
++                    out.println();
++
++                    for (ImmutableNode child : node.getChildren())
++                    {
++                        writeProperty(out, child.getNodeName(),
++                                child.getValue());
++                    }
+                 }
+                 else
+                 {
+-                    out.print(key);
+-                    out.print(" = ");
+-                    out.print(escapeValue(value.toString()));
+-                    out.println();
++                    writeProperty(out, node.getNodeName(), node.getValue());
+                 }
++                first = false;
+             }
+-
+             out.println();
++            out.flush();
++        }
++        finally
++        {
++            endRead();
+         }
+-
+-        out.flush();
+     }
+ 
+     /**
+@@ -448,6 +444,21 @@ private void createValueNodes(ImmutableNode.Builder sectionBuilder,
+         }
+     }
+ 
++    /**
++     * Writes data about a property into the given stream.
++     *
++     * @param out the output stream
++     * @param key the key
++     * @param value the value
++     */
++    private void writeProperty(PrintWriter out, String key, Object value)
++    {
++        out.print(key);
++        out.print(" = ");
++        out.print(escapeValue(value.toString()));
++        out.println();
++    }
++
+     /**
+      * Parse the value to remove the quotes and ignoring the comment. Example:
+      *
+diff --git a/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java
+index 5b90cf8fa0..10e279f2a4 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java
+@@ -17,8 +17,10 @@
+ 
+ package org.apache.commons.configuration2;
+ 
++import static org.hamcrest.CoreMatchers.containsString;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertThat;
+ import static org.junit.Assert.assertTrue;
+ import static org.junit.Assert.fail;
+ 
+@@ -830,6 +832,23 @@ public void testSaveKeysWithDelimiters() throws ConfigurationException, IOExcept
+         assertEquals("Wrong value (2)", "test2", conf.getString(section + ".test2"));
+     }
+ 
++    /**
++     * Tests that loading and saving a configuration that contains keys with
++     * delimiter characters works correctly. This test is related to
++     * CONFIGURATION-622.
++     */
++    @Test
++    public void testPropertyWithDelimiter() throws ConfigurationException
++    {
++        String data = INI_DATA + "key.dot = dotValue";
++        INIConfiguration conf = new INIConfiguration();
++        load(conf, data);
++        assertEquals("Wrong property value", "dotValue",
++                conf.getString("section3.key..dot"));
++        String output = saveToString(conf);
++        assertThat(output, containsString("key.dot = dotValue"));
++    }
++
+     /**
+      * Tests whether a value which contains a semicolon can be loaded
+      * successfully. This test is related to CONFIGURATION-434.

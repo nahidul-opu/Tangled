@@ -1,0 +1,130 @@
+From 6a51e7fc2cfd9f4e0a8e3591bbf586da2bee42cc Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Thu, 8 Sep 2011 09:16:08 +0000
+Subject: [PATCH] OPENNLP-295 Fixed probability array creation in the case that
+ the sentence does not contain an end-of-sentence character.
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/opennlp/trunk@1166581 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../tools/sentdetect/SentenceDetectorME.java    |  7 ++++---
+ .../sentdetect/SentenceDetectorMETest.java      | 17 ++++++++++++++---
+ 2 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/sentdetect/SentenceDetectorME.java b/opennlp-tools/src/main/java/opennlp/tools/sentdetect/SentenceDetectorME.java
+index e08509e6f..235b5a816 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/sentdetect/SentenceDetectorME.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/sentdetect/SentenceDetectorME.java
+@@ -148,7 +148,6 @@ private int getFirstNonWS(String s, int pos) {
+    *
+    */
+   public Span[] sentPosDetect(String s) {
+-    double sentProb = 1;
+     sentProbs.clear();
+     StringBuffer sb = new StringBuffer(s);
+     List<Integer> enders = scanner.getPositions(s);
+@@ -165,7 +164,6 @@ public Span[] sentPosDetect(String s) {
+ 
+       double[] probs = model.eval(cgen.getContext(sb, cint));
+       String bestOutcome = model.getBestOutcome(probs);
+-      sentProb *= probs[model.getIndex(bestOutcome)];
+ 
+       if (bestOutcome.equals(SPLIT) && isAcceptableBreak(s, index, cint)) {
+         if (index != cint) {
+@@ -199,8 +197,10 @@ public Span[] sentPosDetect(String s) {
+         while (end > 0 && StringUtil.isWhitespace(s.charAt(end - 1)))
+           end--;
+         
+-        if ((end - start) > 0)
++        if ((end - start) > 0) {
++          sentProbs.add(1d);
+           return new Span[] {new Span(start, end)};
++        }
+         else 
+           return new Span[0];
+     }
+@@ -225,6 +225,7 @@ public Span[] sentPosDetect(String s) {
+       }
+       spans[si]=new Span(start,end);
+     }
++    
+     if (leftover) {
+       spans[spans.length-1] = new Span(starts[starts.length-1],s.length());
+       sentProbs.add(ONE);
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/sentdetect/SentenceDetectorMETest.java b/opennlp-tools/src/test/java/opennlp/tools/sentdetect/SentenceDetectorMETest.java
+index 45933382c..b5d6e3506 100644
+--- a/opennlp-tools/src/test/java/opennlp/tools/sentdetect/SentenceDetectorMETest.java
++++ b/opennlp-tools/src/test/java/opennlp/tools/sentdetect/SentenceDetectorMETest.java
+@@ -55,6 +55,7 @@ public void testSentenceDetector() throws IOException {
+     assertEquals(sents[1],"There are many tests, this is the second.");
+     double[] probs = sentDetect.getSentenceProbabilities();
+     assertEquals(probs.length,2);
++    
+     String sampleSentences2 = "This is a test. There are many tests, this is the second";
+     sents = sentDetect.sentDetect(sampleSentences2);
+     assertEquals(sents.length,2);
+@@ -62,9 +63,7 @@ public void testSentenceDetector() throws IOException {
+     assertEquals(probs.length,2);
+     assertEquals(sents[0],"This is a test.");
+     assertEquals(sents[1],"There are many tests, this is the second");
+-    assertEquals(sents.length,2);
+-    probs = sentDetect.getSentenceProbabilities();
+-    assertEquals(probs.length,2);
++    
+     String sampleSentences3 = "This is a \"test\". He said \"There are many tests, this is the second.\"";
+     sents = sentDetect.sentDetect(sampleSentences3);
+     assertEquals(sents.length,2);
+@@ -72,6 +71,7 @@ public void testSentenceDetector() throws IOException {
+     assertEquals(probs.length,2);
+     assertEquals(sents[0],"This is a \"test\".");
+     assertEquals(sents[1],"He said \"There are many tests, this is the second.\"");
++    
+     String sampleSentences4 = "This is a \"test\". I said \"This is a test.\"  Any questions?";
+     sents = sentDetect.sentDetect(sampleSentences4);
+     assertEquals(sents.length,3);
+@@ -80,29 +80,39 @@ public void testSentenceDetector() throws IOException {
+     assertEquals(sents[0],"This is a \"test\".");
+     assertEquals(sents[1],"I said \"This is a test.\"");
+     assertEquals(sents[2],"Any questions?");
++    
+     String sampleSentences5 = "This is a one sentence test space at the end.    ";
+     sents = sentDetect.sentDetect(sampleSentences5);
+     assertEquals(1, sentDetect.getSentenceProbabilities().length);
+     assertEquals(sents[0],"This is a one sentence test space at the end.");
++    
+     String sampleSentences6 = "This is a one sentences test with tab at the end.            ";
+     sents = sentDetect.sentDetect(sampleSentences6);
+     assertEquals(sents[0],"This is a one sentences test with tab at the end.");
++    
+     String sampleSentences7 = "This is a test.    With spaces between the two sentences.";
+     sents = sentDetect.sentDetect(sampleSentences7);
+     assertEquals(sents[0],"This is a test.");
+     assertEquals(sents[1],"With spaces between the two sentences.");
++    
+     String sampleSentences9 = "";
+     sents = sentDetect.sentDetect(sampleSentences9);
+     assertEquals(0, sents.length);
++    
+     String sampleSentences10 = "               "; // whitespaces and tabs
+     sents = sentDetect.sentDetect(sampleSentences10);
+     assertEquals(0, sents.length);
++    
+     String sampleSentences11 = "This is test sentence without a dot at the end and spaces          ";
+     sents = sentDetect.sentDetect(sampleSentences11);
+     assertEquals(sents[0],"This is test sentence without a dot at the end and spaces");
++    probs = sentDetect.getSentenceProbabilities();
++    assertEquals(1, probs.length);
++    
+     String sampleSentence12 = "    This is a test.";
+     sents = sentDetect.sentDetect(sampleSentence12);
+     assertEquals(sents[0],"This is a test.");    
++    
+     String sampleSentence13 = " This is a test";
+     sents = sentDetect.sentDetect(sampleSentence13);
+     assertEquals(sents[0],"This is a test");
+@@ -114,5 +124,6 @@ public void testSentenceDetector() throws IOException {
+     assertEquals(probs.length,2);
+     assertEquals(new Span(0, 15), pos[0]);
+     assertEquals(new Span(16, 56), pos[1]);
++    
+   }
+ }

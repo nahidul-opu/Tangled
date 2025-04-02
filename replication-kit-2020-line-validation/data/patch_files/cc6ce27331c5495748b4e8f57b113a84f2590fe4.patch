@@ -1,0 +1,188 @@
+From cc6ce27331c5495748b4e8f57b113a84f2590fe4 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 20 Nov 2008 21:21:37 +0000
+Subject: [PATCH] FIX: <ivy:buildnumber> returns wrong result when resolve
+ fails (IVY-970)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@719378 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/ant/IvyBuildNumber.java    | 71 +++++++++++++++++--
+ .../apache/ivy/ant/IvyBuildNumberTest.java    | 16 +++++
+ test/repositories/ivysettings-checksums.xml   | 28 ++++++++
+ 4 files changed, 112 insertions(+), 4 deletions(-)
+ create mode 100644 test/repositories/ivysettings-checksums.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 1367db37a..739a75dbf 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -88,6 +88,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Log levels aren't respected in certain cases using the standalone functionality (IVY-960) (thanks to Patrick Woodworth)
+ - FIX: Listing of URL's under a given URL does not handle fully specified URL's (IVY-959) (thanks to Randy Nott)
+ - FIX: NPE in LogReportOutputter (IVY-961)
++- FIX: <ivy:buildnumber> returns wrong result when resolve fails (IVY-970)
+ 
+    2.0.0-rc2
+ =====================================
+diff --git a/src/java/org/apache/ivy/ant/IvyBuildNumber.java b/src/java/org/apache/ivy/ant/IvyBuildNumber.java
+index 4adab83d3..462a4df5a 100644
+--- a/src/java/org/apache/ivy/ant/IvyBuildNumber.java
++++ b/src/java/org/apache/ivy/ant/IvyBuildNumber.java
+@@ -17,11 +17,19 @@
+  */
+ package org.apache.ivy.ant;
+ 
++import java.util.List;
++import java.util.ListIterator;
++
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.resolve.ResolvedModuleRevision;
++import org.apache.ivy.core.search.SearchEngine;
+ import org.apache.ivy.core.settings.IvySettings;
++import org.apache.ivy.plugins.latest.ArtifactInfo;
++import org.apache.ivy.plugins.latest.LatestStrategy;
++import org.apache.ivy.plugins.matcher.PatternMatcher;
++import org.apache.ivy.plugins.version.VersionMatcher;
+ import org.apache.tools.ant.BuildException;
+ 
+ /**
+@@ -29,6 +37,24 @@
+  * properties according to what was found.
+  */
+ public class IvyBuildNumber extends IvyTask {
++    
++    public static class ResolvedModuleRevisionArtifactInfo implements ArtifactInfo {
++        private ModuleRevisionId rmr;
++
++        public ResolvedModuleRevisionArtifactInfo(ModuleRevisionId rmr) {
++            this.rmr = rmr;
++        }
++
++        public String getRevision() {
++            return rmr.getRevision();
++        }
++
++        public long getLastModified() {
++            return -1;
++        }
++
++    }
++
+     private String organisation;
+ 
+     private String module;
+@@ -117,10 +143,47 @@ public void doExecute() throws BuildException {
+         if (!prefix.endsWith(".") && prefix.length() > 0) {
+             prefix = prefix + ".";
+         }
+-        ResolvedModuleRevision rmr = ivy.findModule(ModuleRevisionId.newInstance(organisation,
+-            module, branch, revision));
+-        String revision = rmr == null ? null : rmr.getId().getRevision();
+-        NewRevision newRevision = computeNewRevision(revision);
++        
++        
++        SearchEngine searcher = new SearchEngine(settings);
++        ModuleRevisionId[] revisions = searcher.listModules(ModuleRevisionId.newInstance(organisation,
++            module, branch, ".*"), settings.getMatcher(PatternMatcher.EXACT_OR_REGEXP));
++        
++        ArtifactInfo[] infos = new ArtifactInfo[revisions.length];
++        for (int i = 0; i < revisions.length; i++) {
++            infos[i] = new ResolvedModuleRevisionArtifactInfo(revisions[i]);
++        }
++        
++        VersionMatcher matcher = settings.getVersionMatcher();
++        LatestStrategy latestStrategy = settings.getLatestStrategy("latest-revision");
++        List sorted = latestStrategy.sort(infos);
++
++        ModuleRevisionId askedMrid = ModuleRevisionId.newInstance(organisation,
++            module, branch, revision);
++
++        String foundRevision = null;
++        for (ListIterator iter = sorted.listIterator(sorted.size()); iter.hasPrevious();) {
++            ResolvedModuleRevisionArtifactInfo info = (ResolvedModuleRevisionArtifactInfo) iter.previous();
++            
++            if (!matcher.accept(askedMrid, info.rmr)) {
++                continue;
++            }
++            
++            if (matcher.needModuleDescriptor(askedMrid, info.rmr)) {
++                ResolvedModuleRevision rmr = ivy.findModule(info.rmr);
++                if (matcher.accept(askedMrid, rmr.getDescriptor())) {
++                    foundRevision = info.rmr.getRevision();
++                }
++            } else {
++                foundRevision = info.rmr.getRevision();
++            }
++            
++            if (foundRevision != null) {
++                break;
++            }
++        }
++        
++        NewRevision newRevision = computeNewRevision(foundRevision);
+         setProperty("revision", newRevision.getRevision());
+         setProperty("new.revision", newRevision.getNewRevision());
+         setProperty("build.number", newRevision.getBuildNumber());
+diff --git a/test/java/org/apache/ivy/ant/IvyBuildNumberTest.java b/test/java/org/apache/ivy/ant/IvyBuildNumberTest.java
+index e69282cce..ce4b3cd4e 100644
+--- a/test/java/org/apache/ivy/ant/IvyBuildNumberTest.java
++++ b/test/java/org/apache/ivy/ant/IvyBuildNumberTest.java
+@@ -160,5 +160,21 @@ public void testBuildNumber4() throws Exception {
+         assertEquals(null, buildNumber.getProject().getProperty("ivy.build.number"));
+         assertEquals("0", buildNumber.getProject().getProperty("ivy.new.build.number"));
+     }
++    
++    public void testWithBadChecksum() throws Exception {
++        Project project = new Project();
++        project.setProperty("ivy.settings.file", "test/repositories/ivysettings-checksums.xml");
++
++        buildNumber = new IvyBuildNumber();
++        buildNumber.setProject(project);
++        buildNumber.setOrganisation("org1");
++        buildNumber.setModule("badivycs");
++        buildNumber.setRevision("1.");
++        buildNumber.execute();
++        assertEquals("1.0", buildNumber.getProject().getProperty("ivy.revision"));
++        assertEquals("1.1", buildNumber.getProject().getProperty("ivy.new.revision"));
++        assertEquals("0", buildNumber.getProject().getProperty("ivy.build.number"));
++        assertEquals("1", buildNumber.getProject().getProperty("ivy.new.build.number"));
++    }
+ 
+ }
+diff --git a/test/repositories/ivysettings-checksums.xml b/test/repositories/ivysettings-checksums.xml
+new file mode 100644
+index 000000000..4ae0be6ad
+--- /dev/null
++++ b/test/repositories/ivysettings-checksums.xml
+@@ -0,0 +1,28 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<properties file="${ivy.settings.dir}/ivysettings.properties" />
++	<settings defaultCache="${cache.dir}" defaultResolver="1"/>
++	<resolvers>
++		<filesystem name="1">
++			<ivy pattern="${ivy.settings.dir}/checksums/[module]/ivy-[revision].xml"/>
++			<artifact pattern="${ivy.settings.dir}/checksums/[module]/[artifact]-[revision].[ext]"/>
++		</filesystem>
++	</resolvers>
++</ivysettings>

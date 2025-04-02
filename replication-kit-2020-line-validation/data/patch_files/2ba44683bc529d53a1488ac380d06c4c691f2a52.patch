@@ -1,0 +1,86 @@
+From 2ba44683bc529d53a1488ac380d06c4c691f2a52 Mon Sep 17 00:00:00 2001
+From: Nicolas Lalevee <hibou@apache.org>
+Date: Tue, 2 Nov 2010 13:19:55 +0000
+Subject: [PATCH] IVY-1243 : when useCacheOnly is used, don't do any TTL check
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1030034 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                        |  1 +
+ .../ivy/core/cache/CacheMetadataOptions.java       |  8 ++++++++
+ .../core/cache/DefaultRepositoryCacheManager.java  | 14 ++++++++------
+ .../ivy/plugins/resolver/AbstractResolver.java     |  1 +
+ 4 files changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index ac96bab25..ae8850b8a 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -119,6 +119,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: OutOfMemoryError when uploading large files using commons-httpclient (IVY-1197) (thanks to Torkild U. Resheim)
+ - FIX: Only the last dependency descriptor is taken into account on the same module (IVY-1240)
+ - FIX: UseCacheOnly doesn't respect the cache configuration in the ivysettings (IVY-1227)
++- FIX: UseCacheOnly is influenced by the TTL on cached metadata (IVY-1243)
+ 
+    2.2.0
+ =====================================
+diff --git a/src/java/org/apache/ivy/core/cache/CacheMetadataOptions.java b/src/java/org/apache/ivy/core/cache/CacheMetadataOptions.java
+index 25cefafbb..97d150e87 100644
+--- a/src/java/org/apache/ivy/core/cache/CacheMetadataOptions.java
++++ b/src/java/org/apache/ivy/core/cache/CacheMetadataOptions.java
+@@ -25,6 +25,7 @@ public class CacheMetadataOptions extends CacheDownloadOptions {
+     private Boolean isCheckmodified = null;
+     private String changingMatcherName = null;
+     private String changingPattern = null;
++    private boolean checkTTL = true;
+     
+     public Namespace getNamespace() {
+         return namespace;
+@@ -61,4 +62,11 @@ public CacheMetadataOptions setChangingPattern(String changingPattern) {
+         this.changingPattern  = changingPattern;
+         return this;
+     }
++    public CacheMetadataOptions setCheckTTL(boolean checkTTL) {
++        this.checkTTL = checkTTL;
++        return this;
++    }
++    public boolean isCheckTTL() {
++        return checkTTL;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index 93e35146e..af58b6410 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -701,12 +701,14 @@ private String getResolvedRevision(ModuleRevisionId mrid, CacheMetadataOptions o
+                     + ": inconsistent or old cache: no cached resolved time for " + mrid);
+                 saveResolvedRevision(mrid, resolvedRevision);
+                 return resolvedRevision;
+-            } 
+-            long expiration = Long.parseLong(resolvedTime) + getTTL(mrid);
+-            if (expiration > 0 // negative expiration means that Long.MAX_VALUE has been exceeded
+-                    && System.currentTimeMillis() > expiration) {
+-                Message.verbose(getName() + ": cached resolved revision expired for " + mrid);
+-                return null;
++            }
++            if (options.isCheckTTL()) {
++                long expiration = Long.parseLong(resolvedTime) + getTTL(mrid);
++                if (expiration > 0 // negative expiration means that Long.MAX_VALUE has been exceeded
++                        && System.currentTimeMillis() > expiration) {
++                    Message.verbose(getName() + ": cached resolved revision expired for " + mrid);
++                    return null;
++                }
+             }
+             return resolvedRevision;
+         } finally {
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+index 1c235a4f2..e36cf0a2c 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+@@ -436,6 +436,7 @@ protected CacheMetadataOptions getCacheOptions(ResolveData data) {
+         return (CacheMetadataOptions) new CacheMetadataOptions()
+             .setChangingMatcherName(getChangingMatcherName())
+             .setChangingPattern(getChangingPattern())
++            .setCheckTTL(!data.getOptions().isUseCacheOnly())
+             .setCheckmodified(data.getOptions().isUseCacheOnly() ? Boolean.FALSE : checkmodified)
+             .setValidate(doValidate(data))
+             .setNamespace(getNamespace())

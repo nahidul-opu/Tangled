@@ -1,0 +1,129 @@
+From c585c5a536b769af24bbf68d81075c163504c2bd Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Fri, 26 Jun 2009 23:01:22 +0000
+Subject: [PATCH] FIX: ivy:resolve ignores branch in "dynamic" resolve mode
+ (IVY-1087) (2nd attempt)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@788902 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../ivy/core/module/id/ModuleRevisionId.java  | 14 ++++++-
+ .../ivy/core/resolve/ResolveEngine.java       |  5 ++-
+ .../parser/xml/XmlModuleDescriptorParser.java | 42 +++++++++++++------
+ 3 files changed, 47 insertions(+), 14 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java b/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java
+index 6166a38d9..ebfe3f395 100644
+--- a/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java
++++ b/src/java/org/apache/ivy/core/module/id/ModuleRevisionId.java
+@@ -122,6 +122,13 @@ public static ModuleRevisionId newInstance(String organisation, String name, Str
+                 branch, revision, extraAttributes));
+     }
+ 
++    public static ModuleRevisionId newInstance(String organisation, String name, String branch,
++            String revision, Map extraAttributes, boolean replaceNullBranchWithDefault) {
++        return intern(
++            new ModuleRevisionId(ModuleId.newInstance(organisation, name), 
++                branch, revision, extraAttributes, replaceNullBranchWithDefault));
++    }
++
+     public static ModuleRevisionId newInstance(ModuleRevisionId mrid, String rev) {
+         return intern(
+             new ModuleRevisionId(mrid.getModuleId(), 
+@@ -190,10 +197,15 @@ private ModuleRevisionId(ModuleId moduleId, String revision, Map extraAttributes
+ 
+     private ModuleRevisionId(ModuleId moduleId, String branch, String revision, 
+             Map extraAttributes) {
++        this(moduleId, branch, revision, extraAttributes, true);
++    }
++    
++    private ModuleRevisionId(ModuleId moduleId, String branch, String revision, 
++            Map extraAttributes, boolean replaceNullBranchWithDefault) {
+         super(null, extraAttributes);
+         this.moduleId = moduleId;
+         IvyContext context = IvyContext.getContext();
+-        this.branch = branch == null 
++        this.branch = (replaceNullBranchWithDefault && branch == null) 
+             // we test if there's already an Ivy instance loaded, to avoid loading a default one 
+             // just to get the default branch
+             ? (context.peekIvy() == null ? null : context.getSettings().getDefaultBranch(moduleId)) 
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index cf2d37e06..48bec1c90 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -1131,7 +1131,10 @@ public DependencyDescriptor mediate(
+         if (ResolveOptions.RESOLVEMODE_DYNAMIC.equals(resolveMode)
+                 && !dd.getDynamicConstraintDependencyRevisionId()
+                         .equals(dd.getDependencyRevisionId())) {
+-            return dd.clone(dd.getDynamicConstraintDependencyRevisionId());
++            // the dynamicRevId can contain a null branch, so make sure this
++            // has been replaced by the default branch (if any!)
++            return dd.clone(ModuleRevisionId.newInstance(dd.getDynamicConstraintDependencyRevisionId(), 
++                dd.getDynamicConstraintDependencyRevisionId().getRevision()));
+         } else {
+             return dd;
+         }
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index 74ee970aa..bc8ac6cab 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -49,6 +49,7 @@
+ import org.apache.ivy.core.module.id.ArtifactId;
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.conflict.ConflictManager;
+ import org.apache.ivy.plugins.conflict.FixedConflictManager;
+ import org.apache.ivy.plugins.matcher.PatternMatcher;
+@@ -521,23 +522,40 @@ protected void dependencyStarted(Attributes attributes) {
+             String name = settings.substitute(attributes.getValue("name"));
+             String branch = settings.substitute(attributes.getValue("branch"));
+             String branchConstraint = settings.substitute(attributes.getValue("branchConstraint"));
+-            if (branchConstraint == null) {
+-                // there was no branch constraint before, so we should
+-                // set the branchConstraint to the current default branch
+-                branchConstraint = settings.getDefaultBranch(ModuleId.newInstance(org, name));
+-            }
++            
++//            if (branchConstraint == null) {
++//                // there was no branch constraint before, so we should
++//                // set the branchConstraint to the current default branch
++//                branchConstraint = settings.getDefaultBranch(ModuleId.newInstance(org, name));
++//            }
+ 
+             String rev = settings.substitute(attributes.getValue("rev"));
+             String revConstraint = settings.substitute(attributes.getValue("revConstraint"));
+-            revConstraint = revConstraint == null ? rev : revConstraint;
++            
+             Map extraAttributes = ExtendableItemHelper.getExtraAttributes(
+                 settings, attributes, DEPENDENCY_REGULAR_ATTRIBUTES);
+-            dd = new DefaultDependencyDescriptor(
+-                getMd(), 
+-                ModuleRevisionId.newInstance(org, name, branch, rev, extraAttributes), 
+-                ModuleRevisionId.newInstance(
+-                    org, name, branchConstraint, revConstraint, extraAttributes), 
+-                force, changing, transitive);
++
++            ModuleRevisionId revId = ModuleRevisionId.newInstance(org, name, branch, rev, 
++                extraAttributes);
++            ModuleRevisionId dynamicId = null;
++            if ((revConstraint == null) && (branchConstraint == null)) {
++                // no dynamic constraints defined, so dynamicId equals revId
++                dynamicId = ModuleRevisionId.newInstance(org, name, branch, rev, 
++                                extraAttributes, false);
++            } else {
++                if (branchConstraint == null) {
++                    // this situation occurs when there was no branch defined
++                    // in the original dependency descriptor. So the dynamicId
++                    // shouldn't contain a branch neither
++                    dynamicId = ModuleRevisionId.newInstance(org, name, null, revConstraint,
++                                    extraAttributes, false);
++                } else {
++                    dynamicId = ModuleRevisionId.newInstance(org, name, branchConstraint, 
++                                    revConstraint, extraAttributes);
++                }
++            }
++            
++            dd = new DefaultDependencyDescriptor(getMd(), revId, dynamicId, force, changing, transitive);
+             getMd().addDependency(dd);
+             String confs = settings.substitute(attributes.getValue("conf"));
+             if (confs != null && confs.length() > 0) {

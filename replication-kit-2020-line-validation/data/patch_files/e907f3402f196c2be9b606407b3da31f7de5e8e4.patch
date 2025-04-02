@@ -1,0 +1,662 @@
+From e907f3402f196c2be9b606407b3da31f7de5e8e4 Mon Sep 17 00:00:00 2001
+From: rmarroquin <rmarroquin@unknown>
+Date: Tue, 30 Apr 2013 17:45:09 +0000
+Subject: [PATCH] Committing GORA-206. Step towards putting an end to GORA-174
+
+git-svn-id: https://svn.apache.org/repos/asf/gora/branches/GORA_174@1477735 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../gora/cassandra/query/CassandraColumn.java |  12 +-
+ .../gora/cassandra/query/CassandraResult.java |  65 +++++++++--
+ .../gora/cassandra/query/CassandraRow.java    |  16 +++
+ .../cassandra/query/CassandraSubColumn.java   |  20 ++++
+ .../GoraSerializerTypeInferer.java            |   2 +
+ .../gora/cassandra/store/CassandraClient.java |  47 +++++++-
+ .../cassandra/store/CassandraMapping.java     |  11 ++
+ .../store/CassandraMappingManager.java        |  12 +-
+ .../gora/cassandra/store/CassandraStore.java  | 109 ++++++++++++------
+ .../src/test/conf/gora-cassandra-mapping.xml  |   5 +-
+ .../cassandra/store/TestCassandraStore.java   |   1 -
+ gora-core/src/examples/avro/employee.json     |  41 +++----
+ 12 files changed, 262 insertions(+), 79 deletions(-)
+
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraColumn.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraColumn.java
+index b31a9bafc..d41bf9343 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraColumn.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraColumn.java
+@@ -24,7 +24,6 @@
+ 
+ import org.apache.avro.Schema;
+ import org.apache.avro.Schema.Field;
+-import org.apache.avro.Schema.Type;
+ import org.apache.gora.cassandra.serializers.GoraSerializerTypeInferer;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -41,6 +40,15 @@ public abstract class CassandraColumn {
+   private String family;
+   private int type;
+   private Field field;
++  private int unionType;
++
++  public void setUnionType(int pUnionType){
++    this.unionType = pUnionType;
++  }
++
++  public int getUnionType(){
++    return unionType;
++  }
+   
+   public String getFamily() {
+     return family;
+@@ -67,7 +75,7 @@ protected Field getField() {
+   
+   protected Object fromByteBuffer(Schema schema, ByteBuffer byteBuffer) {
+     Object value = null;
+-    Serializer serializer = GoraSerializerTypeInferer.getSerializer(schema);
++    Serializer<?> serializer = GoraSerializerTypeInferer.getSerializer(schema);
+     if (serializer == null) {
+       LOG.info("Schema is not supported: " + schema.toString());
+     } else {
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraResult.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraResult.java
+index 9ebd8ba2c..cd1745366 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraResult.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraResult.java
+@@ -26,7 +26,8 @@
+ 
+ import org.apache.avro.Schema;
+ import org.apache.avro.Schema.Field;
+-import org.apache.avro.specific.SpecificFixed;
++import org.apache.avro.Schema.Type;
++import org.apache.gora.cassandra.store.CassandraStore;
+ import org.apache.gora.persistency.impl.PersistentBase;
+ import org.apache.gora.query.Query;
+ import org.apache.gora.query.impl.ResultBase;
+@@ -58,6 +59,25 @@ protected boolean nextInner() throws IOException {
+     ++this.rowNumber;
+     return (this.rowNumber <= this.cassandraResultSet.size());
+   }
++  
++  /**
++   * Gets the column containing the type of the union type element stored.
++   * TODO: This might seem too much of a overhead if we consider that N rows have M columns,
++   *       this might have to be reviewed to get the specific column in O(1)
++   * @param pFieldName
++   * @param pCassandraRow
++   * @return
++   */
++  private CassandraColumn getUnionTypeColumn(String pFieldName, Object[] pCassandraRow){
++    
++    for (int iCnt = 0; iCnt < pCassandraRow.length; iCnt++){
++      CassandraColumn cColumn = (CassandraColumn)pCassandraRow[iCnt];
++      String columnName = StringSerializer.get().fromByteBuffer(cColumn.getName());
++      if (pFieldName.equals(columnName))
++        return cColumn;
++    }
++    return null;
++  }
+ 
+ 
+   /**
+@@ -80,21 +100,42 @@ private void updatePersistent() throws IOException {
+       String family = cassandraColumn.getFamily();
+       String fieldName = this.reverseMap.get(family + ":" + StringSerializer.get().fromByteBuffer(cassandraColumn.getName()));
+       
+-      // get field
+-      int pos = this.persistent.getFieldIndex(fieldName);
+-      Field field = fields.get(pos);
+-      
+-      // get value
+-      cassandraColumn.setField(field);
+-      Object value = cassandraColumn.getValue();
+-      
+-      this.persistent.put(pos, value);
+-      // this field does not need to be written back to the store
+-      this.persistent.clearDirty(pos);
++      if (fieldName != null ){
++        // get field
++        int pos = this.persistent.getFieldIndex(fieldName);
++        Field field = fields.get(pos);
++        Type fieldType = field.schema().getType();
++        System.out.println(StringSerializer.get().fromByteBuffer(cassandraColumn.getName()) + fieldName + " " + fieldType.name());
++        if (fieldType == Type.UNION){
++          // TODO getting UNION stored type
++          // TODO get value of UNION stored type. This field does not need to be written back to the store
++          cassandraColumn.setUnionType(getNonNullTypePos(field.schema().getTypes()));
++        }
++
++        // get value
++        cassandraColumn.setField(field);
++        Object value = cassandraColumn.getValue();
++
++        this.persistent.put(pos, value);
++        // this field does not need to be written back to the store
++        this.persistent.clearDirty(pos);
++      }
++      else
++        LOG.debug("FieldName was null while iterating CassandraRow and using Avro Union type");
+     }
+ 
+   }
+ 
++  private int getNonNullTypePos(List<Schema> pTypes){
++    int iCnt = 0;
++    for (Schema sch :  pTypes)
++      if (!sch.getName().equals("null"))
++        return iCnt;
++      else 
++        iCnt++;
++    return CassandraStore.DEFAULT_UNION_SCHEMA;
++  }
++
+   @Override
+   public void close() throws IOException {
+     // TODO Auto-generated method stub
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraRow.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraRow.java
+index 544821a19..685d8e45d 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraRow.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraRow.java
+@@ -20,6 +20,9 @@
+ 
+ import java.util.ArrayList;
+ 
++import me.prettyprint.cassandra.serializers.StringSerializer;
++
++
+ /**
+  * List of key value pairs representing a row, tagged by a key.
+  */
+@@ -38,5 +41,18 @@ public K getKey() {
+   public void setKey(K key) {
+     this.key = key;
+   }
++  
++  /**
++   * Gets a specific CassandraColumn within a row using its name
++   * @param pCassandraColumnName
++   * @return CassandraColumn
++   */
++  public CassandraColumn getCassandraColumn(String pCassandraColumnName){
++    for (CassandraColumn cColumn: this)
++      if ( pCassandraColumnName.equals(StringSerializer.get().fromByteBuffer(cColumn.getName())) )
++        return cColumn;
++    
++    return null;
++  }
+ 
+ }
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraSubColumn.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraSubColumn.java
+index 5735c91e6..135d47dd8 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraSubColumn.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/query/CassandraSubColumn.java
+@@ -40,6 +40,7 @@
+ import org.apache.gora.cassandra.serializers.GenericArraySerializer;
+ import org.apache.gora.cassandra.serializers.StatefulHashMapSerializer;
+ import org.apache.gora.cassandra.serializers.TypeUtils;
++import org.apache.gora.cassandra.store.CassandraStore;
+ import org.apache.gora.persistency.StatefulHashMap;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -82,12 +83,31 @@ public Object getValue() {
+       StatefulHashMapSerializer serializer = StatefulHashMapSerializer.get(fieldSchema.getValueType());
+       StatefulHashMap map = serializer.fromByteBuffer(byteBuffer);
+       value = map;
++    } else if (type == Type.UNION){
++      // the selected union schema is obtained
++      Schema unionFieldSchema = getUnionSchema(super.getUnionType(), field.schema());
++      // we use the selected union schema to deserialize our actual value
++      value = fromByteBuffer(unionFieldSchema, byteBuffer);
+     } else {
+       value = fromByteBuffer(fieldSchema, byteBuffer);
+     }
+ 
+     return value;
+   }
++  
++  /**
++   * Gets the specific schema for a union data type
++   * @param pSchemaPos
++   * @param pSchema
++   * @return
++   */
++  private Schema getUnionSchema (int pSchemaPos, Schema pSchema){
++    Schema unionSchema = pSchema.getTypes().get(pSchemaPos);
++    // default union element
++    if ( unionSchema == null )
++      pSchema.getTypes().get(CassandraStore.DEFAULT_UNION_SCHEMA);
++    return unionSchema;
++  }
+ 
+   public void setValue(HColumn<ByteBuffer, ByteBuffer> hColumn) {
+     this.hColumn = hColumn;
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/GoraSerializerTypeInferer.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/GoraSerializerTypeInferer.java
+index 55259fdd1..15ebf239a 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/GoraSerializerTypeInferer.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/GoraSerializerTypeInferer.java
+@@ -148,6 +148,8 @@ public static <T> Serializer<T> getSerializer(Schema schema) {
+       serializer = GenericArraySerializer.get(schema.getElementType());
+     } else if (type == Type.MAP) {
+       serializer = StatefulHashMapSerializer.get(schema.getValueType());
++    } else if (type == Type.UNION){
++      serializer = ByteBufferSerializer.get();
+     } else {
+       serializer = null;
+     }
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+index 84acba999..a9c1a4f82 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+@@ -221,10 +221,24 @@ public void addSubColumn(K key, String fieldName, ByteBuffer columnName, Object
+     }
+   }
+ 
++  /**
++   * Adds an subColumn inside the cassandraMapping file when a String is serialized
++   * @param key
++   * @param fieldName
++   * @param columnName
++   * @param value
++   */
+   public void addSubColumn(K key, String fieldName, String columnName, Object value) {
+     addSubColumn(key, fieldName, StringSerializer.get().toByteBuffer(columnName), value);
+   }
+ 
++  /**
++   * Adds an subColumn inside the cassandraMapping file when an Integer is serialized
++   * @param key
++   * @param fieldName
++   * @param columnName
++   * @param value
++   */
+   public void addSubColumn(K key, String fieldName, Integer columnName, Object value) {
+     addSubColumn(key, fieldName, IntegerSerializer.get().toByteBuffer(columnName), value);
+   }
+@@ -364,6 +378,20 @@ public List<Row<K, ByteBuffer, ByteBuffer>> execute(CassandraQuery<K, T> cassand
+     
+     return orderedRows.getList();
+   }
++  
++  private String getMappingFamily(String pField){
++    String family = null;
++    // TODO checking if it was a UNION field the one we are retrieving
++      family = this.cassandraMapping.getFamily(pField);
++    return family;
++  }
++  
++  private String getMappingColumn(String pField){
++    String column = null;
++    // TODO checking if it was a UNION field the one we are retrieving e.g. column = pField;
++      column = this.cassandraMapping.getColumn(pField);
++    return column;
++  }
+ 
+   /**
+    * Select the families that contain at least one column mapped to a query field.
+@@ -373,8 +401,8 @@ public List<Row<K, ByteBuffer, ByteBuffer>> execute(CassandraQuery<K, T> cassand
+   public Map<String, List<String>> getFamilyMap(Query<K, T> query) {
+     Map<String, List<String>> map = new HashMap<String, List<String>>();
+     for (String field: query.getFields()) {
+-      String family = this.cassandraMapping.getFamily(field);
+-      String column = this.cassandraMapping.getColumn(field);
++      String family = this.getMappingFamily(field);
++      String column = this.getMappingColumn(field);
+       
+       // check if the family value was already initialized 
+       List<String> list = map.get(family);
+@@ -391,6 +419,14 @@ public Map<String, List<String>> getFamilyMap(Query<K, T> query) {
+     
+     return map;
+   }
++
++  /**
++   * Retrieves the cassandraMapping which holds whatever was mapped from the gora-cassandra-mapping.xml
++   * @return
++   */
++  public CassandraMapping getCassandraMapping(){
++    return this.cassandraMapping;
++  }
+   
+   /**
+    * Select the field names according to the column names, which format if fully qualified: "family:column"
+@@ -400,16 +436,15 @@ public Map<String, List<String>> getFamilyMap(Query<K, T> query) {
+   public Map<String, String> getReverseMap(Query<K, T> query) {
+     Map<String, String> map = new HashMap<String, String>();
+     for (String field: query.getFields()) {
+-      String family = this.cassandraMapping.getFamily(field);
+-      String column = this.cassandraMapping.getColumn(field);
++      String family = this.getMappingFamily(field);
++      String column = this.getMappingColumn(field);
+       
+       map.put(family + ":" + column, field);
+     }
+     
+     return map;
+-     
+   }
+-
++  
+   public boolean isSuper(String family) {
+     return this.cassandraMapping.isSuper(family);
+   }
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java
+index 2da5b16f0..99c76a974 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java
+@@ -206,6 +206,17 @@ public CassandraMapping(Element keyspace, Element mapping) {
+     }    
+   }
+ 
++  /**
++   * Add new column to CassandraMapping using the self-explanatory parameters
++   * @param pFamilyName
++   * @param pFieldName
++   * @param pColumnName
++   */
++  public void addColumn(String pFamilyName, String pFieldName, String pColumnName){
++    this.familyMap.put(pFieldName, pFamilyName);
++    this.columnMap.put(pFieldName, pColumnName);
++  }
++
+   public String getFamily(String name) {
+     return this.familyMap.get(name);
+   }
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java
+index 6cdbe3a1c..0c77abcee 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java
+@@ -19,6 +19,7 @@
+ package org.apache.gora.cassandra.store;
+ 
+ import java.io.IOException;
++import java.io.InputStream;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+@@ -48,7 +49,9 @@ public static CassandraMappingManager getManager() {
+     return manager;
+   }
+ 
+-  //
++  /**
++  * Objects to maintain mapped keyspaces
++  */
+   private Map<String, Element> keyspaceMap = null;
+   private Map<String, Element>  mappingMap = null;
+ 
+@@ -95,7 +98,12 @@ public CassandraMapping get(Class<?> persistentClass) {
+   public void loadConfiguration() throws JDOMException, IOException {
+     SAXBuilder saxBuilder = new SAXBuilder();
+     // get mapping file
+-    Document document = saxBuilder.build(getClass().getClassLoader().getResourceAsStream(MAPPING_FILE));
++    InputStream inputStream = getClass().getClassLoader().getResourceAsStream(MAPPING_FILE);
++    if (inputStream == null){
++      LOG.warn("Mapping file '" + MAPPING_FILE + "' could not be found!");
++      throw new IOException("Mapping file '" + MAPPING_FILE + "' could not be found!");
++    }
++    Document document = saxBuilder.build(inputStream);
+     if (document == null) {
+       LOG.warn("Mapping file '" + MAPPING_FILE + "' could not be found!");
+     }
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+index 2d6649cd6..59050683b 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+@@ -29,8 +29,6 @@
+ import java.util.Set;
+ import java.util.Collections;
+ 
+-import me.prettyprint.cassandra.serializers.IntegerSerializer;
+-import me.prettyprint.cassandra.serializers.StringSerializer;
+ import me.prettyprint.hector.api.beans.ColumnSlice;
+ import me.prettyprint.hector.api.beans.HColumn;
+ import me.prettyprint.hector.api.beans.HSuperColumn;
+@@ -42,7 +40,6 @@
+ import org.apache.avro.Schema.Field;
+ import org.apache.avro.Schema.Type;
+ import org.apache.avro.generic.GenericArray;
+-import org.apache.avro.specific.SpecificFixed;
+ import org.apache.avro.util.Utf8;
+ import org.apache.gora.cassandra.query.CassandraQuery;
+ import org.apache.gora.cassandra.query.CassandraResult;
+@@ -67,6 +64,11 @@ public class CassandraStore<K, T extends PersistentBase> extends DataStoreBase<K
+ 
+   private CassandraClient<K, T>  cassandraClient = new CassandraClient<K, T>();
+ 
++  /**
++   * Default schema index used when AVRO Union data types are stored
++   */
++  public static int DEFAULT_UNION_SCHEMA = 0;
++
+   /**
+    * The values are Avro fields pending to be stored.
+    *
+@@ -132,7 +134,7 @@ public Result<K, T> execute(Query<K, T> query) {
+     CassandraResult<K, T> cassandraResult = new CassandraResult<K, T>(this, query);
+     cassandraResult.setReverseMap(reverseMap);
+ 
+-    CassandraResultSet cassandraResultSet = new CassandraResultSet();
++    CassandraResultSet<K> cassandraResultSet = new CassandraResultSet<K>();
+     
+     // We query Cassandra keyspace by families.
+     for (String family : familyMap.keySet()) {
+@@ -322,6 +324,11 @@ public void put(K key, T value) {
+             }
+             fieldValue = newArray;
+             break;
++          case UNION:
++            // storing the union selected schema, the actual value will be stored as soon as getting out of here
++            // TODO determine which schema we are using: int schemaPos = getUnionSchema(fieldValue,fieldSchema);
++            // and save it p.put( p.getFieldIndex(field.name() + CassandraStore.UNION_COL_SUFIX), schemaPos);
++            break;
+         }
+         
+         p.put(fieldPos, fieldValue);
+@@ -341,37 +348,32 @@ public void put(K key, T value) {
+   private void addOrUpdateField(K key, Field field, Object value) {
+     Schema schema = field.schema();
+     Type type = schema.getType();
+-    switch (type) {
+-      case STRING:
+-      case BOOLEAN:
+-      case INT:
+-      case LONG:
+-      case BYTES:
+-      case FLOAT:
+-      case DOUBLE:
+-      case FIXED:
+-        this.cassandraClient.addColumn(key, field.name(), value);
+-        break;
+-      case RECORD:
+-        if (value != null) {
+-          if (value instanceof PersistentBase) {
+-            PersistentBase persistentBase = (PersistentBase) value;
+-            for (Field member: schema.getFields()) {
+-              
+-              // TODO: hack, do not store empty arrays
+-              Object memberValue = persistentBase.get(member.pos());
+-              if (memberValue instanceof GenericArray<?>) {
+-                if (((GenericArray)memberValue).size() == 0) {
+-                  continue;
+-                }
+-              } else if (memberValue instanceof StatefulHashMap<?,?>) {
+-                if (((StatefulHashMap)memberValue).size() == 0) {
+-                  continue;
++      switch (type) {
++        case STRING:
++        case BOOLEAN:
++        case INT:
++        case LONG:
++        case BYTES:
++        case FLOAT:
++        case DOUBLE:
++        case FIXED:
++          this.cassandraClient.addColumn(key, field.name(), value);
++          break;
++        case RECORD:
++          if (value != null) {
++            if (value instanceof PersistentBase) {
++              PersistentBase persistentBase = (PersistentBase) value;
++              for (Field member: schema.getFields()) {
++                
++                // TODO: hack, do not store empty arrays
++                Object memberValue = persistentBase.get(member.pos());
++                if (memberValue instanceof GenericArray<?>) {
++                  if (((GenericArray)memberValue).size() == 0) {
++                    continue;
++                  }
+                 }
++                this.cassandraClient.addSubColumn(key, field.name(), member.name(), memberValue);
+               }
+-
+-              this.cassandraClient.addSubColumn(key, field.name(), member.name(), memberValue);
+-            }
+           } else {
+             LOG.info("Record not supported: " + value.toString());
+             
+@@ -396,11 +398,52 @@ private void addOrUpdateField(K key, Field field, Object value) {
+           }
+         }
+         break;
++       case UNION:
++         if(value != null) {
++           LOG.info("Union being supported with value: " + value.toString());
++           // TODO add union schema index used
++           // adding union value
++           this.cassandraClient.addColumn(key, field.name(), value);
++         } else {
++           LOG.info("Union not supported: " + value.toString());
++         }
+       default:
+         LOG.info("Type not considered: " + type.name());      
+     }
+   }
+ 
++  /**
++   * Gets the position within the schema of the type used
++   * @param pValue
++   * @param pUnionSchema
++   * @return
++   */
++  private int getUnionSchema(Object pValue, Schema pUnionSchema){
++    int unionSchemaPos = 0;
++    String valueType = pValue.getClass().getSimpleName();
++    Iterator<Schema> it = pUnionSchema.getTypes().iterator();
++    while ( it.hasNext() ){
++      String schemaName = it.next().getName();
++      if (valueType.equals("Utf8") && schemaName.equals(Type.STRING.name().toLowerCase()))
++        return unionSchemaPos;
++      else if (valueType.equals("HeapByteBuffer") && schemaName.equals(Type.STRING.name().toLowerCase()))
++        return unionSchemaPos;
++      else if (valueType.equals("Integer") && schemaName.equals(Type.INT.name().toLowerCase()))
++        return unionSchemaPos;
++      else if (valueType.equals("Long") && schemaName.equals(Type.LONG.name().toLowerCase()))
++        return unionSchemaPos;
++      else if (valueType.equals("Double") && schemaName.equals(Type.DOUBLE.name().toLowerCase()))
++        return unionSchemaPos;
++      else if (valueType.equals("Float") && schemaName.equals(Type.FLOAT.name().toLowerCase()))
++        return unionSchemaPos;
++      else if (valueType.equals("Boolean") && schemaName.equals(Type.BOOLEAN.name().toLowerCase()))
++        return unionSchemaPos;
++      unionSchemaPos ++;
++    }
++    // if we weren't able to determine which data type it is, then we return the default
++    return 0;
++  }
++
+   @Override
+   public boolean schemaExists() {
+     LOG.info("schema exists");
+diff --git a/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml b/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml
+index 1e9ec792e..5109d40a3 100644
+--- a/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml
++++ b/gora-cassandra/src/test/conf/gora-cassandra-mapping.xml
+@@ -20,19 +20,16 @@
+ <gora-orm>
+   <keyspace name="Employee" host="localhost" cluster="Gora Cassandra Test Cluster">
+     <family name="p"/>
+-    <family name="f"/>
+      <family name="sc" type="super" />
+   </keyspace>
+ 
+   <keyspace name="WebPage" host="localhost" cluster="Gora Cassandra Test Cluster">
+     <family name="p"/>
+-    <family name="f"/>
+     <family name="sc" type="super"/>
+   </keyspace>
+ 
+   <keyspace name="TokenDatum" host="localhost" cluster="Gora Cassandra Test Cluster">
+     <family name="p"/>
+-    <family name="f"/>
+     <family name="sc" type="super"/>
+   </keyspace>
+ 
+@@ -41,6 +38,8 @@
+     <field name="dateOfBirth"  family="p" qualifier="info:db"/>
+     <field name="ssn"  family="p" qualifier="info:sn"/>
+     <field name="salary"  family="p" qualifier="info:sl"/>
++    <field name="boss" family="p" qualifier="info:bs"/>
++    <field name="webpage" family="p" qualifier="info:wp"/>
+   </class>
+ 
+   <class name="org.apache.gora.examples.generated.WebPage" keyClass="java.lang.String" keyspace="WebPage">
+diff --git a/gora-cassandra/src/test/java/org/apache/gora/cassandra/store/TestCassandraStore.java b/gora-cassandra/src/test/java/org/apache/gora/cassandra/store/TestCassandraStore.java
+index 6e7798222..54135d55f 100644
+--- a/gora-cassandra/src/test/java/org/apache/gora/cassandra/store/TestCassandraStore.java
++++ b/gora-cassandra/src/test/java/org/apache/gora/cassandra/store/TestCassandraStore.java
+@@ -38,7 +38,6 @@
+ 
+ /**
+  * Test for CassandraStore.
+- * @author lewismc
+  */
+ public class TestCassandraStore extends DataStoreTestBase{
+ 	
+diff --git a/gora-core/src/examples/avro/employee.json b/gora-core/src/examples/avro/employee.json
+index 576c60989..e39862066 100644
+--- a/gora-core/src/examples/avro/employee.json
++++ b/gora-core/src/examples/avro/employee.json
+@@ -9,25 +9,26 @@
+       {"name": "salary", "type": "int"},
+       {"name": "boss", "type":["null","Employee","string"]},
+       {"name": "webpage", "type":["null",
+-      							 {
+-      							   "type": "record",
+-      							   "name": "WebPage",
+-      							   "namespace": "org.apache.gora.examples.generated",
+-        							 "fields" : [
+-          							 {"name": "url", "type": "string"},
+-          							 {"name": "content", "type": ["null","bytes"]},
+-          							 {"name": "parsedContent", "type": {"type":"array", "items": "string"}},
+-          							 {"name": "outlinks", "type": {"type":"map", "values":"string"}},
+-          							 {"name": "metadata", "type": {
+-            							 "name": "Metadata",
+-            							 "type": "record",
+-            							 "namespace": "org.apache.gora.examples.generated",
+-            							 "fields": [
+-              							 {"name": "version", "type": "int"},
+-              							 {"name": "data", "type": {"type": "map", "values": "string"}}
+-            							 ]
+-          							 }}
+-        							 ]
+-      							 }]}
++        {
++      	  "type": "record",
++      	  "name": "WebPage",
++      	  "namespace": "org.apache.gora.examples.generated",
++          "fields" : [
++           {"name": "url", "type": "string"},
++           {"name": "content", "type": ["null","bytes"]},
++           {"name": "parsedContent", "type": {"type":"array", "items": "string"}},
++           {"name": "outlinks", "type": {"type":"map", "values":"string"}},
++           {"name": "metadata", "type": {
++            "name": "Metadata",
++            "type": "record",
++            "namespace": "org.apache.gora.examples.generated",
++            "fields": [
++             {"name": "version", "type": "int"},
++             {"name": "data", "type": {"type": "map", "values": "string"}}
++            ]
++          }}
++          ]
++      	}
++      ]}
+     ]
+   }

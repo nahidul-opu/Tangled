@@ -1,0 +1,188 @@
+From 25987cad1d8be02b4b321ce06b23ffdf36cf2f5a Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 7 Dec 2007 20:13:50 +0000
+Subject: [PATCH] FIX: latest compatible conflict manager fails with circular
+ dependencies and dynamic revision (IVY-663)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@602203 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/ResolveEngine.java       |  7 +---
+ .../LatestCompatibleConflictManager.java      | 24 ++++++------
+ .../LatestCompatibleConflictManagerTest.java  | 39 ++++++++++++++++---
+ test/repositories/2/mod6.3/mod6.3-1.0.jar     |  1 +
+ test/repositories/2/mod6.3/mod6.3-1.2.jar     |  1 +
+ 6 files changed, 51 insertions(+), 22 deletions(-)
+ create mode 100644 test/repositories/2/mod6.3/mod6.3-1.0.jar
+ create mode 100644 test/repositories/2/mod6.3/mod6.3-1.2.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f45893920..e1b18ae8a 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -59,6 +59,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - IMPROVEMENT: Decrease memory footprint (IVY-662)
+ 
++- FIX: latest compatible conflict manager fails with circular dependencies and dynamic revision (IVY-663)
+ - FIX: Strict conflictmanager seems to not support dynamic revisions (IVY-474)
+ - FIX: NPE in namespace transformation during the ivy:findrevision and ivy:resolve task execution (IVY-659) (thanks to Andrea Bernardo Ciddio)
+ 
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 7bdecc047..b71073dc8 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -585,7 +585,7 @@ private void fetchDependencies(VisitNode node, String conf, boolean shouldBePubl
+             // indeed in some cases conflict manager need more information than just asked
+             // dependency to take the decision
+             resolveConflict(node, conf); 
+-            if (!node.isEvicted()) {
++            if (!node.isEvicted() && !node.isCircular()) {
+                 String[] confs = node.getRealConfs(conf);
+                 for (int i = 0; i < confs.length; i++) {
+                     doFetchDependencies(node, confs[i]);
+@@ -594,7 +594,7 @@ private void fetchDependencies(VisitNode node, String conf, boolean shouldBePubl
+         } else if (!node.hasProblem()) {
+             // the node has not been loaded but hasn't problem: it was already loaded
+             // => we just have to update its dependencies data
+-            if (!node.isEvicted()) {
++            if (!node.isEvicted() && !node.isCircular()) {
+                 String[] confs = node.getRealConfs(conf);
+                 for (int i = 0; i < confs.length; i++) {
+                     doFetchDependencies(node, confs[i]);
+@@ -661,9 +661,6 @@ private void doFetchDependencies(VisitNode node, String conf) {
+                 VisitNode dep = (VisitNode) iter.next();
+                 dep.useRealNode(); // the node may have been resolved to another real one while
+                 // resolving other deps
+-                if (dep.isCircular()) {
+-                    continue;
+-                }
+                 String[] confs = dep.getRequiredConfigurations(node, conf);
+                 for (int i = 0; i < confs.length; i++) {
+                     fetchDependencies(dep, confs[i], true);
+diff --git a/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java
+index 0d3dd67df..35ca41c77 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManager.java
+@@ -237,8 +237,8 @@ private void blackListIncompatibleCallerAndRestartResolveIfPossible(IvySettings
+             Stack/*<IvyNode>*/ callerStack) {
+         Collection/*<IvyNodeBlacklist>*/ blacklisted = new ArrayList/*<IvyNodeBlacklist>*/();
+         IvyNode node = (IvyNode) callerStack.peek();
+-        Caller[] callers = node.getAllCallers();
+         String rootModuleConf = conflictParent.getData().getReport().getConfiguration();
++        Caller[] callers = node.getCallers(rootModuleConf);
+         for (int i = 0; i < callers.length; i++) {
+             IvyNode callerNode = node.findNode(callers[i].getModuleRevisionId());
+             if (callerNode.isBlacklisted(rootModuleConf)) {
+@@ -248,12 +248,16 @@ private void blackListIncompatibleCallerAndRestartResolveIfPossible(IvySettings
+                 blacklisted.add(new IvyNodeBlacklist(
+                     conflictParent, selectedNode, evictedNode, node, rootModuleConf));
+             } else {
+-                if (callerNode == null) {
+-                    // we have reached the root without finding a way to change the blacklist a
+-                    // caller in a particular path, this is a strict conflict
+-                    return null;
+-                }
+-                if (!callerStack.contains(callerNode)) {
++                if (callerStack.subList(0, callerStack.size() - 1).contains(node)) {
++                    // circular dependency found and handled: the current top of the stack (node)
++                    // was already contained in the rest of the stack, the circle is closed, nothing
++                    // else to do
++                } else {
++                    if (callerNode == null) {
++                        // we have reached the root without finding a way to change the blacklist a
++                        // caller in a particular path, this is a strict conflict
++                        return null;
++                    }
+                     callerStack.push(callerNode);
+                     Collection sub = blackListIncompatibleCaller(
+                         versionMatcher, conflictParent, selectedNode, evictedNode, callerStack);
+@@ -264,13 +268,11 @@ private void blackListIncompatibleCallerAndRestartResolveIfPossible(IvySettings
+                     } else {
+                         blacklisted.addAll(sub);
+                     }
+-                } else {
+-                    // circular dependency, nothing to do, this path should not be considered as a
+-                    // problem
+                 }
+             }
+         }
+-        if (blacklisted.isEmpty()) {
++        if (blacklisted.isEmpty() 
++                && !callerStack.subList(0, callerStack.size() - 1).contains(node)) {
+             return null;
+         }
+         return blacklisted;
+diff --git a/test/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManagerTest.java b/test/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManagerTest.java
+index 50e936ef9..a4fb12a28 100644
+--- a/test/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManagerTest.java
++++ b/test/java/org/apache/ivy/plugins/conflict/LatestCompatibleConflictManagerTest.java
+@@ -112,6 +112,16 @@ public void testCompatibilityResolve5() throws Exception {
+     }
+ 
+     public void testCompatibilityResolve6() throws Exception {
++        fixture
++            .addMD("#A;1-> { #C;[2.0,2.5] #B;1.4 }")
++            .addMD("#B;1.4->#D;1.5")
++            .addMD("#C;2.5->#D;[1.0,1.6]")
++            .addMD("#D;1.5").addMD("#D;1.6")
++            .init();
++        resolveAndAssert("#A;1", "#B;1.4, #C;2.5, #D;1.5");
++    }
++
++    public void testCompatibilityResolveCircularDependency1() throws Exception {
+         fixture
+             .addMD("#A;6->{ #B;[3.0,3.5] #C;4.6 }")
+             .addMD("#B;3.4->#D;2.5")
+@@ -124,14 +134,31 @@ public void testCompatibilityResolve6() throws Exception {
+         resolveAndAssert("#A;6", "#B;3.4, #C;4.6, #D;2.5");
+     }
+ 
+-    public void testCompatibilityResolve7() throws Exception {
++    public void testCompatibilityResolveCircularDependency2() throws Exception {
+         fixture
+-            .addMD("#A;1-> { #C;[2.0,2.5] #B;1.4 }")
+-            .addMD("#B;1.4->#D;1.5")
+-            .addMD("#C;2.5->#D;[1.0,1.6]")
+-            .addMD("#D;1.5").addMD("#D;1.6")
++            .addMD("#A;1->#C;2")
++            .addMD("#C;1->#B;1")
++            .addMD("#C;2->#B;2")
++            .addMD("#C;3->#B;3")
++            .addMD("#B;1->#C;latest.integration") // circular dependency
++            .addMD("#B;2->#C;latest.integration") // circular dependency
++            .addMD("#B;3->#C;latest.integration") // circular dependency
+             .init();
+-        resolveAndAssert("#A;1", "#B;1.4, #C;2.5, #D;1.5");
++        resolveAndAssert("#A;1", "#B;2, #C;2");
++    }
++
++    public void testCompatibilityResolveCircularDependency3() throws Exception {
++        // same as 2, but A depends on B
++        fixture
++            .addMD("#A;1->#B;2")
++            .addMD("#C;1->#B;1")
++            .addMD("#C;2->#B;2")
++            .addMD("#C;3->#B;3")
++            .addMD("#B;1->#C;latest.integration") // circular dependency
++            .addMD("#B;2->#C;latest.integration") // circular dependency
++            .addMD("#B;3->#C;latest.integration") // circular dependency
++            .init();
++        resolveAndAssert("#A;1", "#B;2, #C;2");
+     }
+ 
+ 
+diff --git a/test/repositories/2/mod6.3/mod6.3-1.0.jar b/test/repositories/2/mod6.3/mod6.3-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod6.3/mod6.3-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/2/mod6.3/mod6.3-1.2.jar b/test/repositories/2/mod6.3/mod6.3-1.2.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/2/mod6.3/mod6.3-1.2.jar
+@@ -0,0 +1 @@
++ 

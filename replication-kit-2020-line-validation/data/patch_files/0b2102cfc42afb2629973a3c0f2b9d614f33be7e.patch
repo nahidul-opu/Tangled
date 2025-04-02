@@ -1,0 +1,117 @@
+From 0b2102cfc42afb2629973a3c0f2b9d614f33be7e Mon Sep 17 00:00:00 2001
+From: Bernd Eckenfels <ecki@apache.org>
+Date: Mon, 3 Nov 2014 00:24:02 +0000
+Subject: [PATCH] [VFS-521][RAM][Tests] Fix MonitorOutputStream for Java 8
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/vfs/trunk@1636224 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../vfs2/util/MonitorOutputStream.java        | 36 ++++++++++++++-----
+ src/changes/changes.xml                       |  4 +++
+ 2 files changed, 32 insertions(+), 8 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/commons/vfs2/util/MonitorOutputStream.java b/core/src/main/java/org/apache/commons/vfs2/util/MonitorOutputStream.java
+index acb6e55298..fa869058a6 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/util/MonitorOutputStream.java
++++ b/core/src/main/java/org/apache/commons/vfs2/util/MonitorOutputStream.java
+@@ -19,6 +19,7 @@
+ import java.io.BufferedOutputStream;
+ import java.io.IOException;
+ import java.io.OutputStream;
++import java.util.concurrent.atomic.AtomicBoolean;
+ 
+ import org.apache.commons.vfs2.FileSystemException;
+ 
+@@ -28,7 +29,7 @@
+ public class MonitorOutputStream
+     extends BufferedOutputStream
+ {
+-    private boolean finished;
++    private final AtomicBoolean finished = new AtomicBoolean(false);
+ 
+     public MonitorOutputStream(final OutputStream out)
+     {
+@@ -37,21 +38,42 @@ public MonitorOutputStream(final OutputStream out)
+ 
+     /**
+      * Closes this output stream.
++     * <p>
++     * This makes sure the buffers are flushed, close the output
++     * stream and it will call {@link #onClose()}
++     * and re-throw last exception from any of the three.
++     * <p>
++     * This does nothing if the stream is closed already.
++     *
+      * @throws IOException if an error occurs.
+      */
+     @Override
+     public void close() throws IOException
+     {
+-        if (finished)
++        // do not use super.close()
++        // on Java 8 it might throw self suppression, see JDK-8042377
++        // in older Java it silently ignores flush() errors
++        if (finished.getAndSet(true))
+         {
+             return;
+         }
+ 
+-        // Close the output stream
+         IOException exc = null;
++
++        // flush the buffer and out stream
+         try
+         {
+-            super.close();
++            super.flush();
++        }
++        catch (final IOException ioe)
++        {
++            exc = ioe;
++        }
++
++        // close the out stream without using super.close()
++        try
++        {
++            super.out.close();
+         }
+         catch (final IOException ioe)
+         {
+@@ -68,8 +90,6 @@ public void close() throws IOException
+             exc = ioe;
+         }
+ 
+-        finished = true;
+-
+         if (exc != null)
+         {
+             throw exc;
+@@ -132,12 +152,12 @@ public void write(final byte[] b) throws IOException
+      * This is a workaround for an oddity with Java's BufferedOutputStream where you can write to
+      * even if the stream has been closed.
+      *
+-     * @throws FileSystemException if an error occurs.
++     * @throws FileSystemException if already closed.
+      * @since 2.0
+      */
+     protected void assertOpen() throws FileSystemException
+     {
+-        if (finished)
++        if (finished.get())
+         {
+             throw new FileSystemException("vfs.provider/closed.error");
+         }
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 5dbcc0c38f..56161d46a1 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -26,6 +26,10 @@
+ <!--       <action issue="VFS-443" dev="ggregory" type="update" due-to="nickallen"> -->
+ <!--     	[Local] Need an easy way to convert from a FileObject to a File. -->
+ <!--       </action> -->
++      <action issue="VFS-521" dev="ecki" type="fix">
++       [Ram][Tests] Make RAM provider test pass on Java 8
++       (JDK-8042377, self-suppression not permitted, MonitorOutputStream#close()).
++      </action>
+       <action issue="VFS-542" dev="ggregory" type="update">
+        Update Jsch from 0.1.50 to 0.1.51.
+       </action>

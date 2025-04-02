@@ -1,0 +1,78 @@
+From d48708eca5035fb576983e99e13f89045c1006b6 Mon Sep 17 00:00:00 2001
+From: vijuk <vijuk@users.noreply.github.com>
+Date: Wed, 24 Sep 2014 18:15:20 -0700
+Subject: [PATCH] Fix for GORA-376: Gora Cassandra doesn't accept user
+ credentials for connection
+
+---
+ .../gora/cassandra/store/CassandraClient.java | 27 +++++++++++++++++--
+ .../gora/cassandra/store/CassandraStore.java  |  2 +-
+ 2 files changed, 26 insertions(+), 3 deletions(-)
+
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+index 9e8cd7b22..cb54ed11a 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+@@ -93,6 +93,14 @@ public class CassandraClient<K, T extends PersistentBase> {
+   /** Cassandra serializer to be used for serializing Gora's keys. */
+   private Serializer<K> keySerializer;
+   
++  /**
++   * Method to maintain backward compatibility with earlier versions. 
++  */
++  public void initialize(Class<K> keyClass, Class<T> persistentClass)
++    throws Exception {
++	initialize(keyClass, persistentClass, null);
++  }
++  
+   /**
+    * Given our key, persistentClass from 
+    * {@link org.apache.gora.cassandra.store.CassandraStore#initialize(Class, Class, Properties)}
+@@ -105,17 +113,32 @@ public class CassandraClient<K, T extends PersistentBase> {
+    * defining a mutator from and by which we can mutate this object.
+    * @param keyClass the Key by which we wish o assign a record object
+    * @param persistentClass the generated {@link org.apache.org.gora.persistency.Peristent} bean representing the data.
++   * @param properties key value pairs from gora.properties
+    * @throws Exception
+    */
+-  public void initialize(Class<K> keyClass, Class<T> persistentClass) throws Exception {
++  public void initialize(Class<K> keyClass, Class<T> persistentClass, Properties properties) throws Exception {
+     this.keyClass = keyClass;
+ 
+     // get cassandra mapping with persistent class
+     this.persistentClass = persistentClass;
+     this.cassandraMapping = CassandraMappingManager.getManager().get(persistentClass);
++	Map<String, String> accessMap = null;
++	if (properties != null) {
++		String username = properties
++				.getProperty("gora.cassandrastore.username");
++		if (username != null) {
++			accessMap = new HashMap<String, String>();
++			accessMap.put("username", username);
++			String password = properties
++					.getProperty("gora.cassandrastore.password");
++			if (password != null) {
++				accessMap.put("password", password);
++			}
++		}
++	}
+ 
+     this.cluster = HFactory.getOrCreateCluster(this.cassandraMapping.getClusterName(), 
+-        new CassandraHostConfigurator(this.cassandraMapping.getHostName()));
++        new CassandraHostConfigurator(this.cassandraMapping.getHostName()), accessMap);
+     
+     // add keyspace to cluster
+     checkKeyspace();
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+index 496f1f009..660391ed3 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+@@ -149,7 +149,7 @@ public void initialize(Class<K> keyClass, Class<T> persistent, Properties proper
+         readOpConsLvl = DataStoreFactory.findProperty(properties, this, READ_OP_CL, null);
+         writeOpConsLvl = DataStoreFactory.findProperty(properties, this, WRITE_OP_CL, null);
+       }
+-      this.cassandraClient.initialize(keyClass, persistent);
++      this.cassandraClient.initialize(keyClass, persistent, properties);
+     } catch (Exception e) {
+       LOG.error(e.getMessage());
+       LOG.error(e.getStackTrace().toString());

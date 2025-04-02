@@ -1,0 +1,151 @@
+From 866ec93bfd5f6331c95c66e19178c9ffc1441ee2 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 3 Jan 2006 13:51:00 +0000
+Subject: [PATCH] FIX: bad dependency ivy files now causes failure (IVY-112)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484085 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                            |  1 +
+ src/java/fr/jayasoft/ivy/IvyNode.java                  |  4 ++--
+ src/java/fr/jayasoft/ivy/Main.java                     |  6 ++++--
+ .../fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java |  4 ++--
+ test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java      | 10 ++++++++++
+ test/java/fr/jayasoft/ivy/ant/ivy-failure2.xml         | 10 ++++++++++
+ .../1/orgfailure/modfailure/ivys/ivy-1.0.xml           |  8 ++++++++
+ 7 files changed, 37 insertions(+), 6 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/ivy-failure2.xml
+ create mode 100644 test/repositories/1/orgfailure/modfailure/ivys/ivy-1.0.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d63896194..1e93726a2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -15,6 +15,7 @@
+ - IMPROVE: import system properties as ivy variables in standalone mode
+ - IMPROVE: string identifying a module is now clearly different from a path
+ - IMPROVE: better error message when publish fails due to readonly destination (IVY-83)
++- FIX: bad dependency ivy files now causes failure (IVY-112)
+ - FIX: stack overflow error in contradictory conflict cases (IVY-117)
+ - FIX: publish now doesn't call deliver when not necessary (IVY-119)
+ - FIX: cachefileset was returning all artifacts for empty configuration (IVY-108)
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index afedaa10b..66399ced9 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -527,12 +527,12 @@ public boolean loadData(String conf) {
+             if (_md != null) {        
+                 Configuration c = _md.getConfiguration(conf);
+                 if (c == null) {
+-                    Message.error("configuration not found in "+this+": "+conf+". It was required from "+getParent()+" "+getParentConf());
+                     _confsToFetch.remove(conf);
++                    _problem = new RuntimeException("configuration not found in "+this+": "+conf+". It was required from "+getParent()+" "+getParentConf());
+                     return false;
+                 } else if (!isRoot() && c.getVisibility() != Configuration.Visibility.PUBLIC) {
+-                    Message.error("configuration not public in "+this+": "+c+". It was required from "+getParent()+" "+getParentConf());
+                     _confsToFetch.remove(conf);
++                    _problem = new RuntimeException("configuration not public in "+this+": "+c+". It was required from "+getParent()+" "+getParentConf());
+                     return false;
+                 }
+             }
+diff --git a/src/java/fr/jayasoft/ivy/Main.java b/src/java/fr/jayasoft/ivy/Main.java
+index c2d66abd3..f8ca23056 100644
+--- a/src/java/fr/jayasoft/ivy/Main.java
++++ b/src/java/fr/jayasoft/ivy/Main.java
+@@ -25,6 +25,7 @@
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.types.Path;
+ 
++import fr.jayasoft.ivy.report.ResolveReport;
+ import fr.jayasoft.ivy.url.URLHandlerDispatcher;
+ import fr.jayasoft.ivy.url.URLHandlerRegistry;
+ import fr.jayasoft.ivy.util.DefaultMessageImpl;
+@@ -232,13 +233,14 @@ public static void main(String[] args) throws Exception {
+ 
+             Date date = new Date();
+             
+-            ModuleDescriptor md = ivy.resolve(
++            ResolveReport report = ivy.resolve(
+                     ivyfile.toURL(),
+                     null,
+                     confs, 
+                     cache, 
+                     date,
+-                    validate).getModuleDescriptor();
++                    validate);
++            ModuleDescriptor md = report.getModuleDescriptor();
+ 
+             if (confs.length == 1 && "*".equals(confs[0])) {
+                 confs = md.getConfigurationsNames();
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+index 9b61b6a9d..f51d18b84 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+@@ -51,7 +51,7 @@
+  *
+  */
+ public class XmlModuleDescriptorParser extends DefaultHandler {
+-    private static final Collection ALLOWED_VERSIONS = Arrays.asList(new String[] {"1.0", "1.1", "1.2"});
++    private static final Collection ALLOWED_VERSIONS = Arrays.asList(new String[] {"1.0", "1.1", "1.2", "1.3"});
+     
+     private DefaultModuleDescriptor _md;
+     private DefaultDependencyDescriptor _dd;
+@@ -426,7 +426,7 @@ public void warning(SAXParseException ex) {
+     }
+ 
+     public void error(SAXParseException ex) {
+-        Message.error("xml parsing: " +
++        addError("xml parsing: " +
+                 getLocationString(ex)+": "+
+                 ex.getMessage());
+     }
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+index bde5c83be..826ad89d2 100644
+--- a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+@@ -101,6 +101,16 @@ public void testFailure() throws Exception {
+         }
+     }
+ 
++    public void testFailureOnBadDependencyIvyFile() throws Exception {
++        try {
++            _resolve.setFile(new File("test/java/fr/jayasoft/ivy/ant/ivy-failure2.xml"));
++            _resolve.execute();
++            fail("failure didn't raised an exception with default haltonfailure setting");
++        } catch (BuildException ex) {
++            // ok => should raised an exception
++        }
++    }
++
+     public void testHaltOnFailure() throws Exception {
+         try {
+             _resolve.setFile(new File("test/java/fr/jayasoft/ivy/ant/ivy-failure.xml"));
+diff --git a/test/java/fr/jayasoft/ivy/ant/ivy-failure2.xml b/test/java/fr/jayasoft/ivy/ant/ivy-failure2.xml
+new file mode 100644
+index 000000000..104a35bfe
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/ivy-failure2.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0"> 
++	<info organisation="jayasoft"
++	       module="resolve-failure2"
++	       revision="1.0"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="orgfailure" name="modfailure" rev="1.0"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/orgfailure/modfailure/ivys/ivy-1.0.xml b/test/repositories/1/orgfailure/modfailure/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..4faf47f43
+--- /dev/null
++++ b/test/repositories/1/orgfailure/modfailure/ivys/ivy-1.0.xml
+@@ -0,0 +1,8 @@
++<ivy-module version="1.0"> 
++	<info organisation="orgfailure"
++	       module="modfailure"
++	       revision="1.0"
++	       status="release"
++	/>
++	<badtag/>
++</ivy-module>

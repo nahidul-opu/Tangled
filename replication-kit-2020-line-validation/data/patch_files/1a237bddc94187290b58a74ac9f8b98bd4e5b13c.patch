@@ -1,0 +1,98 @@
+From 1a237bddc94187290b58a74ac9f8b98bd4e5b13c Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Mon, 20 May 2013 15:33:57 +0000
+Subject: [PATCH] COMPRESS-227 ensure ZipFile#getEntry only returns entries
+ that will return non-null InputStreams in getInputStream.
+
+nameMap isn't used before all local file headers are parsed so it is
+easier to only populate it then.  This not only ensure it only
+contains ZipArchiveEntries that are known to the entries map, it also
+simplifies the case where an entry's name changes due to extra fields.
+
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@1484499 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../compress/archivers/zip/ZipFile.java       |  7 +---
+ .../compress/archivers/zip/ZipFileTest.java   | 42 +++++++++++++++++++
+ 2 files changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/compress/archivers/zip/ZipFile.java b/src/main/java/org/apache/commons/compress/archivers/zip/ZipFile.java
+index ffdbb3bbadc..cc2fc5c9ff8 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/zip/ZipFile.java
++++ b/src/main/java/org/apache/commons/compress/archivers/zip/ZipFile.java
+@@ -534,8 +534,6 @@ private Map<ZipArchiveEntry, NameAndComment> populateFromCentralDirectory()
+         // data offset will be filled later
+         entries.put(ze, offset);
+ 
+-        nameMap.put(ze.getName(), ze);
+-
+         byte[] cdExtraData = new byte[extraLen];
+         archive.readFully(cdExtraData);
+         ze.setCentralDirectoryExtra(cdExtraData);
+@@ -889,12 +887,9 @@ private void resolveLocalFileHeaderData(Map<ZipArchiveEntry, NameAndComment>
+                 NameAndComment nc = entriesWithoutUTF8Flag.get(ze);
+                 ZipUtil.setNameAndCommentFromExtraFields(ze, nc.name,
+                                                          nc.comment);
+-                if (!orig.equals(ze.getName())) {
+-                    nameMap.remove(orig);
+-                    nameMap.put(ze.getName(), ze);
+-                }
+             }
+             entries.put(ze, offsetEntry);
++            nameMap.put(ze.getName(), ze);
+         }
+     }
+ 
+diff --git a/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java b/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java
+index d54df6acac8..a1624c7f785 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java
+@@ -204,6 +204,48 @@ public void testUnixSymlinkSampleFile() throws Exception {
+         }
+     }
+ 
++    public void XtestDuplicateEntry() throws Exception {
++        File f = File.createTempFile("commons-compress-zipfiletest", ".zip");
++        f.deleteOnExit();
++        File f2 = File.createTempFile("commons-compress-zipfiletest", ".txt");
++        f2.deleteOnExit();
++
++        OutputStream o = null;
++        try {
++            o = new FileOutputStream(f);
++            ZipArchiveOutputStream zo = new ZipArchiveOutputStream(o);
++            // simple way to ensure entries have extra data
++            zo.setUseZip64(Zip64Mode.Always);
++
++            // add the same file twice
++            ZipArchiveEntry ze = new ZipArchiveEntry(f2, "foo");
++            zo.putArchiveEntry(ze);
++            zo.write(new byte[0]);
++            zo.closeArchiveEntry();
++            ze = new ZipArchiveEntry(f2, "foo");
++            zo.putArchiveEntry(ze);
++            zo.write(new byte[0]);
++            zo.closeArchiveEntry();
++            zo.close();
++
++            o.close();
++            o = null;
++
++            System.err.println("-------------------vvvvvvvvvvvvvvvvvvvvvvv-----------");
++            zf = new ZipFile(f);
++            ze = zf.getEntry("foo");
++            assertNotNull(ze);
++            assertNotNull(zf.getInputStream(ze));
++        } finally {
++            System.err.println("-------------------^^^^^^^^^^^^^^^^^^^^^^^-----------");
++            if (o != null) {
++                o.close();
++            }
++            f.delete();
++            f2.delete();
++        }
++    }
++
+     /*
+      * ordertest.zip has been handcrafted.
+      *

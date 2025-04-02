@@ -1,0 +1,173 @@
+From 54c75983ede72a788285cf7189f4b561a0608748 Mon Sep 17 00:00:00 2001
+From: Scokart Gilles <gscokart@apache.org>
+Date: Tue, 19 Feb 2008 20:22:51 +0000
+Subject: [PATCH] FIX: Inherit depedencies defined in parent pom (IVY-683)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@629215 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  3 +-
+ .../parser/m2/PomModuleDescriptorParser.java  | 32 +++++++++++--------
+ .../apache/ivy/core/resolve/ResolveTest.java  |  8 ++---
+ .../m2/PomModuleDescriptorParserTest.java     |  4 +--
+ .../org/apache/dm/parent/2.0/parent-2.0.pom   |  7 ++++
+ .../org/apache/dm/test/1.0/test-1.0.pom       |  4 ---
+ 6 files changed, 34 insertions(+), 24 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index fe97a49dd..88ea1ede1 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -77,6 +77,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Decrease memory footprint (IVY-662)
+ - IMPROVEMENT: Downgrade Ant version requirement to 1.6 to build Ivy (IVY-687)
+ - IMPROVEMENT: In the ResolveReport class, add the possibility to filter the evicted module while getting the list of DownloadArtifact (IVY-704) (thanks to Nicolas Lalevée)
++- IMPORVEMENT: Refactor the PomModuleDescriptorParser in order to allow easier integration of maven pom 	 
+ 
+ - FIX: ivy:install task not using validate attribute (IVY-728)
+ - FIX: Bad conflict resolution leads to bad "configuration(s) not found" error (IVY-729)
+@@ -98,6 +99,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Strict conflictmanager seems to not support dynamic revisions (IVY-474)
+ - FIX: NPE in namespace transformation during the ivy:findrevision and ivy:resolve task execution (IVY-659) (thanks to Andrea Bernardo Ciddio)
+ - FIX: Maven test scope includes all runtime dependencies (IVY-682)
++- FIX: Inherit depedencies defined in parent pom (IVY-683)
+ 
+ - TASK: Remove cache attribute on Ant tasks (IVY-685)
+ 
+@@ -125,7 +127,6 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Improvements on hello ivy example (IVY-626) (with contribution from Jacob Grydholt Jensen)
+ - IMPROVEMENT: Make the root attribute in the ivyrep resolver mandatory (IVY-625)
+ - IMPROVEMENT: New text representation for main module metadata concepts (IVY-649)
+-- IMPORVEMENT: Refactor the PomModuleDescriptorParser in order to allow easier integration of maven pom
+ 
+ - FIX: m2 incompatibility - IVY does not recognize property section (IVY-637)
+ - FIX: m2 incompatibility - IVY does not recognize parent pom (IVY-636)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index aa43ca9cc..de24ad4eb 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -159,9 +159,18 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                 domReader.setProperty("pom.version", version);
+                 domReader.setProperty("version", version);
+ 
++                ModuleDescriptor parentDescr = null;
+                 if (domReader.hasParent()) {
+                     domReader.setProperty("parent.version", domReader.getParentVersion());
+                     //Is there any other parent properties?
++                    
++                    ModuleRevisionId parentModRevID = ModuleRevisionId.newInstance(
++                        domReader.getParentGroupId(), 
++                        domReader.getParentArtifactId(), 
++                        domReader.getParentVersion());
++                    ResolvedModuleRevision parentModule = parseOtherPom(ivySettings, 
++                        parentModRevID);
++                    parentDescr = parentModule.getDescriptor();
+                 }
+                 
+                 for (Iterator it = domReader.getDependencyMgt().iterator(); it.hasNext();) {
+@@ -169,24 +178,21 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+                     mdBuilder.addDependencyMgt(dep);
+                 }
+                 
+-                if (domReader.hasParent()) {
+-                    ModuleRevisionId parentModRevID = ModuleRevisionId.newInstance(
+-                        domReader.getParentGroupId(), 
+-                        domReader.getParentArtifactId(), 
+-                        domReader.getParentVersion());
+-                    ResolvedModuleRevision parentModule = parseOtherPom(ivySettings, 
+-                        parentModRevID);
+-                    ModuleDescriptor parentDescr = parentModule.getDescriptor();
++                if (parentDescr != null) {
+                     mdBuilder.addExtraDescription(parentDescr.getExtraInfo());
+-                    for (int i = 0; i < parentDescr.getDependencies().length; i++) {
+-                        mdBuilder.addDependency(parentDescr.getDependencies()[i]);
+-                    }
+-                }                
+-                
++                }
++
+                 for (Iterator it = domReader.getDependencies().iterator(); it.hasNext();) {
+                     PomReader.PomDependencyData dep = (PomReader.PomDependencyData) it.next();
+                     mdBuilder.addDependency(res, dep);
+                 }
++
++                if (parentDescr != null) {
++                    for (int i = 0; i < parentDescr.getDependencies().length; i++) {
++                        mdBuilder.addDependency(parentDescr.getDependencies()[i]);
++                    }
++                }
++                
+                 mdBuilder.addArtifact(artifactId , domReader.getPackaging());
+             }            
+         } catch (SAXException e) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index a1beacccb..e7b83d77c 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3396,8 +3396,8 @@ public void testResolveMaven2ParentPomChainResolver() throws Exception {
+         // test has a dependency on test2 but there is no version listed. test has a parent of parent(2.0) 
+         // then parent2. Both parents have a dependencyManagement element for test2, and each list the version as
+         // ${pom.version}. The parent version should take precidence over parent2, 
+-        // so the version should be test2 version 2.0. Test3 is also a dependency, and it's version is listed
+-        // as 1.0 in parent2.
++        // so the version should be test2 version 2.0. Test3 is also a dependency of parent, and it's version is listed
++        // as 1.0 in parent2 (dependencies inherited from parent comes after).
+         Ivy ivy = new Ivy();
+         ivy.configure(new File("test/repositories/parentPom/ivysettings.xml"));
+         ivy.getSettings().setDefaultResolver("parentChain");
+@@ -3443,8 +3443,8 @@ public void testResolveMaven2ParentPomDualResolver() throws Exception {
+         // test has a dependency on test2 but there is no version listed. test has a parent of parent(2.0) 
+         // then parent2. Both parents have a dependencyManagement element for test2, and each list the version as
+         // ${pom.version}. The parent version should take precidence over parent2, 
+-        // so the version should be test2 version 2.0. Test3 is also a dependency, and it's version is listed
+-        // as 1.0 in parent2.
++        // so the version should be test2 version 2.0. Test3 is also a dependency of parent, and it's version is listed
++        // as 1.0 in parent2. (dependencies inherited from parent comes after)
+ 
+         // now run tests with dual resolver
+         Ivy ivy = new Ivy();
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index eb4e33cc1..b3f93deaf 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -503,9 +503,9 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+         DependencyDescriptor[] dds = md.getDependencies();
+         assertNotNull(dds);
+         assertEquals(2, dds.length);
+-        assertEquals(ModuleRevisionId.newInstance("commons-logging", "commons-logging", "1.0.4"),
+-            dds[0].getDependencyRevisionId());
+         assertEquals(ModuleRevisionId.newInstance("commons-collection", "commons-collection", "1.0.5"),
++            dds[0].getDependencyRevisionId());
++        assertEquals(ModuleRevisionId.newInstance("commons-logging", "commons-logging", "1.0.4"),
+             dds[1].getDependencyRevisionId());
+     }
+ }
+diff --git a/test/repositories/parentPom/org/apache/dm/parent/2.0/parent-2.0.pom b/test/repositories/parentPom/org/apache/dm/parent/2.0/parent-2.0.pom
+index a90d8a532..37d224f9a 100644
+--- a/test/repositories/parentPom/org/apache/dm/parent/2.0/parent-2.0.pom
++++ b/test/repositories/parentPom/org/apache/dm/parent/2.0/parent-2.0.pom
+@@ -37,4 +37,11 @@
+         </dependency>
+     </dependencies>
+   </dependencyManagement>
++   <dependencies>
++    <dependency>
++      <groupId>org.apache.dm</groupId>
++      <artifactId>test3</artifactId>
++    </dependency>
++  </dependencies>
++  
+ </project>
+diff --git a/test/repositories/parentPom/org/apache/dm/test/1.0/test-1.0.pom b/test/repositories/parentPom/org/apache/dm/test/1.0/test-1.0.pom
+index 09485338e..95f02e381 100644
+--- a/test/repositories/parentPom/org/apache/dm/test/1.0/test-1.0.pom
++++ b/test/repositories/parentPom/org/apache/dm/test/1.0/test-1.0.pom
+@@ -38,9 +38,5 @@
+       <groupId>org.apache.dm</groupId>
+       <artifactId>test2</artifactId>
+     </dependency>
+-    <dependency>
+-      <groupId>org.apache.dm</groupId>
+-      <artifactId>test3</artifactId>
+-    </dependency>
+   </dependencies>
+ </project>

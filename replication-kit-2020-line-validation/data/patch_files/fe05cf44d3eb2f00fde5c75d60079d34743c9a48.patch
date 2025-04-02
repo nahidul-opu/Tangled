@@ -1,0 +1,80 @@
+From fe05cf44d3eb2f00fde5c75d60079d34743c9a48 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 4 Apr 2008 13:12:42 +0000
+Subject: [PATCH] FIX: ivy.original.xml file using artifact pattern in cache
+ and causing problems (IVY-787)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@644705 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                       |  1 +
+ .../core/cache/DefaultRepositoryCacheManager.java | 15 ++++++++++++---
+ .../org/apache/ivy/core/resolve/ResolveTest.java  |  2 ++
+ 3 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 27fa74bde..d48fb9104 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -78,6 +78,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: ivy.original.xml file using artifact pattern in cache and causing problems (IVY-787)
+ - FIX: ivy:retrieve with sync="true" removes the .svn directory (IVY-763)
+ - FIX: Ivy silently fails XML errors in ivyrep (IVY-579)
+ - FIX: Extra Attributes are not available to resolver after resolve if cache was empty (IVY-773)
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index d81bec9a8..7e44fc6d8 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -356,7 +356,11 @@ public String getArchivePathInCache(Artifact artifact) {
+     }
+ 
+     public String getArchivePathInCache(Artifact artifact, ArtifactOrigin origin) {
+-        return IvyPatternHelper.substitute(getArtifactPattern(), artifact, origin);
++        if (isOriginalMetadataArtifact(artifact)) {
++            return IvyPatternHelper.substitute(getIvyPattern() + ".original", artifact, origin);
++        } else {
++            return IvyPatternHelper.substitute(getArtifactPattern(), artifact, origin);
++        }
+     }
+ 
+     /**
+@@ -1007,11 +1011,16 @@ private Artifact getDefaultMetadataArtifact(ModuleRevisionId mrid) {
+ //    }
+     
+     public Artifact getOriginalMetadataArtifact(Artifact moduleArtifact) {
+-        return DefaultArtifact.cloneWithAnotherName(moduleArtifact, 
+-            moduleArtifact.getName() + ".original");
++        return DefaultArtifact.cloneWithAnotherType(
++            moduleArtifact, moduleArtifact.getType() + ".original");
+     }
+     
+ 
++    private boolean isOriginalMetadataArtifact(Artifact artifact) {
++        return artifact.isMetadata() 
++            && artifact.getType().endsWith(".original");
++    }
++
+     private boolean isChanging(
+             DependencyDescriptor dd, ModuleRevisionId requestedRevisionId, 
+             CacheMetadataOptions options) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index c57617540..3081a7d79 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3834,12 +3834,14 @@ public void testExtraAttributes2() throws Exception {
+         Ivy ivy = new Ivy();
+         ivy.configure(new File("test/repositories/extra-attributes/ivysettings.xml"));
+         ivy.getSettings().setDefaultCache(cache);
++        ivy.getSettings().validate();
+ 
+         ResolveReport report = ivy.resolve(ResolveTest.class.getResource("ivy-extra-att2.xml"),
+             getResolveOptions(ivy.getSettings(), new String[] {"*"}).setValidate(false));
+         assertFalse(report.hasError());
+ 
+         assertTrue(new File(cache, "apache/mymodule/task2/1748/ivy.xml").exists());
++        assertTrue(new File(cache, "apache/mymodule/task2/1748/ivy.xml.original").exists());
+         assertTrue(new File(cache, "apache/mymodule/task2/1748/mymodule-windows.jar").exists());
+         assertTrue(new File(cache, "apache/mymodule/task2/1748/mymodule-linux.jar").exists());
+ 

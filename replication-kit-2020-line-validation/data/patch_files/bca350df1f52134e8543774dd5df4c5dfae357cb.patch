@@ -1,0 +1,292 @@
+From bca350df1f52134e8543774dd5df4c5dfae357cb Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 25 Jul 2013 21:35:08 +0000
+Subject: [PATCH] - IMPROVEMENT: New LockStrategy available based on NIO
+ FileLocks (IVY-1424) - FIX: NIO FileLocker released locks too early
+ (IVY-1424) (thanks to Charles Duffy)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1507138 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  3 ++
+ doc/settings/lock-strategies.html             | 12 ++---
+ .../apache/ivy/core/settings/IvySettings.java |  6 ++-
+ .../plugins/lock/ArtifactLockStrategy.java    | 16 ++-----
+ .../plugins/lock/CreateFileLockStrategy.java  | 27 +++++++++++
+ .../plugins/lock/FileBasedLockStrategy.java   | 47 ++++++++++---------
+ .../ivy/plugins/lock/NIOFileLockStrategy.java | 27 +++++++++++
+ .../lock/ArtifactLockStrategyTest.java        |  2 +-
+ 8 files changed, 95 insertions(+), 45 deletions(-)
+ create mode 100644 src/java/org/apache/ivy/plugins/lock/CreateFileLockStrategy.java
+ create mode 100644 src/java/org/apache/ivy/plugins/lock/NIOFileLockStrategy.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 250e39cd9..1078a41d2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -41,6 +41,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Flavio Coutinho da Costa
+ 	Stefan De Boey
+ 	Mykhailo Delegan
++	Charles Duffy
+ 	Martin Eigenbrodt
+ 	Stephen Evanchik
+ 	Robin Fernandes
+@@ -143,10 +144,12 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - NEW: Exposing some parent metadata (organisation, module, revision, branch) as properties (IVY-1288)
+ - NEW: symlinkmass feature based on symlink feature of ivy:retrieve (IVY-1252) (Thanks to Gene Smith)
+ 
++- IMPROVEMENT: New LockStrategy available based on NIO FileLocks (IVY-1424)
+ - IMPROVEMENT: Optional <include> ivysettings directives (IVY-1392) (thanks to Yanus Poluektovich)
+ - IMPROVEMENT: add support for source bundles from p2 repositories
+ - IMPROVEMENT: add support for source URI from OBR repositories
+ 
++- FIX: NIO FileLocker released locks too early (IVY-1424) (thanks to Charles Duffy)
+ - FIX: Ssh Resolver doesn't work with Java 7 (IVY-1408) (thanks to Mykhailo Delegan)
+ - FIX: Parsing publication date in Ant tasks not thread-safe (IVY-1412)
+ - FIX: NullPointerException when using httpclient and server doesn't return content-type header (IVY-1400) (thanks to Frederic Riviere)
+diff --git a/doc/settings/lock-strategies.html b/doc/settings/lock-strategies.html
+index e0505eefc..458564dbe 100644
+--- a/doc/settings/lock-strategies.html
++++ b/doc/settings/lock-strategies.html
+@@ -30,18 +30,14 @@
+ 
+ A lock strategy is used by a cache manager to decide when and how locking should be performed (see [[settings/cache]] to see how to configure the lock strategy to use).
+ 
+-Two lock strategies are registered by default:
++The following strategies are registered by default:
+ <ul>
+-<li><b>no-lock</b></li> This lock strategy actually performs no locking at all, and thus should not be used in an environment where the cache is shared by multiple processes. 
+-
+-This strategy is implemented by ([[svn:src/java/org/apache/ivy/plugins/lock/NoLockStrategy.java NoLockStrategy]])
+-
++<li><b>no-lock</b></li> This lock strategy actually performs no locking at all, and thus should not be used in an environment where the cache is shared by multiple processes.
+ 
+ <li><b>artifact-lock</b></li> This strategy acquires a lock whenever a module descriptor or an artifact is downloaded to the cache, which makes a good solution when you want to share your repository cache.
++Note that this strategy is based on file locking, performed by default using the java.io.File.createNewFile() atomicity (which is documented as atomic in the javadoc, but not recommended to perform locks). 
+ 
+-Note that this strategy is based on file locking, performed by default using the java.io.File.createNewFile() atomicity (which is documented as atomic in the javadoc, but not recommended to perform locks). A java.nio.FileLock based implementation is also provided, but according to our tests the createNewFile based one performs better and more reliably. We heavily recommend making your own testing in your target environment before relying on this lock strategy for heavily concurrent operations.
+-
+-This strategy is implemented by ([[svn:src/java/org/apache/ivy/plugins/lock/ArtifactLockStrategy.java ArtifactLockStrategy]])
++<li><b>artifact-lock-nio (<span class="since">since 2.4</span>)</b></li> Like the <i>artifact-lock</i>-strategy, this one also acquires a lock whenever a module descriptor or artifact is downloaded to the cache. But here the implementation is done with a java.nio.FileLock.
+ </ul>
+ 
+ The child tag used for the lock strategy must be equal to a name of a lock strategy type (added with the typedef tag).
+diff --git a/src/java/org/apache/ivy/core/settings/IvySettings.java b/src/java/org/apache/ivy/core/settings/IvySettings.java
+index 0e005ca66..d1d4347e2 100644
+--- a/src/java/org/apache/ivy/core/settings/IvySettings.java
++++ b/src/java/org/apache/ivy/core/settings/IvySettings.java
+@@ -74,8 +74,9 @@
+ import org.apache.ivy.plugins.latest.LatestRevisionStrategy;
+ import org.apache.ivy.plugins.latest.LatestStrategy;
+ import org.apache.ivy.plugins.latest.LatestTimeStrategy;
+-import org.apache.ivy.plugins.lock.ArtifactLockStrategy;
++import org.apache.ivy.plugins.lock.CreateFileLockStrategy;
+ import org.apache.ivy.plugins.lock.LockStrategy;
++import org.apache.ivy.plugins.lock.NIOFileLockStrategy;
+ import org.apache.ivy.plugins.lock.NoLockStrategy;
+ import org.apache.ivy.plugins.matcher.ExactOrRegexpPatternMatcher;
+ import org.apache.ivy.plugins.matcher.ExactPatternMatcher;
+@@ -255,7 +256,8 @@ public IvySettings(IvyVariableContainer variableContainer) {
+         addLatestStrategy("latest-osgi", osgiLatestStrategy);
+ 
+         addLockStrategy("no-lock", new NoLockStrategy());
+-        addLockStrategy("artifact-lock", new ArtifactLockStrategy(debugLocking()));
++        addLockStrategy("artifact-lock", new CreateFileLockStrategy(debugLocking()));
++        addLockStrategy("artifact-lock-nio", new NIOFileLockStrategy(debugLocking()));
+ 
+         addConflictManager("latest-revision", new LatestConflictManager("latest-revision",
+             latestRevisionStrategy));
+diff --git a/src/java/org/apache/ivy/plugins/lock/ArtifactLockStrategy.java b/src/java/org/apache/ivy/plugins/lock/ArtifactLockStrategy.java
+index 7253278f2..66b848e1b 100644
+--- a/src/java/org/apache/ivy/plugins/lock/ArtifactLockStrategy.java
++++ b/src/java/org/apache/ivy/plugins/lock/ArtifactLockStrategy.java
+@@ -21,18 +21,10 @@
+ 
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ 
+-public class ArtifactLockStrategy extends FileBasedLockStrategy {
+-    public ArtifactLockStrategy() {
+-        init();
+-    }
+-
+-    public ArtifactLockStrategy(boolean debugLocking) {
+-        super(debugLocking);
+-        init();
+-    }
+-
+-    private void init() {
+-        setName("artifact-lock");
++public abstract class ArtifactLockStrategy extends FileBasedLockStrategy {
++    
++    protected ArtifactLockStrategy(FileLocker locker, boolean debugLocking) {
++        super(locker, debugLocking);
+     }
+ 
+     public boolean lockArtifact(Artifact artifact, File artifactFileToDownload) 
+diff --git a/src/java/org/apache/ivy/plugins/lock/CreateFileLockStrategy.java b/src/java/org/apache/ivy/plugins/lock/CreateFileLockStrategy.java
+new file mode 100644
+index 000000000..460cc7478
+--- /dev/null
++++ b/src/java/org/apache/ivy/plugins/lock/CreateFileLockStrategy.java
+@@ -0,0 +1,27 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.plugins.lock;
++
++public class CreateFileLockStrategy extends ArtifactLockStrategy {
++    
++    public CreateFileLockStrategy(boolean debugLocking) {
++        super(new CreateFileLocker(debugLocking), debugLocking);
++        setName("artifact-lock");
++    }    
++
++}
+diff --git a/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java b/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java
+index 0e8d37163..56165d45a 100644
+--- a/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java
++++ b/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java
+@@ -20,7 +20,6 @@
+ import java.io.File;
+ import java.io.IOException;
+ import java.io.RandomAccessFile;
+-import java.nio.channels.FileChannel;
+ import java.nio.channels.FileLock;
+ import java.util.HashMap;
+ import java.util.Map;
+@@ -34,10 +33,6 @@ public abstract class FileBasedLockStrategy extends AbstractLockStrategy {
+ 
+     /**
+      * The locker to use to make file lock attempts.
+-     * <p>
+-     * Two implementations of FileLocker are provided below, according to our tests the
+-     * CreateFileLocker is both performing better and much more reliable than NIOFileLocker.
+-     * </p>
+      */
+     private FileLocker locker;
+     
+@@ -183,26 +178,31 @@ public NIOFileLocker(boolean debugLocking) {
+             this.debugLocking = debugLocking;
+         }
+ 
++        private static class LockData {
++            private RandomAccessFile raf;
++            private FileLock l;
++
++            LockData(RandomAccessFile raf, FileLock l) {
++                this.raf = raf;
++                this.l = l;
++            }
++        }
++
+         public boolean tryLock(File file) {
+             try {
+                 if (file.getParentFile().exists() || file.getParentFile().mkdirs()) {
+                     RandomAccessFile raf =
+                         new RandomAccessFile(file, "rw");            
+-                    FileChannel channel = raf.getChannel();
+-                    try {
+-                        FileLock l = channel.tryLock();
+-                        if (l != null) {
+-                            synchronized (this) {
+-                                locks.put(file, l);
+-                            }
+-                            return true;
+-                        } else {
+-                            if (debugLocking) {
+-                                debugLocking("failed to acquire lock on " + file);
+-                            }
++                    FileLock l = raf.getChannel().tryLock();
++                    if (l != null) {
++                        synchronized (this) {
++                            locks.put(file, new LockData(raf, l));
++                        }
++                        return true;
++                    } else {
++                        if (debugLocking) {
++                            debugLocking("failed to acquire lock on " + file);
+                         }
+-                    } finally {
+-                        raf.close();
+                     }
+                 }
+             } catch (IOException e) {
+@@ -215,12 +215,15 @@ public boolean tryLock(File file) {
+ 
+         public void unlock(File file) {
+             synchronized (this) {
+-                FileLock l = (FileLock) locks.get(file);
+-                if (l == null) {
++                LockData data = (LockData) locks.get(file);
++                if (data == null) {
+                     throw new IllegalArgumentException("file not previously locked: " + file);
+                 }
++
+                 try {
+-                    l.release();
++                    locks.remove(file);
++                    data.l.release();
++                    data.raf.close();
+                 } catch (IOException e) {
+                     Message.error(
+                         "problem while releasing lock on " + file + ": " + e.getMessage());
+diff --git a/src/java/org/apache/ivy/plugins/lock/NIOFileLockStrategy.java b/src/java/org/apache/ivy/plugins/lock/NIOFileLockStrategy.java
+new file mode 100644
+index 000000000..9f8c474f0
+--- /dev/null
++++ b/src/java/org/apache/ivy/plugins/lock/NIOFileLockStrategy.java
+@@ -0,0 +1,27 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.plugins.lock;
++
++public class NIOFileLockStrategy extends ArtifactLockStrategy {
++
++    public NIOFileLockStrategy(boolean debugLocking) {
++        super(new NIOFileLocker(debugLocking), debugLocking);
++        setName("artifact-lock-nio");
++    }
++
++}
+diff --git a/test/java/org/apache/ivy/plugins/lock/ArtifactLockStrategyTest.java b/test/java/org/apache/ivy/plugins/lock/ArtifactLockStrategyTest.java
+index 5b01c6e1c..ea0601c84 100644
+--- a/test/java/org/apache/ivy/plugins/lock/ArtifactLockStrategyTest.java
++++ b/test/java/org/apache/ivy/plugins/lock/ArtifactLockStrategyTest.java
+@@ -82,7 +82,7 @@ public void testConcurrentResolve() throws Exception {
+     private RepositoryCacheManager newCacheManager(IvySettings settings) {
+         DefaultRepositoryCacheManager cacheManager 
+             = new DefaultRepositoryCacheManager("cache", settings, new File("build/test/cache"));
+-        cacheManager.setLockStrategy(new ArtifactLockStrategy());
++        cacheManager.setLockStrategy(new CreateFileLockStrategy(false));
+         return cacheManager;
+     }
+     

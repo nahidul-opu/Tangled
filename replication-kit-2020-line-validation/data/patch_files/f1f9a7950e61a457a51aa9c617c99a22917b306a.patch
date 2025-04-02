@@ -1,0 +1,143 @@
+From f1f9a7950e61a457a51aa9c617c99a22917b306a Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Sat, 5 Jan 2008 16:37:19 +0000
+Subject: [PATCH] FIX: Problem with cached Ivy files which have extra
+ attributes (IVY-693)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@609172 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/m2/PomModuleDescriptorParser.java  | 11 ++++-
+ .../m2/PomModuleDescriptorParserTest.java     | 44 +++++++++++++++++--
+ 3 files changed, 51 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 10f4bc5a0..16d3a6072 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -66,6 +66,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Decrease memory footprint (IVY-662)
+ - IMPROVEMENT: Downgrade Ant version requirement to 1.6 to build Ivy (IVY-687)
+ 
++- FIX: Problem with cached Ivy files which have extra attributes (IVY-693)
+ - FIX: Detection of newer and better artifacts should not happen if 'checkModified' is set to 'false' (IVY-389) (with contribution from Johan Stuyts)
+ - FIX: Ivy doesn't respect the order of the ivy patterns as defined in the settings (IVY-676)
+ - FIX: XmlModuleDescriptorWriter doesn't write the deprecated attribute of the "ivy-module/configurations/conf" element (IVY-664)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index cd291bb13..4fdac06df 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -23,6 +23,7 @@
+ import java.net.URL;
+ import java.text.ParseException;
+ import java.util.ArrayList;
++import java.util.Collections;
+ import java.util.Date;
+ import java.util.HashMap;
+ import java.util.Iterator;
+@@ -33,6 +34,7 @@
+ 
+ import javax.xml.parsers.ParserConfigurationException;
+ 
++import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.IvyPatternHelper;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+@@ -294,8 +296,13 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+                 if (classifier != null) {
+                     // we deal with classifiers by setting an extra attribute and forcing the
+                     // dependency to assume such an artifact is published
+-                    Map extraAtt = new HashMap();
+-                    extraAtt.put("classifier", classifier);
++                    
++                    // declare the extra attribute namespace if not declared yet
++                    if (!md.getExtraAttributesNamespaces().containsKey("m")) {
++                        md.addExtraAttributeNamespace("m", Ivy.getIvyHomeURL() + "maven");
++                    }
++                    Map extraAtt = Collections.singletonMap("m:classifier", classifier);
++                    
+                     String[] confs = dd.getModuleConfigurations();
+                     for (int i = 0; i < confs.length; i++) {
+                         dd.addDependencyArtifact(confs[i],
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index 37010d2fd..265f70690 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -17,7 +17,9 @@
+  */
+ package org.apache.ivy.plugins.parser.m2;
+ 
++import java.io.File;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.Map;
+@@ -29,11 +31,29 @@
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.parser.AbstractModuleDescriptorParserTester;
++import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorParser;
+ import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorParserTest;
+ import org.apache.ivy.plugins.repository.url.URLResource;
+ 
+ public class PomModuleDescriptorParserTest extends AbstractModuleDescriptorParserTester {
+     // junit test -- DO NOT REMOVE used by ant to know it's a junit test
++    
++    private File dest = new File("build/test/test-write.xml");
++
++    public void setUp() {
++        if (dest.exists()) {
++            dest.delete();
++        }
++        if (!dest.getParentFile().exists()) {
++            dest.getParentFile().mkdirs();
++        }
++    }
++
++    protected void tearDown() throws Exception {
++        if (dest.exists()) {
++            dest.delete();
++        }
++    }
+ 
+     public void testAccept() throws Exception {
+         assertTrue(PomModuleDescriptorParser.getInstance().accept(
+@@ -154,7 +174,7 @@ public void testDependencies() throws Exception {
+     public void testDependenciesWithClassifier() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+             new IvySettings(), getClass().getResource("test-dependencies-with-classifier.pom"),
+-            false);
++            true);
+         assertNotNull(md);
+ 
+         assertEquals(ModuleRevisionId.newInstance("org.apache", "test", "1.0"), md
+@@ -165,8 +185,26 @@ public void testDependenciesWithClassifier() throws Exception {
+         assertEquals(1, dds.length);
+         assertEquals(ModuleRevisionId.newInstance("commons-logging", "commons-logging", "1.0.4"),
+             dds[0].getDependencyRevisionId());
+-        Map extraAtt = new HashMap();
+-        extraAtt.put("classifier", "asl");
++        Map extraAtt = Collections.singletonMap("classifier", "asl");
++        assertEquals(1, dds[0].getAllDependencyArtifacts().length);
++        assertEquals(extraAtt, dds[0].getAllDependencyArtifacts()[0].getExtraAttributes());
++        
++        // now we verify the conversion to an Ivy file
++        PomModuleDescriptorParser.getInstance().toIvyFile(
++            getClass().getResource("test-dependencies-with-classifier.pom").openStream(), 
++            new URLResource(getClass().getResource("test-dependencies-with-classifier.pom")), 
++            dest, md);
++        
++        assertTrue(dest.exists());
++        
++        // the converted Ivy file should be parsable with validate=true
++        ModuleDescriptor md2 = XmlModuleDescriptorParser.getInstance()
++            .parseDescriptor(new IvySettings(), dest.toURL(), true);
++        
++        // and the parsed module descriptor should be similar to the original
++        assertNotNull(md2);
++        assertEquals(md.getModuleRevisionId(), md2.getModuleRevisionId());
++        dds = md2.getDependencies();
+         assertEquals(1, dds[0].getAllDependencyArtifacts().length);
+         assertEquals(extraAtt, dds[0].getAllDependencyArtifacts()[0].getExtraAttributes());
+     }

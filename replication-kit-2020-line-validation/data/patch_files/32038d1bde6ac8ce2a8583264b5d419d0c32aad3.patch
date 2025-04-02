@@ -1,0 +1,1123 @@
+From 32038d1bde6ac8ce2a8583264b5d419d0c32aad3 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 29 Aug 2008 16:24:03 +0000
+Subject: [PATCH] FIX: Incorrect directory path resolve when running from a
+ different directory (IVY-232)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@690317 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/ant/AntBuildTrigger.java   |  4 +-
+ .../org/apache/ivy/ant/IvyAntSettings.java    |  1 +
+ .../apache/ivy/ant/IvyPostResolveTask.java    |  2 +-
+ src/java/org/apache/ivy/ant/IvyPublish.java   |  4 +-
+ src/java/org/apache/ivy/ant/IvyReport.java    |  8 ++--
+ .../apache/ivy/ant/IvyRepositoryReport.java   | 11 +++--
+ .../cache/DefaultRepositoryCacheManager.java  |  4 +-
+ .../ivy/core/cache/ParserSettingsMonitor.java |  9 ++++
+ .../ivy/core/deliver/DeliverEngine.java       |  2 +-
+ .../ivy/core/publish/PublishEngine.java       |  8 ++--
+ .../ivy/core/retrieve/RetrieveEngine.java     | 11 +++--
+ .../apache/ivy/core/settings/IvySettings.java | 48 +++++++++++++++----
+ .../ivy/core/settings/XmlSettingsParser.java  | 13 +++--
+ .../ivy/plugins/parser/ParserSettings.java    |  5 ++
+ .../xml/XmlModuleDescriptorUpdater.java       |  2 +-
+ .../repository/file/FileRepository.java       | 11 ++++-
+ .../plugins/repository/file/FileResource.java |  2 +-
+ .../ivy/plugins/repository/ssh/Scp.java       |  4 +-
+ .../repository/vsftp/VsftpRepository.java     |  3 +-
+ .../resolver/AbstractSshBasedResolver.java    |  8 ++--
+ .../plugins/resolver/FileSystemResolver.java  | 12 ++++-
+ .../resolver/packager/PackagerResolver.java   | 22 +++++++--
+ .../ivy/plugins/trigger/LogTrigger.java       | 10 ++--
+ .../org/apache/ivy/util/Configurator.java     | 14 ++++++
+ .../org/apache/ivy/util/FileResolver.java     | 42 ++++++++++++++++
+ src/java/org/apache/ivy/util/FileUtil.java    | 12 +++++
+ .../apache/ivy/ant/IvyAntSettingsTest.java    |  4 +-
+ .../org/apache/ivy/ant/IvyConfigureTest.java  |  4 +-
+ test/java/org/apache/ivy/ant/IvyTaskTest.java |  4 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  |  8 ++--
+ .../core/settings/XmlSettingsParserTest.java  | 26 ++++++++--
+ .../core/settings/ivysettings-packager.xml    | 29 +++++++++++
+ .../resolver/FileSystemResolverTest.java      |  2 +-
+ .../resolver/PackagerResolverTest.java        |  4 +-
+ .../ivy/plugins/trigger/LogTriggerTest.java   |  4 +-
+ 36 files changed, 278 insertions(+), 80 deletions(-)
+ create mode 100644 src/java/org/apache/ivy/util/FileResolver.java
+ create mode 100644 test/java/org/apache/ivy/core/settings/ivysettings-packager.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index bb5490434..aaa8c7802 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -108,6 +108,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Add a memory cache for the module descriptor that are parsed from the cache (IVY-883)
+ - IMPROVEMENT: Improve performance (IVY-872)
+ 
++- FIX: Incorrect directory path resolve when running from a different directory (IVY-232)
+ - FIX: Ivy#listTokenValues(String, Map) does not filter returned values, and does not use maven-metadata.xml files with IBiblio resolver (IVY-886)
+ - FIX: Circular Dependency messages in a resolve do not reflect the configuration used during the resolve (IVY-708)
+ - FIX: Failure to transitively install Maven2 artifacts with namespace (IVY-440)
+diff --git a/src/java/org/apache/ivy/ant/AntBuildTrigger.java b/src/java/org/apache/ivy/ant/AntBuildTrigger.java
+index 38757cd25..7c2abe24a 100644
+--- a/src/java/org/apache/ivy/ant/AntBuildTrigger.java
++++ b/src/java/org/apache/ivy/ant/AntBuildTrigger.java
+@@ -122,8 +122,8 @@ private boolean isBuilt(File f) {
+     }
+ 
+     private File getBuildFile(IvyEvent event) {
+-        return new File(IvyPatternHelper.substituteTokens(getBuildFilePattern(), event
+-                .getAttributes()));
++        return IvyContext.getContext().getSettings().resolveFile(
++            IvyPatternHelper.substituteTokens(getBuildFilePattern(), event.getAttributes()));
+     }
+ 
+     public String getBuildFilePattern() {
+diff --git a/src/java/org/apache/ivy/ant/IvyAntSettings.java b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+index 68d9331a7..27f63904c 100644
+--- a/src/java/org/apache/ivy/ant/IvyAntSettings.java
++++ b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+@@ -243,6 +243,7 @@ public void execute() throws BuildException {
+         IvyAntVariableContainer ivyAntVariableContainer = new IvyAntVariableContainer(getProject());
+ 
+         IvySettings settings = new IvySettings(ivyAntVariableContainer);
++        settings.setBaseDir(getProject().getBaseDir());
+         
+         if (file == null && url == null) {
+             defineDefaultSettingFile(ivyAntVariableContainer);
+diff --git a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+index 349879f38..53a04c4a0 100644
+--- a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
++++ b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+@@ -96,7 +96,7 @@ protected void prepareAndCheck() {
+         if (file == null) {
+             String fileName = getProperty(settings, "ivy.resolved.file", resolveId);
+             if (fileName != null) {
+-                file = new File(fileName);
++                file = getProject().resolveFile(fileName);
+             }
+         }
+ 
+diff --git a/src/java/org/apache/ivy/ant/IvyPublish.java b/src/java/org/apache/ivy/ant/IvyPublish.java
+index 0891058a5..36b7a2815 100644
+--- a/src/java/org/apache/ivy/ant/IvyPublish.java
++++ b/src/java/org/apache/ivy/ant/IvyPublish.java
+@@ -274,8 +274,8 @@ public void doExecute() throws BuildException {
+         }
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance(organisation, module, revision);
+         try {
+-            File ivyFile = new File(IvyPatternHelper.substitute(srcivypattern, organisation,
+-                module, pubRevision, "ivy", "ivy", "xml"));
++            File ivyFile = getProject().resolveFile(IvyPatternHelper.substitute(
++                    srcivypattern, organisation, module, pubRevision, "ivy", "ivy", "xml"));
+             if (publishivy && (!ivyFile.exists() || forcedeliver)) {
+                 IvyDeliver deliver = new IvyDeliver();
+                 deliver.setSettingsRef(getSettingsRef());
+diff --git a/src/java/org/apache/ivy/ant/IvyReport.java b/src/java/org/apache/ivy/ant/IvyReport.java
+index a1a307741..0fb80d254 100644
+--- a/src/java/org/apache/ivy/ant/IvyReport.java
++++ b/src/java/org/apache/ivy/ant/IvyReport.java
+@@ -170,7 +170,7 @@ public void doExecute() throws BuildException {
+         if (todir == null) {
+             String t = getProperty(settings, "ivy.report.todir");
+             if (t != null) {
+-                todir = new File(t);
++                todir = getProject().resolveFile(t);
+             }
+         }
+         if (todir != null && todir.exists()) {
+@@ -236,7 +236,7 @@ private void genxml(String[] confs)
+             if (todir != null) {
+                 out = new File(todir, getOutputPattern(confs[i], "xml"));
+             } else {
+-                out = new File(getOutputPattern(confs[i], "xml"));
++                out = getProject().resolveFile(getOutputPattern(confs[i], "xml"));
+             }
+ 
+             FileUtil.copy(xml, out, null);
+@@ -253,7 +253,7 @@ private void genreport(String[] confs)
+             if (todir != null) {
+                 css = new File(todir, "ivy-report.css");
+             } else {
+-                css = new File("ivy-report.css");
++                css = getProject().resolveFile("ivy-report.css");
+             }
+             
+             if (!css.exists()) {
+@@ -308,7 +308,7 @@ private void genStyled(String[] confs, File style, String ext) throws IOExceptio
+         if (todir != null) {
+             out = todir;
+         } else {
+-            out = new File(".");
++            out = getProject().getBaseDir();
+         }
+         
+         InputStream xsltStream = null;
+diff --git a/src/java/org/apache/ivy/ant/IvyRepositoryReport.java b/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
+index f97f98381..f118ee4cd 100644
+--- a/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
++++ b/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
+@@ -55,7 +55,7 @@ public class IvyRepositoryReport extends IvyTask {
+ 
+     private String matcher = PatternMatcher.EXACT_OR_REGEXP;
+ 
+-    private File todir = new File(".");
++    private File todir;
+ 
+     private boolean graph = false;
+ 
+@@ -128,7 +128,7 @@ public void doExecute() throws BuildException {
+             if (xml) {
+ 
+                 FileUtil.copy(cacheMgr.getConfigurationResolveReportInCache(resolveId, "default"),
+-                    new File(todir, outputname + ".xml"), null);
++                    new File(getTodir(), outputname + ".xml"), null);
+             }
+             if (xsl) {
+                 genreport(cacheMgr, md.getModuleRevisionId().getOrganisation(), md
+@@ -149,7 +149,7 @@ private void genreport(ResolutionCacheManager cache, String organisation, String
+ 
+         String resolveId = ResolveOptions.getDefaultResolveId(new ModuleId(organisation, module));
+         xslt.setIn(cache.getConfigurationResolveReportInCache(resolveId, "default"));
+-        xslt.setOut(new File(todir, outputname + "." + xslext));
++        xslt.setOut(new File(getTodir(), outputname + "." + xslext));
+ 
+         xslt.setStyle(xslFile);
+ 
+@@ -206,13 +206,16 @@ private void gen(ResolutionCacheManager cache, String organisation, String modul
+ 
+         String resolveId = ResolveOptions.getDefaultResolveId(new ModuleId(organisation, module));
+         xslt.setIn(cache.getConfigurationResolveReportInCache(resolveId, "default"));
+-        xslt.setOut(new File(todir, outputname + "." + ext));
++        xslt.setOut(new File(getTodir(), outputname + "." + ext));
+         xslt.setBasedir(cache.getResolutionCacheRoot());
+         xslt.setStyle(style);
+         xslt.execute();
+     }
+ 
+     public File getTodir() {
++        if (todir == null && getProject() != null) {
++            return getProject().getBaseDir();
++        }
+         return todir;
+     }
+ 
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index ceb48a6dd..02bac0667 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -343,7 +343,7 @@ public File getArchiveFileInCache(Artifact artifact, ArtifactOrigin origin) {
+         File archive = new File(getRepositoryCacheRoot(), getArchivePathInCache(artifact, origin));
+         if (!archive.exists() 
+                 && !ArtifactOrigin.isUnknown(origin) && origin.isLocal()) {
+-            File original = new File(origin.getLocation());
++            File original = settings.resolveFile(origin.getLocation());
+             if (original.exists()) {
+                 return original;
+             }
+@@ -360,7 +360,7 @@ public File getArchiveFileInCache(Artifact artifact, ArtifactOrigin origin) {
+     private File getArchiveFileInCache(
+             Artifact artifact, ArtifactOrigin origin, boolean useOrigin) {
+         if (useOrigin && !ArtifactOrigin.isUnknown(origin) && origin.isLocal()) {
+-            return new File(origin.getLocation());
++            return settings.resolveFile(origin.getLocation());
+         } else {
+             return new File(getRepositoryCacheRoot(), getArchivePathInCache(artifact, origin));
+         }
+diff --git a/src/java/org/apache/ivy/core/cache/ParserSettingsMonitor.java b/src/java/org/apache/ivy/core/cache/ParserSettingsMonitor.java
+index fd227fb2a..d85f5ea39 100644
+--- a/src/java/org/apache/ivy/core/cache/ParserSettingsMonitor.java
++++ b/src/java/org/apache/ivy/core/cache/ParserSettingsMonitor.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.ivy.core.cache;
+ 
++import java.io.File;
+ import java.util.HashMap;
+ import java.util.Iterator;
+ import java.util.LinkedHashMap;
+@@ -117,6 +118,14 @@ public DependencyResolver getResolver(ModuleRevisionId mRevId) {
+         public StatusManager getStatusManager() {
+             return delegatedSettings.getStatusManager();
+         }
++        
++        public File getBaseDir() {
++            return delegatedSettings.getBaseDir();
++        }
++        
++        public File resolveFile(String filename) {
++            return delegatedSettings.resolveFile(filename);
++        }
+ 
+         public Map substitute(Map strings) {
+             Map substituted = new LinkedHashMap();
+diff --git a/src/java/org/apache/ivy/core/deliver/DeliverEngine.java b/src/java/org/apache/ivy/core/deliver/DeliverEngine.java
+index 3bc7eac53..8f466c84b 100644
+--- a/src/java/org/apache/ivy/core/deliver/DeliverEngine.java
++++ b/src/java/org/apache/ivy/core/deliver/DeliverEngine.java
+@@ -183,7 +183,7 @@ public void deliver(ModuleRevisionId mrid, String revision, String destIvyPatter
+         confsToRemove.removeAll(Arrays.asList(confs));
+ 
+         try {
+-            XmlModuleDescriptorUpdater.update(ivyFileURL, new File(publishedIvy),
++            XmlModuleDescriptorUpdater.update(ivyFileURL, settings.resolveFile(publishedIvy),
+                     new UpdateOptions()
+                         .setSettings(settings)
+                         .setResolvedRevisions(resolvedDependencies)
+diff --git a/src/java/org/apache/ivy/core/publish/PublishEngine.java b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+index c9cd6c48b..144c0b3d6 100644
+--- a/src/java/org/apache/ivy/core/publish/PublishEngine.java
++++ b/src/java/org/apache/ivy/core/publish/PublishEngine.java
+@@ -92,7 +92,7 @@ public Collection publish(ModuleRevisionId mrid, Collection srcArtifactPattern,
+             mrid, options.getPubBranch(), options.getPubrevision());
+         File ivyFile;
+         if (options.getSrcIvyPattern() != null) {
+-            ivyFile = new File(IvyPatternHelper.substitute(options.getSrcIvyPattern(),
++            ivyFile = settings.resolveFile(IvyPatternHelper.substitute(options.getSrcIvyPattern(),
+                 DefaultArtifact.newIvyArtifact(pubmrid, new Date())));
+             if (!ivyFile.exists()) {
+                 throw new IllegalArgumentException("ivy file to publish not found for " + mrid
+@@ -201,7 +201,7 @@ public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+             Artifact artifact = (Artifact) iter.next();
+             for (Iterator iterator = srcArtifactPattern.iterator(); iterator.hasNext();) {
+                 String pattern = (String) iterator.next();
+-                File artifactFile = new File(
++                File artifactFile = settings.resolveFile(
+                     IvyPatternHelper.substitute(settings.substitute(pattern), artifact));
+                 if (artifactFile.exists()) {
+                     artifactsFiles.put(artifact, artifactFile);
+@@ -213,7 +213,7 @@ public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+                 for (Iterator iterator = srcArtifactPattern.iterator(); iterator.hasNext();) {
+                     String pattern = (String) iterator.next();
+                     Message.info("\t"
+-                            + new File(IvyPatternHelper.substitute(pattern, artifact))
++                            + settings.resolveFile(IvyPatternHelper.substitute(pattern, artifact))
+                             + " file does not exist");
+                 }
+                 if (options.isHaltOnMissing()) {
+@@ -224,7 +224,7 @@ public Collection publish(ModuleDescriptor md, Collection srcArtifactPattern,
+         }
+         if (options.getSrcIvyPattern() != null) {
+             Artifact artifact = MDArtifact.newIvyArtifact(md);
+-            File artifactFile = new File(
++            File artifactFile = settings.resolveFile(
+                 IvyPatternHelper.substitute(options.getSrcIvyPattern(), artifact));
+             if (!artifactFile.exists()) {
+                 Message.info("missing ivy file for "
+diff --git a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+index 8aaca31ca..f71f08dd0 100644
+--- a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
++++ b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+@@ -100,9 +100,10 @@ public int retrieve(ModuleRevisionId mrid, String destFilePattern, RetrieveOptio
+ 
+         try {
+             Map artifactsToCopy = determineArtifactsToCopy(mrid, destFilePattern, options);
+-            File fileRetrieveRoot = new File(IvyPatternHelper.getTokenRoot(destFilePattern));
+-            File ivyRetrieveRoot = destIvyPattern == null ? null : new File(IvyPatternHelper
+-                    .getTokenRoot(destIvyPattern));
++            File fileRetrieveRoot = settings.resolveFile(
++                IvyPatternHelper.getTokenRoot(destFilePattern));
++            File ivyRetrieveRoot = destIvyPattern == null 
++                ? null : settings.resolveFile(IvyPatternHelper.getTokenRoot(destIvyPattern));
+             Collection targetArtifactsStructure = new HashSet(); // Set(File) set of all paths
+             // which should be present at
+             // then end of retrieve (useful
+@@ -124,7 +125,7 @@ public int retrieve(ModuleRevisionId mrid, String destFilePattern, RetrieveOptio
+                 Message.verbose("\tretrieving " + archive);
+                 for (Iterator it2 = dest.iterator(); it2.hasNext();) {
+                     IvyContext.getContext().checkInterrupted();
+-                    File destFile = new File((String) it2.next());
++                    File destFile = settings.resolveFile((String) it2.next());
+                     if (!settings.isCheckUpToDate() || !upToDate(archive, destFile)) {
+                         Message.verbose("\t\tto " + destFile);
+                         if (options.isMakeSymlinks()) {
+@@ -301,7 +302,7 @@ public Map determineArtifactsToCopy(ModuleRevisionId mrid, String destFilePatter
+                     dest = new HashSet();
+                     artifactsToCopy.put(artifact, dest);
+                 }
+-                String copyDest = new File(destFileName).getAbsolutePath();
++                String copyDest = settings.resolveFile(destFileName).getAbsolutePath();
+                 dest.add(copyDest);
+ 
+                 Set conflicts = (Set) conflictsMap.get(copyDest);
+diff --git a/src/java/org/apache/ivy/core/settings/IvySettings.java b/src/java/org/apache/ivy/core/settings/IvySettings.java
+index e319c44bb..51e424f0c 100644
+--- a/src/java/org/apache/ivy/core/settings/IvySettings.java
++++ b/src/java/org/apache/ivy/core/settings/IvySettings.java
+@@ -98,6 +98,8 @@
+ import org.apache.ivy.plugins.version.SubVersionMatcher;
+ import org.apache.ivy.plugins.version.VersionMatcher;
+ import org.apache.ivy.plugins.version.VersionRangeMatcher;
++import org.apache.ivy.util.FileResolver;
++import org.apache.ivy.util.FileUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.filter.Filter;
+ import org.apache.ivy.util.url.URLHandlerRegistry;
+@@ -105,7 +107,7 @@
+ public class IvySettings implements SortEngineSettings, PublishEngineSettings, ParserSettings,
+         DeliverEngineSettings, CheckEngineSettings, InstallEngineSettings, 
+         ResolverSettings, ResolveEngineSettings, RetrieveEngineSettings, 
+-        RepositoryManagementEngineSettings {
++        RepositoryManagementEngineSettings, FileResolver {
+     private static final long INTERUPT_TIMEOUT = 2000;
+ 
+     private Map typeDefs = new HashMap();
+@@ -179,6 +181,8 @@ public class IvySettings implements SortEngineSettings, PublishEngineSettings, P
+     private boolean useRemoteConfig = false;
+ 
+     private File defaultUserDir;
++    
++    private File baseDir = new File(".");
+ 
+     private List classpathURLs = new ArrayList();
+ 
+@@ -218,7 +222,7 @@ public IvySettings(IvyVariableContainer variableContainer) {
+             String[] files = ivyTypeDefs.split("\\,");
+             for (int i = 0; i < files.length; i++) {
+                 try {
+-                    typeDefs(new FileInputStream(new File(files[i].trim())), true);
++                    typeDefs(new FileInputStream(resolveFile(files[i].trim())), true);
+                 } catch (FileNotFoundException e) {
+                     Message.warn("typedefs file not found: " + files[i].trim());
+                 } catch (IOException e) {
+@@ -360,7 +364,7 @@ public void load(File settingsFile) throws ParseException, IOException {
+         long start = System.currentTimeMillis();
+         setSettingsVariables(settingsFile);
+         if (getVariable("ivy.default.ivy.user.dir") != null) {
+-            setDefaultIvyUserDir(new File(getVariable("ivy.default.ivy.user.dir")));
++            setDefaultIvyUserDir(resolveFile(getVariable("ivy.default.ivy.user.dir")));
+         } else {
+             getDefaultIvyUserDir();
+         }
+@@ -385,7 +389,7 @@ public void load(URL settingsURL) throws ParseException, IOException {
+         long start = System.currentTimeMillis();
+         setSettingsVariables(settingsURL);
+         if (getVariable("ivy.default.ivy.user.dir") != null) {
+-            setDefaultIvyUserDir(new File(getVariable("ivy.default.ivy.user.dir")));
++            setDefaultIvyUserDir(resolveFile(getVariable("ivy.default.ivy.user.dir")));
+         } else {
+             getDefaultIvyUserDir();
+         }
+@@ -407,7 +411,7 @@ public void load(URL settingsURL) throws ParseException, IOException {
+      */
+     public void defaultInit() throws IOException {
+         if (getVariable("ivy.default.ivy.user.dir") != null) {
+-            setDefaultIvyUserDir(new File(getVariable("ivy.default.ivy.user.dir")));
++            setDefaultIvyUserDir(resolveFile(getVariable("ivy.default.ivy.user.dir")));
+         } else {
+             getDefaultIvyUserDir();
+         }
+@@ -729,11 +733,35 @@ public void addModuleConfiguration(Map attributes, PatternMatcher matcher,
+             new MapMatcher(attributes, matcher), 
+             new ModuleSettings(resolverName, branch, conflictManager, resolveMode));
+     }
++    
++    /**
++     * Return the canonical form of a filename.
++     * <p>
++     * If the specified file name is relative it is resolved
++     * with respect to the settings's base directory.
++     *
++     * @param fileName The name of the file to resolve.
++     *                 Must not be <code>null</code>.
++     *
++     * @return the resolved File.
++     *
++     */
++    public File resolveFile(String fileName) {
++        return FileUtil.resolveFile(baseDir, fileName);
++    }
++    
++    public void setBaseDir(File baseDir) {
++        this.baseDir = baseDir;
++    }
++    
++    public File getBaseDir() {
++        return baseDir;
++    }
+ 
+     public File getDefaultIvyUserDir() {
+         if (defaultUserDir == null) {
+             if (getVariable("ivy.home") != null) {
+-                setDefaultIvyUserDir(new File(getVariable("ivy.home")));
++                setDefaultIvyUserDir(resolveFile(getVariable("ivy.home")));
+                 Message.verbose("using ivy.default.ivy.user.dir variable for default ivy user dir: "
+                                 + defaultUserDir);
+             } else {
+@@ -754,7 +782,7 @@ public File getDefaultCache() {
+         if (defaultCache == null) {
+             String cache = getVariable("ivy.cache.dir");
+             if (cache != null) {
+-                defaultCache = new File(cache);
++                defaultCache = resolveFile(cache);
+             } else {
+                 setDefaultCache(new File(getDefaultIvyUserDir(), "cache"));
+                 Message.verbose("no default cache defined: set to " + defaultCache);
+@@ -785,7 +813,7 @@ public void setDefaultResolutionCacheBasedir(String resolutionCacheRoot) {
+     public File getDefaultRepositoryCacheBasedir() {
+         String repositoryCacheRoot = getVariable("ivy.cache.repository");
+         if (repositoryCacheRoot != null) {
+-            return new File(repositoryCacheRoot);
++            return resolveFile(repositoryCacheRoot);
+         } else {
+             return getDefaultCache();
+         }
+@@ -794,7 +822,7 @@ public File getDefaultRepositoryCacheBasedir() {
+     public File getDefaultResolutionCacheBasedir() {
+         String resolutionCacheRoot = getVariable("ivy.cache.resolution");
+         if (resolutionCacheRoot != null) {
+-            return new File(resolutionCacheRoot);
++            return resolveFile(resolutionCacheRoot);
+         } else {
+             return getDefaultCache();
+         }
+@@ -1415,4 +1443,6 @@ private void validateAll(Collection values) {
+             }
+         }
+     }
++
++    
+ }
+diff --git a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+index c2d6bb277..99669e8f3 100644
+--- a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
++++ b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+@@ -130,6 +130,7 @@ public XmlSettingsParser(IvySettings ivy) {
+ 
+     public void parse(URL settings) throws ParseException, IOException {
+         configurator = new Configurator();
++        configurator.setFileResolver(ivy);
+         // put every type definition from ivy to configurator
+         Map typeDefs = ivy.getTypeDefs();
+         for (Iterator iter = typeDefs.keySet().iterator(); iter.hasNext();) {
+@@ -275,7 +276,7 @@ private void cachesStarted(String qName, Map attributes) {
+         
+         String cache = (String) attributes.get("defaultCacheDir");
+         if (cache != null) {
+-            ivy.setDefaultCache(new File(cache));
++            ivy.setDefaultCache(resolveFile(cache));
+         }
+         String up2d = (String) attributes.get("checkUpToDate");
+         if (up2d != null) {
+@@ -312,7 +313,7 @@ private void settingsStarted(String qName, Map attributes) {
+         if (cache != null) {
+             Message.deprecated("'defaultCache' is deprecated, "
+                 + "use 'caches[@defaultCacheDir]' instead (" + settings + ")");
+-            ivy.setDefaultCache(new File(cache));
++            ivy.setDefaultCache(resolveFile(cache));
+         }
+         String defaultBranch = (String) attributes.get("defaultBranch");
+         if (defaultBranch != null) {
+@@ -384,7 +385,7 @@ private void includeStarted(Map attributes) throws IOException, ParseException {
+             } else {
+                 settingsURL = urlFromFileAttribute(propFilePath);
+                 Message.verbose("including file: " + settingsURL);
+-                ivy.setSettingsVariables(new File(propFilePath));
++                ivy.setSettingsVariables(resolveFile(propFilePath));
+                 //We can not use the setSettingsVariables(URL) because that would put different
+                 //values for the properties.  I'm not sure what would be the regression...
+             }
+@@ -469,7 +470,7 @@ private void classpathStarted(Map attributes) throws MalformedURLException {
+                 throw new IllegalArgumentException(
+                         "either url or file should be given for classpath element");
+             } else {
+-                url = new File(file).toURI().toURL();
++                url = resolveFile(file).toURI().toURL();
+             }
+         } else {
+             url = new URL(urlStr);
+@@ -592,4 +593,8 @@ public void endDocument() throws SAXException {
+             ivy.setDefaultLockStrategy(strategy);
+         }
+     }
++
++    private File resolveFile(String filePath) {
++        return ivy.resolveFile(filePath);
++    }
+ }
+diff --git a/src/java/org/apache/ivy/plugins/parser/ParserSettings.java b/src/java/org/apache/ivy/plugins/parser/ParserSettings.java
+index fa721060e..1cd865a79 100644
+--- a/src/java/org/apache/ivy/plugins/parser/ParserSettings.java
++++ b/src/java/org/apache/ivy/plugins/parser/ParserSettings.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.ivy.plugins.parser;
+ 
++import java.io.File;
+ import java.util.Map;
+ 
+ import org.apache.ivy.core.RelativeUrlResolver;
+@@ -47,5 +48,9 @@ public interface ParserSettings {
+     RelativeUrlResolver getRelativeUrlResolver();
+     
+     DependencyResolver getResolver(ModuleRevisionId mRevId);
++    
++    File resolveFile(String filename);
++    
++    File getBaseDir();
+ 
+ }
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+index 05f62baa9..26673362d 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorUpdater.java
+@@ -445,7 +445,7 @@ private void includeStarted(Attributes attributes) throws SAXException {
+                         String urlStr = attributes.getValue("url");
+                         url = new URL(urlStr);
+                     } else {
+-                        url = new File(fileName).toURI().toURL();
++                        url = settings.resolveFile(fileName).toURI().toURL();
+                     }
+                 }
+                 XMLHelper.parse(url, null, new DefaultHandler() {
+diff --git a/src/java/org/apache/ivy/plugins/repository/file/FileRepository.java b/src/java/org/apache/ivy/plugins/repository/file/FileRepository.java
+index a1723ca4c..727c171dd 100644
+--- a/src/java/org/apache/ivy/plugins/repository/file/FileRepository.java
++++ b/src/java/org/apache/ivy/plugins/repository/file/FileRepository.java
+@@ -110,9 +110,9 @@ public List list(String parent) throws IOException {
+         return null;
+     }
+ 
+-    private File getFile(String source) {
++    File getFile(String source) {
+         if (baseDir != null) {
+-            return new File(baseDir, source);
++            return FileUtil.resolveFile(baseDir, source);
+         } else {
+             return new File(source);
+         }
+@@ -126,4 +126,11 @@ public void setLocal(boolean local) {
+         this.local = local;
+     }
+ 
++    public File getBaseDir() {
++        return baseDir;
++    }
++    
++    public void setBaseDir(File baseDir) {
++        this.baseDir = baseDir;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/plugins/repository/file/FileResource.java b/src/java/org/apache/ivy/plugins/repository/file/FileResource.java
+index d30a25c14..322299dbb 100644
+--- a/src/java/org/apache/ivy/plugins/repository/file/FileResource.java
++++ b/src/java/org/apache/ivy/plugins/repository/file/FileResource.java
+@@ -39,7 +39,7 @@ public String getName() {
+     }
+ 
+     public Resource clone(String cloneName) {
+-        return new FileResource(repository, new File(cloneName));
++        return new FileResource(repository, repository.getFile(cloneName));
+     }
+ 
+     public long getLastModified() {
+diff --git a/src/java/org/apache/ivy/plugins/repository/ssh/Scp.java b/src/java/org/apache/ivy/plugins/repository/ssh/Scp.java
+index 1f969e95e..fbd7459b1 100644
+--- a/src/java/org/apache/ivy/plugins/repository/ssh/Scp.java
++++ b/src/java/org/apache/ivy/plugins/repository/ssh/Scp.java
+@@ -466,7 +466,7 @@ private ChannelExec getExecChannel() throws JSchException {
+      * remote side.
+      * 
+      * @param localFile
+-     *            Path and name of local file.
++     *            Path and name of local file. Must be absolute.
+      * @param remoteTargetDir
+      *            Remote target directory where the file has to end up (optional)
+      * @param remoteTargetName
+@@ -526,7 +526,7 @@ public void put(String localFile, String remoteTargetDir, String remoteTargetNam
+      * @param remoteFile
+      *            Path and name of the remote file.
+      * @param localTarget
+-     *            Local file where to store the data.
++     *            Local file where to store the data. Must be absolute.
+      * @throws IOException
+      *             in case of network problems
+      * @throws RemoteScpException
+diff --git a/src/java/org/apache/ivy/plugins/repository/vsftp/VsftpRepository.java b/src/java/org/apache/ivy/plugins/repository/vsftp/VsftpRepository.java
+index bbf47ae17..0c2566457 100644
+--- a/src/java/org/apache/ivy/plugins/repository/vsftp/VsftpRepository.java
++++ b/src/java/org/apache/ivy/plugins/repository/vsftp/VsftpRepository.java
+@@ -151,7 +151,8 @@ public void get(final String source, File destination) throws IOException {
+ 
+             int index = source.lastIndexOf('/');
+             String srcName = index == -1 ? source : source.substring(index + 1);
+-            final File to = destDir == null ? new File(srcName) : new File(destDir, srcName);
++            final File to = destDir == null 
++                    ? ivy.getSettings().resolveFile(srcName) : new File(destDir, srcName);
+ 
+             final IOException[] ex = new IOException[1];
+             Thread get = new IvyThread() {
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractSshBasedResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractSshBasedResolver.java
+index 68bda2dcf..79a7d1704 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractSshBasedResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractSshBasedResolver.java
+@@ -51,8 +51,8 @@ private AbstractSshBasedRepository getSshBasedRepository() {
+      * @param filePath
+      *            full file path name
+      */
+-    public void setKeyFile(String filePath) {
+-        getSshBasedRepository().setKeyFile(new File(filePath));
++    public void setKeyFile(File filePath) {
++        getSshBasedRepository().setKeyFile(filePath);
+     }
+ 
+     /**
+@@ -60,8 +60,8 @@ public void setKeyFile(String filePath) {
+      * load username and passwd entries, and to store them if the user choose to do so. Defaults to
+      * user.dir/.ivy/[host].sftp.passwd, set it to null to disable this feature.
+      */
+-    public void setPassfile(String passfile) {
+-        getSshBasedRepository().setPassFile(passfile == null ? null : new File(passfile));
++    public void setPassfile(File passfile) {
++        getSshBasedRepository().setPassFile(passfile);
+         passfileSet = true;
+     }
+ 
+diff --git a/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java b/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java
+index 068d161ec..914814435 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/FileSystemResolver.java
+@@ -77,6 +77,14 @@ public class FileSystemResolver extends RepositoryResolver {
+     public FileSystemResolver() {
+         setRepository(new FileRepository());
+     }
++    
++    public void setSettings(ResolverSettings settings) {
++        super.setSettings(settings);
++        FileRepository fileRepository = getFileRepository();
++        if (fileRepository.getBaseDir() == null) {
++            fileRepository.setBaseDir(settings.getBaseDir());
++        }
++    }
+ 
+     public String getTypeName() {
+         return "file";
+@@ -276,11 +284,11 @@ private void unsupportedTransaction(String msg) {
+     }
+ 
+     private void initTransaction(ModuleRevisionId module) {
+-        transactionTempDir = new File(IvyPatternHelper.substitute(
++        transactionTempDir = getSettings().resolveFile(IvyPatternHelper.substitute(
+             baseTransactionPattern, 
+             ModuleRevisionId.newInstance(
+                 module, module.getRevision() + TRANSACTION_DESTINATION_SUFFIX)));
+-        transactionDestDir = new File(IvyPatternHelper.substitute(
++        transactionDestDir = getSettings().resolveFile(IvyPatternHelper.substitute(
+             baseTransactionPattern, 
+             module));
+     }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/packager/PackagerResolver.java b/src/java/org/apache/ivy/plugins/resolver/packager/PackagerResolver.java
+index 74916a110..3e90c32ea 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/packager/PackagerResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/packager/PackagerResolver.java
+@@ -85,15 +85,29 @@ protected synchronized void clearCache() {
+     /**
+      * Set root directory under which builds take place.
+      */
+-    public void setBuildRoot(String buildRoot) {
+-        this.buildRoot = new File(buildRoot);
++    public void setBuildRoot(File buildRoot) {
++        this.buildRoot = buildRoot;
++    }
++    
++    /**
++     * Returns root directory under which builds take place. 
++     */
++    public File getBuildRoot() {
++        return buildRoot;
+     }
+ 
+     /**
+      * Set resource cache directory.
+      */
+-    public void setResourceCache(String resourceCache) {
+-        this.resourceCache = resourceCache != null ? new File(resourceCache) : null;
++    public void setResourceCache(File resourceCache) {
++        this.resourceCache = resourceCache;
++    }
++    
++    /**
++     * Get resource cache directory.
++     */
++    public File getResourceCache() {
++        return resourceCache;
+     }
+ 
+     /**
+diff --git a/src/java/org/apache/ivy/plugins/trigger/LogTrigger.java b/src/java/org/apache/ivy/plugins/trigger/LogTrigger.java
+index 9be26dde7..66c19cca1 100644
+--- a/src/java/org/apache/ivy/plugins/trigger/LogTrigger.java
++++ b/src/java/org/apache/ivy/plugins/trigger/LogTrigger.java
+@@ -100,17 +100,15 @@ public void setMessage(String msg) {
+ 
+     /**
+      * File to write to.
+-     * @param file the file to write to, if not set, echo to
+-     *             standard Ivy logging
++     * @param file the file to write to, if not set, echo to standard Ivy logging
+      */
+-    public void setFile(String file) {
+-        this.file = new File(file);
++    public void setFile(File file) {
++        this.file = file;
+     }
+ 
+     /**
+      * If true, append to existing file.
+-     * @param append if true, append to existing file, default
+-     *               is false.
++     * @param append if true, append to existing file, default is false.
+      */
+     public void setAppend(boolean append) {
+         this.append = append;
+diff --git a/src/java/org/apache/ivy/util/Configurator.java b/src/java/org/apache/ivy/util/Configurator.java
+index 50c23a630..3f3cfaacf 100644
+--- a/src/java/org/apache/ivy/util/Configurator.java
++++ b/src/java/org/apache/ivy/util/Configurator.java
+@@ -17,6 +17,7 @@
+  */
+ package org.apache.ivy.util;
+ 
++import java.io.File;
+ import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+ import java.util.ArrayList;
+@@ -429,6 +430,8 @@ public String getObjectName() {
+             return objName;
+         }
+     }
++    
++    private FileResolver fileResolver = FileResolver.DEFAULT;
+ 
+     private Map typedefs = new HashMap();
+ 
+@@ -637,6 +640,8 @@ public void setAttribute(String attributeName, String value) {
+                 convertedValue = Long.valueOf(value);
+             } else if (paramClass.equals(Class.class)) {
+                 convertedValue = Class.forName(value);
++            } else if (paramClass.equals(File.class)) {
++                convertedValue = fileResolver.resolveFile(value);
+             } else {
+                 convertedValue = paramClass.getConstructor(new Class[] {String.class}).newInstance(
+                     new Object[] {value});
+@@ -746,4 +751,13 @@ public void addConfiguredMacrodef(MacroDef macrodef) {
+     public Class getTypeDef(String name) {
+         return (Class) typedefs.get(name);
+     }
++    
++    public FileResolver getFileResolver() {
++        return fileResolver;
++    }
++    
++    public void setFileResolver(FileResolver fileResolver) {
++        Checks.checkNotNull(fileResolver, "fileResolver");
++        this.fileResolver = fileResolver;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/util/FileResolver.java b/src/java/org/apache/ivy/util/FileResolver.java
+new file mode 100644
+index 000000000..432e7a437
+--- /dev/null
++++ b/src/java/org/apache/ivy/util/FileResolver.java
+@@ -0,0 +1,42 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.util;
++
++import java.io.File;
++
++public interface FileResolver {
++    public static final FileResolver DEFAULT = new FileResolver() {
++        public File resolveFile(String filename) {
++            return new File(filename);
++        }
++    };
++    
++    /**
++     * Return the canonical form of a filename.
++     * <p>
++     * If the specified file name is relative it is resolved
++     * with respect to the settings's base directory.
++     *
++     * @param fileName The name of the file to resolve.
++     *                 Must not be <code>null</code>.
++     *
++     * @return the resolved File.
++     *
++     */
++    File resolveFile(String filename);
++}
+diff --git a/src/java/org/apache/ivy/util/FileUtil.java b/src/java/org/apache/ivy/util/FileUtil.java
+index aaaf609c5..6a8e55e5d 100644
+--- a/src/java/org/apache/ivy/util/FileUtil.java
++++ b/src/java/org/apache/ivy/util/FileUtil.java
+@@ -352,4 +352,16 @@ private static Collection listAll(File file, Collection list, Collection ignore)
+         return list;
+     }
+ 
++    public static File resolveFile(File file, String filename) {
++        /*
++         * very simple resolveFile algorithm compared to what is done in Ant. It must be enough in
++         * most common cases though.
++         */
++        File f = new File(filename);
++        if (f.isAbsolute()) {
++            return f;
++        }
++        return new File(file, filename);
++    }
++
+ }
+diff --git a/test/java/org/apache/ivy/ant/IvyAntSettingsTest.java b/test/java/org/apache/ivy/ant/IvyAntSettingsTest.java
+index fe920ce71..e187776f1 100644
+--- a/test/java/org/apache/ivy/ant/IvyAntSettingsTest.java
++++ b/test/java/org/apache/ivy/ant/IvyAntSettingsTest.java
+@@ -97,7 +97,7 @@ public void testFile() throws Exception {
+         IvySettings settings = ivy.getSettings();
+         assertNotNull(settings);
+ 
+-        assertEquals(new File("build/cache"), settings.getDefaultCache());
++        assertEquals(new File("build/cache").getAbsoluteFile(), settings.getDefaultCache());
+         assertEquals(new File("test/repositories/ivysettings.xml").getAbsolutePath(), settings
+                 .getVariables().getVariable("ivy.settings.file"));
+         assertEquals(new File("test/repositories/ivysettings.xml").toURI().toURL().toExternalForm(),
+@@ -119,7 +119,7 @@ public void testURL() throws Exception {
+ 
+         IvySettings settings = getIvyInstance().getSettings();
+ 
+-        assertEquals(new File("build/cache"), settings.getDefaultCache());
++        assertEquals(new File("build/cache").getAbsoluteFile(), settings.getDefaultCache());
+         assertEquals(confUrl, settings.getVariables().getVariable("ivy.settings.url"));
+         assertEquals(confDirUrl, settings.getVariables().getVariable("ivy.settings.dir"));
+         assertEquals("myvalue", settings.getVariables().getVariable("myproperty"));
+diff --git a/test/java/org/apache/ivy/ant/IvyConfigureTest.java b/test/java/org/apache/ivy/ant/IvyConfigureTest.java
+index 955a08be5..05114cfcf 100644
+--- a/test/java/org/apache/ivy/ant/IvyConfigureTest.java
++++ b/test/java/org/apache/ivy/ant/IvyConfigureTest.java
+@@ -100,7 +100,7 @@ public void testFile() throws Exception {
+         IvySettings settings = ivy.getSettings();
+         assertNotNull(settings);
+ 
+-        assertEquals(new File("build/cache"), settings.getDefaultCache());
++        assertEquals(new File("build/cache").getAbsoluteFile(), settings.getDefaultCache());
+         assertEquals(new File("test/repositories/ivysettings.xml").getAbsolutePath(), settings
+                 .getVariables().getVariable("ivy.settings.file"));
+         assertEquals(new File("test/repositories/ivysettings.xml").toURI().toURL().toExternalForm(),
+@@ -123,7 +123,7 @@ public void testURL() throws Exception {
+ 
+         IvySettings settings = getIvyInstance().getSettings();
+ 
+-        assertEquals(new File("build/cache"), settings.getDefaultCache());
++        assertEquals(new File("build/cache").getAbsoluteFile(), settings.getDefaultCache());
+         assertEquals(confUrl, settings.getVariables().getVariable("ivy.settings.url"));
+         assertEquals(confDirUrl, settings.getVariables().getVariable("ivy.settings.dir"));
+         assertEquals("myvalue", settings.getVariables().getVariable("myproperty"));
+diff --git a/test/java/org/apache/ivy/ant/IvyTaskTest.java b/test/java/org/apache/ivy/ant/IvyTaskTest.java
+index 63bf17748..4b16a997a 100644
+--- a/test/java/org/apache/ivy/ant/IvyTaskTest.java
++++ b/test/java/org/apache/ivy/ant/IvyTaskTest.java
+@@ -45,7 +45,7 @@ public void doExecute() throws BuildException {
+         IvySettings settings = ivy.getSettings();
+         assertNotNull(settings);
+ 
+-        assertEquals(new File("build/cache"), settings.getDefaultCache());
++        assertEquals(new File("test/repositories/build/cache").getAbsoluteFile(), settings.getDefaultCache());
+         // The next test doesn't always works on windows (mix C: and c: drive)
+         assertEquals(new File("test/repositories/ivysettings.xml").getAbsolutePath().toUpperCase(),
+             new File((String) settings.getVariables().getVariable("ivy.settings.file")).getAbsolutePath()
+@@ -79,7 +79,7 @@ public void doExecute() throws BuildException {
+         IvySettings settings = ivy.getSettings();
+         assertNotNull(settings);
+ 
+-        assertEquals(new File("build/cache"), settings.getDefaultCache());
++        assertEquals(new File("build/cache").getAbsoluteFile(), settings.getDefaultCache());
+         assertEquals(new File("test/repositories/ivysettings.xml").getAbsolutePath(), settings
+                 .getVariables().getVariable("ivy.settings.file"));
+         assertEquals(new File("test/repositories/ivysettings.xml").toURI().toURL().toExternalForm(),
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 4c24acc63..f9c043f4f 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -761,13 +761,13 @@ public void testMultipleCache() throws Exception {
+         // ivy file should be cached in default cache, and artifact in cache2
+         assertTrue(cacheMgr1.getIvyFileInCache(depMrid).exists());
+         assertFalse(cacheMgr1.getArchiveFileInCache(depArtifact).exists());
+-        assertEquals(new File(cache, "repo1/mod1.1/ivy-1.0.xml"), 
+-            cacheMgr1.getIvyFileInCache(depMrid));
++        assertEquals(new File(cache, "repo1/mod1.1/ivy-1.0.xml").getCanonicalFile(), 
++            cacheMgr1.getIvyFileInCache(depMrid).getCanonicalFile());
+         
+         assertFalse(cacheMgr2.getIvyFileInCache(depMrid).exists());
+         assertTrue(cacheMgr2.getArchiveFileInCache(depArtifact).exists());
+-        assertEquals(new File(cache, "repo2/mod1.1-1.0/mod1.1.jar"), 
+-            cacheMgr2.getArchiveFileInCache(depArtifact));
++        assertEquals(new File(cache, "repo2/mod1.1-1.0/mod1.1.jar").getCanonicalFile(), 
++            cacheMgr2.getArchiveFileInCache(depArtifact).getCanonicalFile());
+     }
+ 
+     public void testForceLocal() throws Exception {
+diff --git a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+index 4f2465174..9a9863524 100644
+--- a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
++++ b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+@@ -43,6 +43,7 @@
+ import org.apache.ivy.plugins.resolver.FileSystemResolver;
+ import org.apache.ivy.plugins.resolver.IBiblioResolver;
+ import org.apache.ivy.plugins.resolver.MockResolver;
++import org.apache.ivy.plugins.resolver.packager.PackagerResolver;
+ import org.apache.ivy.plugins.version.ChainVersionMatcher;
+ import org.apache.ivy.plugins.version.MockVersionMatcher;
+ import org.apache.ivy.plugins.version.VersionMatcher;
+@@ -189,8 +190,10 @@ public void testCache() throws Exception {
+         XmlSettingsParser parser = new XmlSettingsParser(settings);
+         parser.parse(XmlSettingsParserTest.class.getResource("ivysettings-cache.xml"));
+ 
+-        assertEquals(new File("repository"), settings.getDefaultRepositoryCacheBasedir());
+-        assertEquals(new File("resolution"), settings.getDefaultResolutionCacheBasedir());
++        assertEquals(new File("repository").getCanonicalFile(), 
++                    settings.getDefaultRepositoryCacheBasedir().getCanonicalFile());
++        assertEquals(new File("resolution").getCanonicalFile(), 
++                    settings.getDefaultResolutionCacheBasedir().getCanonicalFile());
+         assertEquals("artifact-lock", settings.getDefaultLockStrategy().getName());
+ 
+         assertEquals("[module]/ivys/ivy-[revision].xml", settings.getDefaultCacheIvyPattern());
+@@ -209,7 +212,7 @@ public void testCache() throws Exception {
+             c.getTTL(ModuleRevisionId.newInstance("org2", "A", "A")));
+         assertEquals(60 * 3600 * 1000, // 2d 12h = 60h 
+             c.getTTL(ModuleRevisionId.newInstance("org3", "A", "A")));
+-        assertEquals(new File("mycache"), c.getBasedir());
++        assertEquals(new File("mycache").getCanonicalFile(), c.getBasedir().getCanonicalFile());
+         assertEquals(false, c.isUseOrigin());
+         assertEquals("no-lock", c.getLockStrategy().getName());
+ 
+@@ -219,7 +222,7 @@ public void testCache() throws Exception {
+         DefaultRepositoryCacheManager c2 = (DefaultRepositoryCacheManager) settings.getRepositoryCacheManager("mycache2");
+         assertNotNull(c2);
+         assertEquals("mycache2", c2.getName());
+-        assertEquals(new File("repository"), c2.getBasedir());
++        assertEquals(new File("repository").getCanonicalFile(), c2.getBasedir().getCanonicalFile());
+         assertEquals("artifact-lock", c2.getLockStrategy().getName());
+ 
+         assertEquals("[module]/ivys/ivy-[revision].xml", c2.getIvyPattern());
+@@ -555,6 +558,21 @@ public void testLockingStrategies() throws Exception {
+         assertTrue(lockStrategy instanceof MyLockStrategy);
+     }
+ 
++    public void testFileAttribute() throws Exception {
++        IvySettings settings = new IvySettings();
++        File basedir = new File("test").getAbsoluteFile();
++        settings.setBaseDir(basedir);
++        XmlSettingsParser parser = new XmlSettingsParser(settings);
++        parser.parse(XmlSettingsParserTest.class.getResource("ivysettings-packager.xml"));
++
++        DependencyResolver r = settings.getResolver("packager");
++        assertNotNull(r);
++        assertTrue(r instanceof PackagerResolver);
++        PackagerResolver packager = (PackagerResolver) r;
++        assertEquals(new File(basedir, "packager/build"), packager.getBuildRoot());
++        assertEquals(new File(basedir, "packager/cache"), packager.getResourceCache());
++    }
++
+     public static class MyOutputter implements ReportOutputter {
+         public void output(
+                 ResolveReport report, ResolutionCacheManager cacheMgr, ResolveOptions options) {
+diff --git a/test/java/org/apache/ivy/core/settings/ivysettings-packager.xml b/test/java/org/apache/ivy/core/settings/ivysettings-packager.xml
+new file mode 100644
+index 000000000..e7f7e2b48
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/settings/ivysettings-packager.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<resolvers>
++		<packager name="packager"
++		         buildRoot="packager/build"
++		         resourceCache="packager/cache"
++		         resourceURL="ftp://mirror.example.com/pub/resources/[organisation]/[module]/">
++		    <ivy pattern="http://ivyroundup.googlecode.com/svn/trunk/repo/modules/[organisation]/[module]/[revision]/ivy.xml"/>
++		    <artifact pattern="http://ivyroundup.googlecode.com/svn/trunk/repo/modules/[organisation]/[module]/[revision]/packager.xml"/>
++		</packager>
++	</resolvers>
++</ivysettings>
+diff --git a/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
+index 2dc56f15d..a5611322c 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
+@@ -161,7 +161,7 @@ public void testFindIvyFileRefWithMultipleIvyPatterns() throws Exception {
+             new DefaultDependencyDescriptor(mrid, false), data);
+         
+         // check that the found ivy file is the one from the first pattern!
+-        assertEquals("test/repositories/multi-ivypattern/ivy1/ivy-1.0.xml", 
++        assertEquals("./test/repositories/multi-ivypattern/ivy1/ivy-1.0.xml", 
+             ivyRef.getResource().getName().replace('\\', '/'));
+     }
+ 
+diff --git a/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java
+index 239df5abf..67bf9ded7 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java
+@@ -117,8 +117,8 @@ public void testFile() throws Exception {
+               "" + new File(repoRoot, "[organisation]/[module]/[revision]/ivy.xml").getAbsoluteFile().toURL().toExternalForm());
+             resolver.setPackagerPattern(
+               "" + new File(repoRoot, "[organisation]/[module]/[revision]/packager.xml").getAbsoluteFile().toURL().toExternalForm());
+-            resolver.setBuildRoot(_builddir.getAbsolutePath());
+-            resolver.setResourceCache(_cachedir.getAbsolutePath());
++            resolver.setBuildRoot(_builddir);
++            resolver.setResourceCache(_cachedir);
+             resolver.setPreserveBuildDirectories(true);
+             resolver.setVerbose(true);
+             
+diff --git a/test/java/org/apache/ivy/plugins/trigger/LogTriggerTest.java b/test/java/org/apache/ivy/plugins/trigger/LogTriggerTest.java
+index 72a2ae47d..8a5114be3 100644
+--- a/test/java/org/apache/ivy/plugins/trigger/LogTriggerTest.java
++++ b/test/java/org/apache/ivy/plugins/trigger/LogTriggerTest.java
+@@ -63,7 +63,7 @@ public void testMessage() throws Exception {
+     public void testFile() throws Exception {
+         trigger.setMessage("msg: ${organisation} ${module} ${revision}");
+         File f = new File(testDir, "test.log");
+-        trigger.setFile(f.getPath());
++        trigger.setFile(f);
+         
+         trigger.progress(ev);
+         
+@@ -79,7 +79,7 @@ public void testFile() throws Exception {
+     public void testFileNoAppend() throws Exception {
+         trigger.setMessage("msg: ${organisation} ${module} ${revision}");
+         File f = new File(testDir, "test.log");
+-        trigger.setFile(f.getPath());
++        trigger.setFile(f);
+         trigger.setAppend(false);
+         
+         trigger.progress(ev);

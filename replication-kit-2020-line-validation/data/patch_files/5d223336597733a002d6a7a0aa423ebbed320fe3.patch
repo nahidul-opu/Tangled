@@ -1,0 +1,131 @@
+From 5d223336597733a002d6a7a0aa423ebbed320fe3 Mon Sep 17 00:00:00 2001
+From: Scokart Gilles <gscokart@apache.org>
+Date: Mon, 19 Nov 2007 16:03:16 +0000
+Subject: [PATCH] FIX: Ivy doesn't handle relocation in pom.xml (IVY-586).  I
+ took the simple aproach consisting of considering the relocation as the
+ unique dependency.
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@596346 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../parser/m2/PomModuleDescriptorParser.java  | 14 +++++++++
+ .../apache/ivy/core/resolve/ResolveTest.java  | 29 +++++++++++++++++
+ .../m2/org/relocated/test3/1.0/test3-1.0.pom  | 31 +++++++++++++++++++
+ 3 files changed, 74 insertions(+)
+ create mode 100755 test/repositories/m2/org/relocated/test3/1.0/test3-1.0.pom
+
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 5b0e8c98d..a66436e9e 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -130,6 +130,8 @@ private static final class Parser extends AbstractParser {
+         private Stack contextStack = new Stack();
+ 
+         private String organisation;
++        
++        private String relocationOrganisation = null;
+ 
+         private String module;
+ 
+@@ -283,6 +285,14 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+                 exclusions.add(new ModuleId(organisation, module));
+                 organisation = null;
+                 module = null;
++            } else if ("project/distributionManagement/relocation".equals(context)) {
++                md.setModuleRevisionId(ModuleRevisionId
++                        .newInstance(organisation, module, revision));
++                dd = new DefaultDependencyDescriptor(md, ModuleRevisionId.newInstance(
++                    relocationOrganisation, module, revision), true, false, true);
++                dd.addDependencyConfiguration("*", "*");
++                md.addDependency(dd);
++                dd = null;
+             }
+             if ("project/dependencies/dependency".equals(context)) {
+                 organisation = null;
+@@ -320,6 +330,10 @@ private void processTextContent() {
+                     ext = txt;
+                     return;
+                 } 
++                if (context.equals("project/distributionManagement/relocation/groupId")) {
++                    relocationOrganisation = txt;
++                    return;
++                }
+                 if (context.startsWith("project/parent")) {
+                     return;
+                 } 
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 7089dd01b..4122c93e0 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -2946,6 +2946,35 @@ public void testResolveMaven2() throws Exception {
+             "test", "jar", "jar").exists());
+     }
+ 
++    
++    public void testResolveMaven2Relocation() throws Exception {
++        //Same as testResolveMaven2 but with a relocated module pointing to the module
++        //used in testResolveMaven2.
++        ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml"));
++        ivy.pushContext();
++        try {        
++            ResolveReport report = ivy.resolve(new File(
++                    "test/repositories/m2/org/relocated/test3/1.0/test3-1.0.pom").toURL(),
++                getResolveOptions(new String[] {"*"}));
++            assertNotNull(report);
++    
++            // dependencies
++            assertTrue(ivy.getCacheManager(cache).getIvyFileInCache(
++                ModuleRevisionId.newInstance("org.apache", "test2", "1.0")).exists());
++            assertTrue(TestHelper.getArchiveFileInCache(ivy, cache, "org.apache", "test2", "1.0",
++                "test2", "jar", "jar").exists());
++    
++            assertTrue(ivy.getCacheManager(cache).getIvyFileInCache(
++                ModuleRevisionId.newInstance("org.apache", "test", "1.0")).exists());
++            assertTrue(TestHelper.getArchiveFileInCache(ivy, cache, "org.apache", "test", "1.0",
++                "test", "jar", "jar").exists());
++        } finally {
++            ivy.popContext();
++        }
++    }
++
++    
+     public void testResolveMaven2Classifiers() throws Exception {
+         // test case for IVY-418
+         // test-classifier depends on test-classified with classifier asl
+diff --git a/test/repositories/m2/org/relocated/test3/1.0/test3-1.0.pom b/test/repositories/m2/org/relocated/test3/1.0/test3-1.0.pom
+new file mode 100755
+index 000000000..ef2e19bbb
+--- /dev/null
++++ b/test/repositories/m2/org/relocated/test3/1.0/test3-1.0.pom
+@@ -0,0 +1,31 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.relocated</groupId>
++  <artifactId>test3</artifactId>
++  <name>Test Module for Ivy M2 relocation parsing</name>
++  <version>1.0</version>
++  <distributionManagement>
++	<relocation>
++	   <groupId>org.apache</groupId>
++    </relocation>
++  </distributionManagement>
++</project>

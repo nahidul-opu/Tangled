@@ -1,0 +1,634 @@
+From b971d051925c384993a4265a83081fae9f6a18df Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Sat, 5 Nov 2011 18:41:17 +0000
+Subject: [PATCH] Throw/handle an explicit CacheException when a cache manager
+ instance cannot read its configuration. Fixes JCS-22
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1198004 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 +++
+ src/java/org/apache/jcs/JCS.java              |  6 ++--
+ .../org/apache/jcs/access/CacheAccess.java    |  4 ++-
+ .../jcs/access/exception/CacheException.java  | 20 +++++++----
+ .../org/apache/jcs/admin/JCSAdminBean.java    | 21 +++++++++--
+ .../socket/tcp/LateralTCPListener.java        | 12 +++++--
+ .../remote/AbsractRemoteCacheListener.java    | 33 ++++++++++-------
+ .../http/server/RemoteHttpCacheServlet.java   | 18 +++++++---
+ .../remote/server/RemoteCacheServer.java      | 17 +++++++--
+ .../server/RemoteCacheStartupServlet.java     | 36 ++++++++++++++-----
+ .../engine/control/CompositeCacheManager.java | 29 ++++++++-------
+ .../servlet/JCSServletContextListener.java    | 15 +++++---
+ 12 files changed, 157 insertions(+), 58 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index ea98505be..06196667e 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,10 @@
+ 	</properties>
+ 	<body>
+ 		<release version="2.0" date="unreleased" description="JDK 1.5 based major release">
++            <action dev="tv" type="fix" issue="JCS-22" due-to="Michael Jordan">
++                Throw an explicit CacheException when a cache manager instance cannot
++                read its configuration.
++            </action>
+             <action dev="tv" type="fix" issue="JCS-79" due-to="Graham Leggett">
+                 Fix NPE in CompositeCacheConfigurator.parseRegion
+             </action>
+diff --git a/src/java/org/apache/jcs/JCS.java b/src/java/org/apache/jcs/JCS.java
+index 23a4a52ca..f59f6c0d3 100644
+--- a/src/java/org/apache/jcs/JCS.java
++++ b/src/java/org/apache/jcs/JCS.java
+@@ -90,9 +90,11 @@ public static JCS getInstance( String region, ICompositeCacheAttributes icca )
+     /**
+      * Gets an instance of CompositeCacheManager and stores it in the cacheMgr class field, if it is
+      * not already set. Unlike the implementation in CacheAccess, the cache manager is a
+-     * CompositeCacheManager. NOTE: This can will be moved up into GroupCacheAccess.
++     * CompositeCacheManager. NOTE: This can be moved up into GroupCacheAccess.
++     *
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    protected static synchronized void ensureCacheManager()
++    protected static synchronized void ensureCacheManager() throws CacheException
+     {
+         if ( cacheMgr == null )
+         {
+diff --git a/src/java/org/apache/jcs/access/CacheAccess.java b/src/java/org/apache/jcs/access/CacheAccess.java
+index 2f5a7c3f0..f2e3ae9e4 100644
+--- a/src/java/org/apache/jcs/access/CacheAccess.java
++++ b/src/java/org/apache/jcs/access/CacheAccess.java
+@@ -166,8 +166,10 @@ public static CacheAccess getAccess( String region, ICompositeCacheAttributes ic
+     /**
+      * Helper method which checks to make sure the cacheMgr class field is set, and if not requests
+      * an instance from CacheManagerFactory.
++     *
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    protected static void ensureCacheManager()
++    protected static void ensureCacheManager() throws CacheException
+     {
+         synchronized ( CacheAccess.class )
+         {
+diff --git a/src/java/org/apache/jcs/access/exception/CacheException.java b/src/java/org/apache/jcs/access/exception/CacheException.java
+index 183949066..1e43fea72 100644
+--- a/src/java/org/apache/jcs/access/exception/CacheException.java
++++ b/src/java/org/apache/jcs/access/exception/CacheException.java
+@@ -40,21 +40,29 @@ public CacheException()
+ 
+     /**
+      * Constructor for the CacheException object
+-     * <p>
+-     * @param nested
++     * @param nested a nested exception
+      */
+     public CacheException( Throwable nested )
+     {
+-        super( nested.getMessage() );
++        super(nested);
+     }
+ 
+     /**
+      * Constructor for the CacheException object
+-     * <p>
+-     * @param message
++     * @param message the exception message
+      */
+     public CacheException( String message )
+     {
+-        super( message );
++        super(message);
++    }
++
++    /**
++     * Constructor for the CacheException object
++     * @param message the exception message
++     * @param nested a nested exception
++     */
++    public CacheException(String message, Throwable nested)
++    {
++        super(message, nested);
+     }
+ }
+diff --git a/src/java/org/apache/jcs/admin/JCSAdminBean.java b/src/java/org/apache/jcs/admin/JCSAdminBean.java
+index 880d14384..bc3fad4d7 100644
+--- a/src/java/org/apache/jcs/admin/JCSAdminBean.java
++++ b/src/java/org/apache/jcs/admin/JCSAdminBean.java
+@@ -29,6 +29,7 @@
+ import java.util.LinkedList;
+ import java.util.Map;
+ 
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.auxiliary.remote.server.RemoteCacheServer;
+ import org.apache.jcs.auxiliary.remote.server.RemoteCacheServerFactory;
+ import org.apache.jcs.engine.CacheElementSerialized;
+@@ -48,7 +49,23 @@
+ public class JCSAdminBean
+ {
+     /** The cache manager. */
+-    private final CompositeCacheManager cacheHub = CompositeCacheManager.getInstance();
++    private final CompositeCacheManager cacheHub;
++
++    /**
++     * Default constructor
++     */
++    public JCSAdminBean()
++    {
++        super();
++        try
++        {
++            this.cacheHub = CompositeCacheManager.getInstance();
++        }
++        catch (CacheException e)
++        {
++            throw new RuntimeException("Could not retrieve cache manager instance", e);
++        }
++    }
+ 
+     /**
+      * Builds up info about each element in a region.
+@@ -234,7 +251,7 @@ public void clearAllRegions() throws IOException
+             // Remove objects via the RemoteCacheServer API, so that removes will be broadcast to client machines...
+             try
+             {
+-                String[] cacheNames = CompositeCacheManager.getInstance().getCacheNames();
++                String[] cacheNames = cacheHub.getCacheNames();
+ 
+                 // Call remoteCacheServer.removeAll(String) for each cacheName...
+                 RemoteCacheServer remoteCacheServer = RemoteCacheServerFactory.getRemoteCacheServer();
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPListener.java b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPListener.java
+index 20f53422a..7b15a21e2 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPListener.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPListener.java
+@@ -34,6 +34,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.auxiliary.lateral.LateralCacheInfo;
+ import org.apache.jcs.auxiliary.lateral.LateralElementDescriptor;
+ import org.apache.jcs.auxiliary.lateral.behavior.ILateralCacheListener;
+@@ -347,7 +348,7 @@ public void handleDispose( String cacheName )
+      * Gets the cacheManager attribute of the LateralCacheTCPListener object.
+      * <p>
+      * Normally this is set by the factory. If it wasn't set the listener defaults to the expected
+-     * singleton behavior of the cache amanger.
++     * singleton behavior of the cache manager.
+      * <p>
+      * @param name
+      * @return CompositeCache
+@@ -357,7 +358,14 @@ protected CompositeCache getCache( String name )
+         if ( getCacheManager() == null )
+         {
+             // revert to singleton on failure
+-            setCacheManager( CompositeCacheManager.getInstance() );
++            try
++            {
++                setCacheManager( CompositeCacheManager.getInstance() );
++            }
++            catch (CacheException e)
++            {
++                throw new RuntimeException("Could not retrieve cache manager instance", e);
++            }
+ 
+             if ( log.isDebugEnabled() )
+             {
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/AbsractRemoteCacheListener.java b/src/java/org/apache/jcs/auxiliary/remote/AbsractRemoteCacheListener.java
+index b4608e827..5247f6fca 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/AbsractRemoteCacheListener.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/AbsractRemoteCacheListener.java
+@@ -25,6 +25,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheAttributes;
+ import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheListener;
+ import org.apache.jcs.engine.behavior.ICacheElement;
+@@ -90,7 +91,7 @@ public AbsractRemoteCacheListener( IRemoteCacheAttributes irca, ICompositeCacheM
+     }
+ 
+     /**
+-     * Let the remote cache set a listener_id. Since there is only one listerenr for all the regions
++     * Let the remote cache set a listener_id. Since there is only one listener for all the regions
+      * and every region gets registered? the id shouldn't be set if it isn't zero. If it is we
+      * assume that it is a reconnect.
+      * <p>
+@@ -175,8 +176,7 @@ public void handlePut( ICacheElement cb )
+                 }
+             }
+ 
+-            ensureCacheManager();
+-            CompositeCache cache = cacheMgr.getCache( cb.getCacheName() );
++            CompositeCache cache = getCacheManager().getCache( cb.getCacheName() );
+ 
+             // Eventually the instance of will not be necessary.
+             if ( cb instanceof ICacheElementSerialized )
+@@ -229,8 +229,7 @@ public void handleRemove( String cacheName, Serializable key )
+             log.debug( "handleRemove> cacheName=" + cacheName + ", key=" + key );
+         }
+ 
+-        ensureCacheManager();
+-        CompositeCache cache = cacheMgr.getCache( cacheName );
++        CompositeCache cache = getCacheManager().getCache( cacheName );
+ 
+         cache.localRemove( key );
+     }
+@@ -248,8 +247,8 @@ public void handleRemoveAll( String cacheName )
+         {
+             log.debug( "handleRemoveAll> cacheName=" + cacheName );
+         }
+-        ensureCacheManager();
+-        CompositeCache cache = cacheMgr.getCache( cacheName );
++
++        CompositeCache cache = getCacheManager().getCache( cacheName );
+         cache.localRemoveAll();
+     }
+ 
+@@ -274,15 +273,23 @@ public void handleDispose( String cacheName )
+      * Gets the cacheManager attribute of the RemoteCacheListener object. This is one of the few
+      * places that force the cache to be a singleton.
+      */
+-    protected void ensureCacheManager()
++    protected ICompositeCacheManager getCacheManager()
+     {
+         if ( cacheMgr == null )
+         {
+-            cacheMgr = CompositeCacheManager.getInstance();
+-            log.debug( "had to get cacheMgr" );
+-            if ( log.isDebugEnabled() )
++            try
++            {
++                cacheMgr = CompositeCacheManager.getInstance();
++
++                if ( log.isDebugEnabled() )
++                {
++                    log.debug( "had to get cacheMgr" );
++                    log.debug( "cacheMgr = " + cacheMgr );
++                }
++            }
++            catch (CacheException e)
+             {
+-                log.debug( "cacheMgr = " + cacheMgr );
++                log.error( "Could not get cacheMgr", e );
+             }
+         }
+         else
+@@ -292,6 +299,8 @@ protected void ensureCacheManager()
+                 log.debug( "already got cacheMgr = " + cacheMgr );
+             }
+         }
++
++        return cacheMgr;
+     }
+ 
+     /**
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/http/server/RemoteHttpCacheServlet.java b/src/java/org/apache/jcs/auxiliary/remote/http/server/RemoteHttpCacheServlet.java
+index 0f50c4834..4a05c12f0 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/http/server/RemoteHttpCacheServlet.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/http/server/RemoteHttpCacheServlet.java
+@@ -32,6 +32,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.auxiliary.remote.value.RemoteCacheRequest;
+ import org.apache.jcs.auxiliary.remote.value.RemoteCacheResponse;
+ import org.apache.jcs.engine.control.CompositeCacheManager;
+@@ -57,13 +58,13 @@ public class RemoteHttpCacheServlet
+     private RemoteCacheServiceAdaptor remoteHttpCacheServiceAdaptor;
+ 
+     /** This needs to be standard, since the other side is standard */
+-    private StandardSerializer serializer = new StandardSerializer();
++    private final StandardSerializer serializer = new StandardSerializer();
+ 
+     /** Number of service calls. */
+     private int serviceCalls = 0;
+ 
+     /** The interval at which we will log the count. */
+-    private int logInterval = 100;
++    private final int logInterval = 100;
+ 
+     /**
+      * Initializes the cache.
+@@ -76,7 +77,14 @@ public class RemoteHttpCacheServlet
+     public void init( ServletConfig config )
+         throws ServletException
+     {
+-        ensureCacheManager();
++        try
++        {
++            ensureCacheManager();
++        }
++        catch (CacheException e)
++        {
++            throw new ServletException(e);
++        }
+ 
+         setRemoteHttpCacheServiceAdaptor( new RemoteCacheServiceAdaptor( cacheMgr ) );
+ 
+@@ -201,8 +209,10 @@ private void incrementServiceCallCount()
+ 
+     /**
+      * Make sure we have a cache manager. This should have happened in the init method.
++     *
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    protected synchronized void ensureCacheManager()
++    protected synchronized void ensureCacheManager() throws CacheException
+     {
+         if ( cacheMgr == null )
+         {
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
+index 1fa01b158..5bb60b7f1 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheServer.java
+@@ -30,6 +30,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheAttributes;
+ import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheListener;
+ import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheObserver;
+@@ -145,10 +146,18 @@ protected RemoteCacheServer( IRemoteCacheServerAttributes rcsa, RMISocketFactory
+      * Initialize the RMI Cache Server from a properties file.
+      * <p>
+      * @param prop
++     * @throws RemoteException if the configuration of the cache manager instance fails
+      */
+-    private void init( String prop )
++    private void init( String prop ) throws RemoteException
+     {
+-        cacheManager = createCacheManager( prop );
++        try
++        {
++            cacheManager = createCacheManager( prop );
++        }
++        catch (CacheException e)
++        {
++            throw new RemoteException(e.getMessage(), e);
++        }
+ 
+         // cacheManager would have created a number of ICache objects.
+         // Use these objects to set up the cacheListenersMap.
+@@ -165,8 +174,10 @@ private void init( String prop )
+      * <p>
+      * @param prop The name of the configuration file.
+      * @return The cache hub configured with this configuration file.
++     *
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    private CompositeCacheManager createCacheManager( String prop )
++    private CompositeCacheManager createCacheManager( String prop ) throws CacheException
+     {
+         CompositeCacheManager hub = CompositeCacheManager.getUnconfiguredInstance();
+ 
+diff --git a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java
+index f707f287b..c8a5eb250 100644
+--- a/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java
++++ b/src/java/org/apache/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java
+@@ -33,6 +33,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.engine.control.CompositeCacheManager;
+ import org.apache.jcs.utils.net.HostNameUtil;
+ import org.apache.jcs.utils.props.PropertyLoader;
+@@ -77,10 +78,10 @@ public class RemoteCacheStartupServlet
+     private static final String DEFAULT_PROPS_FILE_SUFFIX = "ccf";
+ 
+     /** properties file name, must set prior to calling get instance */
+-    private String propsFileName = DEFAULT_PROPS_FILE_NAME;
++    private final String propsFileName = DEFAULT_PROPS_FILE_NAME;
+ 
+     /** properties file name, must set prior to calling get instance */
+-    private String fullPropsFileName = DEFAULT_PROPS_FILE_NAME + "." + DEFAULT_PROPS_FILE_SUFFIX;
++    private final String fullPropsFileName = DEFAULT_PROPS_FILE_NAME + "." + DEFAULT_PROPS_FILE_SUFFIX;
+ 
+     /**
+      * Starts the registry and then tries to bind to it.
+@@ -160,7 +161,7 @@ public void init()
+                 if ( log.isInfoEnabled() )
+                 {
+                     log.info( "Remote JCS Server started with properties from " + fullPropsFileName );
+-                }                
++                }
+             }
+             catch ( IOException e )
+             {
+@@ -181,15 +182,25 @@ public void init()
+     /**
+      * It just dumps the stats.
+      * <p>
+-     * @param request 
+-     * @param response 
+-     * @throws ServletException 
+-     * @throws IOException 
++     * @param request
++     * @param response
++     * @throws ServletException
++     * @throws IOException
+      */
+     protected void service( HttpServletRequest request, HttpServletResponse response )
+         throws ServletException, IOException
+     {
+-        String stats = CompositeCacheManager.getInstance().getStats();
++        String stats = "";
++
++        try
++        {
++            stats = CompositeCacheManager.getInstance().getStats();
++        }
++        catch (CacheException e)
++        {
++            throw new ServletException(e);
++        }
++
+         if ( log.isInfoEnabled() )
+         {
+             log.info( stats );
+@@ -216,6 +227,13 @@ public void destroy()
+ 
+         log.info( "Shutting down remote cache " );
+ 
+-        CompositeCacheManager.getInstance().shutDown();
++        try
++        {
++            CompositeCacheManager.getInstance().shutDown();
++        }
++        catch (CacheException e)
++        {
++            log.error("Could not retrieve cache manager instance", e);
++        }
+     }
+ }
+diff --git a/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java b/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
+index 05c3e53fe..cf0260909 100644
+--- a/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
++++ b/src/java/org/apache/jcs/engine/control/CompositeCacheManager.java
+@@ -32,6 +32,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.auxiliary.AuxiliaryCacheAttributes;
+ import org.apache.jcs.auxiliary.AuxiliaryCacheFactory;
+ import org.apache.jcs.auxiliary.remote.behavior.IRemoteCacheConstants;
+@@ -124,8 +125,9 @@ public class CompositeCacheManager
+      * own source, use {@link #getUnconfiguredInstance}and then call {@link #configure}
+      * <p>
+      * @return CompositeCacheManager
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    public static synchronized CompositeCacheManager getInstance()
++    public static synchronized CompositeCacheManager getInstance() throws CacheException
+     {
+         if ( instance == null )
+         {
+@@ -146,8 +148,9 @@ public static synchronized CompositeCacheManager getInstance()
+      * <p>
+      * @param propsFilename
+      * @return CompositeCacheManager configured from the give propsFileName
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    public static synchronized CompositeCacheManager getInstance( String propsFilename )
++    public static synchronized CompositeCacheManager getInstance( String propsFilename ) throws CacheException
+     {
+         if ( instance == null )
+         {
+@@ -200,7 +203,7 @@ protected static CompositeCacheManager createInstance()
+         return new CompositeCacheManager();
+     }
+ 
+-    /** CreAtes a shutdown hook */
++    /** Creates a shutdown hook */
+     protected CompositeCacheManager()
+     {
+         ShutdownHook shutdownHook = new ShutdownHook();
+@@ -216,8 +219,9 @@ protected CompositeCacheManager()
+ 
+     /**
+      * Configure with default properties file
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    public void configure()
++    public void configure() throws CacheException
+     {
+         configure( CacheConstants.DEFAULT_CONFIG );
+     }
+@@ -226,8 +230,9 @@ public void configure()
+      * Configure from specific properties file.
+      * <p>
+      * @param propFile Path <u>within classpath </u> to load configuration from
++     * @throws CacheException if the configuration cannot be loaded
+      */
+-    public void configure( String propFile )
++    public void configure( String propFile ) throws CacheException
+     {
+         log.info( "Creating cache manager from config file: " + propFile );
+ 
+@@ -248,8 +253,7 @@ public void configure( String propFile )
+             }
+             catch ( IOException ex )
+             {
+-                log.error( "Failed to load properties for name [" + propFile + "]", ex );
+-                throw new IllegalStateException( ex.getMessage() );
++                throw new CacheException("Failed to load properties for name [" + propFile + "]", ex);
+             }
+             finally
+             {
+@@ -257,7 +261,7 @@ public void configure( String propFile )
+                 {
+                     is.close();
+                 }
+-                catch ( Exception ignore )
++                catch ( IOException ignore )
+                 {
+                     // Ignored
+                 }
+@@ -265,8 +269,7 @@ public void configure( String propFile )
+         }
+         else
+         {
+-            log.error( "Failed to load properties for name [" + propFile + "]" );
+-            throw new IllegalStateException( "Failed to load properties for name [" + propFile + "]" );
++            throw new CacheException( "Failed to read configuration file [" + propFile + "]" );
+         }
+ 
+         configure( props );
+@@ -275,7 +278,7 @@ public void configure( String propFile )
+     /**
+      * Configure from properties object.
+      * <p>
+-     * This method will call confiure, instructing it to use ssytem properties as a default.
++     * This method will call configure, instructing it to use system properties as a default.
+      * @param props
+      */
+     public void configure( Properties props )
+@@ -284,10 +287,10 @@ public void configure( Properties props )
+     }
+ 
+     /**
+-     * Configure from properties object, overriding with values from the system properteis if
++     * Configure from properties object, overriding with values from the system properties if
+      * instructed.
+      * <p>
+-     * You can override a specific value by passing in a ssytem property:
++     * You can override a specific value by passing in a system property:
+      * <p>
+      * For example, you could override this value in the cache.ccf file by starting up your program
+      * with the argument: -Djcs.auxiliary.LTCP.attributes.TcpListenerPort=1111
+diff --git a/src/java/org/apache/jcs/utils/servlet/JCSServletContextListener.java b/src/java/org/apache/jcs/utils/servlet/JCSServletContextListener.java
+index 4af51eacf..d14ff3b25 100644
+--- a/src/java/org/apache/jcs/utils/servlet/JCSServletContextListener.java
++++ b/src/java/org/apache/jcs/utils/servlet/JCSServletContextListener.java
+@@ -24,6 +24,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.jcs.access.exception.CacheException;
+ import org.apache.jcs.engine.control.CompositeCacheManager;
+ 
+ /**
+@@ -31,7 +32,7 @@
+  * gracefully.
+  * <p>
+  * Add the following to the top of your web.xml file.
+- * 
++ *
+  * <pre>
+  *  &lt;listener&gt;
+  *  &lt;listener-class&gt;
+@@ -50,7 +51,6 @@ public class JCSServletContextListener
+     /**
+      * This does nothing. We don't want to initialize the cache here.
+      * <p>
+-     * (non-Javadoc)
+      * @see javax.servlet.ServletContextListener#contextInitialized(javax.servlet.ServletContextEvent)
+      */
+     public void contextInitialized( ServletContextEvent arg0 )
+@@ -64,7 +64,6 @@ public void contextInitialized( ServletContextEvent arg0 )
+     /**
+      * This gets the singleton instance of the CompositeCacheManager and calls shutdown.
+      * <p>
+-     * (non-Javadoc)
+      * @see javax.servlet.ServletContextListener#contextDestroyed(javax.servlet.ServletContextEvent)
+      */
+     public void contextDestroyed( ServletContextEvent arg0 )
+@@ -73,6 +72,14 @@ public void contextDestroyed( ServletContextEvent arg0 )
+         {
+             log.info( "contextDestroyed, shutting down JCS." );
+         }
+-        CompositeCacheManager.getInstance().shutDown();
++
++        try
++        {
++            CompositeCacheManager.getInstance().shutDown();
++        }
++        catch (CacheException e)
++        {
++            log.error( "Could not retrieve cache manager instance", e );
++        }
+     }
+ }

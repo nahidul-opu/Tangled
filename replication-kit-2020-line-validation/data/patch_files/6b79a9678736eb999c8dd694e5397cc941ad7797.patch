@@ -1,0 +1,94 @@
+From 6b79a9678736eb999c8dd694e5397cc941ad7797 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 20 Sep 2007 12:09:00 +0000
+Subject: [PATCH] FIX: Static revision replacement is not working when a
+ dynamic revision is evicted by a transitive dependency (IVY-603) (with
+ contribution from Matthias Kilian)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@577708 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/ResolveEngine.java       |  2 +-
+ .../org/apache/ivy/ant/IvyDeliverTest.java    | 25 +++++++++++++++++++
+ .../org/apache/ivy/ant/ivy-dyn-evicted.xml    | 11 ++++++++
+ 4 files changed, 38 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/org/apache/ivy/ant/ivy-dyn-evicted.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index a45595e7a..3c4f4748e 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -51,6 +51,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+    version in SVN
+ =====================================
++- FIX: Static revision replacement is not working when a dynamic revision is evicted by a transitive dependency (IVY-603) (with contribution from Matthias Kilian)
+ - FIX: NullPointerException whilst resolving transitive dependencies (IVY-590)
+ - FIX: cachepath based on a resolve done in a previous build broken (IVY-583)
+ - FIX: Resolving dynamic version fails when using multiple patterns if only one pattern find a revision and others don't (IVY-602)
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 19c5c751c..4f17f887c 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -247,7 +247,7 @@ public ResolveReport resolve(ModuleDescriptor md, ResolveOptions options)
+             if (dependencies.length > 0) {
+                 IvyNode root = dependencies[0].getRoot();
+                 for (int i = 0; i < dependencies.length; i++) {
+-                    if (!dependencies[i].isCompletelyEvicted() && !dependencies[i].hasProblem()) {
++                    if (!dependencies[i].hasProblem()) {
+                         DependencyDescriptor dd = dependencies[i].getDependencyDescriptor(root);
+                         if (dd != null) {
+                             String rev = dependencies[i].getResolvedId().getRevision();
+diff --git a/test/java/org/apache/ivy/ant/IvyDeliverTest.java b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+index 42d3f0940..8f3cb9689 100644
+--- a/test/java/org/apache/ivy/ant/IvyDeliverTest.java
++++ b/test/java/org/apache/ivy/ant/IvyDeliverTest.java
+@@ -234,6 +234,31 @@ public void testWithExtraAttributes() throws Exception {
+                 .getDependencyRevisionId());
+     }
+ 
++    public void testWithDynEvicted() throws Exception {
++        project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-dyn-evicted.xml");
++        IvyResolve res = new IvyResolve();
++        res.setValidate(false);
++        res.setProject(project);
++        res.execute();
++        
++        deliver.setPubrevision("1.2");
++        deliver.setDeliverpattern("build/test/deliver/ivy-[revision].xml");
++        deliver.setValidate(false);
++        deliver.execute();
++        
++        // should have done the ivy delivering
++        File deliveredIvyFile = new File("build/test/deliver/ivy-1.2.xml");
++        assertTrue(deliveredIvyFile.exists()); 
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
++	    new IvySettings(), deliveredIvyFile.toURL(), false);
++        assertEquals(ModuleRevisionId.newInstance("apache", "resolve-latest", "1.2"), 
++            md.getModuleRevisionId());
++        DependencyDescriptor[] dds = md.getDependencies();
++        assertEquals(2, dds.length);
++        assertEquals(ModuleRevisionId.newInstance("org1", "mod1.2", "1.1"), 
++            dds[0].getDependencyRevisionId());
++    }
++
+     public void testReplaceImportedConfigurations() throws Exception {
+         project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-import-confs.xml");
+         IvyResolve res = new IvyResolve();
+diff --git a/test/java/org/apache/ivy/ant/ivy-dyn-evicted.xml b/test/java/org/apache/ivy/ant/ivy-dyn-evicted.xml
+new file mode 100644
+index 000000000..d80a7f1c9
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/ivy-dyn-evicted.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0"> 
++	<info organisation="apache"
++	       module="resolve-latest"
++	       revision="1.0"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="1+" />
++		<dependency org="org6" name="mod6.1" rev="2.0" />
++	</dependencies>
++</ivy-module>

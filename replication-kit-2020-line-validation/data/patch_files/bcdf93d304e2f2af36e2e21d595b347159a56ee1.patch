@@ -1,0 +1,285 @@
+From bcdf93d304e2f2af36e2e21d595b347159a56ee1 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 9 Apr 2008 22:08:49 +0000
+Subject: [PATCH] FIX: revision token is not set in report outputpattern
+ (IVY-272)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@646561 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ doc/use/report.html                           |  8 +-
+ src/java/org/apache/ivy/ant/IvyReport.java    | 89 ++++++++++++-------
+ .../org/apache/ivy/ant/IvyReportTest.java     | 24 +++++
+ 4 files changed, 87 insertions(+), 35 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d6fc056c6..5b2dc9775 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -78,6 +78,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: revision token is not set in report outputpattern (IVY-272)
+ - FIX: Ivy uses the first set of configurations it sees when resolving multiple versions of a module (IVY-681)
+ - FIX: Eviction fails for libs not providing their ivy configuration and providing artifacts named different between lib versions (IVY-537)
+ - FIX: Memory leak in ModuleRevisionId.java (IVY-791)
+diff --git a/doc/use/report.html b/doc/use/report.html
+index c86ba92f1..a94f18ed9 100644
+--- a/doc/use/report.html
++++ b/doc/use/report.html
+@@ -56,14 +56,16 @@
+     <tr><td>conf</td><td>a comma separated list of the configurations for which a report should be generated</td>
+         <td>No. Defaults to the configurations resolved by the last resolve call (during same ant build), or ${ivy.resolved.configurations} if no resolve was called</td></tr>
+     <tr><td>organisation</td><td>the name of the organisation of the module for which report should be generated</td>
+-        <td>No, unless no resolve was called during the build. Defaults to last resolved module organisation.</td></tr>
++        <td>No, unless resolveId has not been specified and no resolve was called during the build. Defaults to last resolved module organisation.</td></tr>
+     <tr><td>module</td><td>the name of the module for which report should be generated</td>
+-        <td>No, unless no resolve was called during the build. Defaults to last resolved module.</td></tr>
++        <td>No, unless resolveId has not been specified and no resolve was called during the build. Defaults to last resolved module.</td></tr>
+     <tr><td>validate</td><td>true to force ivy files validation against ivy.xsd, false to force no validation</td>
+         <td>No. Defaults to default ivy value (as configured in configuration file)</td></tr>
+     <tr><td>xslfile</td><td>indicates which xsl file should be used to generate the report</td>
+         <td>No, defaults to ivy provided xsl which generates html report</td></tr>
+-    <tr><td>settingsRef</td><td>A reference to the ivy settings that must be used by this task <span class="since">(since 2.0)</span></td><td>No, 'ivy.instance' is taken by default.</td></tr></tbody>
++    <tr><td>settingsRef</td><td>A reference to the ivy settings that must be used by this task <span class="since">(since 2.0)</span></td><td>No, 'ivy.instance' is taken by default.</td></tr>
++    <tr><td>resolveId</td><td>The id which was used for a previous resolve <span class="since">(since 2.0)</span></td><td>No, defaults to '[org]-[module]'.</td></tr>
++</tbody>
+ </table>
+ 
+ <h1>Examples</h1>
+diff --git a/src/java/org/apache/ivy/ant/IvyReport.java b/src/java/org/apache/ivy/ant/IvyReport.java
+index 99b8ffc4d..9bbfed9cd 100644
+--- a/src/java/org/apache/ivy/ant/IvyReport.java
++++ b/src/java/org/apache/ivy/ant/IvyReport.java
+@@ -25,6 +25,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.OutputStream;
++import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.util.List;
+@@ -41,9 +42,11 @@
+ import org.apache.ivy.core.IvyPatternHelper;
+ import org.apache.ivy.core.cache.ResolutionCacheManager;
+ import org.apache.ivy.core.module.id.ModuleId;
++import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.resolve.ResolveOptions;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.report.XmlReportOutputter;
++import org.apache.ivy.plugins.report.XmlReportParser;
+ import org.apache.ivy.util.FileUtil;
+ import org.apache.ivy.util.Message;
+ import org.apache.tools.ant.BuildException;
+@@ -79,6 +82,8 @@ public class IvyReport extends IvyTask {
+     private List params = new ArrayList();
+ 
+     private String resolveId;
++    
++    private ModuleRevisionId mRevId;
+ 
+     public File getTodir() {
+         return todir;
+@@ -115,7 +120,7 @@ public String getOrganisation() {
+     public void setOrganisation(String organisation) {
+         this.organisation = organisation;
+     }
+-
++    
+     public boolean isGraph() {
+         return graph;
+     }
+@@ -152,8 +157,6 @@ public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+ 
+-        organisation = getProperty(organisation, settings, "ivy.organisation", resolveId);
+-        module = getProperty(module, settings, "ivy.module", resolveId);
+         conf = getProperty(conf, settings, "ivy.resolved.configurations", resolveId);
+         if ("*".equals(conf)) {
+             conf = getProperty(settings, "ivy.resolved.configurations", resolveId);
+@@ -170,10 +173,10 @@ public void doExecute() throws BuildException {
+                 todir = new File(t);
+             }
+         }
+-        outputpattern = getProperty(outputpattern, settings, "ivy.report.output.pattern");
+         if (todir != null && todir.exists()) {
+             todir.mkdirs();
+         }
++        outputpattern = getProperty(outputpattern, settings, "ivy.report.output.pattern");
+         if (outputpattern == null) {
+             outputpattern = "[organisation]-[module]-[conf].[ext]";
+         }
+@@ -181,36 +184,41 @@ public void doExecute() throws BuildException {
+         if (todir != null && todir.exists() && !todir.isDirectory()) {
+             throw new BuildException("destination directory should be a directory !");
+         }
+-        if (organisation == null) {
+-            throw new BuildException(
+-                    "no organisation provided for ivy report task: "
+-                    + "It can either be set explicitely via the attribute 'organisation' or "
+-                    + "via 'ivy.organisation' property or a prior call to <resolve/>");
+-        }
+-        if (module == null) {
+-            throw new BuildException(
+-                    "no module name provided for ivy report task: "
+-                    + "It can either be set explicitely via the attribute 'module' or "
+-                    + "via 'ivy.module' property or a prior call to <resolve/>");
+-        }
++        
+         if (resolveId == null) {
++            organisation = getProperty(organisation, settings, "ivy.organisation", resolveId);
++            module = getProperty(module, settings, "ivy.module", resolveId);
++
++            if (organisation == null) {
++                throw new BuildException(
++                        "no organisation provided for ivy report task: "
++                        + "It can either be set explicitely via the attribute 'organisation' or "
++                        + "via 'ivy.organisation' property or a prior call to <resolve/>");
++            }
++            if (module == null) {
++                throw new BuildException(
++                        "no module name provided for ivy report task: "
++                        + "It can either be set explicitely via the attribute 'module' or "
++                        + "via 'ivy.module' property or a prior call to <resolve/>");
++            }
++            
+             resolveId = ResolveOptions.getDefaultResolveId(new ModuleId(organisation, module));
+         }
+ 
+         try {
+             String[] confs = splitConfs(conf);
+             if (xsl) {
+-                genreport(organisation, module, confs);
++                genreport(confs);
+             }
+             if (xml) {
+-                genxml(organisation, module, confs);
++                genxml(confs);
+             }
+             if (graph) {
+-                genStyled(organisation, module, confs, 
++                genStyled(confs, 
+                     getStylePath("ivy-report-graph.xsl"), "graphml");
+             }
+             if (dot) {
+-                genStyled(organisation, module, confs, 
++                genStyled(confs, 
+                     getStylePath("ivy-report-dot.xsl"), "dot");
+             }
+         } catch (IOException e) {
+@@ -218,7 +226,7 @@ public void doExecute() throws BuildException {
+         }
+     }
+ 
+-    private void genxml(String organisation, String module, String[] confs)
++    private void genxml(String[] confs)
+             throws IOException {
+         ResolutionCacheManager cacheMgr = getIvyInstance().getResolutionCacheManager();
+         for (int i = 0; i < confs.length; i++) {
+@@ -226,20 +234,18 @@ private void genxml(String organisation, String module, String[] confs)
+ 
+             File out;
+             if (todir != null) {
+-                out = new File(todir, IvyPatternHelper.substitute(outputpattern, organisation,
+-                    module, "", "", "", "xml", confs[i]));
++                out = new File(todir, getOutputPattern(confs[i], "xml"));
+             } else {
+-                out = new File(IvyPatternHelper.substitute(outputpattern, organisation, module,
+-                    "", "", "", "xml", confs[i]));
++                out = new File(getOutputPattern(confs[i], "xml"));
+             }
+ 
+             FileUtil.copy(xml, out, null);
+         }
+     }
+ 
+-    private void genreport(String organisation, String module, String[] confs)
++    private void genreport(String[] confs)
+             throws IOException {
+-        genStyled(organisation, module, confs, getReportStylePath(), xslext);
++        genStyled(confs, getReportStylePath(), xslext);
+ 
+         // copy the css if required
+         if (todir != null && xslFile == null) {
+@@ -263,9 +269,29 @@ private File getReportStylePath() throws IOException {
+         FileUtil.copy(XmlReportOutputter.class.getResourceAsStream("ivy-report.xsl"), style, null);
+         return style;
+     }
++    
++    private String getOutputPattern(String conf, String ext) {
++        if (mRevId == null) {
++            ResolutionCacheManager cacheMgr = getIvyInstance().getResolutionCacheManager();
++            
++            XmlReportParser parser = new XmlReportParser();
++            File reportFile = cacheMgr.getConfigurationResolveReportInCache (resolveId, conf);
++            
++            try {
++                parser.parse(reportFile);
++            } catch (ParseException e) {
++                throw new BuildException("Error occurred while parsing reportfile '" + reportFile.getAbsolutePath() + "'", e);
++            }
++            
++            // get the resolve module
++            mRevId = parser.getResolvedModule();
++        }
++        
++        return IvyPatternHelper.substitute(outputpattern, mRevId.getOrganisation(), mRevId.getName(),
++            mRevId.getRevision(), "", "", ext, conf, mRevId.getAttributes());
++    }
+ 
+-    private void genStyled(String organisation, String module, String[] confs,
+-            File style, String ext) throws IOException {
++    private void genStyled(String[] confs, File style, String ext) throws IOException {
+         ResolutionCacheManager cacheMgr = getIvyInstance().getResolutionCacheManager();
+ 
+         // process the report with xslt to generate dot file
+@@ -299,10 +325,9 @@ private void genStyled(String organisation, String module, String[] confs,
+             // create the report
+             for (int i = 0; i < confs.length; i++) {
+                 File reportFile = 
+-                    cacheMgr.getConfigurationResolveReportInCache(resolveId, confs[i]);
++                    cacheMgr.getConfigurationResolveReportInCache (resolveId, confs[i]);
+                 File outFile = 
+-                    new File(out, IvyPatternHelper.substitute(outputpattern, organisation, module,
+-                    "", "", "", ext, confs[i]));
++                    new File(out, getOutputPattern(confs[i], ext));
+                 
+                 log("Processing " + reportFile + " to " + outFile);
+                 
+diff --git a/test/java/org/apache/ivy/ant/IvyReportTest.java b/test/java/org/apache/ivy/ant/IvyReportTest.java
+index e7f29dd9c..a29dbfc53 100644
+--- a/test/java/org/apache/ivy/ant/IvyReportTest.java
++++ b/test/java/org/apache/ivy/ant/IvyReportTest.java
+@@ -81,6 +81,30 @@ public void testSimple() throws Exception {
+         }
+     }
+ 
++    public void testNoRevisionInOutputPattern() throws Exception {
++        Locale oldLocale = Locale.getDefault();
++        
++        try {
++            // set the locale to UK as workaround for SUN bug 6240963
++            Locale.setDefault(Locale.UK);
++
++            IvyResolve res = new IvyResolve();
++            res.setProject(project);
++            res.setFile(new File("test/java/org/apache/ivy/ant/ivy-simple.xml"));
++            res.execute();
++    
++            report.setTodir(new File(cache, "report"));
++            report.setOutputpattern("[organisation]-[module]-[revision].[ext]");
++            report.setConf("default");
++            report.execute();
++            
++            assertTrue(new File(cache, "report/apache-resolve-simple-1.0.html").exists());
++            assertTrue(new File(cache, "report/apache-resolve-simple-1.0.graphml").exists());
++        } finally {
++            Locale.setDefault(oldLocale);
++        }
++    }
++
+     public void testMultipleConfigurations() throws Exception {
+         Locale oldLocale = Locale.getDefault();
+         

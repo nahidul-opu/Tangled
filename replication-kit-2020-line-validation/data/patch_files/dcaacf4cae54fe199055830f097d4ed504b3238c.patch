@@ -1,0 +1,158 @@
+From dcaacf4cae54fe199055830f097d4ed504b3238c Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran@apache.org>
+Date: Wed, 12 Jul 2017 11:49:38 +0530
+Subject: [PATCH] IVY-1562 Add a test case to verify the parsing of the
+ location attribute when the value contains an absolute path
+
+---
+ .../xml/XmlModuleDescriptorParserTest.java    | 56 +++++++++++++++++++
+ .../hello/test-ivy-extends-absolute.xml       | 25 +++++++++
+ .../parser/xml/foo%2Fbar/parent-ivy.xml       | 27 +++++++++
+ 3 files changed, 108 insertions(+)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/hello/test-ivy-extends-absolute.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/parent-ivy.xml
+
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+index 390d713e4..8a5514902 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+@@ -19,12 +19,19 @@
+ 
+ import java.io.File;
+ import java.io.IOException;
++import java.io.InputStream;
++import java.net.URL;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.Paths;
++import java.nio.file.StandardCopyOption;
+ import java.text.ParseException;
+ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.Date;
+ import java.util.GregorianCalendar;
+ import java.util.HashSet;
++import java.util.Set;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+@@ -1447,4 +1454,53 @@ public void testExtendsCached() throws Exception {
+         assertEquals("mymodule", artifacts[0].getName());
+         assertEquals("jar", artifacts[0].getType());
+     }
++
++
++    /**
++     * Tests that when the <code>location</code> attribute of the <code>extends</code> element of a module descriptor
++     * file, includes an {@link File#isAbsolute() absolute path} with characters that {@link java.net.URI} considers
++     * as encoded characters (for example <code>%2F</code>) then the module descriptor and the location of
++     * the parent descriptor, are resolved and parsed correctly.
++     *
++     * @throws Exception
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1562">IVY-1562</a> for more details
++     */
++    @Test
++    public void testExtendsAbsoluteLocation() throws Exception {
++        final URL ivyXML = this.getClass().getResource("foo%2Fbar/hello/test-ivy-extends-absolute.xml");
++        assertNotNull("Ivy xml file is missing", ivyXML);
++        final URL parentIvyXML = this.getClass().getResource("foo%2Fbar/parent-ivy.xml");
++        assertNotNull("Parent Ivy xml file is missing", parentIvyXML);
++        // the ivy xml references a parent ivy xml via extends "location" and expects the parent ivy to be present
++        // at a location under java.io.tmpdir, so we copy over the parent ivy file over there
++        final Path targetDir = Paths.get(System.getProperty("java.io.tmpdir"), "foo%2Fbar");
++        Files.createDirectories(targetDir);
++        final Path parentIvyXMLPath = Paths.get(targetDir.toString(), "parent-ivy.xml");
++        try (final InputStream is = parentIvyXML.openStream()) {
++            Files.copy(is, parentIvyXMLPath, StandardCopyOption.REPLACE_EXISTING);
++        }
++        assertTrue("Parent ivy xml file wasn't copied", Files.isRegularFile(parentIvyXMLPath));
++        try {
++            // now start parsing the Ivy xml
++            final ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(settings, ivyXML, true);
++            assertNotNull("Parsed module descriptor is null", md);
++            assertEquals("Unexpected org for the parsed module descriptor", "myorg", md.getModuleRevisionId().getOrganisation());
++            assertEquals("Unexpected module name for the parsed module descriptor", "mymodule", md.getModuleRevisionId().getName());
++            assertEquals("Unexpected revision for the parsed module descriptor", "1.0.0", md.getModuleRevisionId().getRevision());
++
++            final Configuration[] confs = md.getConfigurations();
++            assertNotNull("No configurations found in module descriptor", confs);
++            assertEquals("Unexpected number of configurations found in module descriptor", 3, confs.length);
++
++            final Set<String> expectedConfs = new HashSet<>(Arrays.asList("parent-conf1", "parent-conf2", "conf2"));
++            for (final Configuration conf : confs) {
++                assertNotNull("One of the configurations was null in module descriptor", conf);
++                assertTrue("Unexpected configuration " + conf.getName() + " found in parsed module descriptor", expectedConfs.remove(conf.getName()));
++            }
++            assertTrue("Missing configurations " + expectedConfs + " from the parsed module descriptor", expectedConfs.isEmpty());
++        } finally {
++            // clean up the copied over file
++            Files.delete(parentIvyXMLPath);
++        }
++    }
+ }
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/hello/test-ivy-extends-absolute.xml b/test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/hello/test-ivy-extends-absolute.xml
+new file mode 100644
+index 000000000..6ceba1a96
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/hello/test-ivy-extends-absolute.xml
+@@ -0,0 +1,25 @@
++<!--
++  ~ Licensed to the Apache Software Foundation (ASF) under one or more
++  ~ contributor license agreements.  See the NOTICE file distributed with
++  ~ this work for additional information regarding copyright ownership.
++  ~ The ASF licenses this file to You under the Apache License, Version 2.0
++  ~ (the "License"); you may not use this file except in compliance with
++  ~ the License.  You may obtain a copy of the License at
++  ~
++  ~    http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License.
++  -->
++<ivy-module version="1.0">
++    <info organisation="myorg"
++          module="mymodule">
++        <extends organisation="myorg" module="myparent" revision="1.0.0" location="${java.io.tmpdir}/foo%2Fbar/parent-ivy.xml"/>
++    </info>
++    <configurations>
++        <conf name="conf2" visibility="private"/>
++    </configurations>
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/parent-ivy.xml b/test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/parent-ivy.xml
+new file mode 100644
+index 000000000..6f993d621
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/xml/foo%2Fbar/parent-ivy.xml
+@@ -0,0 +1,27 @@
++<!--
++  ~ Licensed to the Apache Software Foundation (ASF) under one or more
++  ~ contributor license agreements.  See the NOTICE file distributed with
++  ~ this work for additional information regarding copyright ownership.
++  ~ The ASF licenses this file to You under the Apache License, Version 2.0
++  ~ (the "License"); you may not use this file except in compliance with
++  ~ the License.  You may obtain a copy of the License at
++  ~
++  ~    http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License.
++  -->
++<ivy-module version="1.0">
++    <info organisation="myorg"
++          module="myparent"
++          revision="1.0.0">
++        <description>Parent module description.</description>
++    </info>
++    <configurations>
++        <conf name="parent-conf1"/>
++        <conf name="parent-conf2" visibility="public"/>
++    </configurations>
++</ivy-module>
+\ No newline at end of file

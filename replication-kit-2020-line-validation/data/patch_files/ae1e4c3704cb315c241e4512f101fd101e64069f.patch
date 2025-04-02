@@ -1,0 +1,250 @@
+From ae1e4c3704cb315c241e4512f101fd101e64069f Mon Sep 17 00:00:00 2001
+From: "Gary D. Gregory" <ggregory@apache.org>
+Date: Sat, 5 Jan 2013 16:33:25 +0000
+Subject: [PATCH] [VFS-449] HDFS Provider is not removing cached files.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/vfs/trunk@1429326 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../vfs2/provider/hdfs/HdfsFileObject.java    |  1 +
+ .../vfs2/provider/hdfs/HdfsFileSystem.java    | 30 ++++++++++++----
+ .../hdfs/test/HdfsFileProviderTest.java       | 34 +++++++++++++------
+ src/changes/changes.xml                       |  3 ++
+ 4 files changed, 50 insertions(+), 18 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileObject.java b/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileObject.java
+index da4a5c8cc8..815e4bda78 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileObject.java
++++ b/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileObject.java
+@@ -86,6 +86,7 @@ protected void doAttach() throws Exception
+         }
+         catch (final FileNotFoundException e)
+         {
++            this.stat = null;
+             return;
+         }
+     }
+diff --git a/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileSystem.java b/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileSystem.java
+index 807de870c1..2a33e13ca7 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileSystem.java
++++ b/core/src/main/java/org/apache/commons/vfs2/provider/hdfs/HdfsFileSystem.java
+@@ -23,6 +23,7 @@
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
++import org.apache.commons.vfs2.CacheStrategy;
+ import org.apache.commons.vfs2.Capability;
+ import org.apache.commons.vfs2.FileName;
+ import org.apache.commons.vfs2.FileObject;
+@@ -121,7 +122,16 @@ public FileObject resolveFile(final FileName name) throws FileSystemException
+             }
+         }
+ 
+-        FileObject file = this.getFileFromCache(name);
++        boolean useCache = (null != getContext().getFileSystemManager().getFilesCache());
++        FileObject file;
++        if (useCache)
++        {
++            file = this.getFileFromCache(name);
++        }
++        else
++        {
++            file = null;
++        }
+         if (null == file)
+         {
+             String path = null;
+@@ -135,13 +145,19 @@ public FileObject resolveFile(final FileName name) throws FileSystemException
+             }
+             final Path filePath = new Path(path);
+             file = new HdfsFileObject((AbstractFileName) name, this, fs, filePath);
+-            this.putFileToCache(file);
+-            return file;
+-        }
+-        else
+-        {
+-            return file;
++            if (useCache)
++            {
++        	this.putFileToCache(file);
++            }
++            /**
++             * resync the file information if requested
++             */
++            if (getFileSystemManager().getCacheStrategy().equals(CacheStrategy.ON_RESOLVE))
++            {
++                file.refresh();
++            }
+         }
++        return file;
+     }
+ 
+ }
+diff --git a/core/src/test/java/org/apache/commons/vfs2/provider/hdfs/test/HdfsFileProviderTest.java b/core/src/test/java/org/apache/commons/vfs2/provider/hdfs/test/HdfsFileProviderTest.java
+index 2a37fed2b6..b1aa639741 100644
+--- a/core/src/test/java/org/apache/commons/vfs2/provider/hdfs/test/HdfsFileProviderTest.java
++++ b/core/src/test/java/org/apache/commons/vfs2/provider/hdfs/test/HdfsFileProviderTest.java
+@@ -230,10 +230,11 @@ public void testDoListChildren() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         final FileObject dir = file.getParent();
+ 
+         final FileObject[] children = dir.getChildren();
+@@ -247,10 +248,11 @@ public void testEquals() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         // Get a handle to the same file
+         final FileObject file2 = manager.resolveFile(TEST_FILE1);
+         Assert.assertEquals(file, file2);
+@@ -261,10 +263,11 @@ public void testGetAttributes() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         final Map<String, Object> attributes = file.getContent().getAttributes();
+         Assert.assertTrue(attributes.containsKey(HdfsFileAttributes.BLOCK_SIZE.toString()));
+         Assert.assertTrue(attributes.containsKey(HdfsFileAttributes.GROUP.toString()));
+@@ -280,10 +283,11 @@ public void testGetContentSize() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         Assert.assertEquals(0, file.getContent().getSize());
+     }
+ 
+@@ -292,10 +296,11 @@ public void testGetInputStream() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         file.getContent().getInputStream().close();
+     }
+ 
+@@ -304,6 +309,7 @@ public void testInit() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_FILE1);
+         Assert.assertNotNull(fo);
++        Assert.assertFalse(fo.exists());
+     }
+ 
+     @Test
+@@ -311,10 +317,11 @@ public void testIsHidden() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         Assert.assertFalse(file.isHidden());
+     }
+ 
+@@ -323,10 +330,11 @@ public void testIsReadable() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());        
+         Assert.assertTrue(file.isReadable());
+     }
+ 
+@@ -335,10 +343,11 @@ public void testIsWritable() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         Assert.assertFalse(file.isWriteable());
+     }
+ 
+@@ -347,10 +356,11 @@ public void testLastModificationTime() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         Assert.assertFalse(-1 == file.getContent().getLastModifiedTime());
+     }
+ 
+@@ -359,10 +369,11 @@ public void testRandomAccessContent() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         file.getContent().getRandomAccessContent(RandomAccessMode.READWRITE).close();
+     }
+ 
+@@ -371,10 +382,11 @@ public void testRandomAccessContent2() throws Exception
+     {
+         final FileObject fo = manager.resolveFile(TEST_DIR1);
+         Assert.assertNotNull(fo);
+-        Assert.assertTrue(fo.exists());
++        Assert.assertFalse(fo.exists());
+ 
+         // Create the test file
+         final FileObject file = createTestFile(hdfs);
++        Assert.assertTrue(fo.exists());
+         file.getContent().getRandomAccessContent(RandomAccessMode.READ).close();
+     }
+ 
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 2fb4bcf545..83aed3ab61 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -26,6 +26,9 @@
+ <!--       <action issue="VFS-443" dev="ggregory" type="update" due-to="nickallen"> -->
+ <!--     	[Local] Need an easy way to convert from a FileObject to a File. -->
+ <!--       </action> -->
++      <action issue="VFS-449" dev="ggregory" type="fix" due-to="dlmarion">
++        HDFS Provider is not removing cached files.
++      </action>
+       <action issue="VFS-442" dev="ggregory" type="add" due-to="dlmarion">
+         Add an HDFS FileSystem Provider.
+       </action>

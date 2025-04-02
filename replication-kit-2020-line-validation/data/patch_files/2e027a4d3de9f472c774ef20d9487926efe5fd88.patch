@@ -1,0 +1,515 @@
+From 2e027a4d3de9f472c774ef20d9487926efe5fd88 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 28 Apr 2011 21:16:35 +0000
+Subject: [PATCH] - IMPROVEMENT: Added support for dynamic revisions in
+ <extends> tag (IVY-1281) (thanks to Jean-Louis Boudart) - FIX: extends
+ section of ivy.xml info does not replace variable in location tag (IVY-1287)
+ (thanks to Jean-Louis Boudart)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1097612 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   2 +
+ doc/ivyfile/extends.html                      |   3 +-
+ .../parser/xml/XmlModuleDescriptorParser.java | 198 ++++++++++--------
+ .../org/apache/ivy/ant/IvyPublishTest.java    |  56 ++++-
+ .../xml/XmlModuleDescriptorParserTest.java    |   4 +-
+ .../xml/XmlModuleDescriptorWriterTest.java    |   3 +-
+ .../plugins/parser/xml/test-write-extends.xml |   2 +-
+ 7 files changed, 169 insertions(+), 99 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 75f1518f2..437b5ae56 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -119,12 +119,14 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - NEW: Import Bushel into Ivy core (IVY-1241)
+ - NEW: An new resolver 'mirroredurl' which can handle a list of mirrored URL repositories
+ 
++- IMPROVEMENT: Added support for dynamic revisions in <extends> tag (IVY-1281) (thanks to Jean-Louis Boudart)
+ - IMPROVEMENT: ivy:makepom child element dependency should support the type and classifier attributes (IVY-1262)
+ - IMPROVEMENT: ivy:retrieve can now create a path or fileset containing the retrieved artifacts (IVY-1235)
+ - IMPROVEMENT: Improve diagnostics in ssh resolver (IVY-1267) (thanks to Stepan Koltsov)
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: extends section of ivy.xml info does not replace variable in location tag (IVY-1287) (thanks to Jean-Louis Boudart)
+ - FIX: Valid Path does not work for Filesystem Resolver (IVY-1268)
+ - FIX: quiet="true" does not surpress download 'dots' on packager resolver (IVY-1269)
+ - FIX: Dynamic version resolution result can be incorrect when ivy metadata contains extra attributes (IVY-1236)
+diff --git a/doc/ivyfile/extends.html b/doc/ivyfile/extends.html
+index 9164b11d2..587cfeba7 100644
+--- a/doc/ivyfile/extends.html
++++ b/doc/ivyfile/extends.html
+@@ -37,7 +37,8 @@
+     <tr><td>description</td><td>The content of the <a href="../ivyfile/description.html">info/description</a> element is inherited from the parent.</td></tr>
+     <tr><td>configurations</td><td><a href="../ivyfile/conf.html">Configurations</a> defined in the parent descriptor are added to any configurations defined in the child descriptor.</td></tr>
+     <tr><td>dependencies</td><td><a href="../ivyfile/dependency.html">Dependencies</a> defined in the parent descriptor are added to any dependencies defined in the child descriptor.</td></tr>
+-    <tr><td>all</td><td>info, description, configurations, and dependencies from the parent descriptor are merged into the child descriptor.</td></tr>
++    <tr><td>licenses</td><td><a href="../ivyfile/license.html">Licenses</a> defined in the parent descriptor are added to any licenses defined in the child descriptor.</td></tr>
++    <tr><td>all</td><td>info, description, configurations, licenses and dependencies from the parent descriptor are merged into the child descriptor.</td></tr>
+ </tbody>
+ </table>
+ 
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index 2071ab600..2856d458f 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -24,6 +24,7 @@
+ import java.net.URL;
+ import java.text.ParseException;
+ import java.util.Arrays;
++import java.util.Iterator;
+ import java.util.LinkedHashMap;
+ import java.util.List;
+ import java.util.Locale;
+@@ -33,7 +34,6 @@
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.IvyContext;
+-import org.apache.ivy.core.cache.ResolutionCacheManager;
+ import org.apache.ivy.core.module.descriptor.Configuration;
+ import org.apache.ivy.core.module.descriptor.ConfigurationAware;
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+@@ -58,6 +58,7 @@
+ import org.apache.ivy.core.resolve.ResolveEngine;
+ import org.apache.ivy.core.resolve.ResolveOptions;
+ import org.apache.ivy.core.resolve.ResolvedModuleRevision;
++import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.conflict.ConflictManager;
+ import org.apache.ivy.plugins.conflict.FixedConflictManager;
+ import org.apache.ivy.plugins.matcher.PatternMatcher;
+@@ -65,11 +66,11 @@
+ import org.apache.ivy.plugins.namespace.Namespace;
+ import org.apache.ivy.plugins.parser.AbstractModuleDescriptorParser;
+ import org.apache.ivy.plugins.parser.ModuleDescriptorParser;
+-import org.apache.ivy.plugins.parser.ModuleDescriptorParserRegistry;
+ import org.apache.ivy.plugins.parser.ParserSettings;
+ import org.apache.ivy.plugins.repository.Resource;
+ import org.apache.ivy.plugins.repository.url.URLResource;
+ import org.apache.ivy.plugins.resolver.DependencyResolver;
++import org.apache.ivy.plugins.resolver.URLResolver;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.XMLHelper;
+ import org.apache.ivy.util.extendable.ExtendableItemHelper;
+@@ -83,6 +84,8 @@
+ public class XmlModuleDescriptorParser extends AbstractModuleDescriptorParser {
+     static final String[] DEPENDENCY_REGULAR_ATTRIBUTES = new String[] {"org", "name", "branch",
+             "branchConstraint", "rev", "revConstraint", "force", "transitive", "changing", "conf"};
++    
++    public static final String MODULE_INHERITANCE_REPOSITORY = "module-inheritance-repository";
+ 
+     private static final XmlModuleDescriptorParser INSTANCE = new XmlModuleDescriptorParser();
+ 
+@@ -227,6 +230,30 @@ private State() {
+         public Parser(ModuleDescriptorParser parser, ParserSettings ivySettings) {
+             super(parser);
+             settings = ivySettings;
++            configureModuleInheritanceRepository();
++        }
++        /**
++         * Configure module inheritance repository (repository containning all path references 
++         * to parent modules). Basicaly it checks if module inheritance repository exist 
++         * in current ivy context, otherwise it will create one as a {@link URLResolver}
++         */
++        protected void configureModuleInheritanceRepository() {
++            IvySettings ivysettings = IvyContext.getContext().getSettings();
++            DependencyResolver parentModuleResolver=null;
++            //Does module-inheritance-repository exists ?
++            for (Iterator iterator = ivysettings.getResolvers().iterator(); iterator.hasNext();) {
++                DependencyResolver resolver = (DependencyResolver) iterator.next();
++                if (resolver.getName().equals(MODULE_INHERITANCE_REPOSITORY)) {
++                    parentModuleResolver=resolver;
++                    break;
++                }
++            }
++            //if does not exist create one 
++            if (parentModuleResolver == null) {
++                parentModuleResolver= new URLResolver();
++                parentModuleResolver.setName(MODULE_INHERITANCE_REPOSITORY);
++                ivysettings.addResolver(parentModuleResolver);
++            }
+         }
+ 
+         public void setInput(InputStream descriptorInput) {
+@@ -383,16 +410,16 @@ protected String getDefaultParentLocation() {
+          * @throws ParseException 
+          */
+         protected void extendsStarted(Attributes attributes) throws ParseException {
+-            String parentOrganisation = attributes.getValue("organisation");
+-            String parentModule = attributes.getValue("module");
+-            String parentRevision = attributes.getValue("revision") != null ? attributes
+-                    .getValue("revision") : Ivy.getWorkingRevision();
+-            String location = attributes.getValue("location") != null ? attributes
+-                    .getValue("location") : getDefaultParentLocation();
++            String parentOrganisation = settings.substitute(attributes.getValue("organisation"));
++            String parentModule = settings.substitute(attributes.getValue("module"));
++            String parentRevision = attributes.getValue("revision") != null ? settings.substitute(attributes
++                    .getValue("revision")) : Ivy.getWorkingRevision();
++            String location = attributes.getValue("location") != null ? settings.substitute(attributes
++                    .getValue("location")) : getDefaultParentLocation();
+             ModuleDescriptor parent = null;
+ 
+-            String extendType = attributes.getValue("extendType") != null ? attributes.getValue(
+-                "extendType").toLowerCase(Locale.US) : "all";
++            String extendType = attributes.getValue("extendType") != null ? settings.substitute(attributes.getValue(
++                "extendType").toLowerCase(Locale.US)) : "all";
+ 
+             List/* <String> */extendTypes = Arrays.asList(extendType.split(","));
+             ModuleId parentMid = new ModuleId(parentOrganisation, parentModule);
+@@ -401,29 +428,15 @@ protected void extendsStarted(Attributes attributes) throws ParseException {
+ 
+             //check on filesystem based on location attribute (for dev ONLY)
+             try {
+-                parent = parseOtherIvyFileOnFileSystem(location);
+-
+-                //verify that the parsed descriptor is the correct parent module.
+-                ModuleId pid = parent.getModuleRevisionId().getModuleId();
+-                if (!parentMid.equals(pid)) {
+-                    Message.verbose("Ignoring parent Ivy file " + location + "; expected "
+-                        + parentMrid + " but found " + pid);
+-                    parent = null;
+-                }
+-                
+-            } catch (ParseException e) {
+-                Message.warn("Unable to parse included ivy file " + location + ": " 
+-                    + e.getMessage());
++                checkParentModuleOnFilesystem(location);
+             } catch (IOException e) {
+                 Message.warn("Unable to parse included ivy file " + location + ": " 
+                     + e.getMessage());
+             }
+             
+-            // if not found on file system, check in the cache
+-            if (parent ==null) {
+-                parent = parseOtherIvyFileInCache(parentMrid);
+-            }
+-
++            // resolve parent from module inheritance repository
++            parent = resolveParentFromModuleInheritanceRepository(parentMrid);
++            
+             // if not found, tries to resolve using repositories
+             if (parent == null) {
+                 try {
+@@ -439,25 +452,6 @@ protected void extendsStarted(Attributes attributes) throws ParseException {
+                         + parentMrid.toString(), 0);
+             }
+ 
+-            ResolutionCacheManager cacheManager = settings.getResolutionCacheManager();
+-            File ivyFileInCache = cacheManager.getResolvedIvyFileInCache(parent
+-                    .getResolvedModuleRevisionId());
+-            //Generate the parent cache file if necessary
+-            if (parent.getResource() != null
+-                    && !parent.getResource().getName().equals(ivyFileInCache.toURI().toString())) {
+-                try {
+-                    parent.toIvyFile(ivyFileInCache);
+-                } catch (ParseException e) {
+-                    throw new ParseException("Unable to create cache file for "
+-                            + parentMrid.toString()
+-                            + " Reason:" + e.getLocalizedMessage(), 0);
+-                } catch (IOException e) {
+-                    throw new ParseException("Unable to create cache file for "
+-                            + parentMrid.toString()
+-                            + " Reason :" + e.getLocalizedMessage(), 0);
+-                }
+-            }
+-
+             DefaultExtendsDescriptor ed = new DefaultExtendsDescriptor(
+                     parent.getModuleRevisionId(),
+                     parent.getResolvedModuleRevisionId(),
+@@ -494,6 +488,9 @@ protected void mergeWithOtherModuleDescriptor(List/* <String> */extendTypes,
+                 if (extendTypes.contains("description")) {
+                     mergeDescription(parent.getDescription());
+                 }
++                if (extendTypes.contains("licenses")) {
++                    mergeLicenses(parent.getLicenses());
++                }
+             }
+ 
+         }
+@@ -508,6 +505,7 @@ protected void mergeAll(ModuleDescriptor parent) {
+             mergeConfigurations(sourceMrid, parent.getConfigurations());
+             mergeDependencies(parent.getDependencies());
+             mergeDescription(parent.getDescription());
++            mergeLicenses(parent.getLicenses());
+         }
+ 
+         /**
+@@ -524,7 +522,7 @@ protected void mergeInfo(ModuleDescriptor parent) {
+                 mergeValue(parentMrid.getOrganisation(), currentMrid.getOrganisation()),
+                 currentMrid.getName(),
+                 mergeValue(parentMrid.getBranch(), currentMrid.getBranch()),
+-                mergeValue(parentMrid.getRevision(), currentMrid.getRevision()),
++                mergeRevisionValue(parentMrid.getRevision(), currentMrid.getRevision()),
+                 mergeValues(parentMrid.getQualifiedExtraAttributes(),
+                             currentMrid.getQualifiedExtraAttributes())
+             );
+@@ -539,6 +537,14 @@ protected void mergeInfo(ModuleDescriptor parent) {
+             }
+         }
+         
++        private static String mergeRevisionValue(String inherited, String override) {
++            if (override==null || override.equals(Ivy.getWorkingRevision())) {
++                return inherited;
++            } else {
++                return override;
++            }
++        }
++        
+         private static String mergeValue(String inherited, String override) {
+             return override == null ? inherited : override;
+         }
+@@ -589,27 +595,39 @@ protected void mergeDescription(String description) {
+                 getMd().setDescription(description);
+             }
+         }
++        
++        /**
++         * Describes how to merge licenses
++         * @param licenses licenses going to be inherited
++         */
++        public void mergeLicenses(License[] licenses) {
++            for (int i = 0; i < licenses.length; i++) {
++                getMd().addLicense(licenses[i]);
++            }
++        }
+ 
+         /**
+-         * Describes how to parse another ivy file on filesystem 
+-         * @param location a given location
+-         * @return a {@link ModuleDescriptor} if found. Return null if no {@link ModuleDescriptor} was found
+-         * @throws ParseException
++         * Check if parent module is reachable using location attribute (for dev purpose).
++         * If parent module is reachable it will be registered in module inheritance repository 
++         * @param location a given location 
+          * @throws IOException
++         * @throws ParseException 
+          */
+-        protected ModuleDescriptor parseOtherIvyFileOnFileSystem(String location)
+-                throws ParseException, IOException {
+-            URL url = null;
+-            ModuleDescriptor parent = null;
+-            url = getSettings().getRelativeUrlResolver().getURL(descriptorURL, location);
+-            Message.debug("Trying to load included ivy file from " + url.toString() + " location was " + location);
+-
+-            URLResource res = new URLResource(url);
+-            ModuleDescriptorParser parser = ModuleDescriptorParserRegistry.getInstance().getParser(
+-                res);
+-
+-            parent = parser.parseDescriptor(getSettings(), url, isValidate());
+-            return parent;
++        protected void checkParentModuleOnFilesystem(String location) throws IOException, ParseException {
++            URL url =getSettings().getRelativeUrlResolver().getURL(descriptorURL, location);
++            //is parent module reachable using location attribute ?
++            if (url.openConnection().getContentLength() >0 ) {
++                IvySettings ivysettings = IvyContext.getContext().getSettings();
++                URLResolver urlResolver= (URLResolver) ivysettings.getResolver(MODULE_INHERITANCE_REPOSITORY);
++                if (urlResolver == null) {
++                    throw new ParseException("Unable to find module inheritance repository", 0);
++                } 
++                
++                if (!urlResolver.getIvyPatterns().contains(url.toExternalForm())) {
++                    Message.debug("Registering parent module into module inheritance repository, parent module location is "+url.toExternalForm());
++                    urlResolver.addIvyPattern(url.toExternalForm());
++                }
++            }
+         }
+ 
+         /**
+@@ -630,44 +648,39 @@ protected ModuleDescriptor parseOtherIvyFile(ModuleRevisionId parentMrid) throws
+                 options.setDownload(false);
+                 data = new ResolveData(engine, options);
+             }
+-
+             DependencyResolver resolver = getSettings().getResolver(parentMrid);
+-            if (resolver == null) {
+-                // TODO: Throw exception here?
+-                return null;
+-            } else {
+-                dd = NameSpaceHelper.toSystem(dd, getSettings().getContextNamespace());
+-                ResolvedModuleRevision otherModule = resolver.getDependency(dd, data);
+-                if (otherModule == null) {
+-                    throw new ParseException("Unable to find " + parentMrid.toString(), 0);
+-                }
+-                return otherModule.getDescriptor();
++            dd = NameSpaceHelper.toSystem(dd, getSettings().getContextNamespace());
++            ResolvedModuleRevision otherModule = resolver.getDependency(dd, data);
++            if (otherModule == null) {
++                throw new ParseException("Unable to find " + parentMrid.toString(), 0);
+             }
++            return otherModule.getDescriptor();
+ 
+         }
+ 
+         /**
+-         * Describes how to parse ivy file from cache
++         * Resolve parent module from module inhertance repository
+          * @param parentMrid a given {@link ModuleRevisionId} to find
+          * @return a {@link ModuleDescriptor} if found. Return null if no {@link ModuleDescriptor} was found
+          * @throws ParseException
+          */
+-        protected ModuleDescriptor parseOtherIvyFileInCache(ModuleRevisionId parentMrid) throws ParseException {
+-            // try to load parent module in cache
+-            File cacheFile = settings.getResolutionCacheManager().getResolvedIvyFileInCache(parentMrid);
+-            if (cacheFile.exists() && cacheFile.length() > 0) {
+-                ModuleDescriptor md;
+-                try {
+-                    Message.debug("Trying to load included ivy file from cache " + cacheFile.getAbsolutePath());
+-                    URL parentUrl = cacheFile.toURI().toURL();
+-                    md = parseOtherIvyFileOnFileSystem(parentUrl.toString());
+-                    return md;
+-                } catch (IOException e) {
+-                    // do nothing
+-                    Message.error(e.getLocalizedMessage());
+-                }
++        protected ModuleDescriptor resolveParentFromModuleInheritanceRepository(ModuleRevisionId parentMrid) throws ParseException {
++            Message.debug("Trying to load included ivy file from module inheritance repository " );
++            DependencyDescriptor dd = new DefaultDependencyDescriptor(parentMrid, true);
++            ResolveEngine engine = IvyContext.getContext().getIvy().getResolveEngine();
++            ResolveOptions options = new ResolveOptions();
++            //not sure we need to download parent module 
++            options.setDownload(false);
++            ResolveData data = new ResolveData(engine, options);
++
++            DependencyResolver resolver = IvyContext.getContext().getSettings().getResolver(MODULE_INHERITANCE_REPOSITORY);
++            dd = NameSpaceHelper.toSystem(dd, getSettings().getContextNamespace());
++            ResolvedModuleRevision otherModule = resolver.getDependency(dd, data);
++            if (otherModule != null) {
++                return otherModule.getDescriptor();
++            } else {
++                return null;
+             }
+-            return null;
+         }
+ 
+         protected void publicationsStarted(Attributes attributes) {
+@@ -1319,4 +1332,5 @@ protected URL getSchemaURL() {
+     public String toString() {
+         return "ivy parser";
+     }
++
+ }
+diff --git a/test/java/org/apache/ivy/ant/IvyPublishTest.java b/test/java/org/apache/ivy/ant/IvyPublishTest.java
+index 3e3b9ce0e..b541b7502 100644
+--- a/test/java/org/apache/ivy/ant/IvyPublishTest.java
++++ b/test/java/org/apache/ivy/ant/IvyPublishTest.java
+@@ -150,9 +150,61 @@ public void testMergeParentWithoutPublishingParent() throws IOException, ParseEx
+         //here we directly publish a module extending ivy-multiconf.xml, 
+         //the module parent is not published not yet in cache
+         //See : IVY-1248
++       
++        //update=true implies merge=true
++        //project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-extends-multiconf.xml");
++        publish.setResolver("1");
++        publish.setUpdate(true);
++        publish.setOrganisation("apache");
++        publish.setModule("resolve-extends");
++        publish.setRevision("1.0");
++        publish.setPubrevision("1.2");
++        publish.setStatus("release");
++        publish.addArtifactspattern("test/java/org/apache/ivy/ant/ivy-extends-multiconf.xml");
++        publish.execute();
++
++        // should have published the files with "1" resolver
++        File published = new File("test/repositories/1/apache/resolve-extends/ivys/ivy-1.2.xml");
++        assertTrue(published.exists());
++
++        // do a text compare, since we want to test comments as well as structure.
++        // we could do a better job of this with xmlunit
++
++        int lineNo = 1;
++
++        BufferedReader merged = new BufferedReader(new FileReader(published));
++        BufferedReader expected = new BufferedReader(new InputStreamReader(getClass()
++            .getResourceAsStream("ivy-extends-merged.xml")));
++        for (String mergeLine = merged.readLine(),
++                    expectedLine = expected.readLine(); 
++            mergeLine != null && expectedLine != null; 
++            mergeLine = merged.readLine(),
++            expectedLine = expected.readLine()) {
++
++            //strip timestamps for the comparison
++            if (mergeLine.indexOf("<info") >= 0) {
++                mergeLine = mergeLine.replaceFirst("\\s?publication=\"\\d+\"", "");
++            }
++            //discard whitespace-only lines
++            if (!(mergeLine.trim().equals("") && expectedLine.trim().equals(""))) {
++                assertEquals("published descriptor matches at line[" + lineNo + "]", expectedLine, mergeLine);
++            }
++
++            ++lineNo;
++        }
++    }
++    
++    public void testMergeParentWithoutPublishingParentForceDeliver() throws IOException, ParseException {
++        //here we directly publish a module extending ivy-multiconf.xml, 
++        //the module parent is not published not yet in cache
++        //See : IVY-1248
++        
++        IvyResolve resolve = new IvyResolve();
++        resolve.setProject(project);
++        resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-extends-multiconf.xml"));
++        resolve.execute();
+         
+         //update=true implies merge=true
+-        project.setProperty("ivy.dep.file", "test/java/org/apache/ivy/ant/ivy-extends-multiconf.xml");
+         publish.setResolver("1");
+         publish.setUpdate(true);
+         publish.setOrganisation("apache");
+@@ -161,6 +213,8 @@ public void testMergeParentWithoutPublishingParent() throws IOException, ParseEx
+         publish.setPubrevision("1.2");
+         publish.setStatus("release");
+         publish.addArtifactspattern("test/java/org/apache/ivy/ant/ivy-extends-multiconf.xml");
++        publish.setForcedeliver(true);
++        publish.setSrcivypattern("test/repositories/1/apache/resolve-extends/ivys/ivy-deliver-1.2.xml");
+         publish.execute();
+ 
+         // should have published the files with "1" resolver
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+index c53fddcda..847efcabd 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParserTest.java
+@@ -1030,7 +1030,7 @@ public void testExtendsAll() throws Exception {
+         
+         assertEquals("myorg", md.getModuleRevisionId().getOrganisation());
+         assertEquals("mymodule", md.getModuleRevisionId().getName());
+-        assertEquals(Ivy.getWorkingRevision(), md.getModuleRevisionId().getRevision());
++        assertEquals("myrev", md.getModuleRevisionId().getRevision());
+         assertEquals("integration", md.getStatus());
+ 
+         //verify that the parent description was merged.
+@@ -1311,7 +1311,7 @@ public void testExtendsCached() throws Exception {
+         
+         assertEquals("myorg", md.getModuleRevisionId().getOrganisation());
+         assertEquals("mymodule", md.getModuleRevisionId().getName());
+-        assertEquals(Ivy.getWorkingRevision(), md.getModuleRevisionId().getRevision());
++        assertEquals("myrev", md.getModuleRevisionId().getRevision());
+         assertEquals("integration", md.getStatus());
+ 
+         //verify that the parent description was merged.
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+index f43234418..ef922afbb 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorWriterTest.java
+@@ -120,8 +120,7 @@ public void testExtends() throws Exception {
+ 		String wrote = FileUtil.readEntirely(new BufferedReader(new FileReader(dest)))
+ 				.replaceAll("\r\n?", "\n");
+ 		String expected = readEntirely("test-write-extends.xml")
+-				.replaceAll("\r\n?", "\n")
+-				.replaceAll("working@localhost", Ivy.getWorkingRevision());
++				.replaceAll("\r\n?", "\n");
+ 		assertEquals(expected, wrote);
+ 	}
+ 
+diff --git a/test/java/org/apache/ivy/plugins/parser/xml/test-write-extends.xml b/test/java/org/apache/ivy/plugins/parser/xml/test-write-extends.xml
+index 06fd20c32..cf0b25d32 100644
+--- a/test/java/org/apache/ivy/plugins/parser/xml/test-write-extends.xml
++++ b/test/java/org/apache/ivy/plugins/parser/xml/test-write-extends.xml
+@@ -20,7 +20,7 @@
+ <ivy-module version="2.2">
+ 	<info organisation="myorg"
+ 		module="mymodule"
+-		revision="working@localhost"
++		revision="myrev"
+ 		status="integration"
+ 		publication="20091206000000"
+ 	>

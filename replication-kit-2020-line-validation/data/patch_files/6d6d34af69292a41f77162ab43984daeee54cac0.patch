@@ -1,0 +1,792 @@
+From 6d6d34af69292a41f77162ab43984daeee54cac0 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 22 Aug 2008 15:32:18 +0000
+Subject: [PATCH] FIX: ChainResolverTest failures (IVY-882) The problem was due
+ to the changes introduced in IVY-857. Indeed the cache checking was removed
+ from the chain, to allow a resolver to force a revision even when there is
+ already something in the cache. The problem is that resolvers where always
+ checked in the chain even when the cache is filled. To implement this
+ properly, I've moved the responsibility of knowing what resolved module
+ revision should be returned to each individual resolver instead of the chain
+ (pretty much like in the chain of responsibility pattern, where each node is
+ responsible for calling the next one). To avoid changing the
+ DependencyResolver API, I've added the detail about a possibly already
+ resolved module revision in ResolveData. The added responsibility to
+ DependencyResolver makes it more flexible, but also more complex to write.
+ Hopefully most people writing dependency resolvers at least extend
+ BasicResolver where all this logic is already implemented.
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@688097 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../apache/ivy/core/resolve/ResolveData.java  | 34 ++++++-
+ .../plugins/resolver/AbstractResolver.java    | 51 ++++++++++
+ .../ivy/plugins/resolver/BasicResolver.java   | 46 ++++++---
+ .../ivy/plugins/resolver/ChainResolver.java   | 88 +++++++----------
+ .../ivy/plugins/resolver/DualResolver.java    |  6 ++
+ .../plugins/resolver/ChainResolverTest.java   | 97 ++++++++++---------
+ .../plugins/resolver/DualResolverTest.java    | 12 +--
+ .../plugins/resolver/IBiblioResolverTest.java | 41 ++++++++
+ .../ivy/plugins/resolver/MockResolver.java    | 40 ++++++--
+ 9 files changed, 283 insertions(+), 132 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveData.java b/src/java/org/apache/ivy/core/resolve/ResolveData.java
+index 6cd3ac1d5..4cb0c9948 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveData.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveData.java
+@@ -45,10 +45,13 @@ public class ResolveData {
+ 
+     private VisitNode currentVisitNode = null;
+ 
++    private ResolvedModuleRevision currentResolvedModuleRevision;
++
+     public ResolveData(ResolveData data, boolean validate) {
+         this(data.engine, new ResolveOptions(data.options).setValidate(validate), 
+             data.report, data.visitData);
+-        setCurrentVisitNode(currentVisitNode);
++        setCurrentVisitNode(data.currentVisitNode);
++        setCurrentResolvedModuleRevision(data.currentResolvedModuleRevision);
+     }
+ 
+     public ResolveData(ResolveEngine engine, ResolveOptions options) {
+@@ -235,4 +238,33 @@ public DependencyDescriptor mediate(DependencyDescriptor dd) {
+         }
+         return getEngine().mediate(dd, getOptions());
+     }
++
++    /**
++     * Sets the last {@link ResolvedModuleRevision} which has been currently resolved.
++     * <p>
++     * This can be used especially in dependency resolvers, to know if another dependency resolver
++     * has already resolved the requested dependency, to take a decision if the resolver should try
++     * to resolve it by itself or not. Indeed, the dependency resolver is responsible for taking
++     * this decision, even when included in a chain. The chain responsibility is only to set this
++     * current resolved module revision to enable the resolver to take the decision.
++     * </p>
++     * 
++     * @param mr
++     *            the last {@link ResolvedModuleRevision} which has been currently resolved.
++     */
++    public void setCurrentResolvedModuleRevision(ResolvedModuleRevision mr) {
++        this.currentResolvedModuleRevision = mr;
++    }
++    
++    /**
++     * Returns the last {@link ResolvedModuleRevision} which has been currently resolved.
++     * <p>
++     * It can be <code>null</code>.
++     * </p>
++     * 
++     * @return the last {@link ResolvedModuleRevision} which has been currently resolved.
++     */
++    public ResolvedModuleRevision getCurrentResolvedModuleRevision() {
++        return currentResolvedModuleRevision;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+index c96d889c3..74b7ced2c 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+@@ -20,6 +20,7 @@
+ import java.io.File;
+ import java.io.IOException;
+ import java.util.Arrays;
++import java.util.Date;
+ import java.util.Map;
+ 
+ import org.apache.ivy.core.IvyContext;
+@@ -50,9 +51,11 @@
+ import org.apache.ivy.core.search.OrganisationEntry;
+ import org.apache.ivy.core.search.RevisionEntry;
+ import org.apache.ivy.core.settings.Validatable;
++import org.apache.ivy.plugins.latest.ArtifactInfo;
+ import org.apache.ivy.plugins.latest.LatestStrategy;
+ import org.apache.ivy.plugins.namespace.NameSpaceHelper;
+ import org.apache.ivy.plugins.namespace.Namespace;
++import org.apache.ivy.plugins.resolver.ChainResolver.ResolvedModuleRevisionArtifactInfo;
+ import org.apache.ivy.plugins.resolver.util.HasLatestStrategy;
+ import org.apache.ivy.plugins.resolver.util.ResolvedResource;
+ import org.apache.ivy.util.Message;
+@@ -461,4 +464,52 @@ public void endArtifactDownload(
+         };
+     }
+ 
++
++    /**
++     * Returns true if rmr1 is after rmr2, using the latest strategy to determine which is the
++     * latest
++     * 
++     * @param rmr1
++     * @param rmr2
++     * @return
++     */
++    protected boolean isAfter(ResolvedModuleRevision rmr1, ResolvedModuleRevision rmr2, Date date) {
++        ArtifactInfo[] ais = new ArtifactInfo[] {
++                new ResolvedModuleRevisionArtifactInfo(rmr1),
++                new ResolvedModuleRevisionArtifactInfo(rmr2)};
++        return getLatestStrategy().findLatest(ais, date) == ais[0];
++    }
++
++    protected ResolvedModuleRevision checkLatest(
++            ResolvedModuleRevision newModuleFound,
++            ResolveData data) {
++        // check if latest is asked and compare to return the most recent
++        ResolvedModuleRevision previousModuleFound = data.getCurrentResolvedModuleRevision();
++        String newModuleDesc = describe(newModuleFound);
++        Message.debug("\tchecking " + newModuleDesc + " against " + describe(previousModuleFound));
++        if (previousModuleFound == null) {
++            Message.debug("\tmodule revision kept as first found: " + newModuleDesc);
++            return newModuleFound;
++        } else if (isAfter(newModuleFound, previousModuleFound, data.getDate())) {
++            Message.debug("\tmodule revision kept as younger: " + newModuleDesc);
++            return newModuleFound;
++        } else if (!newModuleFound.getDescriptor().isDefault() 
++                && previousModuleFound.getDescriptor().isDefault()) {
++            Message.debug("\tmodule revision kept as better (not default): " + newModuleDesc);
++            return newModuleFound;
++        } else {
++            Message.debug("\tmodule revision discarded as older: " + newModuleDesc);
++            return previousModuleFound;
++        }
++    }
++
++    private String describe(ResolvedModuleRevision rmr) {
++        if (rmr == null) {
++            return "[none]";
++        }
++        return rmr.getId()
++            + (rmr.getDescriptor().isDefault() ? "[default]" : "") + " from "
++            + rmr.getResolver().getName();
++    }
++
+ }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+index ac2908301..8a7e4a42f 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+@@ -166,15 +166,23 @@ public void setEnvDependent(boolean envDependent) {
+     public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+             throws ParseException {
+         IvyContext context = IvyContext.pushNewCopyContext();
+-        if (isForce()) {
+-            dd = dd.clone(ModuleRevisionId.newInstance(
+-                dd.getDependencyRevisionId(), "latest.integration"));
+-        }
+-        DependencyDescriptor systemDd = dd;
+-        DependencyDescriptor nsDd = fromSystem(dd);
+-        context.setDependencyDescriptor(systemDd);
+-        context.setResolveData(data);
+         try {
++            ResolvedModuleRevision mr = data.getCurrentResolvedModuleRevision();
++            if (mr != null) {
++                if (shouldReturnResolvedModule(dd, mr)) {
++                    return mr;
++                }
++            }
++            
++            if (isForce()) {
++                dd = dd.clone(ModuleRevisionId.newInstance(
++                    dd.getDependencyRevisionId(), "latest.integration"));
++            }
++            DependencyDescriptor systemDd = dd;
++            DependencyDescriptor nsDd = fromSystem(dd);
++            context.setDependencyDescriptor(systemDd);
++            context.setResolveData(data);
++            
+             clearIvyAttempts();
+             clearArtifactAttempts();
+             ModuleRevisionId systemMrid = systemDd.getDependencyRevisionId();
+@@ -200,7 +208,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                         + "): but we are in force mode, let's try to find one ourself");
+                 } else {
+                     Message.verbose("\t" + getName() + ": revision in cache: " + systemMrid);
+-                    return checkForcedResolvedModuleRevision(rmr);
++                    return checkLatest(checkForcedResolvedModuleRevision(rmr), data);
+                 }
+             }
+             
+@@ -254,7 +262,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                 }
+                 if (!rmr.getReport().isDownloaded() 
+                         && rmr.getReport().getLocalFile() != null) {
+-                    return checkForcedResolvedModuleRevision(toSystem(rmr));
++                    return checkLatest(checkForcedResolvedModuleRevision(rmr), data);
+                 } else {
+                     nsMd = rmr.getDescriptor();
+ 
+@@ -287,7 +295,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+ 
+             cacheModuleDescriptor(systemMd, systemMrid, ivyRef, rmr);            
+             
+-            return checkForcedResolvedModuleRevision(rmr);
++            return checkLatest(checkForcedResolvedModuleRevision(rmr), data);
+         } catch (UnresolvedDependencyException ex) {
+             if (ex.getMessage().length() > 0) {
+                 if (ex.isError()) {
+@@ -296,12 +304,26 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                     Message.verbose(ex.getMessage());
+                 }
+             }
+-            return null;
++            return data.getCurrentResolvedModuleRevision();
+         } finally {
+             IvyContext.popContext();
+         }
+     }
+ 
++    protected boolean shouldReturnResolvedModule(
++                            DependencyDescriptor dd, ResolvedModuleRevision mr) {
++        // a resolved module revision has already been found by a prior dependency resolver
++        // let's see if it should be returned and bypass this resolver
++        
++        ModuleRevisionId mrid = dd.getDependencyRevisionId();
++        boolean isDynamic = getSettings().getVersionMatcher().isDynamic(mrid);
++        boolean shouldReturn = mr.isForce();
++        shouldReturn |= !isDynamic && !mr.getDescriptor().isDefault();
++        shouldReturn &= !isForce();
++        
++        return shouldReturn;
++    }
++
+     private ResolvedModuleRevision checkForcedResolvedModuleRevision(ResolvedModuleRevision rmr) {
+         if (rmr == null) {
+             return null;
+diff --git a/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java b/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
+index c575bc8e9..67cc16dbc 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/ChainResolver.java
+@@ -22,7 +22,6 @@
+ import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+-import java.util.Date;
+ import java.util.Iterator;
+ import java.util.List;
+ 
+@@ -100,20 +99,33 @@ public void setCheckmodified(boolean check) {
+     public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+             throws ParseException {
+         data = new ResolveData(data, doValidate(data));
+-        ResolvedModuleRevision ret = null;
+ 
+         List errors = new ArrayList();
+ 
+-        ResolvedModuleRevision mr = null;
++        ResolvedModuleRevision resolved = data.getCurrentResolvedModuleRevision();
++        ResolvedModuleRevision mr = resolved;
+ 
+-        ModuleRevisionId mrid = dd.getDependencyRevisionId();
+-
+-        boolean isDynamic = getSettings().getVersionMatcher().isDynamic(mrid);
++        if (mr == null) {
++            Message.verbose(getName() + ": Checking cache for: " + dd);
++            mr = findModuleInCache(dd, data, true);
++            if (mr != null) {
++                Message.verbose(getName() + ": module revision found in cache: " + mr.getId());
++                if (!isCheckmodified()) {
++                    mr = forcedRevision(mr);
++                }
++            }
++        }
++        
+         for (Iterator iter = chain.iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+             LatestStrategy oldLatest = setLatestIfRequired(resolver, getLatestStrategy());
+             try {
++                ResolvedModuleRevision previouslyResolved = mr;
++                data.setCurrentResolvedModuleRevision(previouslyResolved);
+                 mr = resolver.getDependency(dd, data);
++                if (mr != previouslyResolved && isReturnFirst()) {
++                    mr = forcedRevision(mr);
++                }
+             } catch (Exception ex) {
+                 Message.verbose("problem occured while resolving " + dd + " with " + resolver
+                         + ": " + StringUtils.getStackTrace(ex));
+@@ -124,41 +136,8 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                 }
+             }
+             checkInterrupted();
+-            if (mr != null) {
+-                boolean shouldReturn = returnFirst;
+-                shouldReturn |= !isDynamic
+-                        && ret != null && !ret.getDescriptor().isDefault();
+-                shouldReturn |= mr.isForce();
+-                if (!shouldReturn) {
+-                    // check if latest is asked and compare to return the most recent
+-                    String mrDesc = mr.getId()
+-                            + (mr.getDescriptor().isDefault() ? "[default]" : "") + " from "
+-                            + mr.getResolver().getName();
+-                    Message.debug("\tchecking " + mrDesc + " against " + ret);
+-                    if (ret == null) {
+-                        Message.debug("\tmodule revision kept as first found: " + mrDesc);
+-                        ret = mr;
+-                    } else if (isAfter(mr, ret, data.getDate())) {
+-                        Message.debug("\tmodule revision kept as younger: " + mrDesc);
+-                        ret = mr;
+-                    } else if (!mr.getDescriptor().isDefault() && ret.getDescriptor().isDefault()) {
+-                        Message.debug("\tmodule revision kept as better (not default): " + mrDesc);
+-                        ret = mr;
+-                    } else {
+-                        Message.debug("\tmodule revision discarded as older: " + mrDesc);
+-                    }
+-                    if (!isDynamic
+-                            && !ret.getDescriptor().isDefault()) {
+-                        Message.debug("\tmodule revision found and is not default: returning "
+-                                + mrDesc);
+-                        return resolvedRevision(mr);
+-                    }
+-                } else {
+-                    return resolvedRevision(mr);
+-                }
+-            }
+         }
+-        if (ret == null && !errors.isEmpty()) {
++        if (mr == null && !errors.isEmpty()) {
+             if (errors.size() == 1) {
+                 Exception ex = (Exception) errors.get(0);
+                 if (ex instanceof RuntimeException) {
+@@ -179,7 +158,11 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                         + err);
+             }
+         }
+-        return resolvedRevision(ret);
++        if (resolved == mr) {
++            // nothing has actually been resolved here, we don't need to touch the returned rmr
++            return resolved;
++        }
++        return resolvedRevision(mr);
+     }
+ 
+     private ResolvedModuleRevision resolvedRevision(ResolvedModuleRevision mr) {
+@@ -190,6 +173,15 @@ private ResolvedModuleRevision resolvedRevision(ResolvedModuleRevision mr) {
+             return mr;
+         }
+     }
++    
++    private ResolvedModuleRevision forcedRevision(ResolvedModuleRevision rmr) {
++        if (rmr == null) {
++            return null;
++        }
++        return new ResolvedModuleRevision(
++            rmr.getResolver(), rmr.getArtifactResolver(), 
++            rmr.getDescriptor(), rmr.getReport(), true);
++    }
+ 
+     private LatestStrategy setLatestIfRequired(DependencyResolver resolver,
+             LatestStrategy latestStrategy) {
+@@ -203,20 +195,6 @@ private LatestStrategy setLatestIfRequired(DependencyResolver resolver,
+         }
+     }
+ 
+-    /**
+-     * Returns true if rmr1 is after rmr2, using the latest strategy to determine which is the
+-     * latest
+-     * 
+-     * @param rmr1
+-     * @param rmr2
+-     * @return
+-     */
+-    private boolean isAfter(ResolvedModuleRevision rmr1, ResolvedModuleRevision rmr2, Date date) {
+-        ArtifactInfo[] ais = new ArtifactInfo[] {new ResolvedModuleRevisionArtifactInfo(rmr2),
+-                new ResolvedModuleRevisionArtifactInfo(rmr1)};
+-        return getLatestStrategy().findLatest(ais, date) != ais[0];
+-    }
+-
+     public ResolvedResource findIvyFileRef(DependencyDescriptor dd, ResolveData data) {
+         for (Iterator iter = chain.iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+diff --git a/src/java/org/apache/ivy/plugins/resolver/DualResolver.java b/src/java/org/apache/ivy/plugins/resolver/DualResolver.java
+index 33ee4a4b4..08a208dc7 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/DualResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/DualResolver.java
+@@ -65,6 +65,8 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+             throw new IllegalStateException(
+                     "exactly two resolvers must be added: ivy(1) and artifact(2) one");
+         }
++        ResolvedModuleRevision resolved = data.getCurrentResolvedModuleRevision();
++        
+         data = new ResolveData(data, doValidate(data));
+         final ResolvedModuleRevision mr = ivyResolver.getDependency(dd, data);
+         if (mr == null) {
+@@ -77,6 +79,10 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                 return null;
+             }
+         } else {
++            if (mr == resolved) {
++                // nothing has actually been resolved here, we don't need to touch the returned rmr
++                return mr;
++            }
+             return new ResolvedModuleRevision(
+                 mr.getResolver(), this, mr.getDescriptor(), mr.getReport(), mr.isForce());
+         }
+diff --git a/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java
+index c4911c208..cf1e0d202 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/ChainResolverTest.java
+@@ -106,9 +106,9 @@ public void testResolveOrder() throws Exception {
+         chain.setName("chain");
+         chain.setSettings(settings);
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", false, null),
+-                MockResolver.buildMockResolver("2", true, null),
+-                MockResolver.buildMockResolver("3", true, null)};
++                MockResolver.buildMockResolver(settings, "1", false, null),
++                MockResolver.buildMockResolver(settings, "2", true, null),
++                MockResolver.buildMockResolver(settings, "3", true, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -128,18 +128,19 @@ public void testLatestTimeResolve() throws Exception {
+         ChainResolver chain = new ChainResolver();
+         chain.setName("chain");
+         chain.setSettings(settings);
+-        chain.setLatestStrategy(new LatestTimeStrategy());
++        settings.setDefaultLatestStrategy(new LatestTimeStrategy());
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", true, new GregorianCalendar(2005, 1, 20)
++                MockResolver.buildMockResolver(settings, "1", true, new GregorianCalendar(2005, 1, 20)
+                         .getTime()),
+-                MockResolver.buildMockResolver("2", false, null),
+-                MockResolver.buildMockResolver("3", true, new GregorianCalendar(2005, 1, 25)
++                MockResolver.buildMockResolver(settings, "2", false, null),
++                MockResolver.buildMockResolver(settings, "3", true, new GregorianCalendar(2005, 1, 25)
+                         .getTime()), // younger -> should the one kept
+-                MockResolver.buildMockResolver("4", false, null),
+-                MockResolver.buildMockResolver("5", true, new GregorianCalendar(2005, 1, 22)
++                MockResolver.buildMockResolver(settings, "4", false, null),
++                MockResolver.buildMockResolver(settings, "5", true, new GregorianCalendar(2005, 1, 22)
+                         .getTime()),
+-                MockResolver.buildMockResolver("6", true, new GregorianCalendar(2005, 1, 18)
+-                        .getTime()), MockResolver.buildMockResolver("7", false, null)};
++                MockResolver.buildMockResolver(settings, "6", true, new GregorianCalendar(2005, 1, 18)
++                        .getTime()), 
++                MockResolver.buildMockResolver(settings, "7", false, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -162,19 +163,19 @@ public void testLatestRevisionResolve() throws Exception {
+         chain.setSettings(settings);
+         chain.setLatestStrategy(new LatestRevisionStrategy());
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "1", true, ModuleRevisionId.newInstance("org",
+                     "mod", "1"), new GregorianCalendar(2005, 1, 20).getTime()),
+-                MockResolver.buildMockResolver("2", false, null),
+-                MockResolver.buildMockResolver("3", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "2", false, null),
++                MockResolver.buildMockResolver(settings, "3", true, ModuleRevisionId.newInstance("org",
+                     "mod", "2"), new GregorianCalendar(2005, 1, 25).getTime()),
+-                MockResolver.buildMockResolver("4", false, null),
+-                MockResolver.buildMockResolver("5", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "4", false, null),
++                MockResolver.buildMockResolver(settings, "5", true, ModuleRevisionId.newInstance("org",
+                     "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime()), // latest ->
+                 // should the
+                 // one kept
+-                MockResolver.buildMockResolver("6", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "6", true, ModuleRevisionId.newInstance("org",
+                     "mod", "3"), new GregorianCalendar(2005, 1, 18).getTime()),
+-                MockResolver.buildMockResolver("7", false, null)};
++                MockResolver.buildMockResolver(settings, "7", false, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -197,20 +198,20 @@ public void testWithDefault() throws Exception {
+         chain.setSettings(settings);
+         chain.setLatestStrategy(new LatestRevisionStrategy());
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", false, null),
+-                MockResolver.buildMockResolver("2", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "1", false, null),
++                MockResolver.buildMockResolver(settings, "2", true, ModuleRevisionId.newInstance("org",
+                     "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime(), true), // latest
+                 // ->
+                 // but
+                 // default
+-                MockResolver.buildMockResolver("3", false, null),
+-                MockResolver.buildMockResolver("4", false, null),
+-                MockResolver.buildMockResolver("5", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "3", false, null),
++                MockResolver.buildMockResolver(settings, "4", false, null),
++                MockResolver.buildMockResolver(settings, "5", true, ModuleRevisionId.newInstance("org",
+                     "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime()), // latest ->
+                 // should the
+                 // one kept
+-                MockResolver.buildMockResolver("6", false, null),
+-                MockResolver.buildMockResolver("7", false, null)};
++                MockResolver.buildMockResolver(settings, "6", false, null),
++                MockResolver.buildMockResolver(settings, "7", false, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -236,23 +237,23 @@ public void testLatestWithDefault() throws Exception {
+         chain.setSettings(settings);
+         chain.setLatestStrategy(new LatestRevisionStrategy());
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "1", true, ModuleRevisionId.newInstance("org",
+                     "mod", "1"), new GregorianCalendar(2005, 1, 20).getTime()),
+-                MockResolver.buildMockResolver("2", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "2", true, ModuleRevisionId.newInstance("org",
+                     "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime(), true), // latest
+                 // ->
+                 // but
+                 // default
+-                MockResolver.buildMockResolver("3", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "3", true, ModuleRevisionId.newInstance("org",
+                     "mod", "2"), new GregorianCalendar(2005, 1, 25).getTime()),
+-                MockResolver.buildMockResolver("4", false, null),
+-                MockResolver.buildMockResolver("5", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "4", false, null),
++                MockResolver.buildMockResolver(settings, "5", true, ModuleRevisionId.newInstance("org",
+                     "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime()), // latest ->
+                 // should the
+                 // one kept
+-                MockResolver.buildMockResolver("6", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "6", true, ModuleRevisionId.newInstance("org",
+                     "mod", "3"), new GregorianCalendar(2005, 1, 18).getTime()),
+-                MockResolver.buildMockResolver("7", false, null)};
++                MockResolver.buildMockResolver(settings, "7", false, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -275,15 +276,15 @@ public void testFixedWithDefault() throws Exception {
+         chain.setSettings(settings);
+         chain.setLatestStrategy(new LatestRevisionStrategy());
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", false, null),
+-                MockResolver.buildMockResolver("2", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "1", false, null),
++                MockResolver.buildMockResolver(settings, "2", true, ModuleRevisionId.newInstance("org",
+                     "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime(), true), // default
+-                MockResolver.buildMockResolver("3", false, null),
+-                MockResolver.buildMockResolver("4", true, ModuleRevisionId.newInstance("org",
++                MockResolver.buildMockResolver(settings, "3", false, null),
++                MockResolver.buildMockResolver(settings, "4", true, ModuleRevisionId.newInstance("org",
+                     "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime()), // not default
+                 // -> should the
+                 // one kept
+-                MockResolver.buildMockResolver("5", false, null)};
++                MockResolver.buildMockResolver(settings, "5", false, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -352,7 +353,7 @@ public void testUseCache() throws Exception {
+         chain.setName("chain");
+         chain.setSettings(settings);
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", true, null)};
++                MockResolver.buildMockResolver(settings, "1", true, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -369,16 +370,16 @@ public void testReturnFirst() throws Exception {
+         chain.setReturnFirst(true);
+         
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", true, new GregorianCalendar(2005, 1, 20)
++                MockResolver.buildMockResolver(settings, "1", true, new GregorianCalendar(2005, 1, 20)
+                         .getTime()),
+-                MockResolver.buildMockResolver("2", false, null),
+-                MockResolver.buildMockResolver("3", true, new GregorianCalendar(2005, 1, 25)
++                MockResolver.buildMockResolver(settings, "2", false, null),
++                MockResolver.buildMockResolver(settings, "3", true, new GregorianCalendar(2005, 1, 25)
+                         .getTime()), // younger -> should the one kept
+-                MockResolver.buildMockResolver("4", false, null),
+-                MockResolver.buildMockResolver("5", true, new GregorianCalendar(2005, 1, 22)
++                MockResolver.buildMockResolver(settings, "4", false, null),
++                MockResolver.buildMockResolver(settings, "5", true, new GregorianCalendar(2005, 1, 22)
+                         .getTime()),
+-                MockResolver.buildMockResolver("6", true, new GregorianCalendar(2005, 1, 18)
+-                        .getTime()), MockResolver.buildMockResolver("7", false, null)};
++                MockResolver.buildMockResolver(settings, "6", true, new GregorianCalendar(2005, 1, 18)
++                        .getTime()), MockResolver.buildMockResolver(settings, "7", false, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+@@ -485,9 +486,9 @@ public void testDual() throws Exception {
+         chain.setSettings(settings);
+         chain.setDual(true);
+         MockResolver[] resolvers = new MockResolver[] {
+-                MockResolver.buildMockResolver("1", false, null),
+-                MockResolver.buildMockResolver("2", true, null),
+-                MockResolver.buildMockResolver("3", true, null)};
++                MockResolver.buildMockResolver(settings, "1", false, null),
++                MockResolver.buildMockResolver(settings, "2", true, null),
++                MockResolver.buildMockResolver(settings, "3", true, null)};
+         for (int i = 0; i < resolvers.length; i++) {
+             chain.add(resolvers[i]);
+         }
+diff --git a/test/java/org/apache/ivy/plugins/resolver/DualResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/DualResolverTest.java
+index a09d9cb1c..2d21e8838 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/DualResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/DualResolverTest.java
+@@ -103,9 +103,9 @@ public void testBad() throws Exception {
+ 
+     public void testResolve() throws Exception {
+         DualResolver dual = new DualResolver();
+-        MockResolver ivyResolver = MockResolver.buildMockResolver("ivy", true,
++        MockResolver ivyResolver = MockResolver.buildMockResolver(_settings, "ivy", true,
+             new GregorianCalendar(2005, 1, 20).getTime());
+-        MockResolver artifactResolver = MockResolver.buildMockResolver("artifact", false,
++        MockResolver artifactResolver = MockResolver.buildMockResolver(_settings, "artifact", false,
+             new GregorianCalendar(2005, 1, 20).getTime());
+         dual.setIvyResolver(ivyResolver);
+         dual.setArtifactResolver(artifactResolver);
+@@ -121,9 +121,9 @@ public void testResolve() throws Exception {
+ 
+     public void testResolveFromArtifact() throws Exception {
+         DualResolver dual = new DualResolver();
+-        MockResolver ivyResolver = MockResolver.buildMockResolver("ivy", false,
++        MockResolver ivyResolver = MockResolver.buildMockResolver(_settings, "ivy", false,
+             new GregorianCalendar(2005, 1, 20).getTime());
+-        MockResolver artifactResolver = MockResolver.buildMockResolver("artifact", true,
++        MockResolver artifactResolver = MockResolver.buildMockResolver(_settings, "artifact", true,
+             new GregorianCalendar(2005, 1, 20).getTime());
+         dual.setIvyResolver(ivyResolver);
+         dual.setArtifactResolver(artifactResolver);
+@@ -139,9 +139,9 @@ public void testResolveFromArtifact() throws Exception {
+ 
+     public void testResolveFail() throws Exception {
+         DualResolver dual = new DualResolver();
+-        MockResolver ivyResolver = MockResolver.buildMockResolver("ivy", false,
++        MockResolver ivyResolver = MockResolver.buildMockResolver(_settings, "ivy", false,
+             new GregorianCalendar(2005, 1, 20).getTime());
+-        MockResolver artifactResolver = MockResolver.buildMockResolver("artifact", false,
++        MockResolver artifactResolver = MockResolver.buildMockResolver(_settings, "artifact", false,
+             new GregorianCalendar(2005, 1, 20).getTime());
+         dual.setIvyResolver(ivyResolver);
+         dual.setArtifactResolver(artifactResolver);
+diff --git a/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java
+index 38345191c..272ba6db1 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/IBiblioResolverTest.java
+@@ -18,9 +18,15 @@
+ package org.apache.ivy.plugins.resolver;
+ 
+ import java.io.File;
++import java.util.Arrays;
++import java.util.HashMap;
++import java.util.HashSet;
+ import java.util.List;
++import java.util.Map;
++import java.util.Set;
+ 
+ import org.apache.ivy.core.IvyContext;
++import org.apache.ivy.core.IvyPatternHelper;
+ import org.apache.ivy.core.event.EventManager;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+@@ -35,6 +41,9 @@
+ import org.apache.ivy.core.resolve.ResolveEngine;
+ import org.apache.ivy.core.resolve.ResolveOptions;
+ import org.apache.ivy.core.resolve.ResolvedModuleRevision;
++import org.apache.ivy.core.search.ModuleEntry;
++import org.apache.ivy.core.search.OrganisationEntry;
++import org.apache.ivy.core.search.RevisionEntry;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.core.sort.SortEngine;
+ import org.apache.ivy.plugins.matcher.ExactPatternMatcher;
+@@ -194,6 +203,38 @@ public void testIBiblio() throws Exception {
+         assertEquals(DownloadStatus.NO, ar.getDownloadStatus());
+     }
+ 
++    public void testMaven2Listing() throws Exception {
++        IBiblioResolver resolver = new IBiblioResolver();
++        resolver.setName("test");
++        resolver.setSettings(_settings);
++        resolver.setM2compatible(true);
++        assertEquals("test", resolver.getName());
++
++        ModuleEntry[] modules = resolver.listModules(new OrganisationEntry(resolver, "commons-lang"));
++        assertNotNull(modules);
++        assertEquals(1, modules.length);
++        assertEquals("commons-lang", modules[0].getModule());
++        
++        RevisionEntry[] revisions = resolver.listRevisions(modules[0]);
++        assertTrue(revisions.length > 0);
++        
++        Map otherTokenValues = new HashMap();
++        otherTokenValues.put(IvyPatternHelper.ORGANISATION_KEY, "commons-lang");
++        String[] values = resolver.listTokenValues(IvyPatternHelper.MODULE_KEY, otherTokenValues);
++        assertNotNull(values);
++        assertEquals(1, values.length);
++        assertEquals("commons-lang", values[0]);
++        
++        Map[] valuesMaps = resolver.listTokenValues(new String[] {IvyPatternHelper.MODULE_KEY}, otherTokenValues);
++        Set vals = new HashSet();
++        for (int i = 0; i < valuesMaps.length; i++) {
++            vals.add(valuesMaps[i].get(IvyPatternHelper.MODULE_KEY));
++        }
++        values = (String[]) vals.toArray(new String[vals.size()]);
++        assertEquals(1, values.length);
++        assertEquals("commons-lang", values[0]);
++    }
++
+     public void testErrorReport() throws Exception {
+         IBiblioResolver resolver = new IBiblioResolver();
+         resolver.setRoot("http://unknown.host.comx/");
+diff --git a/test/java/org/apache/ivy/plugins/resolver/MockResolver.java b/test/java/org/apache/ivy/plugins/resolver/MockResolver.java
+index df4e0c967..b19c540c6 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/MockResolver.java
++++ b/test/java/org/apache/ivy/plugins/resolver/MockResolver.java
+@@ -38,21 +38,23 @@
+ import org.apache.ivy.plugins.resolver.util.ResolvedResource;
+ 
+ public class MockResolver extends AbstractResolver {
+-    static MockResolver buildMockResolver(String name, boolean findRevision,
+-            final Date publicationDate) {
+-        return buildMockResolver(name, findRevision, ModuleRevisionId.newInstance("test", "test",
+-            "test"), publicationDate);
++    static MockResolver buildMockResolver(ResolverSettings settings, String name,
++            boolean findRevision, final Date publicationDate) {
++        return buildMockResolver(settings, name, findRevision, ModuleRevisionId.newInstance("test",
++            "test", "test"), publicationDate);
+     }
+ 
+-    static MockResolver buildMockResolver(String name, boolean findRevision,
+-            final ModuleRevisionId mrid, final Date publicationDate) {
+-        return buildMockResolver(name, findRevision, mrid, publicationDate, false);
++    static MockResolver buildMockResolver(ResolverSettings settings, String name,
++            boolean findRevision, final ModuleRevisionId mrid, final Date publicationDate) {
++        return buildMockResolver(settings, name, findRevision, mrid, publicationDate, false);
+     }
+ 
+-    static MockResolver buildMockResolver(String name, boolean findRevision,
+-            final ModuleRevisionId mrid, final Date publicationDate, final boolean isdefault) {
++    static MockResolver buildMockResolver(ResolverSettings settings, String name,
++            boolean findRevision, final ModuleRevisionId mrid, final Date publicationDate,
++            final boolean isdefault) {
+         final MockResolver r = new MockResolver();
+         r.setName(name);
++        r.setSettings(settings);
+         if (findRevision) {
+             DefaultModuleDescriptor md = new DefaultModuleDescriptor(
+                 mrid, "integration", publicationDate, isdefault);
+@@ -68,8 +70,26 @@ static MockResolver buildMockResolver(String name, boolean findRevision,
+ 
+     public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+             throws ParseException {
++        ResolvedModuleRevision mr = data.getCurrentResolvedModuleRevision();
++        if (mr != null) {
++            if (shouldReturnResolvedModule(dd, mr)) {
++                return mr;
++            }
++        }
+         askedDeps.add(dd);
+-        return rmr;
++        return checkLatest(rmr, data);
++    }
++    
++    private boolean shouldReturnResolvedModule(DependencyDescriptor dd, ResolvedModuleRevision mr) {
++        // a resolved module revision has already been found by a prior dependency resolver
++        // let's see if it should be returned and bypass this resolver
++        
++        ModuleRevisionId mrid = dd.getDependencyRevisionId();
++        boolean isDynamic = getSettings().getVersionMatcher().isDynamic(mrid);
++        boolean shouldReturn = mr.isForce();
++        shouldReturn |= !isDynamic && !mr.getDescriptor().isDefault();
++        
++        return shouldReturn;
+     }
+ 
+     public DownloadReport download(Artifact[] artifacts, DownloadOptions options) {

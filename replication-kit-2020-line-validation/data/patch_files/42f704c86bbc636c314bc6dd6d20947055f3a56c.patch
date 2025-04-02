@@ -1,0 +1,117 @@
+From 42f704c86bbc636c314bc6dd6d20947055f3a56c Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 24 Oct 2012 20:13:32 +0000
+Subject: [PATCH] Attempt to fix IVY-1378 by converting all systemIds to URI's
+ according to RFC 2396.
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1401854 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../ivy/plugins/parser/m2/PomReader.java      | 16 +++++-----
+ src/java/org/apache/ivy/util/XMLHelper.java   | 30 +++++++++++--------
+ 2 files changed, 24 insertions(+), 22 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+index 62cbc504a..84f07e692 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+@@ -48,8 +48,6 @@
+ import org.xml.sax.SAXException;
+ import org.xml.sax.SAXParseException;
+ 
+-
+-
+ /**
+  * Provides the method to read some data out of the DOM tree of a pom 
+  * file.
+@@ -91,8 +89,10 @@ public class PomReader {
+     
+     public PomReader(URL descriptorURL, Resource res) throws IOException, SAXException {
+         InputStream stream = new AddDTDFilterInputStream(URLHandlerRegistry.getDefault().openStream(descriptorURL));
++        InputSource source = new InputSource(stream);
++        source.setSystemId(XMLHelper.toSystemId(descriptorURL));
+         try {
+-            Document pomDomDoc = XMLHelper.parseToDom(stream, res, new EntityResolver() {
++            Document pomDomDoc = XMLHelper.parseToDom(source, new EntityResolver() {
+                 public InputSource resolveEntity(String publicId, String systemId) 
+                                 throws SAXException, IOException {
+                     if ((systemId != null) && systemId.endsWith("m2-entities.ent")) {
+@@ -109,12 +109,10 @@ public InputSource resolveEntity(String publicId, String systemId)
+             }
+             parentElement = getFirstChildElement(projectElement , PARENT);
+         } finally {
+-            if (stream != null) {
+-                try {
+-                    stream.close();
+-                } catch (IOException e) {
+-                    // ignore
+-                }
++            try {
++                stream.close();
++            } catch (IOException e) {
++                // ignore
+             }
+         }
+     }
+diff --git a/src/java/org/apache/ivy/util/XMLHelper.java b/src/java/org/apache/ivy/util/XMLHelper.java
+index 406adf34f..38d6c8cd5 100644
+--- a/src/java/org/apache/ivy/util/XMLHelper.java
++++ b/src/java/org/apache/ivy/util/XMLHelper.java
+@@ -19,6 +19,8 @@
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.net.URI;
++import java.net.URISyntaxException;
+ import java.net.URL;
+ 
+ import javax.xml.parsers.DocumentBuilder;
+@@ -76,6 +78,17 @@ private static SAXParser newSAXParser(URL schema, InputStream schemaStream)
+         return parser;
+     }
+ 
++    /**
++     * Convert an URL to a valid systemId according to RFC 2396.
++     */
++    public static String toSystemId(URL url) {
++        try {
++            return new URI(url.toExternalForm()).toASCIIString();
++        } catch (URISyntaxException e) {
++            return url.toExternalForm();
++        }
++    }
++
+     // IMPORTANT: validation errors are only notified to the given handler, and
+     // do not cause exception
+     // implement warning error and fatalError methods in handler to be informed
+@@ -91,7 +104,7 @@ public static void parse(
+         InputStream xmlStream = URLHandlerRegistry.getDefault().openStream(xmlURL);
+         try {
+             InputSource inSrc = new InputSource(xmlStream);
+-            inSrc.setSystemId(xmlURL.toExternalForm());
++            inSrc.setSystemId(toSystemId(xmlURL));
+             parse(inSrc, schema, handler, lHandler);
+         } finally {
+             try {
+@@ -187,19 +200,10 @@ public static String escape(String text) {
+     }
+ 
+     
+-    public static Document parseToDom(
+-            InputStream stream, Resource res, EntityResolver entityResolver) 
+-                throws IOException, SAXException {
++    public static Document parseToDom(InputSource source, EntityResolver entityResolver)
++            throws IOException, SAXException {
+         DocumentBuilder docBuilder = getDocBuilder(entityResolver);
+-        Document pomDomDoc;
+-        try {
+-            pomDomDoc = docBuilder.parse(stream, res.getName());
+-        } catch (SAXException e) {
+-            throw e;
+-        } finally {
+-            stream.close();
+-        } 
+-        return pomDomDoc;
++        return docBuilder.parse(source);
+     }
+ 
+     public static DocumentBuilder getDocBuilder(EntityResolver entityResolver) {

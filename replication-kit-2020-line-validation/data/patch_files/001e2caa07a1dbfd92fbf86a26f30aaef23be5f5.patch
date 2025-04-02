@@ -1,0 +1,393 @@
+From 001e2caa07a1dbfd92fbf86a26f30aaef23be5f5 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 3 Dec 2007 01:57:37 +0000
+Subject: [PATCH] fix settings initialization issue, related to the changes
+ made for IVY-639. Default settings were loaded when no there was no Ivy in
+ context, which was actually happening pretty often in the ant tasks since the
+ Ivy instance was only attached when calling an Ivy method. Now all IvyTasks
+ push an IvyContext with the configured Ivy instance attached, and pop it at
+ the end. I've also reviewed the default message logger use, now
+ MessageLoggerEngine actually use it as currently defined (and not as defined
+ at logger engine init) at the time it needs it. This allow easier
+ configuration of the default logger with the Message.setDefaultLogger()
+ method, which actually propagates to all logger engines on which a default
+ logger has not been specificied.
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@600418 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../org/apache/ivy/ant/IvyAntSettings.java    | 30 +++++++++++++------
+ src/java/org/apache/ivy/ant/IvyConfigure.java | 10 +++++--
+ .../org/apache/ivy/ant/IvyConvertPom.java     |  2 +-
+ .../apache/ivy/ant/IvyExtractFromSources.java |  5 ++--
+ src/java/org/apache/ivy/ant/IvyMakePom.java   |  2 +-
+ src/java/org/apache/ivy/ant/IvyTask.java      |  5 +++-
+ src/java/org/apache/ivy/core/IvyContext.java  | 16 +++++++++-
+ src/java/org/apache/ivy/util/Message.java     |  9 ++++++
+ .../apache/ivy/util/MessageLoggerEngine.java  | 16 ++++++----
+ .../IgnoreCircularDependencyStrategyTest.java |  4 +--
+ .../WarnCircularDependencyStrategyTest.java   |  3 +-
+ 11 files changed, 77 insertions(+), 25 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/ant/IvyAntSettings.java b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+index faa6e8c40..daf4312e4 100644
+--- a/src/java/org/apache/ivy/ant/IvyAntSettings.java
++++ b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+@@ -109,8 +109,8 @@ public static IvyAntSettings getDefaultInstance(Project project) {
+         if (defaultInstanceObj != null
+                 && defaultInstanceObj.getClass().getClassLoader() != IvyAntSettings.class
+                         .getClassLoader()) {
+-            Message.warn("ivy.instance reference an ivy:settings defined in an other classloader.  "
+-                     + "An new default one will be used in this project.");
++            project.log("ivy.instance reference an ivy:settings defined in an other classloader.  "
++                     + "An new default one will be used in this project.", Project.MSG_WARN);
+             defaultInstanceObj = null;
+         }
+         if (defaultInstanceObj != null && !(defaultInstanceObj instanceof IvyAntSettings)) {
+@@ -119,8 +119,8 @@ public static IvyAntSettings getDefaultInstance(Project project) {
+                     + " an not an IvyAntSettings.  Please don't use this reference id ()");
+         }
+         if (defaultInstanceObj == null) {
+-            Message.info("No ivy:settings found for the default reference 'ivy.instance'.  " 
+-                    + "A default instance will be used");
++            project.log("No ivy:settings found for the default reference 'ivy.instance'.  " 
++                    + "A default instance will be used", Project.MSG_INFO);
+             IvyAntSettings defaultInstance = new IvyAntSettings();
+             defaultInstance.setProject(project);
+             defaultInstance.registerAsDefault();
+@@ -269,7 +269,7 @@ protected Properties getDefaultProperties() {
+         URL url = IvySettings.getDefaultPropertiesURL();
+         // this is copy of loadURL code from ant Property task (not available in 1.5.1)
+         Properties props = new Properties();
+-        Message.verbose("Loading " + url);
++        verbose("Loading " + url);
+         try {
+             InputStream is = url.openStream();
+             try {
+@@ -294,7 +294,7 @@ private void defineDefaultSettingFile(IvyVariableContainer variableContainer) {
+         String settingsFileName = variableContainer.getVariable("ivy.conf.file");
+         if (settingsFileName != null 
+                 && !settingsFileName.equals(variableContainer.getVariable("ivy.settings.file"))) {
+-            Message.deprecated("'ivy.conf.file' is deprecated, use 'ivy.settings.file' instead");
++            info("DEPRECATED: 'ivy.conf.file' is deprecated, use 'ivy.settings.file' instead");
+         } else {
+             settingsFileName = variableContainer.getVariable("ivy.settings.file");
+         }
+@@ -306,24 +306,36 @@ private void defineDefaultSettingFile(IvyVariableContainer variableContainer) {
+         };
+         for (int i = 0; i < settingsLocations.length; i++) {
+             file = settingsLocations[i];
+-            Message.verbose("searching settings file: trying " + file);
++            verbose("searching settings file: trying " + file);
+             if (file.exists()) {
+                 break;
+             }
+         }
+         if (!file.exists()) {
+             if (Boolean.valueOf(getProject().getProperty("ivy.14.compatible")).booleanValue()) {
+-                Message.info("no settings file found, using Ivy 1.4 default...");
++                info("no settings file found, using Ivy 1.4 default...");
+                 file = null;
+                 url = IvySettings.getDefault14SettingsURL();
+             } else {
+-                Message.info("no settings file found, using default...");
++                info("no settings file found, using default...");
+                 file = null;
+                 url = IvySettings.getDefaultSettingsURL();
+             }
+         }
+     }
+ 
++    private void verbose(String msg) {
++        log(msg, Project.MSG_VERBOSE);
++    }
++
++    private void info(String msg) {
++        log(msg, Project.MSG_INFO);
++    }
++
++    private void warn(String msg) {
++        log(msg, Project.MSG_WARN);
++    }
++
+     private void configureURLHandler() {
+         // TODO : the credentialStore should also be scoped
+         CredentialsStore.INSTANCE.addCredentials(getRealm(), getHost(), getUsername(), getPasswd());
+diff --git a/src/java/org/apache/ivy/ant/IvyConfigure.java b/src/java/org/apache/ivy/ant/IvyConfigure.java
+index d3f6b5018..d5de05103 100644
+--- a/src/java/org/apache/ivy/ant/IvyConfigure.java
++++ b/src/java/org/apache/ivy/ant/IvyConfigure.java
+@@ -21,9 +21,11 @@
+ import java.net.MalformedURLException;
+ import java.util.Properties;
+ 
++import org.apache.ivy.Ivy;
+ import org.apache.ivy.ant.IvyAntSettings.Credentials;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.Project;
++import org.apache.tools.ant.Task;
+ import org.apache.tools.ant.taskdefs.Property;
+ 
+ /**
+@@ -31,11 +33,11 @@
+  * 
+  * @deprecated Use the IvyAntSettings instead.
+  */
+-public class IvyConfigure extends IvyTask {
++public class IvyConfigure extends Task {
+ 
+     private IvyAntSettings antSettings = new IvyAntSettings();
+ 
+-    public void doExecute() throws BuildException {
++    public void execute() throws BuildException {
+         log("ivy:configure is deprecated, please use the data type ivy:settings instead",
+             Project.MSG_WARN);
+         // ivyConfigure used to export properties in the ant script.
+@@ -92,4 +94,8 @@ public void setUsername(String userName) {
+         antSettings.setUsername(userName);
+     }
+ 
++    public Ivy getIvyInstance() {
++        return antSettings.getConfiguredIvyInstance();
++    }
++
+ }
+diff --git a/src/java/org/apache/ivy/ant/IvyConvertPom.java b/src/java/org/apache/ivy/ant/IvyConvertPom.java
+index 6d9a81a1a..a4ba18041 100644
+--- a/src/java/org/apache/ivy/ant/IvyConvertPom.java
++++ b/src/java/org/apache/ivy/ant/IvyConvertPom.java
+@@ -61,7 +61,7 @@ public void doExecute() throws BuildException {
+                 throw new BuildException("destination ivy file is required for convertpom task");
+             }
+             ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(
+-                new IvySettings(), pomFile.toURL(), false);
++                getSettings(), pomFile.toURL(), false);
+             PomModuleDescriptorParser.getInstance().toIvyFile(pomFile.toURL().openStream(),
+                 new URLResource(pomFile.toURL()), getIvyFile(), md);
+         } catch (MalformedURLException e) {
+diff --git a/src/java/org/apache/ivy/ant/IvyExtractFromSources.java b/src/java/org/apache/ivy/ant/IvyExtractFromSources.java
+index 25acd92d6..a7e6cd5a6 100644
+--- a/src/java/org/apache/ivy/ant/IvyExtractFromSources.java
++++ b/src/java/org/apache/ivy/ant/IvyExtractFromSources.java
+@@ -35,6 +35,7 @@
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.Project;
++import org.apache.tools.ant.Task;
+ import org.apache.tools.ant.filters.LineContainsRegExp;
+ import org.apache.tools.ant.filters.TokenFilter;
+ import org.apache.tools.ant.taskdefs.Concat;
+@@ -45,7 +46,7 @@
+ /**
+  * Extracts imports from a set of java sources and generate corresponding ivy file
+  */
+-public class IvyExtractFromSources extends IvyTask {
++public class IvyExtractFromSources extends Task {
+     public static class Ignore {
+         private String packageName;
+ 
+@@ -126,7 +127,7 @@ public void addFileSet(FileSet fileSet) {
+         concat.addFileset(fileSet);
+     }
+ 
+-    public void doExecute() throws BuildException {
++    public void execute() throws BuildException {
+         configureConcat();
+         Writer out = new StringWriter();
+         concat.setWriter(out);
+diff --git a/src/java/org/apache/ivy/ant/IvyMakePom.java b/src/java/org/apache/ivy/ant/IvyMakePom.java
+index c668fedfb..62c9a36bb 100644
+--- a/src/java/org/apache/ivy/ant/IvyMakePom.java
++++ b/src/java/org/apache/ivy/ant/IvyMakePom.java
+@@ -92,7 +92,7 @@ public void doExecute() throws BuildException {
+                 throw new BuildException("destination pom file is required for makepom task");
+             }
+             ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(
+-                new IvySettings(), ivyFile.toURL(), false);
++                getSettings(), ivyFile.toURL(), false);
+             PomModuleDescriptorWriter.write(md, 
+                 mappings.isEmpty() 
+                     ? PomModuleDescriptorWriter.DEFAULT_MAPPING
+diff --git a/src/java/org/apache/ivy/ant/IvyTask.java b/src/java/org/apache/ivy/ant/IvyTask.java
+index aff237ae4..d6edea395 100644
+--- a/src/java/org/apache/ivy/ant/IvyTask.java
++++ b/src/java/org/apache/ivy/ant/IvyTask.java
+@@ -249,7 +249,9 @@ protected String getProperty(IvySettings ivy, String name) {
+      * Called when task starts its execution.
+      */
+     protected void prepareTask() {
+-        // push current project on the stack in context
++        // push current project and Ivy on the stack in context
++        IvyContext.pushNewCopyContext();
++        IvyContext.getContext().setIvy(getIvyInstance());
+         IvyContext.getContext().push(ANT_PROJECT_CONTEXT_KEY, getProject());
+     }
+ 
+@@ -261,6 +263,7 @@ protected void finalizeTask() {
+         if (!IvyContext.getContext().pop(ANT_PROJECT_CONTEXT_KEY, getProject())) {
+             Message.error("ANT project poped from stack not equals current !. Ignoring");
+         }
++        IvyContext.popContext();
+     }
+ 
+     /**
+diff --git a/src/java/org/apache/ivy/core/IvyContext.java b/src/java/org/apache/ivy/core/IvyContext.java
+index c2ef4326e..de4a56688 100644
+--- a/src/java/org/apache/ivy/core/IvyContext.java
++++ b/src/java/org/apache/ivy/core/IvyContext.java
+@@ -31,6 +31,7 @@
+ import org.apache.ivy.core.resolve.ResolveData;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.circular.CircularDependencyStrategy;
++import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.MessageLogger;
+ 
+ /**
+@@ -346,7 +347,20 @@ public Thread getOperatingThread() {
+ 
+ 
+     public MessageLogger getMessageLogger() {
+-        return getIvy().getLoggerEngine();
++        // calling getIvy() instead of peekIvy() is not possible here: it will initialize a default
++        // Ivy instance, with default settings, but settings themselves may log messages and lead to
++        // a call to this method. So we use the current Ivy instance if any, or the default Ivy
++        // instance, or the default MessageLogger.
++        Ivy ivy = peekIvy();
++        if (ivy == null) {
++            if (defaultIvy == null) {
++                return Message.getDefaultLogger();
++            } else {
++                return defaultIvy.getLoggerEngine();
++            }
++        } else {
++            return ivy.getLoggerEngine();
++        }
+     }
+ 
+     public EventManager getEventManager() {
+diff --git a/src/java/org/apache/ivy/util/Message.java b/src/java/org/apache/ivy/util/Message.java
+index f63bec0c8..52b01c4c2 100644
+--- a/src/java/org/apache/ivy/util/Message.java
++++ b/src/java/org/apache/ivy/util/Message.java
+@@ -54,11 +54,20 @@ public final class Message {
+ 
+     private static MessageLogger defaultLogger = new DefaultMessageLogger(Message.MSG_INFO);
+ 
++    /**
++     * Returns the current default logger.
++     * @return the current default logger; is never <code>null</code>.
++     */
+     public static MessageLogger getDefaultLogger() {
+         return defaultLogger;
+     }
+ 
++    /**
++     * Change the default logger used when no other logger is currently configured
++     * @param logger the new default logger, must not be <code>null</code>
++     */
+     public static void setDefaultLogger(MessageLogger logger) {
++        Checks.checkNotNull(logger, "logger");
+         defaultLogger = logger;
+     }
+ 
+diff --git a/src/java/org/apache/ivy/util/MessageLoggerEngine.java b/src/java/org/apache/ivy/util/MessageLoggerEngine.java
+index 4e1481733..6b271adaa 100644
+--- a/src/java/org/apache/ivy/util/MessageLoggerEngine.java
++++ b/src/java/org/apache/ivy/util/MessageLoggerEngine.java
+@@ -36,7 +36,7 @@
+ public class MessageLoggerEngine implements MessageLogger {
+     private final Stack/*<MessageLogger>*/ loggerStack = new Stack();
+     
+-    private MessageLogger defaultLogger = Message.getDefaultLogger();
++    private MessageLogger defaultLogger = null;
+ 
+     private List problems = new ArrayList();
+ 
+@@ -87,11 +87,17 @@ public void popLogger() {
+      */
+     private MessageLogger peekLogger() {
+         if (loggerStack.isEmpty()) {
+-            return defaultLogger;
++            return getDefaultLogger();
+         }
+         return (MessageLogger) loggerStack.peek();
+     }
+ 
++    private MessageLogger getDefaultLogger() {
++        // we don't store the logger returned by Message.getDefaultLogger() to always stay in sync
++        // as long as our default logger has not been set explicitly with setDefaultLogger()
++        return defaultLogger == null ? Message.getDefaultLogger() : defaultLogger;
++    }
++
+     // consolidated methods
+     public void warn(String msg) {
+         peekLogger().warn(msg);
+@@ -123,7 +129,7 @@ public void sumupProblems() {
+     }
+     
+     public void clearProblems() {
+-        defaultLogger.clearProblems();
++        getDefaultLogger().clearProblems();
+         for (Iterator iter = loggerStack.iterator(); iter.hasNext();) {
+             MessageLogger l = (MessageLogger) iter.next();
+             l.clearProblems();
+@@ -134,7 +140,7 @@ public void clearProblems() {
+     }
+ 
+     public void setShowProgress(boolean progress) {
+-        defaultLogger.setShowProgress(progress);
++        getDefaultLogger().setShowProgress(progress);
+         // updates all loggers in the stack
+         for (Iterator iter = loggerStack.iterator(); iter.hasNext();) {
+             MessageLogger l = (MessageLogger) iter.next();
+@@ -144,7 +150,7 @@ public void setShowProgress(boolean progress) {
+     
+     public boolean isShowProgress() {
+         // testing the default logger is enough, all loggers should be in sync
+-        return defaultLogger.isShowProgress();
++        return getDefaultLogger().isShowProgress();
+     }
+ 
+     // delegation methods
+diff --git a/test/java/org/apache/ivy/plugins/circular/IgnoreCircularDependencyStrategyTest.java b/test/java/org/apache/ivy/plugins/circular/IgnoreCircularDependencyStrategyTest.java
+index e64af14db..aed0b67b6 100644
+--- a/test/java/org/apache/ivy/plugins/circular/IgnoreCircularDependencyStrategyTest.java
++++ b/test/java/org/apache/ivy/plugins/circular/IgnoreCircularDependencyStrategyTest.java
+@@ -20,7 +20,7 @@
+ import junit.framework.TestCase;
+ 
+ import org.apache.ivy.TestHelper;
+-import org.apache.ivy.core.IvyContext;
++import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.MockMessageLogger;
+ 
+ public class IgnoreCircularDependencyStrategyTest extends TestCase {
+@@ -31,7 +31,7 @@ protected void setUp() throws Exception {
+         strategy = IgnoreCircularDependencyStrategy.getInstance();
+         
+         mockMessageImpl = new MockMessageLogger();
+-        IvyContext.getContext().getIvy().getLoggerEngine().setDefaultLogger(mockMessageImpl);
++        Message.setDefaultLogger(mockMessageImpl);
+     }
+     
+     public void testLog() throws Exception {
+diff --git a/test/java/org/apache/ivy/plugins/circular/WarnCircularDependencyStrategyTest.java b/test/java/org/apache/ivy/plugins/circular/WarnCircularDependencyStrategyTest.java
+index b2b319036..0ca137bc5 100644
+--- a/test/java/org/apache/ivy/plugins/circular/WarnCircularDependencyStrategyTest.java
++++ b/test/java/org/apache/ivy/plugins/circular/WarnCircularDependencyStrategyTest.java
+@@ -27,6 +27,7 @@
+ import org.apache.ivy.core.resolve.ResolveOptions;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.core.sort.SortEngine;
++import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.MockMessageLogger;
+ 
+ public class WarnCircularDependencyStrategyTest extends TestCase {
+@@ -41,7 +42,7 @@ protected void setUp() throws Exception {
+ 
+     private void resetLogger() {
+         mockMessageImpl = new MockMessageLogger();
+-        IvyContext.getContext().getIvy().getLoggerEngine().setDefaultLogger(mockMessageImpl);
++        Message.setDefaultLogger(mockMessageImpl);
+     }
+     
+     public void testLog() throws Exception {

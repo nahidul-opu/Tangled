@@ -1,0 +1,281 @@
+From fc856fc14402b8eaa975691b1a09ccf42770f178 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sat, 31 Mar 2007 22:15:35 +0000
+Subject: [PATCH] FIX: IvyPostResolve Task doesn't reuse Ivy file of previous
+ resolve (IVY-458)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@524488 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../apache/ivy/ant/IvyPostResolveTask.java    |  10 +-
+ src/java/org/apache/ivy/ant/IvyResolve.java   |   4 +
+ .../apache/ivy/ant/IvyPostResolveTest.java    | 150 ++++++++++++++++++
+ .../java/org/apache/ivy/ant/ivy-multiconf.xml |  33 ++++
+ 5 files changed, 197 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/org/apache/ivy/ant/IvyPostResolveTest.java
+ create mode 100644 test/java/org/apache/ivy/ant/ivy-multiconf.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 0d90e421c..974fa77db 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -58,6 +58,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ - IMPROVE: Generated XML reports now contains more information about the resolved module (IVY-446)
+ 
++- FIX: IvyPostResolve Task doesn't reuse Ivy file of previous resolve (IVY-458)
+ - FIX: Ivy standalone is passing null args to main method when invoking with no args (IVY-457)
+ - FIX: Invalid error report with m2compatible resolver (IVY-456)
+ - FIX: IvyPostResolve Task doesn't use specified cache for the resolve (IVY-453)
+diff --git a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+index 866b6314c..977fd0ff9 100644
+--- a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
++++ b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+@@ -55,7 +55,7 @@ public abstract class IvyPostResolveTask extends IvyTask {
+     private String _resolveId;
+ 
+     private String _type;
+-    
++    private File _file;
+     
+     private Filter _artifactFilter = null;
+     private boolean useOrigin = false;
+@@ -80,6 +80,13 @@ protected void prepareAndCheck() {
+         if (_cache == null) {
+             _cache = settings.getDefaultCache();
+         }
++        
++        if (_file == null) {
++        	String fileName = getProperty(settings, "ivy.resolved.file", _resolveId);
++        	if (fileName != null) {
++        		_file = new File(fileName);
++        	}
++        }
+ 
+         if (isInline()) {
+         	_conf = _conf == null ? "*" : _conf;
+@@ -222,6 +229,7 @@ protected IvyResolve createResolve(boolean haltOnFailure, boolean useOrigin) {
+ 		resolve.setHaltonfailure(haltOnFailure);
+ 		resolve.setUseOrigin(useOrigin);
+ 		resolve.setValidate(isValidate());
++		resolve.setFile(_file);
+ 		return resolve;
+ 	}
+ 
+diff --git a/src/java/org/apache/ivy/ant/IvyResolve.java b/src/java/org/apache/ivy/ant/IvyResolve.java
+index 38e81a240..e1c61128e 100644
+--- a/src/java/org/apache/ivy/ant/IvyResolve.java
++++ b/src/java/org/apache/ivy/ant/IvyResolve.java
+@@ -207,6 +207,8 @@ public void execute() throws BuildException {
+ 	                getProject().setProperty("ivy.resolved.configurations", _conf);
+ 	                settings.setVariable("ivy.resolved.configurations", _conf);
+ 	            }
++	            getProject().setProperty("ivy.resolved.file", _file.getAbsolutePath());
++	            settings.setVariable("ivy.resolved.file", _file.getAbsolutePath());
+ 	            if (_resolveId != null) {
+ 		            getProject().setProperty("ivy.organisation." + _resolveId, md.getModuleRevisionId().getOrganisation());
+ 		            settings.setVariable("ivy.organisation." + _resolveId, md.getModuleRevisionId().getOrganisation());
+@@ -223,6 +225,8 @@ public void execute() throws BuildException {
+ 		                getProject().setProperty("ivy.resolved.configurations." + _resolveId, _conf);
+ 		                settings.setVariable("ivy.resolved.configurations." + _resolveId, _conf);
+ 		            }
++		            getProject().setProperty("ivy.resolved.file." + _resolveId, _file.getAbsolutePath());
++		            settings.setVariable("ivy.resolved.file." + _resolveId, _file.getAbsolutePath());
+ 	            }
+             }
+         } catch (MalformedURLException e) {
+diff --git a/test/java/org/apache/ivy/ant/IvyPostResolveTest.java b/test/java/org/apache/ivy/ant/IvyPostResolveTest.java
+new file mode 100644
+index 000000000..0335eda79
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/IvyPostResolveTest.java
+@@ -0,0 +1,150 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.ant;
++
++import java.io.File;
++
++import junit.framework.TestCase;
++
++import org.apache.ivy.TestHelper;
++import org.apache.ivy.core.report.ResolveReport;
++import org.apache.ivy.util.DefaultMessageImpl;
++import org.apache.ivy.util.Message;
++import org.apache.tools.ant.BuildException;
++import org.apache.tools.ant.Project;
++import org.apache.tools.ant.taskdefs.Delete;
++
++public class IvyPostResolveTest extends TestCase {
++    private File _cache;
++    private IvyPostResolveTask _task;
++    private Project _project;
++    
++    protected void setUp() throws Exception {
++    	Message.init(new DefaultMessageImpl(10));
++
++        createCache();
++        _project = new Project();
++        _project.setProperty("ivy.settings.file", "test/repositories/ivysettings.xml");
++
++        _task = new IvyPostResolveTask() {
++        	public void execute() throws BuildException {
++        		prepareAndCheck();
++        	}
++        };
++        _task.setProject(_project);
++        _task.setCache(_cache);
++    }
++
++    private void createCache() {
++        _cache = new File("build/cache");
++        _cache.mkdirs();
++    }
++    
++    protected void tearDown() throws Exception {
++        cleanCache();
++    }
++
++    private void cleanCache() {
++        Delete del = new Delete();
++        del.setProject(new Project());
++        del.setDir(_cache);
++        del.execute();
++    }
++
++    public void testWithPreviousResolveInSameBuildAndLessConfs() throws Exception {
++    	IvyResolve resolve = new IvyResolve();
++    	resolve.setProject(_project);
++    	resolve.setCache(_cache);
++    	resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-multiconf.xml"));
++    	resolve.setConf("default,compile");
++    	resolve.execute();
++
++    	ResolveReport reportBefore = (ResolveReport) _project.getReference("ivy.resolved.report");
++    
++    	_task.setConf("default");
++    	_task.execute();
++
++    	ResolveReport reportAfter = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	
++    	assertSame("IvyPostResolveTask has performed a resolve where it shouldn't", reportBefore, reportAfter);
++    }
++
++    public void testWithPreviousResolveInSameBuildAndSameConfs() throws Exception {
++    	IvyResolve resolve = new IvyResolve();
++    	resolve.setProject(_project);
++    	resolve.setCache(_cache);
++    	resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-multiconf.xml"));
++    	resolve.setConf("default");
++    	resolve.execute();
++
++    	ResolveReport reportBefore = (ResolveReport) _project.getReference("ivy.resolved.report");
++    
++    	_task.setConf("default");
++    	_task.execute();
++
++    	ResolveReport reportAfter = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	
++    	assertSame("IvyPostResolveTask has performed a resolve where it shouldn't", reportBefore, reportAfter);
++    }
++
++    public void testWithPreviousResolveInSameBuildAndWildcard() throws Exception {
++    	IvyResolve resolve = new IvyResolve();
++    	resolve.setProject(_project);
++    	resolve.setCache(_cache);
++    	resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-multiconf.xml"));
++    	resolve.setConf("*");
++    	resolve.execute();
++
++    	ResolveReport reportBefore = (ResolveReport) _project.getReference("ivy.resolved.report");
++    
++    	_task.setConf("default");
++    	_task.execute();
++
++    	ResolveReport reportAfter = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	
++    	assertSame("IvyPostResolveTask has performed a resolve where it shouldn't", reportBefore, reportAfter);
++    }
++
++    public void testWithPreviousResolveInSameBuildAndMoreConfs() throws Exception {
++    	IvyResolve resolve = new IvyResolve();
++    	resolve.setProject(_project);
++    	resolve.setCache(_cache);
++    	resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-multiconf.xml"));
++    	resolve.setConf("compile");
++    	resolve.execute();
++
++    	ResolveReport reportBefore = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	assertTrue(getArchiveFileInCache("org1", "mod1.1", "2.0", "mod1.1", "jar", "jar").exists());
++    	assertFalse(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++    
++    	_task.setConf("*");
++    	_task.execute();
++
++    	ResolveReport reportAfter = (ResolveReport) _project.getReference("ivy.resolved.report");
++    	
++    	assertNotSame("IvyPostResolveTask hasn't performed a resolve where it should have", reportBefore, reportAfter);
++    	assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++    }
++
++
++
++    private File getArchiveFileInCache(String organisation, String module, String revision, String artifact, String type, String ext) {
++		return TestHelper.getArchiveFileInCache(_task.getIvyInstance(), _cache, 
++				organisation, module, revision, artifact, type, ext);
++	}
++}
+diff --git a/test/java/org/apache/ivy/ant/ivy-multiconf.xml b/test/java/org/apache/ivy/ant/ivy-multiconf.xml
+new file mode 100644
+index 000000000..74870b7d6
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/ivy-multiconf.xml
+@@ -0,0 +1,33 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0"> 
++	<info organisation="apache"
++	       module="resolve-simple"
++	       revision="1.0"
++	       status="release"
++	/>
++	<configurations>
++		<conf name="default" />
++		<conf name="compile" />
++	</configurations>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0" conf="default" />
++		<dependency org="org1" name="mod1.1" rev="2.0" conf="compile->default" transitive="false" />
++	</dependencies>
++</ivy-module>

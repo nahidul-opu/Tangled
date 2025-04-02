@@ -1,0 +1,162 @@
+From 7126e673ceb6ff1fbac0ad53f82b268685cee9ff Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 8 Mar 2007 11:14:01 +0000
+Subject: [PATCH] FIX: NPE when no organisation or no name is provided in
+ module element of ivyconf (IVY-422)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@516010 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  3 ++-
+ .../apache/ivy/core/module/id/ModuleId.java   |  8 +++++--
+ .../ivy/core/settings/XmlSettingsParser.java  | 10 +++++++-
+ .../ivy/plugins/matcher/ModuleIdMatcher.java  |  5 +++-
+ .../core/settings/XmlSettingsParserTest.java  | 24 +++++++++++++++++++
+ .../settings/ivyconf-no-name-in-module.xml    |  5 ++++
+ .../settings/ivyconf-no-org-in-module.xml     |  5 ++++
+ 7 files changed, 55 insertions(+), 5 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/settings/ivyconf-no-name-in-module.xml
+ create mode 100644 test/java/org/apache/ivy/core/settings/ivyconf-no-org-in-module.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 092803d3e..c9ce3f049 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -16,7 +16,8 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - IMPROVE: Add a unit test to verify that latest.integration accepts released modules (IVY-394) (thanks to Gilles Scokart)
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ 
+-- FIX:  FileUtil#copy(File src, File dest, CopyProgressListener l, boolean overwrite) (IVY-420)
++- FIX: NPE when no organisation or no name is provided in module element of ivyconf (IVY-422)
++- FIX: FileUtil#copy(File src, File dest, CopyProgressListener l, boolean overwrite) (IVY-420)
+ - FIX: Ivy doesn't recognize maven2 classifiers (IVY-418)
+ - FIX: Static revision replacement is not working when delivering an artifact with a dependency having extra attributes (IVY-415)
+ - FIX: Static revision replacement is not working when delivering an artifact with a dependency on a branch (IVY-404)
+diff --git a/src/java/org/apache/ivy/core/module/id/ModuleId.java b/src/java/org/apache/ivy/core/module/id/ModuleId.java
+index eea7d3508..fc60cb288 100644
+--- a/src/java/org/apache/ivy/core/module/id/ModuleId.java
++++ b/src/java/org/apache/ivy/core/module/id/ModuleId.java
+@@ -49,14 +49,18 @@ public boolean equals(Object obj) {
+             return false;
+         }
+         ModuleId other = (ModuleId)obj;
+-        return other._organisation.equals(_organisation) && other._name.equals(_name);
++        if (other._organisation == null) {
++        	return _organisation == null && other._name.equals(_name);
++        } else {
++        	return other._organisation.equals(_organisation) && other._name.equals(_name);
++        }
+     }
+     public int hashCode() {
+         return _hash;
+     }
+     public int _hashCode() {
+         int hash = 31;
+-        hash = hash * 13 + _organisation.hashCode();
++        hash = hash * 13 + (_organisation == null ? 0 : _organisation.hashCode());
+         hash = hash * 13 + _name.hashCode();
+         return hash;
+     }
+diff --git a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+index e6b627bcb..e7a43ad9f 100644
+--- a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
++++ b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+@@ -296,10 +296,18 @@ public void startElement(String uri, String localName, String qName, Attributes
+                 String cm = _ivy.substitute((String)attributes.get("conflict-manager"));
+                 String matcher = _ivy.substitute((String)attributes.get("matcher"));
+                 matcher = matcher == null ? PatternMatcher.EXACT_OR_REGEXP : matcher;
++                if (organisation == null) {
++                    throw new IllegalArgumentException("'organisation' is mandatory in module element: check your configuration");
++                }
++                if (module == null) {
++                    throw new IllegalArgumentException("'name' is mandatory in module element: check your configuration");
++                }
+                 _ivy.addModuleConfiguration(new ModuleId(organisation, module), _ivy.getMatcher(matcher), resolver, branch, cm);
+             }
+-        } catch (Exception ex) {
++        } catch (ParseException ex) {
+             throw new SAXException("problem in config file: "+ex.getMessage(), ex);
++        } catch (IOException ex) {
++            throw new SAXException("io problem while parsing config file: "+ex.getMessage(), ex);
+         }
+     }
+ 
+diff --git a/src/java/org/apache/ivy/plugins/matcher/ModuleIdMatcher.java b/src/java/org/apache/ivy/plugins/matcher/ModuleIdMatcher.java
+index 43addddb4..d3cfb8ca5 100644
+--- a/src/java/org/apache/ivy/plugins/matcher/ModuleIdMatcher.java
++++ b/src/java/org/apache/ivy/plugins/matcher/ModuleIdMatcher.java
+@@ -29,7 +29,10 @@ public class ModuleIdMatcher {
+     public ModuleIdMatcher(ModuleId mid, PatternMatcher pm) {
+         _mid = mid;
+         _pm = pm;
+-        _orgMatcher = pm.getMatcher(mid.getOrganisation());
++        _orgMatcher = pm.getMatcher(
++        		mid.getOrganisation()==null?
++        				PatternMatcher.ANY_EXPRESSION
++        				:mid.getOrganisation());
+         _moduleMatcher = pm.getMatcher(mid.getName());
+     }
+     
+diff --git a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+index 6c59acb8c..7f06f34d0 100644
+--- a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
++++ b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+@@ -18,6 +18,8 @@
+ package org.apache.ivy.core.settings;
+ 
+ import java.io.File;
++import java.io.IOException;
++import java.text.ParseException;
+ import java.util.List;
+ 
+ import junit.framework.TestCase;
+@@ -100,6 +102,28 @@ public void test() throws Exception {
+         assertEquals("int1", settings.getResolver(new ModuleId("apache", "ivy")).getName());
+         assertEquals("int1", settings.getResolver(new ModuleId("apache", "ivyde")).getName());        
+     }
++    
++    public void testNoOrgInModule() throws Exception {
++        IvySettings settings = new IvySettings();
++        XmlSettingsParser parser = new XmlSettingsParser(settings);
++        try {
++			parser.parse(XmlSettingsParserTest.class.getResource("ivyconf-no-org-in-module.xml"));
++			fail("no organisation in module is supposed to raise an exception");
++		} catch (ParseException e) {
++			assertTrue("bad exception message: "+e.getMessage(), e.getMessage().indexOf("'organisation'") != -1);
++		}
++    }
++
++    public void testNoNameInModule() throws Exception {
++        IvySettings settings = new IvySettings();
++        XmlSettingsParser parser = new XmlSettingsParser(settings);
++        try {
++			parser.parse(XmlSettingsParserTest.class.getResource("ivyconf-no-name-in-module.xml"));
++			fail("no name in module is supposed to raise an exception");
++		} catch (ParseException e) {
++			assertTrue("bad exception message: "+e.getMessage(), e.getMessage().indexOf("'name'") != -1);
++		}
++    }
+ 
+     public void testTypedef() throws Exception {
+     	IvySettings settings = new IvySettings();
+diff --git a/test/java/org/apache/ivy/core/settings/ivyconf-no-name-in-module.xml b/test/java/org/apache/ivy/core/settings/ivyconf-no-name-in-module.xml
+new file mode 100644
+index 000000000..e57fdbbb4
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/settings/ivyconf-no-name-in-module.xml
+@@ -0,0 +1,5 @@
++<ivyconf>
++	<modules>
++		<module organisation=".*" branch="internal"/>
++	</modules>
++</ivyconf>
+diff --git a/test/java/org/apache/ivy/core/settings/ivyconf-no-org-in-module.xml b/test/java/org/apache/ivy/core/settings/ivyconf-no-org-in-module.xml
+new file mode 100644
+index 000000000..08b1681c4
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/settings/ivyconf-no-org-in-module.xml
+@@ -0,0 +1,5 @@
++<ivyconf>
++	<modules>
++		<module name=".*" branch="internal"/>
++	</modules>
++</ivyconf>

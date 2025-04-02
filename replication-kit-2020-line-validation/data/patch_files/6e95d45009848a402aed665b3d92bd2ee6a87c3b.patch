@@ -1,0 +1,76 @@
+From 6e95d45009848a402aed665b3d92bd2ee6a87c3b Mon Sep 17 00:00:00 2001
+From: Ryan Blue <blue@apache.org>
+Date: Thu, 8 Sep 2016 14:22:30 -0700
+Subject: [PATCH] PARQUET-623: Fix DeltaByteArrayReader#skip.
+
+Previously, this passed the skip to the underlying readers, but would
+not update previous and would corrupt values or cause exceptions.
+
+Author: Ryan Blue <blue@apache.org>
+
+Closes #366 from rdblue/PARQUET-623-fix-delta-byte-array-skip and squashes the following commits:
+
+f85800c [Ryan Blue] PARQUET-623: Fix DeltaByteArrayReader#skip.
+---
+ .../deltastrings/DeltaByteArrayReader.java     |  4 ++--
+ .../deltastrings/TestDeltaByteArray.java       | 18 ++++++++++++++++++
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/parquet-column/src/main/java/org/apache/parquet/column/values/deltastrings/DeltaByteArrayReader.java b/parquet-column/src/main/java/org/apache/parquet/column/values/deltastrings/DeltaByteArrayReader.java
+index 87ec08e2e8..14fa1eeab6 100644
+--- a/parquet-column/src/main/java/org/apache/parquet/column/values/deltastrings/DeltaByteArrayReader.java
++++ b/parquet-column/src/main/java/org/apache/parquet/column/values/deltastrings/DeltaByteArrayReader.java
+@@ -54,8 +54,8 @@ public void initFromPage(int valueCount, byte[] page, int offset)
+ 
+   @Override
+   public void skip() {
+-    prefixLengthReader.skip();
+-    suffixReader.skip();
++    // read the next value to skip so that previous is correct.
++    readBytes();
+   }
+ 
+   @Override
+diff --git a/parquet-column/src/test/java/org/apache/parquet/column/values/deltastrings/TestDeltaByteArray.java b/parquet-column/src/test/java/org/apache/parquet/column/values/deltastrings/TestDeltaByteArray.java
+index b62ef8447f..263fce457d 100644
+--- a/parquet-column/src/test/java/org/apache/parquet/column/values/deltastrings/TestDeltaByteArray.java
++++ b/parquet-column/src/test/java/org/apache/parquet/column/values/deltastrings/TestDeltaByteArray.java
+@@ -19,6 +19,7 @@
+ package org.apache.parquet.column.values.deltastrings;
+ 
+ import java.io.IOException;
++import java.nio.ByteBuffer;
+ 
+ import org.junit.Test;
+ import org.junit.Assert;
+@@ -48,6 +49,13 @@ public void testRandomStrings() throws Exception {
+     assertReadWrite(writer, reader, randvalues);
+   }
+ 
++  @Test
++  public void testRandomStringsWithSkip() throws Exception {
++    DeltaByteArrayWriter writer = new DeltaByteArrayWriter(64 * 1024, 64 * 1024);
++    DeltaByteArrayReader reader = new DeltaByteArrayReader();
++    assertReadWriteWithSkip(writer, reader, randvalues);
++  }
++
+   @Test
+   public void testLengths() throws IOException {
+     DeltaByteArrayWriter writer = new DeltaByteArrayWriter(64 * 1024, 64 * 1024);
+@@ -80,6 +88,16 @@ private void assertReadWrite(DeltaByteArrayWriter writer, DeltaByteArrayReader r
+     }
+   }
+ 
++  private void assertReadWriteWithSkip(DeltaByteArrayWriter writer, DeltaByteArrayReader reader, String[] vals) throws Exception {
++    Utils.writeData(writer, vals);
++
++    reader.initFromPage(vals.length, writer.getBytes().toByteArray(), 0);
++    for (int i = 0; i < vals.length; i += 2) {
++      Assert.assertEquals(Binary.fromString(vals[i]), reader.readBytes());
++      reader.skip();
++    }
++  }
++
+   @Test
+   public void testWriterReset() throws Exception {
+     DeltaByteArrayWriter writer = new DeltaByteArrayWriter(64 * 1024, 64 * 1024);

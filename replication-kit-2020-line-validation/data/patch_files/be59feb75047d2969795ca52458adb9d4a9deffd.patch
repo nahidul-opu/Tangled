@@ -1,0 +1,300 @@
+From be59feb75047d2969795ca52458adb9d4a9deffd Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Wed, 21 Jun 2017 12:42:00 +0000
+Subject: [PATCH] JCS-178: Clients using RemoteCache are not working. Add a
+ test. Add new constructors with better parametrization, deprecate the old
+ ones
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1799432 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../AbstractRemoteCacheNoWaitFacade.java      | 37 ++++++++++--
+ .../jcs/auxiliary/remote/RemoteCache.java     | 10 ++++
+ .../auxiliary/remote/RemoteCacheFactory.java  | 11 ++--
+ .../remote/RemoteCacheNoWaitFacade.java       | 27 +++++++--
+ .../RemoteCacheNoWaitFacadeUnitTest.java      | 56 +++++++++++++++++++
+ src/changes/changes.xml                       |  3 +
+ 6 files changed, 129 insertions(+), 15 deletions(-)
+ create mode 100644 commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacadeUnitTest.java
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/AbstractRemoteCacheNoWaitFacade.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/AbstractRemoteCacheNoWaitFacade.java
+index 98cdf21ba..30ae72c6f 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/AbstractRemoteCacheNoWaitFacade.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/AbstractRemoteCacheNoWaitFacade.java
+@@ -55,6 +55,32 @@ public abstract class AbstractRemoteCacheNoWaitFacade<K, V>
+     /** holds failover and cluster information */
+     private IRemoteCacheAttributes remoteCacheAttributes;
+ 
++    /**
++     * Constructs with the given remote cache, and fires events to any listeners.
++     * <p>
++     * @param noWaits
++     * @param rca
++     * @param cacheEventLogger
++     * @param elementSerializer
++     */
++    public AbstractRemoteCacheNoWaitFacade( List<RemoteCacheNoWait<K,V>> noWaits, IRemoteCacheAttributes rca,
++                                    ICacheEventLogger cacheEventLogger, IElementSerializer elementSerializer )
++    {
++        if ( log.isDebugEnabled() )
++        {
++            log.debug( "CONSTRUCTING NO WAIT FACADE" );
++        }
++        this.remoteCacheAttributes = rca;
++        setCacheEventLogger( cacheEventLogger );
++        setElementSerializer( elementSerializer );
++        this.noWaits = new ArrayList<RemoteCacheNoWait<K,V>>(noWaits);
++        for (RemoteCacheNoWait<K,V> nw : this.noWaits)
++        {
++            // FIXME: This cast is very brave. Remove this.
++            ((RemoteCache<K, V>)nw.getRemoteCache()).setFacade(this);
++        }
++    }
++
+     /**
+      * Constructs with the given remote cache, and fires events to any listeners.
+      * <p>
+@@ -63,7 +89,9 @@ public abstract class AbstractRemoteCacheNoWaitFacade<K, V>
+      * @param cacheMgr
+      * @param cacheEventLogger
+      * @param elementSerializer
++     * @deprecated Unused parameter cacheMgr scheduled for removal
+      */
++    @Deprecated
+     public AbstractRemoteCacheNoWaitFacade( List<ICache<K, V>> noWaits, RemoteCacheAttributes rca,
+                                     ICompositeCacheManager cacheMgr, ICacheEventLogger cacheEventLogger,
+                                     IElementSerializer elementSerializer )
+@@ -72,15 +100,16 @@ public AbstractRemoteCacheNoWaitFacade( List<ICache<K, V>> noWaits, RemoteCacheA
+         {
+             log.debug( "CONSTRUCTING NO WAIT FACADE" );
+         }
++        this.remoteCacheAttributes = rca;
++        setCacheEventLogger( cacheEventLogger );
++        setElementSerializer( elementSerializer );
+         this.noWaits = new ArrayList<RemoteCacheNoWait<K,V>>();
+         for (ICache<K, V> nw : noWaits)
+         {
+-            RemoteCacheNoWait<K,V> rcnw = (RemoteCacheNoWait<K,V>) nw;
++            RemoteCacheNoWait<K,V> rcnw = (RemoteCacheNoWait<K,V>)nw;
++            ((RemoteCache<K, V>)rcnw.getRemoteCache()).setFacade(this);
+             this.noWaits.add(rcnw);
+         }
+-        this.remoteCacheAttributes = rca;
+-        setCacheEventLogger( cacheEventLogger );
+-        setElementSerializer( elementSerializer );
+     }
+ 
+     /**
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCache.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCache.java
+index 128d188a1..ec0a26967 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCache.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCache.java
+@@ -112,6 +112,16 @@ protected void setFacade(AbstractRemoteCacheNoWaitFacade<K, V> facade)
+         this.facade = facade;
+     }
+ 
++    /**
++     * Get facade
++     *
++     * @return the facade
++     */
++    protected AbstractRemoteCacheNoWaitFacade<K, V> getFacade()
++    {
++        return facade;
++    }
++
+     /**
+      * Handles exception by disabling the remote cache service before re-throwing the exception in
+      * the form of an IOException.
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheFactory.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheFactory.java
+index a7b558125..3c1ef01dc 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheFactory.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheFactory.java
+@@ -32,7 +32,6 @@
+ import org.apache.commons.jcs.auxiliary.AuxiliaryCacheAttributes;
+ import org.apache.commons.jcs.auxiliary.remote.behavior.IRemoteCacheAttributes;
+ import org.apache.commons.jcs.auxiliary.remote.server.behavior.RemoteType;
+-import org.apache.commons.jcs.engine.behavior.ICache;
+ import org.apache.commons.jcs.engine.behavior.ICompositeCacheManager;
+ import org.apache.commons.jcs.engine.behavior.IElementSerializer;
+ import org.apache.commons.jcs.engine.logging.behavior.ICacheEventLogger;
+@@ -75,7 +74,7 @@ public <K, V> AuxiliaryCache<K, V> createCache(
+     {
+         RemoteCacheAttributes rca = (RemoteCacheAttributes) iaca;
+ 
+-        ArrayList<ICache<K, V>> noWaits = new ArrayList<ICache<K, V>>();
++        ArrayList<RemoteCacheNoWait<K,V>> noWaits = new ArrayList<RemoteCacheNoWait<K,V>>();
+ 
+         switch (rca.getRemoteType())
+         {
+@@ -93,7 +92,7 @@ public <K, V> AuxiliaryCache<K, V> createCache(
+ 
+                     failovers.add( rca.getRemoteLocation() );
+                     RemoteCacheManager rcm = getManager( rca, cacheMgr, cacheEventLogger, elementSerializer );
+-                    ICache<K, V> ic = rcm.getCache( rca );
++                    RemoteCacheNoWait<K,V> ic = rcm.getCache( rca );
+                     noWaits.add( ic );
+                 }
+ 
+@@ -120,7 +119,7 @@ public <K, V> AuxiliaryCache<K, V> createCache(
+                             // number it is at
+                             if ( ( !primaryDefined && fCnt == 1 ) || noWaits.size() <= 0 )
+                             {
+-                                ICache<K, V> ic = rcm.getCache( rca );
++                                RemoteCacheNoWait<K,V> ic = rcm.getCache( rca );
+                                 noWaits.add( ic );
+                             }
+                         }
+@@ -145,7 +144,7 @@ public <K, V> AuxiliaryCache<K, V> createCache(
+                         rca.setRemoteLocation(location);
+                         RemoteCacheManager rcm = getManager( rca, cacheMgr, cacheEventLogger, elementSerializer );
+                         rca.setRemoteType( RemoteType.CLUSTER );
+-                        ICache<K, V> ic = rcm.getCache( rca );
++                        RemoteCacheNoWait<K,V> ic = rcm.getCache( rca );
+                         noWaits.add( ic );
+                     }
+                 }
+@@ -153,7 +152,7 @@ public <K, V> AuxiliaryCache<K, V> createCache(
+         }
+ 
+         RemoteCacheNoWaitFacade<K, V> rcnwf =
+-            new RemoteCacheNoWaitFacade<K, V>(noWaits, rca, cacheMgr, cacheEventLogger, elementSerializer, this );
++            new RemoteCacheNoWaitFacade<K, V>(noWaits, rca, cacheEventLogger, elementSerializer, this );
+ 
+         return rcnwf;
+     }
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java
+index 0fc8b8017..eb88eedc0 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacade.java
+@@ -21,6 +21,7 @@
+ 
+ import java.util.List;
+ 
++import org.apache.commons.jcs.auxiliary.remote.behavior.IRemoteCacheAttributes;
+ import org.apache.commons.jcs.auxiliary.remote.server.behavior.RemoteType;
+ import org.apache.commons.jcs.engine.CacheStatus;
+ import org.apache.commons.jcs.engine.behavior.ICache;
+@@ -47,6 +48,25 @@ public class RemoteCacheNoWaitFacade<K, V>
+     /** Provide factory instance to RemoteCacheFailoverRunner */
+     private final RemoteCacheFactory cacheFactory;
+ 
++    /**
++     * Constructs with the given remote cache, and fires events to any listeners.
++     * <p>
++     * @param noWaits
++     * @param rca
++     * @param cacheEventLogger
++     * @param elementSerializer
++     * @param cacheFactory
++     */
++    public RemoteCacheNoWaitFacade( List<RemoteCacheNoWait<K,V>> noWaits,
++                                    IRemoteCacheAttributes rca,
++                                    ICacheEventLogger cacheEventLogger,
++                                    IElementSerializer elementSerializer,
++                                    RemoteCacheFactory cacheFactory)
++    {
++        super( noWaits, rca, cacheEventLogger, elementSerializer );
++        this.cacheFactory = cacheFactory;
++    }
++
+     /**
+      * Constructs with the given remote cache, and fires events to any listeners.
+      * <p>
+@@ -56,7 +76,9 @@ public class RemoteCacheNoWaitFacade<K, V>
+      * @param cacheEventLogger
+      * @param elementSerializer
+      * @param cacheFactory
++     * @deprecated Unused parameter cacheMgr scheduled for removal
+      */
++    @Deprecated
+     public RemoteCacheNoWaitFacade( List<ICache<K, V>> noWaits,
+                                     RemoteCacheAttributes rca,
+                                     ICompositeCacheManager cacheMgr,
+@@ -66,11 +88,6 @@ public RemoteCacheNoWaitFacade( List<ICache<K, V>> noWaits,
+     {
+         super( noWaits, rca, cacheMgr, cacheEventLogger, elementSerializer );
+         this.cacheFactory = cacheFactory;
+-
+-        for (RemoteCacheNoWait<K,V> rcnw : this.noWaits)
+-        {
+-            ((RemoteCache<K, V>)rcnw.getRemoteCache()).setFacade(this);
+-        }
+     }
+ 
+     /**
+diff --git a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacadeUnitTest.java b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacadeUnitTest.java
+new file mode 100644
+index 000000000..afbeef2d1
+--- /dev/null
++++ b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/RemoteCacheNoWaitFacadeUnitTest.java
+@@ -0,0 +1,56 @@
++package org.apache.commons.jcs.auxiliary.remote;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import org.apache.commons.jcs.auxiliary.remote.behavior.IRemoteCacheAttributes;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import junit.framework.TestCase;
++
++/**
++ * Tests for RemoteCacheNoWaitFacade.
++ */
++public class RemoteCacheNoWaitFacadeUnitTest
++    extends TestCase
++{
++    /**
++     * Verify that we can add an item.
++     */
++    public void testAddNoWait_InList()
++    {
++        // SETUP
++        List<RemoteCacheNoWait<String, String>> noWaits = new ArrayList<RemoteCacheNoWait<String,String>>();
++        IRemoteCacheAttributes cattr = new RemoteCacheAttributes();
++        cattr.setCacheName( "testCache1" );
++
++        RemoteCache<String, String> client = new RemoteCache<String, String>(cattr, null, null, null);
++        RemoteCacheNoWait<String, String> noWait = new RemoteCacheNoWait<String, String>( client );
++        noWaits.add( noWait );
++
++        RemoteCacheNoWaitFacade<String, String> facade = new RemoteCacheNoWaitFacade<String, String>(noWaits, cattr, null, null, null );
++        
++        // VERIFY
++        assertEquals( "Should have one entry.", 1, facade.noWaits.size() );
++        assertTrue( "Should be in the list.", facade.noWaits.contains( noWait ) );
++        assertSame( "Should have same facade.", facade, ((RemoteCache<String, String>)facade.noWaits.get(0).getRemoteCache()).getFacade() );
++    }
++}
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 1770127cc..23f7dff41 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,9 @@
+ 	</properties>
+ 	<body>
+         <release version="2.2" date="unreleased">
++            <action issue="JCS-178" dev="tv" type="fix">
++                Clients using RemoteCache are not working. Add a test. 
++            </action>
+             <action dev="tv" type="add">
+                 Add a shutdown() method to JCS
+             </action>

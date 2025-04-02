@@ -1,0 +1,138 @@
+From 08cf1d1fb517d9778fed6e1857a2b71df5c368be Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 26 May 2009 15:17:04 +0000
+Subject: [PATCH] FIX: transitive dependencies and conflict management
+ (IVY-1083)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@778742 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/resolve/IvyNode.java  | 26 +++++++++++++++++++
+ .../apache/ivy/core/resolve/IvyNodeUsage.java | 20 ++++++++++++++
+ .../apache/ivy/core/resolve/VisitNode.java    |  4 ++-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 20 ++++++++++++++
+ 5 files changed, 70 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index ffd259905..eae5e5110 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -91,6 +91,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Wrong BuildException messages (findmodules) (IVY-1056)
+ - FIX: PomModuleDescriptorBuilder does not resolve ejb type dependencies to jar extension (IVY-1058) (thanks to Andrey Lomakin)
+ - FIX: Ivy doesn't handle maven dependencies with type 'test-jar' correctly (IVY-1066)
++- FIX: transitive dependencies and conflict management (IVY-1083)
+ 	
+    2.1.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 29cf1bbf4..9c904e57f 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -1265,4 +1265,30 @@ public IvyNodeUsage getMainUsage() {
+         return usage;
+     }
+ 
++    /**
++     * Indicates if there is any of the merged usages of this node which has a depender with
++     * transitive dependency descriptor.
++     * <p>
++     * If at there is at least one usage from the merged usages for which there is a depender in the
++     * given root module conf which has a dependency descriptor with transitive == true, then it
++     * returns true. Otherwise it returns false.
++     * </p>
++     * 
++     * @param rootModuleConf
++     *            the root module configuration to consider
++     * @return true if there is any merged usage with transitive dd, false otherwise.
++     */
++    public boolean hasAnyMergedUsageWithTransitiveDependency(String rootModuleConf) {
++        if (mergedUsages == null) {
++            return false;
++        }
++        for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
++            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++            if (usage.hasTransitiveDepender(rootModuleConf)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+ }
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+index aff5843cd..c00106b7b 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+@@ -299,5 +299,25 @@ protected IvyNodeBlacklist getBlacklistData(String rootModuleConf) {
+     protected IvyNode getNode() {
+         return node;
+     }
++
++    /**
++     * Indicates if at least one depender has a transitive dependency descriptor for the given root
++     * module conf.
++     * 
++     * @param rootModuleConf
++     *            the root module conf to consider
++     * @return <code>true</code> if at least one depender has a transitive dependency descriptor for
++     *         the given root module conf, <code>false</code> otherwise.
++     */
++    public boolean hasTransitiveDepender(String rootModuleConf) {
++        Set/*<Depender>*/ dependersSet = (Set) dependers.get(rootModuleConf);
++        for (Iterator iterator = dependersSet.iterator(); iterator.hasNext();) {
++            Depender depender = (Depender) iterator.next();
++            if (depender.dd.isTransitive()) {
++                return true;
++            }
++        }
++        return false;
++    }
+     
+ }
+diff --git a/src/java/org/apache/ivy/core/resolve/VisitNode.java b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+index 6e2d11d53..3937414d2 100644
+--- a/src/java/org/apache/ivy/core/resolve/VisitNode.java
++++ b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+@@ -216,7 +216,9 @@ public static VisitNode getRoot(VisitNode parent) {
+      */
+     public boolean isTransitive() {
+         return (data.isTransitive() 
+-                && node.getDependencyDescriptor(getParentNode()).isTransitive() 
++                && (
++                        node.getDependencyDescriptor(getParentNode()).isTransitive() 
++                     || node.hasAnyMergedUsageWithTransitiveDependency(rootModuleConf))
+                 && isParentConfTransitive());
+     }
+ 
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index aec1ee20b..6d8aaae31 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -1992,6 +1992,26 @@ public void testResolveConflict3() throws Exception {
+             "commons-lang", "jar", "jar").exists());
+     }
+ 
++    public void testResolveMergeTransitiveAfterConflict() throws Exception {
++        // mod20.4 ->  mod20.3;1.0 mod20.2;1.0
++        // mod20.3;1.0 -> mod20.1;1.0
++        // mod20.2;1.0 -> mod20.1;1.1 (transitive false)
++        // mod20.1;1.0 -> mod1.2;1.0
++        // mod20.1;1.1 -> mod1.2;1.0
++        ResolveReport report = ivy.resolve(new File("test/repositories/1/org20/mod20.4/ivys/ivy-1.0.xml")
++                .toURL(), getResolveOptions(new String[] {"*"}));
++
++        // dependencies
++        ConfigurationResolveReport crr = report.getConfigurationReport("default");
++        assertNotNull(crr);
++        assertEquals(1, crr.getDownloadReports(ModuleRevisionId
++                .newInstance("org1", "mod1.2", "1.0")).length);
++
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org1", "mod1.2", "1.0")).exists());
++        assertTrue(getArchiveFileInCache("org1", "mod1.2", "1.0", "mod1.2", "jar", "jar").exists());
++    }
++
+     /**
+      * Test IVY-618. 
+      */

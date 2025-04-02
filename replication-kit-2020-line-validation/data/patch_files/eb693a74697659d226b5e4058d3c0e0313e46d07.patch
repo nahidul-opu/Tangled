@@ -1,0 +1,123 @@
+From eb693a74697659d226b5e4058d3c0e0313e46d07 Mon Sep 17 00:00:00 2001
+From: Thomas Neidhart <tn@apache.org>
+Date: Sat, 7 Nov 2015 21:17:00 +0000
+Subject: [PATCH] Backport COLLECTIONS-294 to 3.2.2.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/collections/branches/COLLECTIONS_3_2_X@1713181 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  8 +++---
+ .../collections/map/CaseInsensitiveMap.java   | 16 +++++++----
+ .../map/TestCaseInsensitiveMap.java           | 28 ++++++++++++++++++-
+ 3 files changed, 41 insertions(+), 11 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 8695e33590..66cee6864d 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -29,6 +29,10 @@
+     <action issue="COLLECTIONS-335" dev="jochen" type="fix" due-to="sebb">
+       Fixed cache assignment for "TreeBidiMap#entrySet".
+     </action>
++    <action issue="COLLECTIONS-294" dev="bayard" type="fix" due-to="Benjamin Bentmann">
++      "CaseInsensitiveMap" will now convert input strings to lower-case in a
++      locale-independent manner.
++    </action>
+     <action issue="COLLECTIONS-266" dev="bayard" type="fix" due-to="Joerg Schaible">
+       "MultiKey" will now be correctly serialized/de-serialized.
+     </action>
+@@ -71,10 +75,6 @@
+     <action issue="COLLECTIONS-304" dev="bayard" type="fix" due-to="Rafał Figas,Bjorn Townsend">
+       "SetUniqueList#set(int, Object)" will now correctly enforce the uniqueness constraint.
+     </action>
+-    <action issue="COLLECTIONS-294" dev="bayard" type="fix" due-to="Benjamin Bentmann">
+-      "CaseInsensitiveMap" will now convert input strings to lower-case in a
+-      locale-independant manner.
+-    </action>
+     <action issue="COLLECTIONS-261" dev="bayard" type="fix" due-to="ori">
+       "Flat3Map#remove(Object)" will now return the correct value mapped to the removed key
+       if the size of the map is less or equal 3.
+diff --git a/src/java/org/apache/commons/collections/map/CaseInsensitiveMap.java b/src/java/org/apache/commons/collections/map/CaseInsensitiveMap.java
+index ba9650d5fb..237c05af6f 100644
+--- a/src/java/org/apache/commons/collections/map/CaseInsensitiveMap.java
++++ b/src/java/org/apache/commons/collections/map/CaseInsensitiveMap.java
+@@ -25,9 +25,9 @@
+ /**
+  * A case-insensitive <code>Map</code>.
+  * <p>
+- * As entries are added to the map, keys are converted to all lowercase. A new 
+- * key is compared to existing keys by comparing <code>newKey.toString().toLower()</code>
+- * to the lowercase values in the current <code>KeySet.</code>
++ * Before keys are added to the map or compared to other existing keys, they are converted
++ * to all lowercase in a locale-independent fashion by using information from the Unicode
++ * data file.
+  * <p>
+  * Null keys are supported.  
+  * <p>
+@@ -111,14 +111,18 @@ public CaseInsensitiveMap(Map map) {
+      * Overrides convertKey() from {@link AbstractHashedMap} to convert keys to 
+      * lower case.
+      * <p>
+-     * Returns null if key is null.
+-     * 
++     * Returns {@link AbstractHashedMap#NULL} if key is null.
++     *
+      * @param key  the key convert
+      * @return the converted key
+      */
+     protected Object convertKey(Object key) {
+         if (key != null) {
+-            return key.toString().toLowerCase();
++            char[] chars = key.toString().toCharArray();
++            for (int i = chars.length - 1; i >= 0; i--) {
++                chars[i] = Character.toLowerCase(Character.toUpperCase(chars[i]));
++            }
++            return new String(chars);
+         } else {
+             return AbstractHashedMap.NULL;
+         }
+diff --git a/src/test/org/apache/commons/collections/map/TestCaseInsensitiveMap.java b/src/test/org/apache/commons/collections/map/TestCaseInsensitiveMap.java
+index b3f27a5ee9..0b7266e75c 100644
+--- a/src/test/org/apache/commons/collections/map/TestCaseInsensitiveMap.java
++++ b/src/test/org/apache/commons/collections/map/TestCaseInsensitiveMap.java
+@@ -17,6 +17,7 @@
+ package org.apache.commons.collections.map;
+ 
+ import java.util.HashMap;
++import java.util.Locale;
+ import java.util.Map;
+ import java.util.Set;
+ 
+@@ -108,7 +109,32 @@ public void testClone() {
+         assertEquals(map.size(), cloned.size());
+         assertSame(map.get("1"), cloned.get("1"));
+     }
+-    
++
++    // COLLECTIONS-294
++    public void testLocaleIndependence() {
++        Locale orig = Locale.getDefault();
++        Locale[] locales = { Locale.ENGLISH, new Locale("tr"), Locale.getDefault() };
++        String[][] data = { 
++            { "i", "I" },
++            { "\u03C2", "\u03C3" },
++            { "\u03A3", "\u03C2" },
++            { "\u03A3", "\u03C3" },
++        };
++        try {
++            for (int i = 0; i < locales.length; i++) {
++                Locale.setDefault(locales[i]);
++                for (int j = 0; j < data.length; j++) {
++                    assertTrue("Test data corrupt: " + j, data[j][0].equalsIgnoreCase(data[j][1]));
++                    CaseInsensitiveMap map = new CaseInsensitiveMap();
++                    map.put(data[j][0], "value");
++                    assertEquals(Locale.getDefault() + ": " + j, "value", map.get(data[j][1]));
++                }
++            }
++        } finally {
++            Locale.setDefault(orig);
++        }
++    }
++
+     /*
+     public void testCreate() throws Exception {
+         resetEmpty();

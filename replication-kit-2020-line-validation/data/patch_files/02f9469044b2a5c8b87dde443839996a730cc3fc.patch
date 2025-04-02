@@ -1,0 +1,121 @@
+From 02f9469044b2a5c8b87dde443839996a730cc3fc Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 25 Oct 2005 07:18:44 +0000
+Subject: [PATCH] FIX: transitive and changing attribute were not copied in ivy
+ files in cache (IVY-94)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484056 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/xml/XmlModuleDescriptorUpdater.java   | 30 +++++++++----------
+ .../xml/XmlModuleDescriptorParserTest.java    | 10 ++++++-
+ test/java/fr/jayasoft/ivy/xml/test.xml        |  1 +
+ test/java/fr/jayasoft/ivy/xml/updated.xml     |  1 +
+ 5 files changed, 27 insertions(+), 16 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 5e87511f0..26e266a68 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -4,6 +4,7 @@
+ - IMPROVE: import system properties as ivy variables in standalone mode
+ - IMPROVE: string identifying a module is now clearly different from a path
+ - IMPROVE: better error message when publish fails due to readonly destination (IVY-83)
++- FIX: transitive and changing attribute were not copied in ivy files in cache (IVY-94)
+ - FIX: chain resolver now support latest strategy configuration (IVY-90)
+ - FIX: raise a clean error when a cyclic variable definition is found (IVY-75)
+ - FIX: reinitiliase ant project instance at each new task to avoid using a bad ant project instance in some ide (like netbeans) (IVY-87)
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
+index c90a69fc0..d6d3ebfd0 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
+@@ -109,22 +109,22 @@ public void startElement(String uri, String localName,
+                             out.print(" resolver=\""+attributes.getValue("resolver")+"\"");
+                         }
+                     } else if ("dependency".equals(qName)) {
+-                        out.print("<dependency ");
+-                        String org = _organisation;
+-                        if (attributes.getValue("org") != null) {
+-                            org = attributes.getValue("org");
+-                            out.print("org=\""+org+"\" ");
+-                        }
++                        out.print("<dependency");
++                        String org = attributes.getValue("org");
++                        org = org == null ? _organisation : org;
+                         ModuleId mid = new ModuleId(org, attributes.getValue("name"));
+-                        out.print("name=\""+mid.getName()+"\" ");
+-                        String rev = (String)resolvedRevisions.get(mid);
+-                        if (rev != null) {
+-                            out.print("rev=\""+rev+"\"");
+-                        } else {
+-                            out.print("rev=\""+attributes.getValue("rev")+"\"");
+-                        }
+-                        if (attributes.getValue("conf") != null) {
+-                            out.print(" conf=\""+attributes.getValue("conf")+"\"");
++                        for (int i=0; i<attributes.getLength(); i++) {
++                            String attName = attributes.getQName(i);
++                            if ("rev".equals(attName)) {
++                                String rev = (String)resolvedRevisions.get(mid);
++                                if (rev != null) {
++                                    out.print(" rev=\""+rev+"\"");
++                                } else {
++                                    out.print(" rev=\""+attributes.getValue("rev")+"\"");
++                                }
++                            } else {
++                                out.print(" "+attName+"=\""+attributes.getValue(attName)+"\"");
++                            }
+                         }
+                     } else {
+                         // copy
+diff --git a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+index da78bddd7..2e01bd401 100644
+--- a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+@@ -107,7 +107,7 @@ public void testFull() throws Exception {
+         
+         DependencyDescriptor[] dependencies = md.getDependencies();
+         assertNotNull(dependencies);
+-        assertEquals(12, dependencies.length);
++        assertEquals(13, dependencies.length);
+         
+         // no conf def => equivalent to *->*
+         DependencyDescriptor dd = getDependency(dependencies, "mymodule2");
+@@ -118,6 +118,14 @@ public void testFull() throws Exception {
+         assertEquals(Arrays.asList(new String[] {"*"}), Arrays.asList(dd.getDependencyConfigurations("myconf1")));        
+         assertEquals(Arrays.asList(new String[] {"*"}), Arrays.asList(dd.getDependencyConfigurations(new String[] {"myconf2", "myconf3", "myconf4"})));
+         assertDependencyArtifactsIncludes(dd, new String[] {"myconf1", "myconf2", "myconf3", "myconf4"}, new String[0]);
++        assertFalse(dd.isChanging());
++        assertTrue(dd.isTransitive());
++        
++        // changing = true
++        dd = getDependency(dependencies, "mymodule3");
++        assertNotNull(dd);
++        assertTrue(dd.isChanging());
++        assertFalse(dd.isTransitive());
+         
+         // conf="myconf1" => equivalent to myconf1->myconf1
+         dd = getDependency(dependencies, "yourmodule1");
+diff --git a/test/java/fr/jayasoft/ivy/xml/test.xml b/test/java/fr/jayasoft/ivy/xml/test.xml
+index 0aae565e2..9c0cc0d47 100644
+--- a/test/java/fr/jayasoft/ivy/xml/test.xml
++++ b/test/java/fr/jayasoft/ivy/xml/test.xml
+@@ -37,6 +37,7 @@
+ 	</publications>
+ 	<dependencies>
+ 		<dependency name="mymodule2" rev="2.0"/>
++		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
+ 		<dependency org="yourorg" name="yourmodule1" rev="1.1" conf="myconf1"/>
+ 		<dependency org="yourorg" name="yourmodule2" rev="2+" conf="myconf1->yourconf1"/>
+ 		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>
+diff --git a/test/java/fr/jayasoft/ivy/xml/updated.xml b/test/java/fr/jayasoft/ivy/xml/updated.xml
+index aef389c0c..9e1191158 100644
+--- a/test/java/fr/jayasoft/ivy/xml/updated.xml
++++ b/test/java/fr/jayasoft/ivy/xml/updated.xml
+@@ -33,6 +33,7 @@
+ 	</publications>
+ 	<dependencies>
+ 		<dependency name="mymodule2" rev="2.0"/>
++		<dependency name="mymodule3" rev="2.0" changing="true" transitive="false"/>
+ 		<dependency org="yourorg" name="yourmodule1" rev="1.1" conf="myconf1"/>
+ 		<dependency org="yourorg" name="yourmodule2" rev="2.5" conf="myconf1->yourconf1"/>
+ 		<dependency org="yourorg" name="yourmodule3" rev="3.1" conf="myconf1->yourconf1, yourconf2"/>

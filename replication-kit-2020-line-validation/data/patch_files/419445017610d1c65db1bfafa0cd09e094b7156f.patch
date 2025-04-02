@@ -1,0 +1,150 @@
+From 419445017610d1c65db1bfafa0cd09e094b7156f Mon Sep 17 00:00:00 2001
+From: Claudio Martella <claudio.martella@gmail.com>
+Date: Fri, 31 Jan 2014 14:21:54 +0100
+Subject: [PATCH] GIRAPH-834
+
+---
+ CHANGELOG                                                 | 2 ++
+ .../org/apache/giraph/bsp/CentralizedServiceWorker.java   | 6 +++++-
+ .../java/org/apache/giraph/graph/GraphTaskManager.java    | 8 ++++++--
+ .../java/org/apache/giraph/metrics/AggregatedMetrics.java | 4 ++++
+ .../java/org/apache/giraph/worker/BspServiceWorker.java   | 8 ++++++--
+ giraph-dist/pom.xml                                       | 4 ----
+ 6 files changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index d88ed41c1..d2f59806b 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-834: Metrcis missing superstep time (armax00 via claudio)
++
+   GIRAPH-819: Number of Containers Required for a Job (Rafal Wojdyla via ereisman)
+ 
+   GIRAPH-832: Test don't finish after GIRAPH-792 (majakabiljo)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java b/giraph-core/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+index 29567c030..e5d0ae16b 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
++++ b/giraph-core/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+@@ -25,6 +25,7 @@
+ import org.apache.giraph.graph.VertexEdgeCount;
+ import org.apache.giraph.io.superstep_output.SuperstepOutput;
+ import org.apache.giraph.master.MasterInfo;
++import org.apache.giraph.metrics.GiraphTimerContext;
+ import org.apache.giraph.partition.PartitionOwner;
+ import org.apache.giraph.partition.PartitionStats;
+ import org.apache.giraph.partition.PartitionStore;
+@@ -129,10 +130,13 @@ public interface CentralizedServiceWorker<I extends WritableComparable,
+    * worker level statistics after the computation.
+    *
+    * @param partitionStatsList All the partition stats for this worker
++   * @param superstepTimerContext superstep timer context only given when the
++   *      function needs to stop the timer, otherwise null.
+    * @return Stats of the superstep completion
+    */
+   FinishedSuperstepStats finishSuperstep(
+-      List<PartitionStats> partitionStatsList);
++      List<PartitionStats> partitionStatsList,
++      GiraphTimerContext superstepTimerContext);
+ 
+   /**
+    * Get the partition id that a vertex id would belong to.
+diff --git a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+index 064c71f4b..573bd952a 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
++++ b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+@@ -410,8 +410,12 @@ private void updateSuperstepGraphState() {
+   private FinishedSuperstepStats completeSuperstepAndCollectStats(
+     List<PartitionStats> partitionStatsList,
+     GiraphTimerContext superstepTimerContext) {
+-    finishedSuperstepStats = serviceWorker.finishSuperstep(partitionStatsList);
+-    superstepTimerContext.stop();
++
++    // the superstep timer is stopped inside the finishSuperstep function
++    // (otherwise metrics are not available at the end of the computation
++    //  using giraph.metrics.enable=true).
++    finishedSuperstepStats =
++      serviceWorker.finishSuperstep(partitionStatsList, superstepTimerContext);
+     if (conf.metricsEnabled()) {
+       GiraphMetrics.get().perSuperstep().printSummary(System.err);
+     }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/metrics/AggregatedMetrics.java b/giraph-core/src/main/java/org/apache/giraph/metrics/AggregatedMetrics.java
+index 9ce074b9e..83681e567 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/metrics/AggregatedMetrics.java
++++ b/giraph-core/src/main/java/org/apache/giraph/metrics/AggregatedMetrics.java
+@@ -64,6 +64,8 @@ public AggregatedMetrics add(String name, long value,
+    */
+   public AggregatedMetrics add(WorkerSuperstepMetrics workerMetrics,
+                                String hostname) {
++    add(GraphTaskManager.TIMER_SUPERSTEP_TIME,
++        workerMetrics.getSuperstepTimer(), hostname);
+     add(GraphTaskManager.TIMER_COMMUNICATION_TIME,
+         workerMetrics.getCommTimer(), hostname);
+     add(GraphTaskManager.TIMER_COMPUTE_ALL,
+@@ -85,6 +87,7 @@ public AggregatedMetrics add(WorkerSuperstepMetrics workerMetrics,
+    * @return this
+    */
+   public AggregatedMetrics print(long superstep, PrintStream out) {
++    AggregatedMetric superstepTime = get(GraphTaskManager.TIMER_SUPERSTEP_TIME);
+     AggregatedMetric commTime = get(GraphTaskManager.TIMER_COMMUNICATION_TIME);
+     AggregatedMetric computeAll = get(GraphTaskManager.TIMER_COMPUTE_ALL);
+     AggregatedMetric timeToFirstMsg =
+@@ -95,6 +98,7 @@ public AggregatedMetrics print(long superstep, PrintStream out) {
+ 
+     out.println();
+     out.println("--- METRICS: superstep " + superstep + " ---");
++    printAggregatedMetric(out, "superstep time", "ms", superstepTime);
+     printAggregatedMetric(out, "compute all partitions", "ms", computeAll);
+     printAggregatedMetric(out, "user compute time", "ms", userComputeTime);
+     printAggregatedMetric(out, "network communication time", "ms", commTime);
+diff --git a/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java b/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java
+index 13de188e5..88a642aa8 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java
++++ b/giraph-core/src/main/java/org/apache/giraph/worker/BspServiceWorker.java
+@@ -587,7 +587,7 @@ public FinishedSuperstepStats setup() {
+     workerGraphPartitioner.finalizePartitionStats(
+         partitionStatsList, getPartitionStore());
+ 
+-    return finishSuperstep(partitionStatsList);
++    return finishSuperstep(partitionStatsList, null);
+   }
+ 
+   /**
+@@ -730,7 +730,8 @@ public Collection<? extends PartitionOwner> startSuperstep() {
+ 
+   @Override
+   public FinishedSuperstepStats finishSuperstep(
+-      List<PartitionStats> partitionStatsList) {
++      List<PartitionStats> partitionStatsList,
++      GiraphTimerContext superstepTimerContext) {
+     // This barrier blocks until success (or the master signals it to
+     // restart).
+     //
+@@ -769,6 +770,9 @@ public FinishedSuperstepStats finishSuperstep(
+           MemoryUtils.getRuntimeMemoryStats());
+     }
+ 
++    if (superstepTimerContext != null) {
++      superstepTimerContext.stop();
++    }
+     writeFinshedSuperstepInfoToZK(partitionStatsList,
+       workerSentMessages, workerSentMessageBytes);
+ 
+diff --git a/giraph-dist/pom.xml b/giraph-dist/pom.xml
+index 1830ca782..597a1d3f4 100644
+--- a/giraph-dist/pom.xml
++++ b/giraph-dist/pom.xml
+@@ -77,10 +77,6 @@
+       <groupId>org.apache.giraph</groupId>
+       <artifactId>giraph-accumulo</artifactId>
+     </dependency>
+-    <dependency>
+-      <groupId>org.apache.giraph</groupId>
+-      <artifactId>giraph-rexster-io</artifactId>
+-    </dependency>
+     <dependency>
+       <groupId>org.apache.giraph</groupId>
+       <artifactId>giraph-hcatalog</artifactId>

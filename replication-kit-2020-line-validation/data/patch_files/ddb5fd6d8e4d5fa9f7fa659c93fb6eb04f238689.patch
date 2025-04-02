@@ -1,0 +1,252 @@
+From ddb5fd6d8e4d5fa9f7fa659c93fb6eb04f238689 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Sun, 27 Apr 2014 09:15:33 +0000
+Subject: [PATCH] COMPRESS-279 detect a truncated tar archive and throw an
+ exception
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@1590361 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |   5 ++++
+ .../archivers/tar/TarArchiveInputStream.java  |   5 +++-
+ .../tar/TarArchiveInputStreamTest.java        |  28 ++++++++++++++++++
+ src/test/resources/COMPRESS-279.tar           | Bin 0 -> 19000 bytes
+ 4 files changed, 37 insertions(+), 1 deletion(-)
+ create mode 100644 src/test/resources/COMPRESS-279.tar
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index eb24ae79359..80a705f0d86 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -78,6 +78,11 @@ The <action> type attribute can be add,update,fix,remove.
+         TarArchiveInputStream failed to read archives with empty
+         gid/uid fields.
+       </action>
++      <action type="fix" date="2014-04-27" issue="COMPRESS-279">
++        TarArchiveInputStream now again throws an exception when it
++        encounters a truncated archive while reading from the last
++        entry.
++      </action>
+     </release>
+     <release version="1.8" date="2014-03-12"
+              description="Release 1.8">
+diff --git a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
+index fe2c1133b22..6f0c6a42001 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
+@@ -580,11 +580,14 @@ public int read(byte[] buf, int offset, int numToRead) throws IOException {
+         numToRead = Math.min(numToRead, available());
+         
+         totalRead = is.read(buf, offset, numToRead);
+-        count(totalRead);
+         
+         if (totalRead == -1) {
++            if (numToRead > 0) {
++                throw new IOException("Truncated TAR archive");
++            }
+             hasHitEOF = true;
+         } else {
++            count(totalRead);
+             entryOffset += totalRead;
+         }
+ 
+diff --git a/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java b/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java
+index 0de9bef9b56..d8734a64ce2 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java
+@@ -19,6 +19,8 @@
+ package org.apache.commons.compress.archivers.tar;
+ 
+ import static org.apache.commons.compress.AbstractTestCase.getFile;
++import static org.apache.commons.compress.AbstractTestCase.mkdir;
++import static org.apache.commons.compress.AbstractTestCase.rmdir;
+ import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertTrue;
+@@ -26,7 +28,9 @@
+ 
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
++import java.io.File;
+ import java.io.FileInputStream;
++import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.util.Calendar;
+@@ -36,6 +40,7 @@
+ import java.util.zip.GZIPInputStream;
+ 
+ import org.apache.commons.compress.utils.CharsetNames;
++import org.apache.commons.compress.utils.IOUtils;
+ import org.junit.Test;
+ 
+ public class TarArchiveInputStreamTest {
+@@ -204,6 +209,29 @@ public void readsArchiveCompletely_COMPRESS245() throws Exception {
+         }
+     }
+ 
++    @Test(expected = IOException.class)
++    public void shouldThrowAnExceptionOnTruncatedEntries() throws Exception {
++        File dir = mkdir("COMPRESS-279");
++        TarArchiveInputStream is = getTestStream("/COMPRESS-279.tar");
++        FileOutputStream out = null;
++        try {
++            TarArchiveEntry entry = is.getNextTarEntry();
++            int count = 0;
++            while (entry != null) {
++                out = new FileOutputStream(new File(dir, String.valueOf(count)));
++                IOUtils.copy(is, out);
++                out.close();
++                out = null;
++                count++;
++                entry = is.getNextTarEntry();
++            }
++        } finally {
++            is.close();
++            if (out != null) {
++                out.close();
++            }
++        }
++    }
+ 
+     private TarArchiveInputStream getTestStream(String name) {
+         return new TarArchiveInputStream(
+diff --git a/src/test/resources/COMPRESS-279.tar b/src/test/resources/COMPRESS-279.tar
+new file mode 100644
+index 0000000000000000000000000000000000000000..eeb0932f7d7c89ebcfaebe0f7d4f8b9297e8cfc4
+GIT binary patch
+literal 19000
+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
+bQe5*fqw02ILi#BXc9)JyViXufm5cudM&+S+
+
+literal 0
+HcmV?d00001
+

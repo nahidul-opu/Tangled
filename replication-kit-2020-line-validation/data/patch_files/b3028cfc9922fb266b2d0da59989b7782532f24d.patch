@@ -1,0 +1,99 @@
+From b3028cfc9922fb266b2d0da59989b7782532f24d Mon Sep 17 00:00:00 2001
+From: Bernd Eckenfels <ecki@apache.org>
+Date: Mon, 28 Sep 2015 18:25:02 +0000
+Subject: [PATCH] [VFS-583] Avoid layered filesystem leak when options are
+ used. Added tests.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/vfs/trunk@1705741 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../provider/AbstractLayeredFileProvider.java |  2 +-
+ .../provider/tar/test/NestedTarTestCase.java  | 12 +++++++++--
+ .../apache/commons/vfs2/test/UrlTests.java    | 20 +++++++++++++++++++
+ 3 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/commons/vfs2/provider/AbstractLayeredFileProvider.java b/core/src/main/java/org/apache/commons/vfs2/provider/AbstractLayeredFileProvider.java
+index 135798365a..5d7a46cb17 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/provider/AbstractLayeredFileProvider.java
++++ b/core/src/main/java/org/apache/commons/vfs2/provider/AbstractLayeredFileProvider.java
+@@ -80,7 +80,7 @@ public synchronized FileObject createFileSystem(final String scheme,
+     {
+         // Check if cached
+         final FileName rootName = file.getName();
+-        FileSystem fs = findFileSystem(rootName, null);
++        FileSystem fs = findFileSystem(rootName, fileSystemOptions); // TODO
+         if (fs == null)
+         {
+             // Create the file system
+diff --git a/core/src/test/java/org/apache/commons/vfs2/provider/tar/test/NestedTarTestCase.java b/core/src/test/java/org/apache/commons/vfs2/provider/tar/test/NestedTarTestCase.java
+index eb7df8db54..cc18179418 100644
+--- a/core/src/test/java/org/apache/commons/vfs2/provider/tar/test/NestedTarTestCase.java
++++ b/core/src/test/java/org/apache/commons/vfs2/provider/tar/test/NestedTarTestCase.java
+@@ -20,7 +20,11 @@
+ 
+ import org.apache.commons.AbstractVfsTestCase;
+ import org.apache.commons.vfs2.FileObject;
++import org.apache.commons.vfs2.FileSystemConfigBuilder;
+ import org.apache.commons.vfs2.FileSystemManager;
++import org.apache.commons.vfs2.FileSystemOptions;
++import org.apache.commons.vfs2.auth.StaticUserAuthenticator;
++import org.apache.commons.vfs2.impl.DefaultFileSystemConfigBuilder;
+ import org.apache.commons.vfs2.impl.DefaultFileSystemManager;
+ import org.apache.commons.vfs2.provider.tar.TarFileProvider;
+ import org.apache.commons.vfs2.test.AbstractProviderTestConfig;
+@@ -60,12 +64,16 @@ public void prepare(final DefaultFileSystemManager manager)
+     @Override
+     public FileObject getBaseTestFolder(final FileSystemManager manager) throws Exception
+     {
++        // We test with non-empty FS options to make sure they are propagated
++        final FileSystemOptions opts = new FileSystemOptions();
++        DefaultFileSystemConfigBuilder.getInstance().setUserAuthenticator(opts, new StaticUserAuthenticator("domain",  null,  null));
++
+         // Locate the base Tar file
+         final String tarFilePath = AbstractVfsTestCase.getTestResource("nested.tar").getAbsolutePath();
+-        final String uri = "tar:file:" + tarFilePath + "!/test.tar";
+-        final FileObject tarFile = manager.resolveFile(uri);
+ 
+         // Now build the nested file system
++        final String uri = "tar:file:" + tarFilePath + "!/test.tar";
++        final FileObject tarFile = manager.resolveFile(uri, opts);
+         final FileObject nestedFS = manager.createFileSystem(tarFile);
+         return nestedFS.resolveFile("/");
+     }
+diff --git a/core/src/test/java/org/apache/commons/vfs2/test/UrlTests.java b/core/src/test/java/org/apache/commons/vfs2/test/UrlTests.java
+index 85175b1638..ec269f1bca 100644
+--- a/core/src/test/java/org/apache/commons/vfs2/test/UrlTests.java
++++ b/core/src/test/java/org/apache/commons/vfs2/test/UrlTests.java
+@@ -23,6 +23,7 @@
+ 
+ import org.apache.commons.vfs2.Capability;
+ import org.apache.commons.vfs2.FileObject;
++import org.apache.commons.vfs2.FileSystemOptions;
+ 
+ /**
+  * URL test cases for providers.
+@@ -87,6 +88,25 @@ public void testURLContent() throws Exception
+         assertSameURLContent("", urlCon);
+     }
+ 
++    /**
++     * Tests content.
++     */
++    public void testURLContentProvider() throws Exception
++    {
++        // Test non-empty file
++        FileObject file = getReadFolder().resolveFile("file1.txt");
++        assertTrue(file.exists());
++
++        String uri = file.getURL().toExternalForm();
++        FileSystemOptions options = getReadFolder().getFileSystem().getFileSystemOptions();
++
++        FileObject f1 = getManager().resolveFile(uri, options);
++        FileObject f2 = getManager().resolveFile(uri, options);
++
++        assertEquals("Two files resolved by URI must be equals on " + uri,  f1, f2);
++        assertSame("Resolving two times should not produce new filesystem on " + uri, f1.getFileSystem(), f2.getFileSystem());
++    }
++
+     /**
+      * Tests that unknown files have no content.
+      */

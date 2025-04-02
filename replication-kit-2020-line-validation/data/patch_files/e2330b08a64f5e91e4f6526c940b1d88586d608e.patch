@@ -1,0 +1,149 @@
+From e2330b08a64f5e91e4f6526c940b1d88586d608e Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 2 Dec 2009 21:13:21 +0000
+Subject: [PATCH] FIX: metadata lock files not always deleted from cache
+ (IVY-1145) (thanks to Jason Trump)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@886303 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../cache/DefaultRepositoryCacheManager.java  | 105 +++++++++---------
+ 2 files changed, 54 insertions(+), 52 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d1149fc4f..0df993fde 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -100,6 +100,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Trace a message when a property file referenced from the settings doesn't exixts (IVY-1074)
+ - IMPROVEMENT: use defaultconf in combination with defaultconfmapping (IVY-1135) (thanks to Jon Schneider)
+ 
++- FIX: metadata lock files not always deleted from cache (IVY-1145) (thanks to Jason Trump)
+ - FIX: FileSystem resolver with m2compatible=true throws error when publishing modules with dotted organisation names (IVY-968)
+ - FIX: ivy:retrieve sync="true" does nothing if first variable is optional (IVY-1142) (thanks to Andreas Axelsson)
+ - FIX: Latest Compatible Conflict Manager + Extra Attributes in Dependencies' IVY files == infinite loop (IVY-956)
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index a2c5bfa97..332966160 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -881,67 +881,68 @@ public ResolvedModuleRevision cacheModuleDescriptor(
+             Message.error("impossible to acquire lock for " + mrid);
+             return null;
+         }
++
++        BackupResourceDownloader backupDownloader = new BackupResourceDownloader(downloader);
++
++        try {
++            if (!moduleArtifact.isMetadata()) {
++                // the descriptor we are trying to cache is a default one, not much to do
++                // just make sure the old artifacts are deleted...
++                if (isChanging(dd, mrid, options)) {
++                    long repoLastModified = mdRef.getLastModified();
+         
+-        if (!moduleArtifact.isMetadata()) {
+-            // the descriptor we are trying to cache is a default one, not much to do
+-            // just make sure the old artifacts are deleted...
+-            if (isChanging(dd, mrid, options)) {
+-                long repoLastModified = mdRef.getLastModified();
+-    
+-                Artifact transformedArtifact = NameSpaceHelper.transform(
+-                    moduleArtifact, options.getNamespace().getToSystemTransformer());
+-                ArtifactOrigin origin = getSavedArtifactOrigin(transformedArtifact);
+-                File artFile = getArchiveFileInCache(transformedArtifact, origin, false);
+-                if (artFile.exists() && repoLastModified > artFile.lastModified()) {
+-                    // artifacts have changed, they should be downloaded again
+-                    Message.verbose(mrid + " has changed: deleting old artifacts");
+-                    Message.debug("deleting " + artFile);
+-                    if (!artFile.delete()) {
+-                        Message.error("Couldn't delete outdated artifact from cache: " + artFile);
+-                        return null;
++                    Artifact transformedArtifact = NameSpaceHelper.transform(
++                        moduleArtifact, options.getNamespace().getToSystemTransformer());
++                    ArtifactOrigin origin = getSavedArtifactOrigin(transformedArtifact);
++                    File artFile = getArchiveFileInCache(transformedArtifact, origin, false);
++                    if (artFile.exists() && repoLastModified > artFile.lastModified()) {
++                        // artifacts have changed, they should be downloaded again
++                        Message.verbose(mrid + " has changed: deleting old artifacts");
++                        Message.debug("deleting " + artFile);
++                        if (!artFile.delete()) {
++                            Message.error("Couldn't delete outdated artifact from cache: " + artFile);
++                            return null;
++                        }
++                        removeSavedArtifactOrigin(transformedArtifact);
+                     }
+-                    removeSavedArtifactOrigin(transformedArtifact);
+                 }
++                return null;
+             }
+-            return null;
+-        }
+-        
+-        // now let's see if we can find it in cache and if it is up to date
+-        ResolvedModuleRevision rmr = doFindModuleInCache(mrid, options, null);
+-        if (rmr != null) {
+-            if (rmr.getDescriptor().isDefault() && rmr.getResolver() != resolver) {
+-                Message.verbose("\t" + getName() + ": found revision in cache: " + mrid
+-                    + " (resolved by " + rmr.getResolver().getName()
+-                    + "): but it's a default one, maybe we can find a better one");
+-            } else {
+-                if (!isCheckmodified(dd, mrid, options) && !isChanging(dd, mrid, options)) {
+-                    Message.verbose("\t" + getName() + ": revision in cache: " + mrid);
+-                    rmr.getReport().setSearched(true);
+-                    return rmr;
+-                }
+-                long repLastModified = mdRef.getLastModified();
+-                long cacheLastModified = rmr.getDescriptor().getLastModified();
+-                if (!rmr.getDescriptor().isDefault() && repLastModified <= cacheLastModified) {
+-                    Message.verbose("\t" + getName() + ": revision in cache (not updated): "
+-                        + mrid);
+-                    rmr.getReport().setSearched(true);
+-                    return rmr;
++            
++            // now let's see if we can find it in cache and if it is up to date
++            ResolvedModuleRevision rmr = doFindModuleInCache(mrid, options, null);
++            if (rmr != null) {
++                if (rmr.getDescriptor().isDefault() && rmr.getResolver() != resolver) {
++                    Message.verbose("\t" + getName() + ": found revision in cache: " + mrid
++                        + " (resolved by " + rmr.getResolver().getName()
++                        + "): but it's a default one, maybe we can find a better one");
+                 } else {
+-                    Message.verbose("\t" + getName() + ": revision in cache is not up to date: "
+-                        + mrid);
+-                    if (isChanging(dd, mrid, options)) {
+-                        // ivy file has been updated, we should see if it has a new publication
+-                        // date to see if a new download is required (in case the dependency is
+-                        // a changing one)
+-                        cachedPublicationDate = 
+-                            rmr.getDescriptor().getResolvedPublicationDate();
++                    if (!isCheckmodified(dd, mrid, options) && !isChanging(dd, mrid, options)) {
++                        Message.verbose("\t" + getName() + ": revision in cache: " + mrid);
++                        rmr.getReport().setSearched(true);
++                        return rmr;
++                    }
++                    long repLastModified = mdRef.getLastModified();
++                    long cacheLastModified = rmr.getDescriptor().getLastModified();
++                    if (!rmr.getDescriptor().isDefault() && repLastModified <= cacheLastModified) {
++                        Message.verbose("\t" + getName() + ": revision in cache (not updated): "
++                            + mrid);
++                        rmr.getReport().setSearched(true);
++                        return rmr;
++                    } else {
++                        Message.verbose("\t" + getName() + ": revision in cache is not up to date: "
++                            + mrid);
++                        if (isChanging(dd, mrid, options)) {
++                            // ivy file has been updated, we should see if it has a new publication
++                            // date to see if a new download is required (in case the dependency is
++                            // a changing one)
++                            cachedPublicationDate = 
++                                rmr.getDescriptor().getResolvedPublicationDate();
++                        }
+                     }
+                 }
+             }
+-        }
+         
+-        BackupResourceDownloader backupDownloader = new BackupResourceDownloader(downloader);
+-        try {
+             Artifact originalMetadataArtifact = getOriginalMetadataArtifact(moduleArtifact);
+             // now download module descriptor and parse it
+             report = download(

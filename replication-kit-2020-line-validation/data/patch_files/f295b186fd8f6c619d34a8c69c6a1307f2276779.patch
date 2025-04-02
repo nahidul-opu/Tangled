@@ -1,0 +1,196 @@
+From f295b186fd8f6c619d34a8c69c6a1307f2276779 Mon Sep 17 00:00:00 2001
+From: William D C M SILVA <colen@apache.org>
+Date: Wed, 11 Jan 2017 20:44:45 -0200
+Subject: [PATCH] OPENNLP-719: Override any name type with specified type
+ Closes apache/opennlp#48
+
+---
+ .../tools/namefind/NameFinderEventStream.java | 10 ++--
+ .../namefind/NameFinderEventStreamTest.java   |  2 +-
+ .../tools/namefind/NameFinderMETest.java      | 60 +++++++++++++++----
+ 3 files changed, 52 insertions(+), 20 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java b/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java
+index 8739b1f09..f0e89ea0e 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/namefind/NameFinderEventStream.java
+@@ -125,7 +125,7 @@ protected Iterator<Event> createEvents(NameSample sample) {
+ 
+     Span[] names = sample.getNames();
+     if (!Objects.isNull(this.defaultType)) {
+-      overrideDefaultType(names);
++      overrideType(names);
+     }
+ 
+     String outcomes[] = codec.encode(names, sample.getSentence().length);
+@@ -140,13 +140,11 @@ protected Iterator<Event> createEvents(NameSample sample) {
+     return generateEvents(tokens, outcomes, contextGenerator).iterator();
+   }
+ 
+-  private void overrideDefaultType(Span[] names) {
++  private void overrideType(Span[] names) {
+     for (int i = 0; i < names.length; i++) {
+       Span n = names[i];
+-      if (Objects.isNull(n.getType())) {
+-        names[i] = new Span(n.getStart(), n.getEnd(), this.defaultType,
+-                n.getProb());
+-      }
++      names[i] = new Span(n.getStart(), n.getEnd(), this.defaultType,
++              n.getProb());
+     }
+   }
+ 
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java b/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java
+index 1cafd5b69..1faecb273 100644
+--- a/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java
++++ b/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderEventStreamTest.java
+@@ -76,7 +76,7 @@ public void testOutcomesTypeCantOverride() throws IOException {
+     ObjectStream<Event> eventStream = new NameFinderEventStream(
+             ObjectStreamUtils.createObjectStream(nameSample), type, CG, null);
+ 
+-    String prefix = "person-";
++    String prefix = type + "-";
+     Assert.assertEquals(prefix + NameFinderME.START, eventStream.read().getOutcome());
+     Assert.assertEquals(prefix + NameFinderME.CONTINUE,
+             eventStream.read().getOutcome());
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderMETest.java b/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderMETest.java
+index 19e364ec1..bf1125010 100644
+--- a/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderMETest.java
++++ b/opennlp-tools/src/test/java/opennlp/tools/namefind/NameFinderMETest.java
+@@ -51,7 +51,8 @@
+  */
+ public class NameFinderMETest {
+ 
+-  private final String TYPE = "default";
++  private final String TYPE_OVERRIDE = "aType";
++  private final String DEFAULT = "default";
+ 
+   @Test
+   public void testNameFinder() throws Exception {
+@@ -71,7 +72,7 @@ public void testNameFinder() throws Exception {
+     params.put(TrainingParameters.ITERATIONS_PARAM, Integer.toString(70));
+     params.put(TrainingParameters.CUTOFF_PARAM, Integer.toString(1));
+ 
+-    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", TYPE, sampleStream,
++    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", null, sampleStream,
+         params, TokenNameFinderFactory.create(null, null, Collections.emptyMap(), new BioCodec()));
+ 
+     TokenNameFinder nameFinder = new NameFinderME(nameFinderModel);
+@@ -92,7 +93,7 @@ public void testNameFinder() throws Exception {
+     Span names[] = nameFinder.find(sentence);
+ 
+     assertEquals(1, names.length);
+-    assertEquals(new Span(0, 1, TYPE), names[0]);
++    assertEquals(new Span(0, 1, DEFAULT), names[0]);
+ 
+     sentence = new String[] {
+         "Hi",
+@@ -107,8 +108,8 @@ public void testNameFinder() throws Exception {
+     names = nameFinder.find(sentence);
+ 
+     assertEquals(2, names.length);
+-    assertEquals(new Span(1, 2, TYPE), names[0]);
+-    assertEquals(new Span(4, 6, TYPE), names[1]);
++    assertEquals(new Span(1, 2, DEFAULT), names[0]);
++    assertEquals(new Span(4, 6, DEFAULT), names[1]);
+   }
+ 
+   /**
+@@ -132,7 +133,7 @@ public void testNameFinderWithTypes() throws Exception {
+     params.put(TrainingParameters.ITERATIONS_PARAM, Integer.toString(70));
+     params.put(TrainingParameters.CUTOFF_PARAM, Integer.toString(1));
+ 
+-    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", TYPE, sampleStream,
++    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", null, sampleStream,
+         params, TokenNameFinderFactory.create(null, null, Collections.emptyMap(), new BioCodec()));
+ 
+     NameFinderME nameFinder = new NameFinderME(nameFinderModel);
+@@ -169,6 +170,39 @@ public void testOnlyWithNames() throws Exception {
+ 
+     // train the name finder
+ 
++    InputStream in = getClass().getClassLoader().getResourceAsStream(
++            "opennlp/tools/namefind/OnlyWithNames.train");
++
++    ObjectStream<NameSample> sampleStream = new NameSampleDataStream(
++            new PlainTextByLineStream(new MockInputStreamFactory(in), "UTF-8"));
++
++    TrainingParameters params = new TrainingParameters();
++    params.put(TrainingParameters.ITERATIONS_PARAM, Integer.toString(70));
++    params.put(TrainingParameters.CUTOFF_PARAM, Integer.toString(1));
++
++    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", null, sampleStream,
++            params, TokenNameFinderFactory.create(null, null, Collections.emptyMap(), new BioCodec()));
++
++    NameFinderME nameFinder = new NameFinderME(nameFinderModel);
++
++    // now test if it can detect the sample sentences
++
++    String[] sentence = ("Neil Abercrombie Anibal Acevedo-Vila Gary Ackerman " +
++            "Robert Aderholt Daniel Akaka Todd Akin Lamar Alexander Rodney Alexander").split("\\s+");
++
++    Span[] names1 = nameFinder.find(sentence);
++
++    assertEquals(new Span(0, 2, DEFAULT), names1[0]);
++    assertEquals(new Span(2, 4, DEFAULT), names1[1]);
++    assertEquals(new Span(4, 6, DEFAULT), names1[2]);
++    assertTrue(!hasOtherAsOutcome(nameFinderModel));
++  }
++
++  @Test
++  public void testOnlyWithNamesTypeOverride() throws Exception {
++
++    // train the name finder
++
+     InputStream in = getClass().getClassLoader().getResourceAsStream(
+         "opennlp/tools/namefind/OnlyWithNames.train");
+ 
+@@ -179,7 +213,7 @@ public void testOnlyWithNames() throws Exception {
+     params.put(TrainingParameters.ITERATIONS_PARAM, Integer.toString(70));
+     params.put(TrainingParameters.CUTOFF_PARAM, Integer.toString(1));
+ 
+-    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", TYPE, sampleStream,
++    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", TYPE_OVERRIDE, sampleStream,
+         params, TokenNameFinderFactory.create(null, null, Collections.emptyMap(), new BioCodec()));
+ 
+     NameFinderME nameFinder = new NameFinderME(nameFinderModel);
+@@ -191,9 +225,9 @@ public void testOnlyWithNames() throws Exception {
+ 
+     Span[] names1 = nameFinder.find(sentence);
+ 
+-    assertEquals(new Span(0, 2, TYPE), names1[0]);
+-    assertEquals(new Span(2, 4, TYPE), names1[1]);
+-    assertEquals(new Span(4, 6, TYPE), names1[2]);
++    assertEquals(new Span(0, 2, TYPE_OVERRIDE), names1[0]);
++    assertEquals(new Span(2, 4, TYPE_OVERRIDE), names1[1]);
++    assertEquals(new Span(4, 6, TYPE_OVERRIDE), names1[2]);
+     assertTrue(!hasOtherAsOutcome(nameFinderModel));
+   }
+ 
+@@ -216,7 +250,7 @@ public void testOnlyWithNamesWithTypes() throws Exception {
+     params.put(TrainingParameters.ITERATIONS_PARAM, Integer.toString(70));
+     params.put(TrainingParameters.CUTOFF_PARAM, Integer.toString(1));
+ 
+-    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", TYPE, sampleStream,
++    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", null, sampleStream,
+         params, TokenNameFinderFactory.create(null, null, Collections.emptyMap(), new BioCodec()));
+ 
+     NameFinderME nameFinder = new NameFinderME(nameFinderModel);
+@@ -255,7 +289,7 @@ public void testOnlyWithEntitiesWithTypes() throws Exception {
+     params.put(TrainingParameters.ITERATIONS_PARAM, Integer.toString(70));
+     params.put(TrainingParameters.CUTOFF_PARAM, Integer.toString(1));
+ 
+-    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", TYPE, sampleStream,
++    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", null, sampleStream,
+         params, TokenNameFinderFactory.create(null, null, Collections.emptyMap(), new BioCodec()));
+ 
+     NameFinderME nameFinder = new NameFinderME(nameFinderModel);
+@@ -310,7 +344,7 @@ public void testNameFinderWithMultipleTypes() throws Exception {
+     params.put(TrainingParameters.ITERATIONS_PARAM, Integer.toString(70));
+     params.put(TrainingParameters.CUTOFF_PARAM, Integer.toString(1));
+ 
+-    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", TYPE, sampleStream,
++    TokenNameFinderModel nameFinderModel = NameFinderME.train("en", null, sampleStream,
+         params, TokenNameFinderFactory.create(null, null, Collections.emptyMap(), new BioCodec()));
+ 
+     NameFinderME nameFinder = new NameFinderME(nameFinderModel);

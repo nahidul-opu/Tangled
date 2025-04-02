@@ -1,0 +1,130 @@
+From 19a620c904587dc0397b43bfe9071ff60033c097 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Fri, 20 May 2016 18:18:05 +0200
+Subject: [PATCH] COMPRESS-355 properly deal with blank PAX header lines
+
+Patch-by: Jeremy Gustie
+---
+ src/changes/changes.xml                         |   5 +++++
+ .../archivers/tar/TarArchiveInputStream.java    |   4 +++-
+ .../tar/TarArchiveInputStreamTest.java          |  16 ++++++++++++++++
+ src/test/resources/COMPRESS-355.tar             | Bin 0 -> 8192 bytes
+ 4 files changed, 24 insertions(+), 1 deletion(-)
+ create mode 100644 src/test/resources/COMPRESS-355.tar
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 72df2274738..276bb662500 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -60,6 +60,11 @@ The <action> type attribute can be add,update,fix,remove.
+         PureJavaCrc32C in the snappy package is now final so it is now
+         safe to call a virtual method inside the constructor.
+       </action>
++      <action issue="COMPRESS-355" type="fix" date="2016-05-20"
++              due-to="Jeremy Gustie">
++        TarArchiveInputStream failed to parse PAX headers that
++        included blank lines.
++      </action>
+     </release>
+     <release version="1.11" date="2016-04-06"
+              description="Release 1.11">
+diff --git a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
+index 61b908f00ab..f0d60cb8d29 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
+@@ -459,7 +459,9 @@ Map<String, String> parsePaxHeaders(final InputStream i)
+             int read = 0;
+             while((ch = i.read()) != -1) {
+                 read++;
+-                if (ch == ' '){ // End of length string
++                if (ch == '\n') { // blank line in header
++                    break;
++                } else if (ch == ' '){ // End of length string
+                     // Get keyword
+                     final ByteArrayOutputStream coll = new ByteArrayOutputStream();
+                     while((ch = i.read()) != -1) {
+diff --git a/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java b/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java
+index 84f2e1dfb3f..015748b624a 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStreamTest.java
+@@ -23,6 +23,7 @@
+ import static org.apache.commons.compress.AbstractTestCase.rmdir;
+ import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertTrue;
+ import static org.junit.Assert.fail;
+ 
+@@ -297,6 +298,21 @@ public void shouldReadGNULongNameEntryWithWrongName() throws Exception {
+         }
+     }
+ 
++    /**
++     * @link "https://issues.apache.org/jira/browse/COMPRESS-355"
++     */
++    @Test
++    public void survivesBlankLinesInPaxHeader() throws Exception {
++        final TarArchiveInputStream is = getTestStream("/COMPRESS-355.tar");
++        try {
++            final TarArchiveEntry entry = is.getNextTarEntry();
++            assertEquals("package/package.json", entry.getName());
++            assertNull(is.getNextTarEntry());
++        } finally {
++            is.close();
++        }
++    }
++
+     private TarArchiveInputStream getTestStream(final String name) {
+         return new TarArchiveInputStream(
+                 TarArchiveInputStreamTest.class.getResourceAsStream(name));
+diff --git a/src/test/resources/COMPRESS-355.tar b/src/test/resources/COMPRESS-355.tar
+new file mode 100644
+index 0000000000000000000000000000000000000000..6eb94f2786ebacbfb8f2c3809b2ad8ef6b829c17
+GIT binary patch
+literal 8192
+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
+L+ngUiSRM2)B)F35
+
+literal 0
+HcmV?d00001
+

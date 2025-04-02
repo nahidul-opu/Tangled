@@ -1,0 +1,196 @@
+From eedabc673b7e2a2aeb9180ea69b7ea5d44b58530 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sat, 29 May 2010 14:22:08 +0000
+Subject: [PATCH] CONFIGURATION-415: Files with a plus character in their names
+ are now handled correctly. Copied code from the FileUtils class of Commons IO
+ to ConfigurationUtils.fileFromURL() to achieve this. Ported this fix to
+ configuration2 branch.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@949393 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  3 ++
+ .../configuration2/ConfigurationUtils.java    | 36 +++++++++----------
+ .../TestConfigurationUtils.java               | 25 ++++++++++++-
+ .../configuration2/TestFileConfiguration.java | 23 ++++++++++++
+ 4 files changed, 68 insertions(+), 19 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 7c62a589a0..e4c1f7d8e3 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -79,6 +79,9 @@
+     </release>
+ 
+     <release version="1.7" date="in SVN" description="">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-415">
++        Files with a plus character in their names are now handled correctly.
++      </action>
+       <action dev="oheger" type="fix" issue="CONFIGURATION-413" due-to="Alexander Prishchepov">
+         SubsetConfiguration now produces correct events.
+       </action>
+diff --git a/src/main/java/org/apache/commons/configuration2/ConfigurationUtils.java b/src/main/java/org/apache/commons/configuration2/ConfigurationUtils.java
+index 435e6c1512..081a405ff2 100644
+--- a/src/main/java/org/apache/commons/configuration2/ConfigurationUtils.java
++++ b/src/main/java/org/apache/commons/configuration2/ConfigurationUtils.java
+@@ -21,12 +21,10 @@
+ import java.io.PrintStream;
+ import java.io.PrintWriter;
+ import java.io.StringWriter;
+-import java.io.UnsupportedEncodingException;
+ import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+ import java.net.MalformedURLException;
+ import java.net.URL;
+-import java.net.URLDecoder;
+ import java.util.Iterator;
+ 
+ import org.apache.commons.configuration2.event.ConfigurationErrorEvent;
+@@ -47,7 +45,7 @@
+  * @author <a href="mailto:herve.quiroz@esil.univ-mrs.fr">Herve Quiroz</a>
+  * @author <a href="mailto:oliver.heger@t-online.de">Oliver Heger</a>
+  * @author Emmanuel Bourg
+- * @version $Revision$, $Date$
++ * @version $Id$
+  */
+ public final class ConfigurationUtils
+ {
+@@ -60,9 +58,6 @@ public final class ConfigurationUtils
+     /** Constant for the name of the clone() method.*/
+     private static final String METHOD_CLONE = "clone";
+ 
+-    /** Constant for the encoding for URLs. */
+-    private static final String ENCODING = "UTF-8";
+-
+     /** The logger.*/
+     private static Log log = LogFactory.getLog(ConfigurationUtils.class.getName());
+ 
+@@ -543,28 +538,33 @@ public static File getFile(String basePath, String fileName)
+ 
+     /**
+      * Tries to convert the specified URL to a file object. If this fails,
+-     * <b>null</b> is returned.
++     * <b>null</b> is returned. Note: This code has been copied from the
++     * <code>FileUtils</code> class from <em>Commons IO</em>.
+      *
+      * @param url the URL
+      * @return the resulting file object
+      */
+     public static File fileFromURL(URL url)
+     {
+-        if (PROTOCOL_FILE.equals(url.getProtocol()))
++        if (url == null || !url.getProtocol().equals(PROTOCOL_FILE))
+         {
+-            try
+-            {
+-                return new File(URLDecoder.decode(url.getPath(), ENCODING));
+-            }
+-            catch (UnsupportedEncodingException uex)
+-            {
+-                // should not happen because UTF-8 should be supported
+-                throw new AssertionError("Encoding not supported: " + uex);
+-            }
++            return null;
+         }
+         else
+         {
+-            return null;
++            String filename = url.getFile().replace('/', File.separatorChar);
++            int pos = 0;
++            while ((pos = filename.indexOf('%', pos)) >= 0)
++            {
++                if (pos + 2 < filename.length())
++                {
++                    String hexStr = filename.substring(pos + 1, pos + 3);
++                    char ch = (char) Integer.parseInt(hexStr, 16);
++                    filename = filename.substring(0, pos) + ch
++                            + filename.substring(pos + 3);
++                }
++            }
++            return new File(filename);
+         }
+     }
+ 
+diff --git a/src/test/java/org/apache/commons/configuration2/TestConfigurationUtils.java b/src/test/java/org/apache/commons/configuration2/TestConfigurationUtils.java
+index 541c98101d..9092fb0d2e 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestConfigurationUtils.java
++++ b/src/test/java/org/apache/commons/configuration2/TestConfigurationUtils.java
+@@ -18,6 +18,7 @@
+ package org.apache.commons.configuration2;
+ 
+ import java.io.File;
++import java.net.MalformedURLException;
+ import java.net.URL;
+ import java.util.ArrayList;
+ import java.util.List;
+@@ -34,7 +35,7 @@
+ /**
+  * Tests the ConfigurationUtils class
+  *
+- * @version $Revision$, $Date$
++ * @version $Id$
+  */
+ public class TestConfigurationUtils extends TestCase
+ {
+@@ -165,6 +166,28 @@ public void testGetFile() throws Exception
+                 reference.getAbsolutePath()));
+     }
+ 
++    /**
++     * Tests whether a "+" character in the file name is handled correctly by
++     * fileFromURL(). This test is related to CONFIGURATION-415.
++     */
++    public void testFileFromURLWithPlus() throws MalformedURLException
++    {
++        File file = ConfigurationAssert.getOutFile("foo+bar.txt")
++                .getAbsoluteFile();
++        URL fileURL = file.toURI().toURL();
++        File file2 = ConfigurationUtils.fileFromURL(fileURL);
++        assertEquals("Wrong file", file, file2);
++    }
++
++    /**
++     * Tests whether fileFromURL() handles null URLs correctly.
++     */
++    public void testFileFromURLNull() throws MalformedURLException
++    {
++        assertNull("Wrong file for null URL", ConfigurationUtils
++                .fileFromURL(null));
++    }
++
+     public void testLocateWithNullTCCL() throws Exception
+     {
+         ClassLoader cl = Thread.currentThread().getContextClassLoader();
+diff --git a/src/test/java/org/apache/commons/configuration2/TestFileConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestFileConfiguration.java
+index 51fb63a129..ae8f4d48c0 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestFileConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestFileConfiguration.java
+@@ -375,6 +375,29 @@ public void testPathWithSpaces() throws Exception
+         }
+     }
+ 
++    /**
++     * Tests whether file names containing a "+" character are handled
++     * correctly. This test is related to CONFIGURATION-415.
++     */
++    public void testPathWithPlus() throws ConfigurationException, IOException
++    {
++        File saveFile = ConfigurationAssert.getOutFile("test+config.properties")
++                .getAbsoluteFile();
++        saveFile.createNewFile();
++        try
++        {
++            FileConfiguration config = new PropertiesConfiguration(saveFile);
++            config.addProperty("test", Boolean.TRUE);
++            config.save();
++            File configFile = config.getFile();
++            assertEquals("Wrong configuration file", saveFile, configFile);
++        }
++        finally
++        {
++            assertTrue("Could not remove test file", saveFile.delete());
++        }
++    }
++
+     /**
+      * Tests the getFile() method.
+      */

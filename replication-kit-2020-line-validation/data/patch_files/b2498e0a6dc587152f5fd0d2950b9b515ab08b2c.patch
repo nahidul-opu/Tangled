@@ -1,0 +1,450 @@
+From b2498e0a6dc587152f5fd0d2950b9b515ab08b2c Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Mon, 17 Jul 2006 19:04:28 +0000
+Subject: [PATCH] FIX: Multiple versions of dependencies appearing in retrieve
+ (IVY-264)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484384 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .classpath                                    |  2 +-
+ CHANGES.txt                                   |  1 +
+ src/java/fr/jayasoft/ivy/Ivy.java             | 49 +++------------
+ src/java/fr/jayasoft/ivy/IvyContext.java      | 21 +++++++
+ src/java/fr/jayasoft/ivy/IvyNode.java         | 33 ++++++----
+ .../ivy/xml/XmlModuleDescriptorWriter.java    | 12 +++-
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 62 +++++++++++++++++++
+ test/repositories/2/mod4.1/ivy-4.14.xml       | 13 ++++
+ .../commons-lang/commons-lang-1.0.1.jar       |  1 +
+ .../IVY-264/commons-lang/commons-lang-2.0.jar |  1 +
+ test/repositories/IVY-264/x/ivy-1.0.xml       |  6 ++
+ test/repositories/IVY-264/x/x-1.0.jar         |  1 +
+ test/repositories/IVY-264/y/ivy-1.0.xml       |  6 ++
+ test/repositories/IVY-264/y/y-1.0.jar         |  1 +
+ test/repositories/IVY-264/z/ivy-1.0.xml       |  6 ++
+ test/repositories/IVY-264/z/z-1.0.jar         |  1 +
+ 16 files changed, 159 insertions(+), 57 deletions(-)
+ create mode 100644 test/repositories/2/mod4.1/ivy-4.14.xml
+ create mode 100644 test/repositories/IVY-264/commons-lang/commons-lang-1.0.1.jar
+ create mode 100644 test/repositories/IVY-264/commons-lang/commons-lang-2.0.jar
+ create mode 100644 test/repositories/IVY-264/x/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-264/x/x-1.0.jar
+ create mode 100644 test/repositories/IVY-264/y/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-264/y/y-1.0.jar
+ create mode 100644 test/repositories/IVY-264/z/ivy-1.0.xml
+ create mode 100644 test/repositories/IVY-264/z/z-1.0.jar
+
+diff --git a/.classpath b/.classpath
+index 66a74c2d1..d26aba832 100644
+--- a/.classpath
++++ b/.classpath
+@@ -3,7 +3,7 @@
+ 	<classpathentry kind="src" path="src/java"/>
+ 	<classpathentry kind="src" path="test/java"/>
+ 	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+-	<classpathentry kind="con" path="org.jayasoft.ivyde.eclipse.cpcontainer.IVYDE_CONTAINER/ivy.xml/default,"/>
++	<classpathentry kind="con" path="org.jayasoft.ivyde.eclipse.cpcontainer.IVYDE_CONTAINER/ivy.xml/*"/>
+ 	<classpathentry sourcepath="ECLIPSE_HOME/plugins/org.eclipse.jdt.source_3.0.0/src/org.junit_3.8.1/junitsrc.zip" kind="var" path="JUNIT_HOME/junit.jar"/>
+ 	<classpathentry sourcepath="/ANT_HOME/src/main" kind="var" path="ANT_HOME/lib/ant.jar"/>
+ 	<classpathentry kind="var" path="ANT_HOME/lib/ant-launcher.jar"/>
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 899cbaf2a..a927fb7b3 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -38,6 +38,7 @@ Changes:
+   - IMPROVE: prints URL before downloading in verbose mode (IVY-257)
+   - IMPROVE: incorrect value in status attribute causes silent failure (IVY-259)
+ 
++  - FIX: Multiple versions of dependencies appearing in retrieve (IVY-264)
+   - FIX: Too many false CircularDependencyException errors thrown (IVY-230)
+   - FIX: CircularDependencyException not always thrown (IVY-184)
+   - FIX: NullPointer in BasicResolver (IVY-258)
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index bb2b9ace2..f64e87bda 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -1220,9 +1220,11 @@ private void fetchDependencies(IvyNode node, String conf, boolean shouldBePublic
+         if (node.isEvicted(node.getRootModuleConf())) {
+             // update selected nodes with confs asked in evicted one
+             IvyNode.EvictionData ed = node.getEvictedData(node.getRootModuleConf());
+-            for (Iterator iter = ed.getSelected().iterator(); iter.hasNext();) {
+-                IvyNode selected = (IvyNode)iter.next();
+-                fetchDependencies(selected, conf, true);
++            if (ed.getSelected() != null) {
++            	for (Iterator iter = ed.getSelected().iterator(); iter.hasNext();) {
++            		IvyNode selected = (IvyNode)iter.next();
++            		fetchDependencies(selected, conf, true);
++            	}
+             }
+         }
+         if (debugConflictResolution()) {
+@@ -1342,11 +1344,6 @@ private void resolveConflict(IvyNode node, IvyNode parent, Collection toevict) {
+         }
+         if (resolved.contains(node)) {
+             // node has been selected for the current parent
+-            // we update its eviction... but it can still be evicted by parent !
+-            node.markSelected(node.getRootModuleConf());
+-            if (debugConflictResolution()) {
+-                Message.debug("selecting "+node+" in "+parent);
+-            }
+             
+             // handle previously selected nodes that are now evicted by this new node
+             toevict = resolvedNodes;
+@@ -1380,20 +1377,11 @@ private void resolveConflict(IvyNode node, IvyNode parent, Collection toevict) {
+                 }
+             }
+             
+-            // first we mark the selected nodes as selected if it isn't already the case
+-            for (Iterator iter = resolved.iterator(); iter.hasNext();) {
+-                IvyNode selected = (IvyNode)iter.next();
+-                if (selected.isEvicted(node.getRootModuleConf())) {
+-                    selected.markSelected(node.getRootModuleConf());
+-                    if (debugConflictResolution()) {
+-                        Message.debug("selecting "+selected+" in "+parent);
+-                    }
+-                }
+-            }
+             
+             // it's time to update parent resolved and evicted with what was found 
+             
+             Collection evicted = new HashSet(parent.getEvictedNodes(node.getModuleId(), node.getRootModuleConf()));
++            toevict.removeAll(resolved);
+             evicted.removeAll(resolved);
+             evicted.addAll(toevict);
+             evicted.add(node);
+@@ -1459,22 +1447,10 @@ private boolean checkConflictSolved(IvyNode node, IvyNode parent) {
+             }
+             EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), parent);
+             if (evictionData != null) {
+-                // node has been previously evicted in an ancestor: we mark it as evicted and ensure selected are selected
++                // node has been previously evicted in an ancestor: we mark it as evicted
+                 if (debugConflictResolution()) {
+                     Message.debug(node+" was previously evicted in root module conf "+node.getRootModuleConf());
+                 }
+-                if (evictionData.getSelected() != null) {
+-                    for (Iterator iter = evictionData.getSelected().iterator(); iter.hasNext();) {
+-                        IvyNode selected = (IvyNode)iter.next();
+-                        if (selected.isEvicted(node.getRootModuleConf())) {
+-                            selected.markSelected(node.getRootModuleConf());
+-                            if (debugConflictResolution()) {
+-                                Message.debug("selecting "+selected+" in "+parent+" due to eviction of "+node);
+-                            }
+-                        }
+-                    }
+-                }
+-
+ 
+                 node.markEvicted(evictionData);                
+                 if (debugConflictResolution()) {
+@@ -1488,17 +1464,6 @@ private boolean checkConflictSolved(IvyNode node, IvyNode parent) {
+             if (debugConflictResolution()) {
+                 Message.debug("conflict resolution already done for "+node+" in "+parent);
+             }
+-            EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), parent);
+-            if (evictionData == null) {
+-                // node was selected in the root, we have to select it
+-                if (debugConflictResolution()) {
+-                    Message.debug(node+" was previously selected in root module conf "+node.getRootModuleConf());
+-                }
+-                node.markSelected(node.getRootModuleConf());            
+-                if (debugConflictResolution()) {
+-                    Message.debug("selecting "+node+" in "+parent);
+-                }
+-            }
+             return true;
+         }
+         return false;
+diff --git a/src/java/fr/jayasoft/ivy/IvyContext.java b/src/java/fr/jayasoft/ivy/IvyContext.java
+index ff96ba7dc..376297601 100644
+--- a/src/java/fr/jayasoft/ivy/IvyContext.java
++++ b/src/java/fr/jayasoft/ivy/IvyContext.java
+@@ -73,4 +73,25 @@ void setCache(File cache) {
+ 	public CircularDependencyStrategy getCircularDependencyStrategy() {
+ 		return getIvy().getCircularDependencyStrategy();
+ 	}
++
++	// should be better to use context to store this kind of information, but not yet ready to do so...
++//    private WeakReference _root = new WeakReference(null); 
++//    private String _rootModuleConf = null;
++//	public IvyNode getRoot() {
++//		return (IvyNode) _root.get();
++//	}
++//	
++//	public void setRoot(IvyNode root) {
++//		_root = new WeakReference(root);
++//	}
++//
++//	public String getRootModuleConf() {
++//		return _rootModuleConf;
++//	}
++//
++//	public void setRootModuleConf(String rootModuleConf) {
++//		_rootModuleConf = rootModuleConf;
++//	}
++	
++	
+ }
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index ca2bd0474..9afdc3210 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -363,7 +363,21 @@ public void setEvictedNodes(ModuleId moduleId, String rootModuleConf, Collection
+ 
+     public boolean isEvicted(String rootModuleConf) {
+         cleanEvicted();
+-        return _evicted.containsKey(rootModuleConf);
++        return getRoot() != this && !getRoot().getResolvedRevisions(getId().getModuleId(), rootModuleConf).contains(getResolvedId());
++    }
++
++    public boolean isCompletelyEvicted() {
++        cleanEvicted();
++        if (getRoot() == this) {
++        	return false;
++        }
++        for (Iterator iter = _rootModuleConfs.keySet().iterator(); iter.hasNext();) {
++			String conf = (String) iter.next();
++			if (!isEvicted(conf)) {
++				return false;
++			}
++		}
++        return true;
+     }
+     
+     private void cleanEvicted() {
+@@ -385,10 +399,6 @@ private void cleanEvicted() {
+         }
+     }
+ 
+-    public void markSelected(String rootModuleConf) {
+-        _evicted.remove(rootModuleConf);
+-    }
+-
+     public void markEvicted(String rootModuleConf, IvyNode node, ConflictManager conflictManager, Collection resolved) {
+         EvictionData evictionData = new EvictionData(rootModuleConf, node, conflictManager, resolved);
+         markEvicted(evictionData);
+@@ -408,6 +418,7 @@ public void markEvicted(EvictionData evictionData) {
+             }
+         }
+     }
++    
+     private void updateDataFrom(IvyNode node, String rootModuleConf) {
+         // update callers
+         Map nodecallers = (Map)node._callersByRootConf.get(rootModuleConf);
+@@ -467,11 +478,6 @@ public String[] getEvictedConfs() {
+         return (String[])_evicted.keySet().toArray(new String[_evicted.keySet().size()]);
+     }
+ 
+-    public boolean isCompletelyEvicted() {
+-        cleanEvicted();
+-        return _evicted.keySet().containsAll(_rootModuleConfs.keySet());
+-    }
+-
+     /**
+      * Returns null if this node has only be evicted transitively, or the the colletion of selected nodes
+      * if it has been evicted by other selected nodes
+@@ -619,9 +625,14 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+                                     return false;
+                                 }
+                                 
++                                if (resolved._md == null) {
++                                	resolved._md = _md;
++                                }
++                                if (resolved._module == null) {
++                                	resolved._module = _module;
++                                }
+                                 resolved._downloaded |= _module.isDownloaded();
+                                 resolved._searched |= _module.isSearched();
+-                                resolved.markSelected(_rootModuleConf);
+                                 resolved.updateDataFrom(this, _rootModuleConf);
+                                 resolved.loadData(conf, shouldBePublic);
+                                 DependencyDescriptor dd = getDependencyDescriptor(getParent());
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorWriter.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorWriter.java
+index 916ccb013..5e65d29e6 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorWriter.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorWriter.java
+@@ -96,9 +96,15 @@ public static void write(ModuleDescriptor md, File output) throws IOException {
+                     out.print(" org=\""+dds[i].getDependencyRevisionId().getOrganisation()+"\"");
+                     out.print(" name=\""+dds[i].getDependencyRevisionId().getName()+"\"");
+                     out.print(" rev=\""+dds[i].getDependencyRevisionId().getRevision()+"\"");
+-                    out.print(" force=\""+dds[i].isForce()+"\"");
+-                    out.print(" changing=\""+dds[i].isChanging()+"\"");
+-                    out.print(" transitive=\""+dds[i].isTransitive()+"\"");
++                    if (dds[i].isForce()) {
++                    	out.print(" force=\""+dds[i].isForce()+"\"");
++                    }
++                    if (dds[i].isChanging()) {
++                    	out.print(" changing=\""+dds[i].isChanging()+"\"");
++                    }
++                    if (!dds[i].isTransitive()) {
++                    	out.print(" transitive=\""+dds[i].isTransitive()+"\"");
++                    }
+                     out.print(" conf=\"");
+                     String[] modConfs = dds[i].getModuleConfigurations();
+                     for (int j = 0; j < modConfs.length; j++) {
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index e00a481e6..38890951b 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -901,6 +901,68 @@ public void startElement(String uri,String localName,String qName,org.xml.sax.At
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
+     }
+     
++    public void testResolveConflict2() throws Exception {
++        // mod4.1 v 4.14 depends on 
++        //   - mod1.1 v 1.0 which depends on mod1.2 v 2.0
++        //   - mod3.1 v 1.1 which depends on mod1.2 v 2.1
++        //   - mod6.1 v 0.3 which depends on mod1.2 v 2.0
++        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod4.1/ivy-4.14.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        
++        // dependencies
++        ConfigurationResolveReport crr = report.getConfigurationReport("default");
++        assertNotNull(crr);
++        assertEquals(0, crr.getDownloadReports(ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).length);
++        assertEquals(1, crr.getDownloadReports(ModuleRevisionId.newInstance("org1", "mod1.2", "2.1")).length);
++        
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org4", "mod4.1", "4.14");
++        File r = new File(_cache, XmlReportOutputter.getReportFileName(mrid.getModuleId(), "default"));
++        assertTrue(r.exists());
++        final boolean[] found = new boolean[] {false};
++        SAXParser saxParser = SAXParserFactory.newInstance().newSAXParser();
++        saxParser.parse(r, new DefaultHandler() {
++            public void startElement(String uri,String localName,String qName,org.xml.sax.Attributes attributes) throws SAXException {
++                if ("revision".equals(qName) && "2.0".equals(attributes.getValue("name"))) {
++                    found[0] = true;
++                }
++            }
++        });
++        assertTrue(found[0]); // the report should contain the evicted revision
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.1", "1.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.1", "1.0", "mod1.1", "jar", "jar").exists());
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org3", "mod3.1", "1.1")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org3", "mod3.1", "1.1", "mod3.1", "jar", "jar").exists());
++
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.1")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++    }
++    
++    public void testResolveConflict3() throws Exception {
++        // test case for IVY-264
++        // a depends on x latest, y latest, z latest
++    	// x and z depends on commons-lang 1.0.1
++    	// y depends on commons-lang 2.0
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/IVY-264/ivyconf.xml"));
++        ResolveReport report = ivy.resolve(new File("test/repositories/IVY-264/ivy.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertFalse(report.hasError());
++        
++        // dependencies
++        ConfigurationResolveReport crr = report.getConfigurationReport("default");
++        assertNotNull(crr);
++        assertEquals(0, crr.getDownloadReports(ModuleRevisionId.newInstance("myorg", "commons-lang", "1.0.1")).length);
++        assertEquals(1, crr.getDownloadReports(ModuleRevisionId.newInstance("myorg", "commons-lang", "2.0")).length);
++
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "myorg", "commons-lang", "1.0.1", "commons-lang", "jar", "jar").exists());
++
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "myorg", "commons-lang", "2.0", "commons-lang", "jar", "jar").exists());
++    }
++
+     public void testTransitiveEviction() throws Exception {
+         // mod7.3 depends on mod7.2 v1.0 and on mod7.1 v2.0
+         //      mod7.2 v1.0 depends on mod7.1 v1.0 (which then should be evicted)
+diff --git a/test/repositories/2/mod4.1/ivy-4.14.xml b/test/repositories/2/mod4.1/ivy-4.14.xml
+new file mode 100644
+index 000000000..69097e97d
+--- /dev/null
++++ b/test/repositories/2/mod4.1/ivy-4.14.xml
+@@ -0,0 +1,13 @@
++<ivy-module version="1.0">
++	<info organisation="org4"
++	       module="mod4.1"
++	       revision="4.14"
++	       status="integration"
++	       publication="20060716110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.1" rev="1.0"/>
++		<dependency org="org3" name="mod3.1" rev="1.1"/>
++		<dependency org="org6" name="mod6.1" rev="0.3" conf="default"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-264/commons-lang/commons-lang-1.0.1.jar b/test/repositories/IVY-264/commons-lang/commons-lang-1.0.1.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-264/commons-lang/commons-lang-1.0.1.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-264/commons-lang/commons-lang-2.0.jar b/test/repositories/IVY-264/commons-lang/commons-lang-2.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-264/commons-lang/commons-lang-2.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-264/x/ivy-1.0.xml b/test/repositories/IVY-264/x/ivy-1.0.xml
+new file mode 100644
+index 000000000..c7cb15c2f
+--- /dev/null
++++ b/test/repositories/IVY-264/x/ivy-1.0.xml
+@@ -0,0 +1,6 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="x" revision="1.0" />
++    <dependencies>
++        <dependency name="commons-lang" rev="1.0.1" conf="default->default" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-264/x/x-1.0.jar b/test/repositories/IVY-264/x/x-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-264/x/x-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-264/y/ivy-1.0.xml b/test/repositories/IVY-264/y/ivy-1.0.xml
+new file mode 100644
+index 000000000..a95e9ce14
+--- /dev/null
++++ b/test/repositories/IVY-264/y/ivy-1.0.xml
+@@ -0,0 +1,6 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="y" revision="1.0"/>
++    <dependencies>
++        <dependency name="commons-lang" rev="2.0" conf="default->default" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-264/y/y-1.0.jar b/test/repositories/IVY-264/y/y-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-264/y/y-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/IVY-264/z/ivy-1.0.xml b/test/repositories/IVY-264/z/ivy-1.0.xml
+new file mode 100644
+index 000000000..f98351178
+--- /dev/null
++++ b/test/repositories/IVY-264/z/ivy-1.0.xml
+@@ -0,0 +1,6 @@
++<ivy-module version="1.0">
++    <info organisation="myorg" module="z" revision="1.0"/>
++    <dependencies>
++        <dependency name="commons-lang" rev="1.0.1" conf="default->default" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-264/z/z-1.0.jar b/test/repositories/IVY-264/z/z-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/IVY-264/z/z-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file

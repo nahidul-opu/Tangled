@@ -1,0 +1,275 @@
+From 601e4d7dbf966bc861f15c6dd657cb68772df08e Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Mon, 3 Jun 2013 09:20:30 +0000
+Subject: [PATCH] COMPRESS-229 properly parse GNU_LONGLNK entries, patch by
+ Christoph Gysin
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@1488935 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |   6 ++
+ .../archivers/tar/TarArchiveEntry.java        |  10 +++
+ .../archivers/tar/TarArchiveInputStream.java  |  63 +++++++++++-------
+ .../compress/archivers/tar/TarConstants.java  |   5 ++
+ .../compress/archivers/LongPathTest.java      |  36 ++++++++--
+ src/test/resources/longsymlink/files.txt      |   1 +
+ src/test/resources/longsymlink/gnu.tar        | Bin 0 -> 10240 bytes
+ 7 files changed, 92 insertions(+), 29 deletions(-)
+ create mode 100644 src/test/resources/longsymlink/files.txt
+ create mode 100644 src/test/resources/longsymlink/gnu.tar
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index dcf63487d86..4763fec3f33 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -54,6 +54,12 @@ The <action> type attribute can be add,update,fix,remove.
+         to be able to read archives created by DotNetZip and maybe
+         other archivers as well.
+       </action>
++      <action type="fix" date="2013-06-03" issue="COMPRESS-229"
++              due-to="Christoph Gysin">
++        TAR will now properly read the names of symbolic links with
++        long names that use the GNU variant to specify the long file
++        name.
++      </action>
+     </release>
+     <release version="1.5" date="2013-03-14"
+              description="Release 1.5">
+diff --git a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveEntry.java b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveEntry.java
+index 6ed628038a4..14b94ccc7bd 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveEntry.java
++++ b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveEntry.java
+@@ -675,6 +675,16 @@ public boolean isGNUSparse() {
+         return linkFlag == LF_GNUTYPE_SPARSE;
+     }
+ 
++    /**
++     * Indicate if this entry is a GNU long linkname block
++     *
++     * @return true if this is a long name extension provided by GNU tar
++     */
++    public boolean isGNULongLinkEntry() {
++        return linkFlag == LF_GNUTYPE_LONGLINK
++            && name.equals(GNU_LONGLINK);
++    }
++
+     /**
+      * Indicate if this entry is a GNU long name block
+      *
+diff --git a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
+index d20d039e9b7..1eb0b6839ab 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/tar/TarArchiveInputStream.java
+@@ -248,31 +248,13 @@ public TarArchiveEntry getNextTarEntry() throws IOException {
+         entryOffset = 0;
+         entrySize = currEntry.getSize();
+ 
+-        if (currEntry.isGNULongNameEntry()) {
+-            // read in the name
+-            ByteArrayOutputStream longName = new ByteArrayOutputStream();
+-            int length = 0;
+-            while ((length = read(SMALL_BUF)) >= 0) {
+-                longName.write(SMALL_BUF, 0, length);
+-            }
+-            getNextEntry();
+-            if (currEntry == null) {
+-                // Bugzilla: 40334
+-                // Malformed tar file - long entry name not followed by entry
+-                return null;
+-            }
+-            byte[] longNameData = longName.toByteArray();
+-            // remove trailing null terminator(s)
+-            length = longNameData.length;
+-            while (length > 0 && longNameData[length - 1] == 0) {
+-                --length;
+-            }
+-            if (length != longNameData.length) {
+-                byte[] l = new byte[length];
+-                System.arraycopy(longNameData, 0, l, 0, length);
+-                longNameData = l;
+-            }
++        if (currEntry.isGNULongLinkEntry()) {
++            byte[] longLinkData = getLongNameData();
++            currEntry.setLinkName(encoding.decode(longLinkData));
++        }
+ 
++        if (currEntry.isGNULongNameEntry()) {
++            byte[] longNameData = getLongNameData();
+             currEntry.setName(encoding.decode(longNameData));
+         }
+ 
+@@ -292,6 +274,39 @@ public TarArchiveEntry getNextTarEntry() throws IOException {
+         return currEntry;
+     }
+ 
++    /**
++     * Get the next entry in this tar archive as longname data.
++     *
++     * @return The next entry in the archive as longname data, or null.
++     * @throws IOException on error
++     */
++    protected byte[] getLongNameData() throws IOException {
++        // read in the name
++        ByteArrayOutputStream longName = new ByteArrayOutputStream();
++        int length = 0;
++        while ((length = read(SMALL_BUF)) >= 0) {
++            longName.write(SMALL_BUF, 0, length);
++        }
++        getNextEntry();
++        if (currEntry == null) {
++            // Bugzilla: 40334
++            // Malformed tar file - long entry name not followed by entry
++            return null;
++        }
++        byte[] longNameData = longName.toByteArray();
++        // remove trailing null terminator(s)
++        length = longNameData.length;
++        while (length > 0 && longNameData[length - 1] == 0) {
++            --length;
++        }
++        if (length != longNameData.length) {
++            byte[] l = new byte[length];
++            System.arraycopy(longNameData, 0, l, 0, length);
++            longNameData = l;
++        }
++        return longNameData;
++    }
++
+     /**
+      * Get the next record in this tar archive. This will skip
+      * over any remaining data in the current entry, if there
+diff --git a/src/main/java/org/apache/commons/compress/archivers/tar/TarConstants.java b/src/main/java/org/apache/commons/compress/archivers/tar/TarConstants.java
+index 7b7c9cd37b1..5e5889cda42 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/tar/TarConstants.java
++++ b/src/main/java/org/apache/commons/compress/archivers/tar/TarConstants.java
+@@ -232,6 +232,11 @@ public interface TarConstants {
+      */
+     byte   LF_CONTIG = (byte) '7';
+ 
++    /**
++     * Identifies the *next* file on the tape as having a long linkname.
++     */
++    byte LF_GNUTYPE_LONGLINK = (byte) 'K';
++
+     /**
+      * Identifies the *next* file on the tape as having a long name.
+      */
+diff --git a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+index 1f951a69a2e..930de9c97de 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/LongPathTest.java
+@@ -25,6 +25,8 @@
+ import java.io.FileReader;
+ import java.io.IOException;
+ import java.util.ArrayList;
++import java.util.Map;
++import java.util.HashMap;
+ 
+ import junit.framework.AssertionFailedError;
+ import junit.framework.Test;
+@@ -33,6 +35,7 @@
+ import org.apache.commons.compress.AbstractTestCase;
+ import org.apache.commons.compress.archivers.ar.ArArchiveInputStream;
+ import org.apache.commons.compress.archivers.cpio.CpioArchiveInputStream;
++import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+ import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream;
+ 
+@@ -44,26 +47,37 @@
+  */
+ public class LongPathTest extends AbstractTestCase {
+ 
++    private String name;
+     private File file;
+ 
+-    private static final ArrayList<String> fileList = new ArrayList<String>();
++    private static final Map<String, ArrayList<String>> fileLists = new HashMap<String, ArrayList<String>>();
+ 
+     public LongPathTest(String name) {
+         super(name);
+     }
+ 
+-    private LongPathTest(String name, File file){
+-        super(name);
++    private LongPathTest(String name, String function, File file) {
++        super(function);
++        this.name = name;
+         this.file = file;
+     }
+ 
+     public static TestSuite suite() throws IOException{
+         TestSuite suite = new TestSuite("LongPathTests");
+-        File arcdir = getFile("longpath");
++        suite.addTest(createSuite("LongPathTest", "longpath"));
++        suite.addTest(createSuite("LongSymlinkTest", "longsymlink"));
++        return suite;
++    }
++
++    public static TestSuite createSuite(String name, String dirname) throws IOException {
++        TestSuite suite = new TestSuite(name);
++        File arcdir = getFile(dirname);
+         assertTrue(arcdir.exists());
+         File listing= new File(arcdir,"files.txt");
+         assertTrue("File listing is readable",listing.canRead());
+         BufferedReader br = new BufferedReader(new FileReader(listing));
++
++        ArrayList<String> fileList = new ArrayList<String>();
+         String line;
+         while ((line=br.readLine())!=null){
+             if (line.startsWith("#")){
+@@ -71,6 +85,7 @@ public static TestSuite suite() throws IOException{
+             }
+             fileList.add(line);
+         }
++        fileLists.put(name, fileList);
+         br.close();
+         File[]files=arcdir.listFiles();
+         for (final File file : files) {
+@@ -79,14 +94,25 @@ public static TestSuite suite() throws IOException{
+             }
+             // Appears to be the only way to give the test a variable name
+             TestSuite namedSuite = new TestSuite(file.getName());
+-            Test test = new LongPathTest("testArchive", file);
++            Test test = new LongPathTest(name, "testArchive", file);
+             namedSuite.addTest(test);
+             suite.addTest(namedSuite);
+         }
+         return suite;
+     }
+ 
++    protected String getExpectedString(ArchiveEntry entry) {
++        if (entry instanceof TarArchiveEntry) {
++            TarArchiveEntry tarEntry = (TarArchiveEntry) entry;
++            if (tarEntry.isSymbolicLink()) {
++                return tarEntry.getName() + " -> " + tarEntry.getLinkName();
++            }
++        }
++        return entry.getName();
++    }
++
+     public void testArchive() throws Exception {
++        ArrayList<String> fileList = fileLists.get(name);
+         @SuppressWarnings("unchecked") // fileList is of correct type
+         ArrayList<String> expected = (ArrayList<String>) fileList.clone();
+         String name = file.getName();
+diff --git a/src/test/resources/longsymlink/files.txt b/src/test/resources/longsymlink/files.txt
+new file mode 100644
+index 00000000000..2af0afd78c9
+--- /dev/null
++++ b/src/test/resources/longsymlink/files.txt
+@@ -0,0 +1 @@
++0xxxxxxxxx10xxxxxxxx20xxxxxxxx30xxxxxxxx40xxxxxxxx50xxxxxxxx60xxxxxxxx70xxxxxxxx80xxxxxxxx90xxxxxxxx100xxxxxxx110xxxxxxx120xxxxxxx130xxxxxxx -> 0yyyyyyyyy10yyyyyyyy20yyyyyyyy30yyyyyyyy40yyyyyyyy50yyyyyyyy60yyyyyyyy70yyyyyyyy80yyyyyyyy90yyyyyyyy100yyyyyyy110yyyyyyy120yyyyyyy130yyyyyyy
+diff --git a/src/test/resources/longsymlink/gnu.tar b/src/test/resources/longsymlink/gnu.tar
+new file mode 100644
+index 0000000000000000000000000000000000000000..b747f11ec5d52514642e0984c3cdd2c006f1ef01
+GIT binary patch
+literal 10240
+zcmeH}L2AP=5Jhzqoxsu9mXz$euP;$bX+t3fI|1qTk!keHEZQzYOw)d0@RLV)%o~Pr
+zvuQRD!+3Zd_J?<Ko8>;1`Qq+c@in#_F;2vX*4W3}e2#wWX+Azp)|zP?k2<1vKgIRw
+zyV<#1mjGK(2kJo{6hINQ1?@oMDhiSak_eLAjkG`Xq0MjY|IXN94bT6*|5IJ!Dz%^v
+z)Pp=IfFfuM+JQ>{UtV4MzY>y^{=Yn1quk7)4OI6jp)?7lNhnRarvA%Nk1;MYUZOAa
+zeSyALGhfP2K)FgJ7#Ac)F%}~tXUvWK`4Dp>Uo)I)|3AM?`&qkDyVLwKeHT}UxuF3X
+wpaB}70UDqI8lV9hpaB}70UDqI8lV9hpaB}70UDqI8lV9hpaB}7fpra>0o+Rde*gdg
+
+literal 0
+HcmV?d00001
+

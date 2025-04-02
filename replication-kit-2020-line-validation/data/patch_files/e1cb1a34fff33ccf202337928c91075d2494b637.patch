@@ -1,0 +1,127 @@
+From e1cb1a34fff33ccf202337928c91075d2494b637 Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Fri, 16 Mar 2012 10:01:18 +0000
+Subject: [PATCH] [SANTUARIO-301] - Missing KeyInfo element when encrypting
+ multiple elements
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1301409 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG.txt                                 |  1 +
+ .../xml/security/encryption/XMLCipher.java    |  4 +-
+ .../test/encryption/EncryptContentTest.java   | 52 +++++++++++++++++--
+ 3 files changed, 52 insertions(+), 5 deletions(-)
+
+diff --git a/CHANGELOG.txt b/CHANGELOG.txt
+index 516c56d9d5..97b687314d 100644
+--- a/CHANGELOG.txt
++++ b/CHANGELOG.txt
+@@ -1,6 +1,7 @@
+ Changelog for "Apache xml-security" <http://santuario.apache.org/>
+ 
+ New in v1.5.2-SNAPSHOT:
++    Fixed SANTUARIO-301 - Missing KeyInfo element when encrypting multiple elements.
+ 
+ New in v1.5.1:
+     Fixed SANTUARIO-300 - decryption/encryption optimization.
+diff --git a/src/main/java/org/apache/xml/security/encryption/XMLCipher.java b/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
+index f36e34473b..a0bfb6b1ab 100644
+--- a/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
++++ b/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
+@@ -2679,7 +2679,7 @@ Element toElement() {
+                     );
+                 }
+                 if (null != super.getKeyInfo()) {
+-                    result.appendChild(super.getKeyInfo().getElement());
++                    result.appendChild(super.getKeyInfo().getElement().cloneNode(true));
+                 }
+ 
+                 result.appendChild(((CipherDataImpl) super.getCipherData()).toElement());
+@@ -2765,7 +2765,7 @@ null, EncryptionConstants._ATT_RECIPIENT, getRecipient()
+                         super.getEncryptionMethod()).toElement());
+                 }
+                 if (null != super.getKeyInfo()) {
+-                    result.appendChild(super.getKeyInfo().getElement());
++                    result.appendChild(super.getKeyInfo().getElement().cloneNode(true));
+                 }
+                 result.appendChild(((CipherDataImpl) super.getCipherData()).toElement());
+                 if (null != super.getEncryptionProperties()) {
+diff --git a/src/test/java/org/apache/xml/security/test/encryption/EncryptContentTest.java b/src/test/java/org/apache/xml/security/test/encryption/EncryptContentTest.java
+index cc5aebeddc..5d0b4bb070 100644
+--- a/src/test/java/org/apache/xml/security/test/encryption/EncryptContentTest.java
++++ b/src/test/java/org/apache/xml/security/test/encryption/EncryptContentTest.java
+@@ -29,14 +29,17 @@
+ import javax.xml.parsers.DocumentBuilder;
+ import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.transform.TransformerFactory;
++
++import org.apache.xml.security.algorithms.JCEMapper;
++import org.apache.xml.security.encryption.EncryptedData;
++import org.apache.xml.security.encryption.XMLCipher;
++import org.apache.xml.security.keys.KeyInfo;
++import org.apache.xml.security.utils.Constants;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+ import org.w3c.dom.NodeList;
+ 
+-import org.apache.xml.security.algorithms.JCEMapper;
+-import org.apache.xml.security.encryption.XMLCipher;
+-
+ public class EncryptContentTest extends org.junit.Assert {
+ 
+     /** {@link org.apache.commons.logging} logging facility */
+@@ -52,6 +55,18 @@ public class EncryptContentTest extends org.junit.Assert {
+         "    <serial>Y10</serial>\n" +
+         "  </user>\n" +
+         "</users>\n";
++    
++    private static final String MULTIPLE_USER_DATA =
++        "<users>\n" +
++        "  <user>\n" +
++        "    <firstname>Bugs</firstname>\n" +
++        "    <lastname>Bunny</lastname>\n" +
++        "  </user>\n" +
++        "  <user>\n" +
++        "    <firstname>Daffy</firstname>\n" +
++        "    <lastname>Duck</lastname>\n" +
++        "  </user>\n" +
++        "</users>\n";
+ 
+     private DocumentBuilder db;
+     private SecretKey secretKey;
+@@ -138,4 +153,35 @@ public void testContentRemoved() throws Exception {
+         // t.transform(new DOMSource(doc), new StreamResult(System.out));
+     }
+     
++    /**
++     * See SANTUARIO-301:
++     * https://issues.apache.org/jira/browse/SANTUARIO-301
++     */
++    @org.junit.Test
++    public void testMultipleKeyInfoElements() throws Exception {
++        if (!haveISOPadding) {
++            log.warn("Test testMultipleKeyInfoElements skipped as necessary algorithms not available");
++            return;
++        }
++
++        Document doc = db.parse(new ByteArrayInputStream(MULTIPLE_USER_DATA.getBytes("UTF8")));
++        NodeList dataToEncrypt = doc.getElementsByTagName("user");
++
++        XMLCipher dataCipher = XMLCipher.getInstance(XMLCipher.TRIPLEDES);
++        dataCipher.init(XMLCipher.ENCRYPT_MODE, secretKey);
++
++        KeyInfo keyInfo = new KeyInfo(doc);
++        keyInfo.addKeyName("mykey");
++
++        EncryptedData encryptedData = dataCipher.getEncryptedData();
++        encryptedData.setKeyInfo(keyInfo);
++        
++        for (int i = 0; i < dataToEncrypt.getLength(); i++) {
++            dataCipher.doFinal(doc,(Element) dataToEncrypt.item(i), true);
++        }
++
++        NodeList keyInfoList = doc.getElementsByTagNameNS(Constants.SignatureSpecNS, "KeyInfo");
++        assertEquals(keyInfoList.getLength(), 2);
++    }
++    
+ }

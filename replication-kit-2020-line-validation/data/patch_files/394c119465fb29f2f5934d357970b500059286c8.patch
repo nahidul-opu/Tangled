@@ -1,0 +1,183 @@
+From 394c119465fb29f2f5934d357970b500059286c8 Mon Sep 17 00:00:00 2001
+From: Maja Kabiljo <maja@apache.org>
+Date: Tue, 4 Dec 2012 18:52:30 +0000
+Subject: [PATCH] GIRAPH-441: Keep track of connected channels in NettyServer
+
+git-svn-id: https://svn.apache.org/repos/asf/giraph/trunk@1417114 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                     |  2 +
+ .../apache/giraph/comm/netty/NettyClient.java |  7 +--
+ .../apache/giraph/comm/netty/NettyServer.java | 22 ++++++++++
+ .../giraph/utils/ProgressableUtils.java       | 43 ++++++++++++++++++-
+ 4 files changed, 70 insertions(+), 4 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 1521ce828..4b7a445ec 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++  GIRAPH-441: Keep track of connected channels in NettyServer (majakabiljo)
++
+   GIRAPH-440: ProgressableUtils - TimeoutException from future.get shouldn't 
+   be rethrown (majakabiljo)
+ 
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+index b13c628f6..cad14050b 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+@@ -47,6 +47,7 @@
+ /*end[HADOOP_NON_SECURE]*/
+ import org.apache.giraph.comm.requests.WritableRequest;
+ import org.apache.giraph.graph.TaskInfo;
++import org.apache.giraph.utils.ProgressableUtils;
+ import org.apache.giraph.utils.TimedLogger;
+ import org.apache.hadoop.mapreduce.Mapper;
+ import org.apache.log4j.Logger;
+@@ -399,8 +400,8 @@ public void connectAllAddresses(Collection<? extends TaskInfo> tasks) {
+       List<ChannelFutureAddress> nextCheckFutures = Lists.newArrayList();
+       for (ChannelFutureAddress waitingConnection : waitingConnectionList) {
+         context.progress();
+-        ChannelFuture future =
+-            waitingConnection.future.awaitUninterruptibly();
++        ChannelFuture future = waitingConnection.future;
++        ProgressableUtils.awaitChannelFuture(future, context);
+         if (!future.isSuccess()) {
+           LOG.warn("connectAllAddresses: Future failed " +
+               "to connect with " + waitingConnection.address + " with " +
+@@ -596,7 +597,7 @@ private Channel getNextChannel(InetSocketAddress remoteServer) {
+     int reconnectFailures = 0;
+     while (reconnectFailures < maxConnectionFailures) {
+       ChannelFuture connectionFuture = bootstrap.connect(remoteServer);
+-      connectionFuture.awaitUninterruptibly();
++      ProgressableUtils.awaitChannelFuture(connectionFuture, context);
+       if (connectionFuture.isSuccess()) {
+         if (LOG.isInfoEnabled()) {
+           LOG.info("getNextChannel: Connected to " + remoteServer + "!");
+diff --git a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
+index 2e3d31a7e..f8a5b4675 100644
+--- a/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
++++ b/giraph/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
+@@ -47,10 +47,13 @@
+ import org.jboss.netty.channel.Channel;
+ import org.jboss.netty.channel.ChannelException;
+ import org.jboss.netty.channel.ChannelFactory;
++import org.jboss.netty.channel.ChannelHandlerContext;
+ import org.jboss.netty.channel.ChannelLocal;
+ import org.jboss.netty.channel.ChannelPipeline;
+ import org.jboss.netty.channel.ChannelPipelineFactory;
++import org.jboss.netty.channel.ChannelStateEvent;
+ import org.jboss.netty.channel.Channels;
++import org.jboss.netty.channel.SimpleChannelUpstreamHandler;
+ import org.jboss.netty.channel.group.ChannelGroup;
+ import org.jboss.netty.channel.group.DefaultChannelGroup;
+ import org.jboss.netty.channel.socket.nio.NioServerSocketChannelFactory;
+@@ -271,6 +274,18 @@ public ChannelPipeline getPipeline() throws Exception {
+ /*end[HADOOP_NON_SECURE]*/
+           ChannelPipeline pipeline = pipeline();
+ 
++          // Store all connected channels in order to ensure that we can close
++          // them on stop(), or else stop() may hang waiting for the
++          // connections to close on their own
++          pipeline.addLast("connectedChannels",
++              new SimpleChannelUpstreamHandler() {
++                @Override
++                public void channelConnected(ChannelHandlerContext ctx,
++                    ChannelStateEvent e) throws Exception {
++                  super.channelConnected(ctx, e);
++                  accepted.add(e.getChannel());
++                }
++              });
+           pipeline.addLast("serverByteCounter", byteCounter);
+           pipeline.addLast("requestFrameDecoder",
+               new LengthFieldBasedFrameDecoder(
+@@ -363,7 +378,14 @@ public void stop() {
+     }
+     ProgressableUtils.awaitChannelGroupFuture(accepted.close(), progressable);
+     bossExecutorService.shutdownNow();
++    ProgressableUtils.awaitExecutorTermination(bossExecutorService,
++        progressable);
+     workerExecutorService.shutdownNow();
++    ProgressableUtils.awaitExecutorTermination(workerExecutorService,
++        progressable);
++    if (LOG.isInfoEnabled()) {
++      LOG.info("stop: Start releasing resources");
++    }
+     bootstrap.releaseExternalResources();
+     channelFactory.releaseExternalResources();
+     if (LOG.isInfoEnabled()) {
+diff --git a/giraph/src/main/java/org/apache/giraph/utils/ProgressableUtils.java b/giraph/src/main/java/org/apache/giraph/utils/ProgressableUtils.java
+index e229ff1f2..77eb49a76 100644
+--- a/giraph/src/main/java/org/apache/giraph/utils/ProgressableUtils.java
++++ b/giraph/src/main/java/org/apache/giraph/utils/ProgressableUtils.java
+@@ -20,6 +20,7 @@
+ 
+ import org.apache.hadoop.util.Progressable;
+ import org.apache.log4j.Logger;
++import org.jboss.netty.channel.ChannelFuture;
+ import org.jboss.netty.channel.group.ChannelGroupFuture;
+ 
+ import java.util.concurrent.ExecutionException;
+@@ -78,6 +79,18 @@ public static void awaitChannelGroupFuture(ChannelGroupFuture future,
+     waitForever(new ChannelGroupFutureWaitable(future), progressable);
+   }
+ 
++  /**
++   * Wait for {@link ChannelFuture} to finish, while periodically
++   * reporting progress.
++   *
++   * @param future       ChannelFuture
++   * @param progressable Progressable for reporting progress (Job context)
++   */
++  public static void awaitChannelFuture(ChannelFuture future,
++      Progressable progressable) {
++    waitForever(new ChannelFutureWaitable(future), progressable);
++  }
++
+   /**
+    * Wait forever for waitable to finish. Periodically reports progress.
+    *
+@@ -268,7 +281,7 @@ public boolean isFinished() {
+   }
+ 
+   /**
+-   * {@link Waitable} for waiting on a {@link ChannelGroupFutureWaitable} to
++   * {@link Waitable} for waiting on a {@link ChannelGroupFuture} to
+    * terminate.
+    */
+   private static class ChannelGroupFutureWaitable extends
+@@ -295,4 +308,32 @@ public boolean isFinished() {
+       return future.isDone();
+     }
+   }
++
++  /**
++   * {@link Waitable} for waiting on a {@link ChannelFuture} to
++   * terminate.
++   */
++  private static class ChannelFutureWaitable extends WaitableWithoutResult {
++    /** ChannelGroupFuture which we want to wait for */
++    private final ChannelFuture future;
++
++    /**
++     * Constructor
++     *
++     * @param future ChannelFuture which we want to wait for
++     */
++    public ChannelFutureWaitable(ChannelFuture future) {
++      this.future = future;
++    }
++
++    @Override
++    public void waitFor(int msecs) throws InterruptedException {
++      future.await(msecs, TimeUnit.MILLISECONDS);
++    }
++
++    @Override
++    public boolean isFinished() {
++      return future.isDone();
++    }
++  }
+ }

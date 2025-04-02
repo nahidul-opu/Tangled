@@ -1,0 +1,113 @@
+From 8dd181cb2646b5688676997c8f2725b443d39744 Mon Sep 17 00:00:00 2001
+From: Emmanuel Bourg <ebourg@apache.org>
+Date: Wed, 23 Apr 2014 14:05:41 +0000
+Subject: [PATCH] Fixed the verification of Java 8 interfaces (BCEL-174)
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/bcel/trunk@1589418 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../bcel/verifier/statics/Pass2Verifier.java  | 45 ++++++++++++-------
+ .../bcel/verifier/VerifierTestCase.java       | 39 ++++++++++++++++
+ 2 files changed, 68 insertions(+), 16 deletions(-)
+ create mode 100644 src/test/java/org/apache/bcel/verifier/VerifierTestCase.java
+
+diff --git a/src/main/java/org/apache/bcel/verifier/statics/Pass2Verifier.java b/src/main/java/org/apache/bcel/verifier/statics/Pass2Verifier.java
+index 986e450b9e..6051648587 100644
+--- a/src/main/java/org/apache/bcel/verifier/statics/Pass2Verifier.java
++++ b/src/main/java/org/apache/bcel/verifier/statics/Pass2Verifier.java
+@@ -682,22 +682,35 @@ public void visitMethod(Method obj){
+ 			}
+ 			else{ // isInterface!
+ 				if (!name.equals(STATIC_INITIALIZER_NAME)){//vmspec2, p.116, 2nd paragraph
+-					if (!obj.isPublic()){
+-						throw new ClassConstraintException("Interface method '"+tostring(obj)+"' must have the ACC_PUBLIC modifier set but hasn't!");
+-					}
+-					if (!obj.isAbstract()){
+-						throw new ClassConstraintException("Interface method '"+tostring(obj)+"' must have the ACC_ABSTRACT modifier set but hasn't!");
+-					}
+-					if (	obj.isPrivate() ||
+-								obj.isProtected() ||
+-								obj.isStatic() ||
+-								obj.isFinal() ||
+-								obj.isSynchronized() ||
+-								obj.isNative() ||
+-								obj.isStrictfp() ){
+-						throw new ClassConstraintException("Interface method '"+tostring(obj)+"' must not have any of the ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL, ACC_SYNCHRONIZED, ACC_NATIVE, ACC_ABSTRACT, ACC_STRICT modifiers set.");
+-					}
+-				}
++                    if (jc.getMajor() >= MAJOR_1_8) {
++                        if (!(obj.isPublic() ^ obj.isPrivate())) {
++                            throw new ClassConstraintException("Interface method '" + tostring(obj) + "' must have exactly one of its ACC_PUBLIC and ACC_PRIVATE modifiers set.");
++                        }
++                        if (obj.isProtected()
++                                || obj.isFinal()
++                                || obj.isSynchronized()
++                                || obj.isNative()) {
++                            throw new ClassConstraintException("Interface method '"+tostring(obj)+"' must not have any of the ACC_PROTECTED, ACC_FINAL, ACC_SYNCHRONIZED, or ACC_NATIVE modifiers set.");
++                        }
++
++                    } else {
++                        if (!obj.isPublic()){
++                            throw new ClassConstraintException("Interface method '"+tostring(obj)+"' must have the ACC_PUBLIC modifier set but hasn't!");
++                        }
++                        if (!obj.isAbstract()){
++                            throw new ClassConstraintException("Interface method '"+tostring(obj)+"' must have the ACC_ABSTRACT modifier set but hasn't!");
++                        }
++                        if (obj.isPrivate()
++                                || obj.isProtected()
++                                || obj.isStatic()
++                                || obj.isFinal()
++                                || obj.isSynchronized()
++                                || obj.isNative()
++                                || obj.isStrictfp() ) {
++                            throw new ClassConstraintException("Interface method '"+tostring(obj)+"' must not have any of the ACC_PRIVATE, ACC_PROTECTED, ACC_STATIC, ACC_FINAL, ACC_SYNCHRONIZED, ACC_NATIVE, ACC_ABSTRACT, ACC_STRICT modifiers set.");
++                        }
++                    }
++                }
+ 			}
+ 
+ 			// A specific instance initialization method... (vmspec2,Page 116).
+diff --git a/src/test/java/org/apache/bcel/verifier/VerifierTestCase.java b/src/test/java/org/apache/bcel/verifier/VerifierTestCase.java
+new file mode 100644
+index 0000000000..791c24ffec
+--- /dev/null
++++ b/src/test/java/org/apache/bcel/verifier/VerifierTestCase.java
+@@ -0,0 +1,39 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *   http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ * 
++ */
++
++package org.apache.bcel.verifier;
++
++import java.util.Collection;
++
++import junit.framework.TestCase;
++
++public class VerifierTestCase extends TestCase {
++
++    public void testDefaultMethodValidation() {
++        String classname = Collection.class.getName();
++        
++        Verifier verifier = VerifierFactory.getVerifier(classname);
++        VerificationResult result = verifier.doPass1();
++
++        assertEquals("Pass 1 verification of " + classname + " failed: " + result.getMessage(), VerificationResult.VERIFIED_OK, result.getStatus());
++        
++        result = verifier.doPass2();
++        
++        assertEquals("Pass 2 verification of " + classname + " failed: " + result.getMessage(), VerificationResult.VERIFIED_OK, result.getStatus());
++    }
++}

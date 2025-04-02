@@ -1,0 +1,101 @@
+From 445be68f8bda57b06c632e8c0f569859f8ce72f8 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 7 Mar 2007 21:57:24 +0000
+Subject: [PATCH] FIX:  FileUtil#copy(File src, File dest, CopyProgressListener
+ l, boolean overwrite) (IVY-420)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@515788 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/retrieve/RetrieveEngine.java     |  7 ++++---
+ src/java/org/apache/ivy/util/FileUtil.java    |  1 +
+ .../ivy/core/retrieve/RetrieveTest.java       | 19 +++++++++++++++++++
+ 4 files changed, 25 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 7255bf6f3..092803d3e 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -16,6 +16,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - IMPROVE: Add a unit test to verify that latest.integration accepts released modules (IVY-394) (thanks to Gilles Scokart)
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ 
++- FIX:  FileUtil#copy(File src, File dest, CopyProgressListener l, boolean overwrite) (IVY-420)
+ - FIX: Ivy doesn't recognize maven2 classifiers (IVY-418)
+ - FIX: Static revision replacement is not working when delivering an artifact with a dependency having extra attributes (IVY-415)
+ - FIX: Static revision replacement is not working when delivering an artifact with a dependency on a branch (IVY-404)
+diff --git a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+index 9478468d8..671fe033e 100644
+--- a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
++++ b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+@@ -69,6 +69,7 @@ public RetrieveEngine(IvySettings settings) {
+     public int retrieve(ModuleRevisionId mrid, String destFilePattern, RetrieveOptions options) throws IOException {
+     	ModuleId moduleId = mrid.getModuleId();
+         Message.info(":: retrieving :: "+moduleId+(options.isSync()?" [sync]":""));
++        Message.verbose("\tcheckUpToDate="+_settings.isCheckUpToDate());
+         long start = System.currentTimeMillis();
+         
+         destFilePattern = IvyPatternHelper.substituteVariables(destFilePattern, _settings.getVariables());
+@@ -110,9 +111,9 @@ public int retrieve(ModuleRevisionId mrid, String destFilePattern, RetrieveOptio
+                     if (!_settings.isCheckUpToDate() || !upToDate(archive, destFile)) {
+                         Message.verbose("\t\tto "+destFile);
+                         if (options.isMakeSymlinks()) {
+-                            FileUtil.symlink(archive, destFile, null, false);
++                            FileUtil.symlink(archive, destFile, null, true);
+                         } else {
+-                            FileUtil.copy(archive, destFile, null);
++                            FileUtil.copy(archive, destFile, null, true);
+                         }
+                         targetsCopied++;
+                     } else {
+@@ -145,7 +146,7 @@ public int retrieve(ModuleRevisionId mrid, String destFilePattern, RetrieveOptio
+                 	}
+                 }
+             }
+-            Message.info("\t"+targetsCopied+" artifacts copied, "+targetsUpToDate+" already retrieved");
++            Message.info("\t"+targetsCopied+" artifacts copied"+(_settings.isCheckUpToDate()?(", "+targetsUpToDate+" already retrieved"):""));
+             Message.verbose("\tretrieve done ("+(System.currentTimeMillis()-start)+"ms)");
+             
+             return targetsCopied;
+diff --git a/src/java/org/apache/ivy/util/FileUtil.java b/src/java/org/apache/ivy/util/FileUtil.java
+index 228fadae7..38ad0a852 100644
+--- a/src/java/org/apache/ivy/util/FileUtil.java
++++ b/src/java/org/apache/ivy/util/FileUtil.java
+@@ -107,6 +107,7 @@ public static void copy(File src, File dest, CopyProgressListener l, boolean ove
+         		} // if dest is writable, the copy will overwrite it without requiring a delete
+         	} else {
+         		Message.verbose(dest+" already exists, nothing done");
++        		return;
+         	}
+         }
+         copy(new FileInputStream(src), dest, l);
+diff --git a/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java b/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
+index c6b86adc5..a4aaba759 100644
+--- a/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
++++ b/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
+@@ -81,6 +81,25 @@ public void testRetrieveSimple() throws Exception {
+         assertTrue(new File(IvyPatternHelper.substitute(pattern, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar", "default")).exists());
+     }
+ 
++    public void testRetrieveOverwrite() throws Exception {
++        // mod1.1 depends on mod1.2
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org1/mod1.1/ivys/ivy-1.0.xml").toURL(),
++        		getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        
++        String pattern = "build/test/retrieve/[module]/[conf]/[artifact]-[revision].[ext]";
++        
++        // we create a fake old file to see if it is overwritten
++        File file = new File(IvyPatternHelper.substitute(pattern, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar", "default"));
++        file.getParentFile().mkdirs();
++        file.createNewFile();
++        file.setLastModified(10000);
++        _ivy.retrieve(md.getModuleRevisionId(), pattern, getRetrieveOptions());
++        assertEquals(new File("test/repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar").lastModified(), file.lastModified());
++    }
++
+     public void testRetrieveWithSymlinks() throws Exception {
+         // mod1.1 depends on mod1.2
+         ResolveReport report = _ivy.resolve(new File("test/repositories/1/org1/mod1.1/ivys/ivy-1.0.xml").toURL(),

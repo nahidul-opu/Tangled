@@ -1,0 +1,150 @@
+From 26d31606bda1000638b7fec59e1914aa83e1c71a Mon Sep 17 00:00:00 2001
+From: Claudio Martella <claudio.martella@gmail.com>
+Date: Mon, 20 Jan 2014 19:04:51 +0100
+Subject: [PATCH] GIRAPH-805
+
+---
+ CHANGELOG                                          |  2 ++
+ .../apache/giraph/conf/GiraphConfiguration.java    |  6 +++---
+ .../org/apache/giraph/conf/GiraphConstants.java    |  7 ++++++-
+ .../org/apache/giraph/graph/GraphTaskManager.java  |  2 +-
+ .../apache/giraph/utils/InternalVertexRunner.java  |  6 +++---
+ .../org/apache/giraph/zk/GiraphZooKeeperAdmin.java | 14 ++++++++------
+ 6 files changed, 23 insertions(+), 14 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 135ba78eb..dd86f1cce 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-805: getZookeeperList can return null (armax00 via claudio)
++
+   GIRAPH-823: upgrade hiveio to version 0.21 from olderversion 0.20 (pavanka via majakabiljo)
+ 
+   GIRAPH-724: UnsafeByteArrayOutputStream.writeUTF should call ensureSize (yhdong via majakabiljo)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java
+index c8b7d367d..e378147e7 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java
+@@ -625,7 +625,7 @@ public final float getMinPercentResponded() {
+    *        (i.e. zk1:2221,zk2:2221)
+    */
+   public final void setZooKeeperConfiguration(String serverList) {
+-    set(ZOOKEEPER_LIST, serverList);
++    ZOOKEEPER_LIST.set(this, serverList);
+   }
+ 
+   /**
+@@ -728,7 +728,7 @@ public void setYarnTaskHeapMb(int heapMb) {
+    * @return ZooKeeper list of strings, comma separated or null if none set.
+    */
+   public String getZookeeperList() {
+-    return get(ZOOKEEPER_LIST);
++    return ZOOKEEPER_LIST.get(this);
+   }
+ 
+   /**
+@@ -739,7 +739,7 @@ public String getZookeeperList() {
+    * @param zkList list of strings, comma separated of zookeeper servers
+    */
+   public void setZookeeperList(String zkList) {
+-    set(ZOOKEEPER_LIST, zkList);
++    ZOOKEEPER_LIST.set(this, zkList);
+     ZOOKEEPER_IS_EXTERNAL.set(this, false);
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
+index 63f38dfda..aca0c1665 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
+@@ -408,7 +408,12 @@ public interface GiraphConstants {
+    *  zookeeper, this parameter will updated the configuration with the corrent
+    *  configuration value.
+    */
+-  String ZOOKEEPER_LIST = "giraph.zkList";
++  StrConfOption ZOOKEEPER_LIST =
++      new StrConfOption("giraph.zkList", "",
++          "ZooKeeper comma-separated list (if not set, will start up " +
++          "ZooKeeper locally). Consider that after locally-starting " +
++          "zookeeper, this parameter will updated the configuration with " +
++          "the corrent configuration value.");
+ 
+   /**
+    * Zookeeper List will always hold a value during the computation while
+diff --git a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+index f31d99e46..0617973df 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
++++ b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+@@ -199,7 +199,7 @@ public void setup(Path[] zkPathList)
+     context.setStatus("setup: Initializing Zookeeper services.");
+     locateZookeeperClasspath(zkPathList);
+     String serverPortList = conf.getZookeeperList();
+-    if (serverPortList == null && startZooKeeperManager()) {
++    if (serverPortList.isEmpty() && startZooKeeperManager()) {
+       return; // ZK connect/startup failed
+     }
+     if (zkManager != null && zkManager.runsZooKeeper()) {
+diff --git a/giraph-core/src/main/java/org/apache/giraph/utils/InternalVertexRunner.java b/giraph-core/src/main/java/org/apache/giraph/utils/InternalVertexRunner.java
+index 16e2f6a19..3f49395c9 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/utils/InternalVertexRunner.java
++++ b/giraph-core/src/main/java/org/apache/giraph/utils/InternalVertexRunner.java
+@@ -129,8 +129,8 @@ public static Iterable<String> run(
+       conf.setWorkerConfiguration(1, 1, 100.0f);
+       GiraphConstants.SPLIT_MASTER_WORKER.set(conf, false);
+       GiraphConstants.LOCAL_TEST_MODE.set(conf, true);
+-      conf.set(GiraphConstants.ZOOKEEPER_LIST, "localhost:" +
+-          String.valueOf(LOCAL_ZOOKEEPER_PORT));
++      conf.setZookeeperList("localhost:" +
++        String.valueOf(LOCAL_ZOOKEEPER_PORT));
+ 
+       conf.set(GiraphConstants.ZOOKEEPER_DIR, zkDir.toString());
+       GiraphConstants.ZOOKEEPER_MANAGER_DIRECTORY.set(conf,
+@@ -230,7 +230,7 @@ E extends Writable> void run(
+       conf.setWorkerConfiguration(1, 1, 100.0f);
+       GiraphConstants.SPLIT_MASTER_WORKER.set(conf, false);
+       GiraphConstants.LOCAL_TEST_MODE.set(conf, true);
+-      conf.set(GiraphConstants.ZOOKEEPER_LIST, "localhost:" +
++      GiraphConstants.ZOOKEEPER_LIST.set(conf, "localhost:" +
+           String.valueOf(LOCAL_ZOOKEEPER_PORT));
+ 
+       conf.set(GiraphConstants.ZOOKEEPER_DIR, zkDir.toString());
+diff --git a/giraph-core/src/main/java/org/apache/giraph/zk/GiraphZooKeeperAdmin.java b/giraph-core/src/main/java/org/apache/giraph/zk/GiraphZooKeeperAdmin.java
+index 19f6be572..dbb2096b3 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/zk/GiraphZooKeeperAdmin.java
++++ b/giraph-core/src/main/java/org/apache/giraph/zk/GiraphZooKeeperAdmin.java
+@@ -19,6 +19,7 @@
+ 
+ 
+ import org.apache.giraph.bsp.BspService;
++import org.apache.giraph.conf.GiraphConfiguration;
+ import org.apache.giraph.conf.GiraphConstants;
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.util.Tool;
+@@ -76,17 +77,18 @@ public void setConf(Configuration conf) {
+    */
+   @Override
+   public int run(String[] args) {
+-    final int zkPort = ZOOKEEPER_SERVER_PORT.get(getConf());
+-    final String zkBasePath = getConf().get(
++    final GiraphConfiguration giraphConf = new GiraphConfiguration(getConf());
++    final int zkPort = ZOOKEEPER_SERVER_PORT.get(giraphConf);
++    final String zkBasePath = giraphConf.get(
+       GiraphConstants.BASE_ZNODE_KEY, "") + BspService.BASE_DIR;
+     final String[] zkServerList;
+-    try {
+-      zkServerList = getConf()
+-        .get(GiraphConstants.ZOOKEEPER_LIST).split(",");
+-    } catch (NullPointerException npe) {
++    String zkServerListStr = giraphConf.getZookeeperList();
++    if (zkServerListStr.isEmpty()) {
+       throw new IllegalStateException("GiraphZooKeeperAdmin requires a list " +
+         "of ZooKeeper servers to clean.");
+     }
++    zkServerList = zkServerListStr.split(",");
++
+     out.println("[GIRAPH-ZKADMIN] Attempting to clean Zookeeper " +
+       "hosts at: " + Arrays.deepToString(zkServerList));
+     out.println("[GIRAPH-ZKADMIN] Connecting on port: " + zkPort);

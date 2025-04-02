@@ -1,0 +1,147 @@
+From 0b877617b56f602167603ba974eeb20cda07cbbd Mon Sep 17 00:00:00 2001
+From: Colm O hEigeartaigh <coheigea@apache.org>
+Date: Thu, 8 Jun 2017 09:40:51 +0000
+Subject: [PATCH] SANTUARIO-465 - SignedInfo Reference constructor does not
+ check for case of zero child elements
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1798036 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../resource/xmlsecurity_de.properties        |  2 +
+ .../resource/xmlsecurity_en.properties        |  2 +
+ .../xml/security/signature/Reference.java     | 11 ++++-
+ .../dom/signature/SignatureReferenceTest.java | 48 +++++++++++++++++++
+ 4 files changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/src/main/java/org/apache/xml/security/resource/xmlsecurity_de.properties b/src/main/java/org/apache/xml/security/resource/xmlsecurity_de.properties
+index d011b04364..0b6626cdc0 100644
+--- a/src/main/java/org/apache/xml/security/resource/xmlsecurity_de.properties
++++ b/src/main/java/org/apache/xml/security/resource/xmlsecurity_de.properties
+@@ -112,6 +112,8 @@ signature.Canonicalizer.UnknownCanonicalizer = Unbekannter Kanonisierer. Kein Ha
+ signature.DSA.invalidFormat = Ung\u00fcltige ASN.1 Kodierung der DSA Signatur
+ signature.Generation.signBeforeGetValue = Es muss zuerst XMLSignature.sign(java.security.PrivateKey) aufgerufen werden
+ signature.Reference.ForbiddenResolver = Der "Resolver" {0} ist bei aktivierter "secure validation" nicht erlaubt
++signature.Reference.NoDigestMethod = A Signature Reference Element must contain a DigestMethod child
++signature.Reference.NoDigestValue = A Signature Reference Element must contain a DigestValue child
+ signature.signatureAlgorithm = Der Algorithmus {0} ist bei aktivierter "secure validation" nicht erlaubt
+ signature.signaturePropertyHasNoTarget = Das Target Attribut der SignatureProperty muss gesetzt sein
+ signature.tooManyReferences = Das Manifest enth\u00e4lt {0} Referenzen, bei aktivierter "secure validation" sind aber maximal {1} erlaubt
+diff --git a/src/main/java/org/apache/xml/security/resource/xmlsecurity_en.properties b/src/main/java/org/apache/xml/security/resource/xmlsecurity_en.properties
+index 5ef4865a77..4b6c9876d3 100644
+--- a/src/main/java/org/apache/xml/security/resource/xmlsecurity_en.properties
++++ b/src/main/java/org/apache/xml/security/resource/xmlsecurity_en.properties
+@@ -112,6 +112,8 @@ signature.Canonicalizer.UnknownCanonicalizer = Unknown canonicalizer. No handler
+ signature.DSA.invalidFormat = Invalid ASN.1 encoding of the DSA signature
+ signature.Generation.signBeforeGetValue = You have to XMLSignature.sign(java.security.PrivateKey) first
+ signature.Reference.ForbiddenResolver = It is forbidden to access resolver {0} when secure validation is enabled
++signature.Reference.NoDigestMethod = A Signature Reference Element must contain a DigestMethod child
++signature.Reference.NoDigestValue = A Signature Reference Element must contain a DigestValue child
+ signature.signatureAlgorithm = It is forbidden to use algorithm {0} when secure validation is enabled
+ signature.signaturePropertyHasNoTarget = The Target attribute of the SignatureProperty must be set
+ signature.tooManyReferences = {0} references are contained in the Manifest, maximum {1} are allowed with secure validation
+diff --git a/src/main/java/org/apache/xml/security/signature/Reference.java b/src/main/java/org/apache/xml/security/signature/Reference.java
+index 3df59bbe73..c6eaba285f 100644
+--- a/src/main/java/org/apache/xml/security/signature/Reference.java
++++ b/src/main/java/org/apache/xml/security/signature/Reference.java
+@@ -232,7 +232,8 @@ protected Reference(Element element, String baseURI, Manifest manifest, boolean
+         this.secureValidation = secureValidation;
+         this.baseURI = baseURI;
+         Element el = XMLUtils.getNextElement(element.getFirstChild());
+-        if (Constants._TAG_TRANSFORMS.equals(el.getLocalName())
++
++        if (el != null && Constants._TAG_TRANSFORMS.equals(el.getLocalName())
+             && Constants.SignatureSpecNS.equals(el.getNamespaceURI())) {
+             transforms = new Transforms(el, this.baseURI);
+             transforms.setSecureValidation(secureValidation);
+@@ -243,8 +244,16 @@ protected Reference(Element element, String baseURI, Manifest manifest, boolean
+             }
+             el = XMLUtils.getNextElement(el.getNextSibling());
+         }
++
+         digestMethodElem = el;
++        if (digestMethodElem == null) {
++            throw new XMLSecurityException("signature.Reference.NoDigestMethod");
++        }
++
+         digestValueElement = XMLUtils.getNextElement(digestMethodElem.getNextSibling());
++        if (digestValueElement == null) {
++            throw new XMLSecurityException("signature.Reference.NoDigestValue");
++        }
+         this.manifest = manifest;
+     }
+ 
+diff --git a/src/test/java/org/apache/xml/security/test/dom/signature/SignatureReferenceTest.java b/src/test/java/org/apache/xml/security/test/dom/signature/SignatureReferenceTest.java
+index 690822930e..68e6476651 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/signature/SignatureReferenceTest.java
++++ b/src/test/java/org/apache/xml/security/test/dom/signature/SignatureReferenceTest.java
+@@ -25,11 +25,15 @@
+ import java.security.PublicKey;
+ import java.util.Enumeration;
+ 
++import javax.xml.crypto.dsig.DigestMethod;
+ import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
+ 
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.apache.xml.security.Init;
++import org.apache.xml.security.exceptions.XMLSecurityException;
++import org.apache.xml.security.signature.Manifest;
+ import org.apache.xml.security.signature.Reference;
+ import org.apache.xml.security.signature.SignedInfo;
+ import org.apache.xml.security.signature.XMLSignature;
+@@ -87,6 +91,44 @@ public void testSigningVerifyingReference() throws Throwable {
+         assertEquals(referenceElement, originalElement);
+     }
+ 
++    // See SANTUARIO-465
++    @org.junit.Test
++    public void testNoReferenceChildren() throws ParserConfigurationException, XMLSecurityException {
++        DocumentBuilder db = XMLUtils.createDocumentBuilder(true);
++        Document doc = db.newDocument();
++        Element referenceElement = doc.createElementNS(Constants.SignatureSpecNS, "Reference");
++        referenceElement.setAttributeNS(null, "URI", "#_12345");
++
++        // No DigestMethod child
++        try {
++            new WrappedReference(referenceElement, "_54321", null);
++            fail("Failure expected on no Reference DigestMethod child element");
++        } catch (XMLSecurityException ex) {
++            // ex.printStackTrace();
++            // expected
++        }
++
++        // No DigestValue child
++        try {
++            Element digestMethod = doc.createElementNS(Constants.SignatureSpecNS, "DigestMethod");
++            digestMethod.setAttributeNS(null, "Algorithm", DigestMethod.SHA1);
++            referenceElement.appendChild(digestMethod);
++
++            new WrappedReference(referenceElement, "_54321", null);
++            fail("Failure expected on no Reference DigestValue child element");
++        } catch (XMLSecurityException ex) {
++            // expected
++        }
++
++        Element digestValue = doc.createElementNS(Constants.SignatureSpecNS, "DigestValue");
++        digestValue.setTextContent("abcabc");
++        referenceElement.appendChild(digestValue);
++
++        new WrappedReference(referenceElement, "_54321", null);
++
++        XMLUtils.repoolDocumentBuilder(db);
++    }
++
+     /**
+      * Loads the 'localhost' keystore from the test keystore.
+      *
+@@ -153,4 +195,10 @@ private XMLSignature signDocument(Document doc) throws Throwable {
+ 
+         return sig;
+     }
++
++    private static class WrappedReference extends Reference {
++        public WrappedReference(Element element, String baseURI, Manifest manifest) throws XMLSecurityException {
++            super(element, baseURI, manifest);
++        }
++    }
+ }

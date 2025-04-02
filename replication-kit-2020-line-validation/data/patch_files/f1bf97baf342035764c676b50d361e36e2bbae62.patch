@@ -1,0 +1,40 @@
+From f1bf97baf342035764c676b50d361e36e2bbae62 Mon Sep 17 00:00:00 2001
+From: Matthias Boehm <mboehm7@gmail.com>
+Date: Thu, 12 Jul 2018 17:46:30 -0700
+Subject: [PATCH] [SYSTEMML-2431] Fix codegen multi-agg compilation w/
+ interleaved MMs
+
+This patch fixes special cases of compiling code generation plans of
+multi-aggregates with interleaved matrix multiplications (e.g.,
+t(X)%*%X, t(X)%*Y, t(Y)%*%Y) over transient reads which require
+dedicated handling of data operators.
+---
+ .../sysml/hops/codegen/template/TemplateCell.java  | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/org/apache/sysml/hops/codegen/template/TemplateCell.java b/src/main/java/org/apache/sysml/hops/codegen/template/TemplateCell.java
+index 3789b3fa961..d4cb8fc6624 100644
+--- a/src/main/java/org/apache/sysml/hops/codegen/template/TemplateCell.java
++++ b/src/main/java/org/apache/sysml/hops/codegen/template/TemplateCell.java
+@@ -188,11 +188,17 @@ protected void rConstructCplan(Hop hop, CPlanMemoTable memo, HashMap<Long, CNode
+ 				&& (me.type!=TemplateType.MAGG || memo.contains(c.getHopID(), TemplateType.CELL)))
+ 				rConstructCplan(c, memo, tmp, inHops, compileLiterals);
+ 			else if( me!=null && (me.type==TemplateType.MAGG || me.type==TemplateType.CELL) 
+-					&& HopRewriteUtils.isMatrixMultiply(hop) && i==0 ) //skip transpose
+-				rConstructCplan(c.getInput().get(0), memo, tmp, inHops, compileLiterals);
++					&& HopRewriteUtils.isMatrixMultiply(hop) && i==0 ) { //skip transpose
++				if( c.getInput().get(0) instanceof DataOp ) {
++					tmp.put(c.getInput().get(0).getHopID(),
++						TemplateUtils.createCNodeData(c.getInput().get(0), compileLiterals));
++					inHops.add(c.getInput().get(0));
++				}
++				else
++					rConstructCplan(c.getInput().get(0), memo, tmp, inHops, compileLiterals);
++			}
+ 			else {
+-				CNodeData cdata = TemplateUtils.createCNodeData(c, compileLiterals);
+-				tmp.put(c.getHopID(), cdata);
++				tmp.put(c.getHopID(), TemplateUtils.createCNodeData(c, compileLiterals));
+ 				inHops.add(c);
+ 			}
+ 		}

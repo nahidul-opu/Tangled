@@ -1,0 +1,106 @@
+From 06d37eb1d79845f5a050b5deeda466771ba1c202 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Sun, 3 Sep 2006 23:31:47 +0000
+Subject: [PATCH] FIX: Maven2 POM support can find groupId from "parent"
+ element (IVY-262)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484502 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                     |  1 +
+ .../external/m2/PomModuleDescriptorParser.java  | 11 ++++++++++-
+ .../m2/PomModuleDescriptorParserTest.java       | 16 ++++++++++++++++
+ .../jayasoft/ivy/external/m2/test-parent2.pom   | 17 +++++++++++++++++
+ 4 files changed, 44 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/external/m2/test-parent2.pom
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 0cd3ec69e..235678289 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -63,6 +63,7 @@ Changes:
+   - FIX: CircularDependencyException not always thrown (IVY-184)
+   - FIX: NullPointer in BasicResolver (IVY-258)
+   - FIX: Bad diagnostics message when no space left (IVY-250)
++  - FIX: Maven2 POM support can find groupId from "parent" element (IVY-262)
+   - FIX: Parent version is expected to be equal to the module version in POM (IVY-241)
+   - FIX: problem with cache and returnFirst (IVY-207)
+   - FIX: modules splitted across a chain are not handled correctly (IVY-206)
+diff --git a/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java
+index 7dfccefdd..a7bee8b3a 100644
+--- a/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParser.java
+@@ -174,13 +174,22 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+         
+         public void characters(char[] ch, int start, int length) throws SAXException {
+             String txt = IvyPatternHelper.substituteVariables(new String(ch, start, length).trim(), _properties);
++            if (txt.trim().length() == 0) {
++            	return;
++            }
+             String context = getContext();
++            if (context.equals("project/parent/groupId") && _organisation == null) {
++            	_organisation = txt;
++                return;
++            }
+             if (context.startsWith("project/parent")) {
+                 return;
+             }
+             if (_md.getModuleRevisionId() == null || context.startsWith("project/dependencies/dependency")) {
+-                if (_organisation == null && context.endsWith("groupId")) {
++                if (context.equals("project/groupId")) {
+                     _organisation = txt;
++                } else if (_organisation == null && context.endsWith("groupId")) {
++                	_organisation = txt;
+                 } else if (_module == null && context.endsWith("artifactId")) {
+                     _module = txt;
+                 } else if (_revision == null && context.endsWith("version")) {
+diff --git a/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java b/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java
+index 6fd08d6d5..6268ef17f 100644
+--- a/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/fr/jayasoft/ivy/external/m2/PomModuleDescriptorParserTest.java
+@@ -62,6 +62,22 @@ public void testParent() throws Exception {
+         assertEquals("test", artifact[0].getName());
+     }
+     
++    public void testParent2() throws Exception {
++        ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(new Ivy(), getClass().getResource("test-parent2.pom"), false);
++        assertNotNull(md);
++        
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("fr.jayasoft", "test", "1.0");
++        assertEquals(mrid, md.getModuleRevisionId());
++        
++        assertNotNull(md.getConfigurations());
++        assertEquals(Arrays.asList(PomModuleDescriptorParser.MAVEN2_CONFIGURATIONS), Arrays.asList(md.getConfigurations()));
++        
++        Artifact[] artifact = md.getArtifacts("master");
++        assertEquals(1, artifact.length);
++        assertEquals(mrid, artifact[0].getModuleRevisionId());
++        assertEquals("test", artifact[0].getName());
++    }
++    
+     public void testDependencies() throws Exception {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(new Ivy(), getClass().getResource("test-dependencies.pom"), false);
+         assertNotNull(md);
+diff --git a/test/java/fr/jayasoft/ivy/external/m2/test-parent2.pom b/test/java/fr/jayasoft/ivy/external/m2/test-parent2.pom
+new file mode 100644
+index 000000000..99c2396ab
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/external/m2/test-parent2.pom
+@@ -0,0 +1,17 @@
++<?xml version="1.0"?>
++<project>
++  <parent>
++    <artifactId>test-parent</artifactId>
++    <groupId>fr.jayasoft</groupId>
++    <version>1.0.parent</version>
++  </parent>
++  <modelVersion>4.0.0</modelVersion>
++  <artifactId>test</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.0</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++</project>
+\ No newline at end of file

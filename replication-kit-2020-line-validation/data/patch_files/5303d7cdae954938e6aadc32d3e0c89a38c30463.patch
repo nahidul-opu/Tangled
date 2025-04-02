@@ -1,0 +1,112 @@
+From 5303d7cdae954938e6aadc32d3e0c89a38c30463 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Thu, 10 May 2018 17:26:21 +0000
+Subject: [PATCH] CONFIGURATION-687: Changes on reloading of combined
+ configurations.
+
+The reloading controller of a ReloadingCombinedConfigurationBuilder is
+now created only once on first access. When triggering a reloading
+check it is important that all child configuration sources are
+included.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1831358 13f79535-47bb-0310-9956-ffa450edef68
+---
+ ...ReloadingCombinedConfigurationBuilder.java | 20 ++++++++++++++++++-
+ .../CombinedReloadingController.java          | 11 ++++++----
+ .../TestCombinedReloadingController.java      |  6 ++++++
+ 3 files changed, 32 insertions(+), 5 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/builder/combined/ReloadingCombinedConfigurationBuilder.java b/src/main/java/org/apache/commons/configuration2/builder/combined/ReloadingCombinedConfigurationBuilder.java
+index cd2b58b181..a286bb4495 100644
+--- a/src/main/java/org/apache/commons/configuration2/builder/combined/ReloadingCombinedConfigurationBuilder.java
++++ b/src/main/java/org/apache/commons/configuration2/builder/combined/ReloadingCombinedConfigurationBuilder.java
+@@ -122,6 +122,21 @@ public synchronized ReloadingController getReloadingController()
+         return reloadingController;
+     }
+ 
++    /**
++     * {@inheritDoc} This implementation makes sure that the reloading state of
++     * the managed reloading controller is reset. Note that this has to be done
++     * here and not in {@link #initResultInstance(CombinedConfiguration)}
++     * because it must be outside of a synchronized block; otherwise, a
++     * dead-lock situation can occur.
++     */
++    @Override
++    public CombinedConfiguration getConfiguration() throws ConfigurationException
++    {
++        CombinedConfiguration result = super.getConfiguration();
++        reloadingController.resetReloadingState();
++        return result;
++    }
++
+     /**
+      * {@inheritDoc} This implementation creates a builder for XML
+      * configurations with reloading support.
+@@ -145,7 +160,10 @@ protected void initResultInstance(CombinedConfiguration result)
+             throws ConfigurationException
+     {
+         super.initResultInstance(result);
+-        reloadingController = createReloadingController();
++        if (reloadingController == null)
++        {
++            reloadingController = createReloadingController();
++        }
+     }
+ 
+     /**
+diff --git a/src/main/java/org/apache/commons/configuration2/reloading/CombinedReloadingController.java b/src/main/java/org/apache/commons/configuration2/reloading/CombinedReloadingController.java
+index 9ea0831e76..23f4c357c4 100644
+--- a/src/main/java/org/apache/commons/configuration2/reloading/CombinedReloadingController.java
++++ b/src/main/java/org/apache/commons/configuration2/reloading/CombinedReloadingController.java
+@@ -172,20 +172,23 @@ public MultiReloadingControllerDetector(CombinedReloadingController o)
+ 
+         /**
+          * {@inheritDoc} This implementation delegates to the managed
+-         * controllers. If one of them returns <b>true</b> from its check
+-         * method, iteration is aborted, and result is <b>true</b>.
++         * controllers. For all of them the {@code checkForReloading()}
++         * method is called, giving them the chance to trigger a reload if
++         * necessary. If one of these calls returns <b>true</b>, the result of
++         * this method is <b>true</b>, otherwise <b>false</b>.
+          */
+         @Override
+         public boolean isReloadingRequired()
+         {
++            boolean result = false;
+             for (ReloadingController rc : owner.getSubControllers())
+             {
+                 if (rc.checkForReloading(null))
+                 {
+-                    return true;
++                    result = true;
+                 }
+             }
+-            return false;
++            return result;
+         }
+ 
+         /**
+diff --git a/src/test/java/org/apache/commons/configuration2/reloading/TestCombinedReloadingController.java b/src/test/java/org/apache/commons/configuration2/reloading/TestCombinedReloadingController.java
+index 917ec6e78b..2fcdf344e9 100644
+--- a/src/test/java/org/apache/commons/configuration2/reloading/TestCombinedReloadingController.java
++++ b/src/test/java/org/apache/commons/configuration2/reloading/TestCombinedReloadingController.java
+@@ -118,6 +118,8 @@ public void testCheckForReloadingTrue()
+                 Boolean.FALSE);
+         EasyMock.expect(subControllers[1].checkForReloading(null)).andReturn(
+                 Boolean.TRUE);
++        EasyMock.expect(subControllers[2].checkForReloading(null)).andReturn(
++                Boolean.FALSE);
+         replaySubControllers();
+         assertTrue("Wrong result", ctrl.checkForReloading("someData"));
+         verifySubSontrollers();
+@@ -149,6 +151,10 @@ public void testResetReloadingState()
+         CombinedReloadingController ctrl = setUpController();
+         EasyMock.expect(subControllers[0].checkForReloading(null)).andReturn(
+                 Boolean.TRUE);
++        EasyMock.expect(subControllers[1].checkForReloading(null)).andReturn(
++                Boolean.FALSE);
++        EasyMock.expect(subControllers[2].checkForReloading(null)).andReturn(
++                Boolean.FALSE);
+         for (ReloadingController rc : subControllers)
+         {
+             rc.resetReloadingState();

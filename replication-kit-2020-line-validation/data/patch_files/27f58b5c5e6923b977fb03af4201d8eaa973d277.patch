@@ -1,0 +1,167 @@
+From 27f58b5c5e6923b977fb03af4201d8eaa973d277 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Sun, 30 Oct 2011 20:47:19 +0000
+Subject: [PATCH] Ensure shutdown of LateralCacheMonitor. Fixes JCS-69
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1195241 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  3 ++
+ .../lateral/LateralCacheMonitor.java          | 31 +++++++++++++++++--
+ .../lateral/LateralCacheRestore.java          |  2 +-
+ .../socket/tcp/LateralTCPCacheFactory.java    |  7 +++++
+ .../socket/tcp/LateralTCPCacheManager.java    |  8 ++++-
+ .../lateral/socket/tcp/LateralTCPService.java |  1 +
+ 6 files changed, 48 insertions(+), 4 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index d263ed79e..604264fe3 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,9 @@
+ 	</properties>
+ 	<body>
+ 		<release version="2.0" date="unreleased" description="JDK 1.5 based major release">
++            <action dev="tv" type="fix" issue="JCS-69" due-to="Michael Stevens">
++                Ensure shutdown of LateralCacheMonitor
++            </action>
+             <action dev="tv" type="fix" issue="JCS-11" due-to="Peter Schwarz">
+                 Add method for programmatic configuration to JCS
+             </action>
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheMonitor.java b/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheMonitor.java
+index 27df4d563..d277e6196 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheMonitor.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheMonitor.java
+@@ -45,6 +45,11 @@ public class LateralCacheMonitor
+      */
+     private boolean alright = true;
+ 
++    /**
++     * shutdown flag
++     */
++    private boolean shutdown = false;
++
+     /** code for eror */
+     private final static int ERROR = 1;
+ 
+@@ -101,6 +106,18 @@ public void notifyError()
+         }
+     }
+ 
++    /**
++     * Notifies the cache monitor that the service shall shut down
++     */
++    public void notifyShutdown()
++    {
++        synchronized ( this )
++        {
++            this.shutdown = true;
++            notify();
++        }
++    }
++
+     /**
+      * Main processing method for the LateralCacheMonitor object
+      */
+@@ -148,6 +165,16 @@ public void run()
+                 // will need to test not just check status
+             }
+ 
++            // check for requested shutdown
++            synchronized ( this )
++            {
++                if (shutdown)
++                {
++                    log.info( "Shutting down cache monitor" );
++                    return;
++                }
++            }
++
+             // The "alright" flag must be false here.
+             // Simply presume we can fix all the errors until proven otherwise.
+             synchronized ( this )
+@@ -185,7 +212,7 @@ public void run()
+                         // there
+                         // is not a cache yet.
+                         // if this is error driven mode, mark as bad,
+-                        // otherwise we will come back around argain.
++                        // otherwise we will come back around again.
+                         if ( mode == ERROR )
+                         {
+                             bad();
+@@ -247,7 +274,7 @@ public void run()
+     }
+ 
+     /**
+-     * Sets the "alright" flag to false in a critial section.
++     * Sets the "alright" flag to false in a critical section.
+      */
+     private void bad()
+     {
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheRestore.java b/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheRestore.java
+index 78437034f..1a3f45f80 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheRestore.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/LateralCacheRestore.java
+@@ -55,7 +55,7 @@ public LateralCacheRestore( ILateralCacheManager lcm )
+     }
+ 
+     /**
+-     * Returns true iff the connection to the lateral host for the corresponding cache manager can
++     * Returns true if the connection to the lateral host for the corresponding cache manager can
+      * be successfully re-established.
+      * <p>
+      * @return whether or not the cache can be fixed.
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheFactory.java b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheFactory.java
+index 9286cd711..0cb7265e7 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheFactory.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheFactory.java
+@@ -94,6 +94,13 @@ public AuxiliaryCache createCache( AuxiliaryCacheAttributes iaca, ICompositeCach
+                 lacC.setTcpServer( server );
+                 LateralTCPCacheManager lcm = LateralTCPCacheManager.getInstance( lacC, cacheMgr, cacheEventLogger,
+                                                                                  elementSerializer );
++
++                // register for shutdown notification
++                if (cacheMgr instanceof IShutdownObservable )
++                {
++                    ( (IShutdownObservable) cacheMgr ).registerShutdownObserver( lcm );
++                }
++
+                 ICache ic = lcm.getCache( lacC.getCacheName() );
+                 if ( ic != null )
+                 {
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheManager.java b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheManager.java
+index 3a29bd0dd..0888d0f2b 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheManager.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPCacheManager.java
+@@ -343,7 +343,7 @@ public Object fixService()
+      */
+     public void shutdown()
+     {
+-        // TODO revist this.
++        // TODO revisit this.
+         // the name here doesn't matter.
+         try
+         {
+@@ -353,5 +353,11 @@ public void shutdown()
+         {
+             log.error( "Problem disposing of service", e );
+         }
++
++        // shut down monitor
++        if (monitor != null)
++        {
++            monitor.notifyShutdown();
++        }
+     }
+ }
+diff --git a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java
+index 4cf753dcd..81fab9007 100644
+--- a/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java
++++ b/src/java/org/apache/jcs/auxiliary/lateral/socket/tcp/LateralTCPService.java
+@@ -287,6 +287,7 @@ public Map<Serializable, ICacheElement> getMatching( String cacheName, String pa
+      *         data in cache matching the pattern.
+      * @throws IOException
+      */
++    @SuppressWarnings("unchecked")
+     public Map<Serializable, ICacheElement> getMatching( String cacheName, String pattern, long requesterId )
+         throws IOException
+     {

@@ -1,0 +1,71 @@
+From 35cf1b4d4cb1c0e1fb70afae369ee73244c7dada Mon Sep 17 00:00:00 2001
+From: Ryan Blue <blue@apache.org>
+Date: Thu, 30 Jun 2016 09:47:48 -0700
+Subject: [PATCH] PARQUET-645: Fix null handling in DictionaryFilter.
+
+This fixes how null is handled by `DictionaryFilter` for equals predicates. Null is never in the dictionary and is encoded by the definition level, so the `DictionaryFilter` would never find the value in the dictionary and would incorrectly filter row groups whenever the filter was `col == null`.
+
+Author: Ryan Blue <blue@apache.org>
+
+Closes #348 from rdblue/PARQUET-645-fix-null-dictionary-filter and squashes the following commits:
+
+ae8dd41 [Ryan Blue] PARQUET-645: Fix null handling in DictionaryFilter.
+---
+ .../filter2/dictionarylevel/DictionaryFilter.java    | 12 ++++++++++++
+ .../dictionarylevel/DictionaryFilterTest.java        |  6 ++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/parquet-hadoop/src/main/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilter.java b/parquet-hadoop/src/main/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilter.java
+index 9b03f82b19..dc1d649c39 100644
+--- a/parquet-hadoop/src/main/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilter.java
++++ b/parquet-hadoop/src/main/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilter.java
+@@ -123,6 +123,12 @@ public <T extends Comparable<T>> Boolean visit(Eq<T> eq) {
+ 
+     filterColumn.getColumnPath();
+ 
++    if (value == null) {
++      // the dictionary contains only non-null values so isn't helpful. this
++      // could check the column stats, but the StatisticsFilter is responsible
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     try {
+       Set<T> dictSet = expandDictionary(meta);
+       if (dictSet != null && !dictSet.contains(value)) {
+@@ -150,6 +156,12 @@ public <T extends Comparable<T>> Boolean visit(NotEq<T> notEq) {
+ 
+     filterColumn.getColumnPath();
+ 
++    if (value == null) {
++      // the dictionary contains only non-null values so isn't helpful. this
++      // could check the column stats, but the StatisticsFilter is responsible
++      return BLOCK_MIGHT_MATCH;
++    }
++
+     try {
+       Set<T> dictSet = expandDictionary(meta);
+       if (dictSet != null && dictSet.size() == 1 && dictSet.contains(value)) {
+diff --git a/parquet-hadoop/src/test/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilterTest.java b/parquet-hadoop/src/test/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilterTest.java
+index 754da686b9..35b944dee0 100644
+--- a/parquet-hadoop/src/test/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilterTest.java
++++ b/parquet-hadoop/src/test/java/org/apache/parquet/filter2/dictionarylevel/DictionaryFilterTest.java
+@@ -193,6 +193,9 @@ public void testEqBinary() throws Exception {
+ 
+     assertTrue("Should drop block for upper case letters",
+         canDrop(eq(b, Binary.fromString("A")), ccmd, dictionaries));
++
++    assertFalse("Should not drop block for null",
++        canDrop(eq(b, null), ccmd, dictionaries));
+   }
+ 
+   @Test
+@@ -211,6 +214,9 @@ public void testNotEqBinary() throws Exception {
+ 
+     assertFalse("Should not drop block with a known value",
+         canDrop(notEq(b, Binary.fromString("B")), ccmd, dictionaries));
++
++    assertFalse("Should not drop block for null",
++        canDrop(notEq(b, null), ccmd, dictionaries));
+   }
+ 
+   @Test

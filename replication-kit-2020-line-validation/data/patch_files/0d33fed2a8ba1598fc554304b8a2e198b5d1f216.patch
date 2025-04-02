@@ -1,0 +1,231 @@
+From 0d33fed2a8ba1598fc554304b8a2e198b5d1f216 Mon Sep 17 00:00:00 2001
+From: ferdy <ferdy@unknown>
+Date: Thu, 19 Apr 2012 12:15:35 +0000
+Subject: [PATCH] GORA-120 Dirty fields are not correctly applied after
+ serialization and map clearance
+
+git-svn-id: https://svn.apache.org/repos/asf/gora/trunk@1327922 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../gora/avro/PersistentDatumReader.java      | 23 ++++++---
+ .../gora/persistency/StatefulHashMap.java     | 50 ++++++++++++++++---
+ .../apache/gora/persistency/StatefulMap.java  |  6 +++
+ .../gora/persistency/impl/PersistentBase.java | 11 +++-
+ 5 files changed, 77 insertions(+), 15 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f64bd4db8..6cac87537 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -7,6 +7,8 @@ Gora Change Log
+ 0.2 Release: 20/04/2012
+ Jira Release Report: https://issues.apache.org/jira/secure/ReleaseNote.jspa?projectId=12311172&version=12315541
+  
++* GORA-120 Dirty fields are not correctly applied after serialization and map clearance (ferdy)
++ 
+ * GORA-115 Flushing HBaseStore should flush all HTable instances. (ferdy)
+ 
+ * Make hbase autoflush default to false and make autoflush configurable rather than hardcoded (stack via lewismc)
+diff --git a/gora-core/src/main/java/org/apache/gora/avro/PersistentDatumReader.java b/gora-core/src/main/java/org/apache/gora/avro/PersistentDatumReader.java
+index d3991dbb6..4a7c7c170 100644
+--- a/gora-core/src/main/java/org/apache/gora/avro/PersistentDatumReader.java
++++ b/gora-core/src/main/java/org/apache/gora/avro/PersistentDatumReader.java
+@@ -19,8 +19,10 @@
+ package org.apache.gora.avro;
+ 
+ import java.io.IOException;
++import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Map.Entry;
+ import java.util.WeakHashMap;
+ 
+ import org.apache.avro.Schema;
+@@ -141,6 +143,9 @@ protected Object readRecord(Object old, Schema expected, ResolvingDecoder in)
+       for (i = 0; i < dirtyFields.length; i++) {
+         if (dirtyFields[i]) {
+           persistent.setDirty(i);
++        } 
++        else {
++          persistent.clearDirty(i);
+         }
+       }
+       return record;
+@@ -163,26 +168,32 @@ protected Object readRecord(Object old, Schema expected, ResolvingDecoder in)
+   @SuppressWarnings("unchecked")
+   protected Object readMap(Object old, Schema expected, ResolvingDecoder in)
+       throws IOException {
+-
+     StatefulMap<Utf8, ?> map = (StatefulMap<Utf8, ?>) newMap(old, 0);
+-    map.clearStates();
++    Map<Utf8, State> tempStates = null;
+     if (readDirtyBits) {
++      tempStates = new HashMap<Utf8, State>();
+       int size = in.readInt();
+       for (int j = 0; j < size; j++) {
+         Utf8 key = in.readString(null);
+         State state = State.values()[in.readInt()];
+-        map.putState(key, state);
++        tempStates.put(key, state);
++      }
++    }
++    super.readMap(map, expected, in);
++    map.clearStates();
++    if (readDirtyBits) {
++      for (Entry<Utf8, State> entry : tempStates.entrySet()) {
++        map.putState(entry.getKey(), entry.getValue());
+       }
+     }
+-    return super.readMap(map, expected, in);
++    return map;
+   }
+ 
+   @Override
+   @SuppressWarnings({ "rawtypes" })
+   protected Object newMap(Object old, int size) {
+     if (old instanceof StatefulHashMap) {
+-      ((Map) old).clear();
+-      ((StatefulHashMap)old).clearStates();
++      ((StatefulHashMap)old).reuse();
+       return old;
+     }
+     return new StatefulHashMap<Object, Object>();
+diff --git a/gora-core/src/main/java/org/apache/gora/persistency/StatefulHashMap.java b/gora-core/src/main/java/org/apache/gora/persistency/StatefulHashMap.java
+index 8fdac7e71..7615035cb 100644
+--- a/gora-core/src/main/java/org/apache/gora/persistency/StatefulHashMap.java
++++ b/gora-core/src/main/java/org/apache/gora/persistency/StatefulHashMap.java
+@@ -29,31 +29,49 @@ public class StatefulHashMap<K, V> extends HashMap<K, V>
+    */
+   private Map<K, State> keyStates = new HashMap<K, State>();
+ 
++  /**
++   * Create an empty instance.
++   */
+   public StatefulHashMap() {
+     this(null);
+   }
+ 
++  /**
++   * Create an instance with initial entries. These entries are added stateless;
++   * in other words the statemap will be clear after the construction.
++   * 
++   * @param m The map with initial entries.
++   */
+   public StatefulHashMap(Map<K, V> m) {
+     super();
+     if (m == null) {
+       return;
+     }
+-    super.putAll(m);
++    for (java.util.Map.Entry<K, V> entry : m.entrySet()) {
++      put(entry.getKey(), entry.getValue());
++    }
++    clearStates();
+   }
+   
+   @Override
+   public V put(K key, V value) {
+-    keyStates.put(key, State.DIRTY);
+-    return super.put(key, value);
++    keyStates.remove(key);
++    V old = super.put(key, value);
++    //if old value is different or null, set state to dirty
++    if (!value.equals(old)) {
++      keyStates.put(key, State.DIRTY);
++    }
++    return old;
+   }
+ 
+   @SuppressWarnings("unchecked")
+   @Override
+   public V remove(Object key) {
+-    if (keyStates.containsKey(key)) {
+-      keyStates.put((K) key, State.DELETED);
+-    }
+-    return super.remove(key);
++    keyStates.put((K) key, State.DELETED);
++    return null;
++    // We do not remove the actual entry from the map.
++    // When we keep the entries, we can compare previous state to make Datastore
++    // puts more efficient. (In the case of new puts that are in fact unchanged)
+   }
+ 
+   @Override
+@@ -65,10 +83,18 @@ public void putAll(Map<? extends K, ? extends V> m) {
+ 
+   @Override
+   public void clear() {
++    // The problem with clear() is that we cannot delete entries that were not
++    // initially set on the input.  This means that for a clear() to fully
++    // reflect on a datastore you have to input the full map from the store.
++    // This is acceptable for now. Another way around this is to implement
++    // some sort of "clear marker" that indicates a map should be fully cleared,
++    // with respect to any possible new entries.
+     for (Entry<K, V> e : entrySet()) {
+       keyStates.put(e.getKey(), State.DELETED);
+     }
+-    super.clear();
++    // Do not actually clear the map, i.e. with super.clear()
++    // When we keep the entries, we can compare previous state to make Datastore
++    // puts more efficient. (In the case of new puts that are in fact unchanged)
+   }
+ 
+   public State getState(K key) {
+@@ -95,4 +121,12 @@ public void putState(K key, State state) {
+   public Map<K, State> states() {
+     return keyStates;
+   }
++
++  /* (non-Javadoc)
++   * @see org.apache.gora.persistency.StatefulMap#reuse()
++   */
++  public void reuse() {
++    super.clear();
++    clearStates();
++  }
+ }
+diff --git a/gora-core/src/main/java/org/apache/gora/persistency/StatefulMap.java b/gora-core/src/main/java/org/apache/gora/persistency/StatefulMap.java
+index e426ffc04..6136d2d86 100644
+--- a/gora-core/src/main/java/org/apache/gora/persistency/StatefulMap.java
++++ b/gora-core/src/main/java/org/apache/gora/persistency/StatefulMap.java
+@@ -34,4 +34,10 @@ public interface StatefulMap<K, V> extends Map<K, V> {
+ 
+   void clearStates();
+   
++  /**
++   * Reuse will clear the map completely with states. This is different
++   * from {@link #clear()} in that the latter only sets entries to deleted.
++   */
++  void reuse();
++  
+ }
+\ No newline at end of file
+diff --git a/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java b/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
+index 0e31322f6..b53372e86 100644
+--- a/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
++++ b/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
+@@ -29,6 +29,7 @@
+ import org.apache.gora.persistency.ListGenericArray;
+ import org.apache.gora.persistency.Persistent;
+ import org.apache.gora.persistency.StateManager;
++import org.apache.gora.persistency.StatefulHashMap;
+ 
+ /**
+  * Base classs implementing common functionality for Persistent
+@@ -99,7 +100,15 @@ public void clear() {
+ 
+     for(int i=0; i<getFields().length; i++) {
+       switch(fields.get(i).schema().getType()) {
+-        case MAP: if(get(i) != null) ((Map)get(i)).clear(); break;
++        case MAP: 
++          if(get(i) != null) {
++            if (get(i) instanceof StatefulHashMap) {
++              ((StatefulHashMap)get(i)).reuse(); 
++            } else {
++              ((Map)get(i)).clear();
++            }
++          }
++          break;
+         case ARRAY:
+           if(get(i) != null) {
+             if(get(i) instanceof ListGenericArray) {

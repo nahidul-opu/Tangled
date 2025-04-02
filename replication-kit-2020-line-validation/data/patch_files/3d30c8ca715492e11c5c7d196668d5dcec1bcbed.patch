@@ -1,0 +1,190 @@
+From 3d30c8ca715492e11c5c7d196668d5dcec1bcbed Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran.pai@gmail.com>
+Date: Fri, 19 May 2017 14:30:33 +0530
+Subject: [PATCH] IVY-1495 Delay the processing of configured cache ttls, until
+ the IvySettings object is usable
+
+---
+ .../cache/DefaultRepositoryCacheManager.java  | 59 ++++++++++++++++---
+ .../core/settings/XmlSettingsParserTest.java  | 26 ++++++++
+ .../ivysettings-cache-ttl-matcher.xml         | 25 ++++++++
+ 3 files changed, 102 insertions(+), 8 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/settings/ivysettings-cache-ttl-matcher.xml
+
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index ea0179719..1a1fa0f5c 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -25,8 +25,14 @@
+ import java.security.MessageDigest;
+ import java.security.NoSuchAlgorithmException;
+ import java.text.ParseException;
++import java.util.ArrayList;
++import java.util.Collections;
+ import java.util.Date;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ import java.util.regex.Pattern;
+ 
+ import org.apache.ivy.Ivy;
+@@ -121,6 +127,8 @@ public class DefaultRepositoryCacheManager implements RepositoryCacheManager, Iv
+ 
+     private PackagingManager packagingManager = new PackagingManager();
+ 
++    private final List<ConfiguredTTL> configuredTTLs = new ArrayList<ConfiguredTTL>();
++
+     public DefaultRepositoryCacheManager() {
+     }
+ 
+@@ -134,9 +142,16 @@ public IvySettings getSettings() {
+         return settings;
+     }
+ 
+-    public void setSettings(IvySettings settings) {
++    public void setSettings(final IvySettings settings) {
+         this.settings = settings;
+         packagingManager.setSettings(settings);
++        // process and setup the configured TTLs (which weren't yet processed since they needed a settings instance to be present)
++        for (final ConfiguredTTL configuredTTL : configuredTTLs) {
++            this.addTTL(configuredTTL.attributes,
++                    configuredTTL.matcher == null ? ExactPatternMatcher.INSTANCE : settings.getMatcher(configuredTTL.matcher), configuredTTL.duration);
++        }
++        // clear off the configured TTLs since we have now processed them and created TTL rules out of them
++        this.configuredTTLs.clear();
+     }
+ 
+     public File getIvyFileInCache(ModuleRevisionId mrid) {
+@@ -242,15 +257,16 @@ public void addTTL(Map<String, String> attributes, PatternMatcher matcher, long
+         ttlRules.defineRule(new MapMatcher(attributes, matcher), new Long(duration));
+     }
+ 
+-    public void addConfiguredTtl(Map<String, String> attributes) {
+-        String duration = attributes.remove("duration");
+-        if (duration == null) {
++    public void addConfiguredTtl(final Map<String, String> attributes) {
++        final String durationValue = attributes.get("duration");
++        if (durationValue == null) {
+             throw new IllegalArgumentException("'duration' attribute is mandatory for ttl");
+         }
+-        String matcher = attributes.remove("matcher");
+-        addTTL(attributes,
+-            matcher == null ? ExactPatternMatcher.INSTANCE : settings.getMatcher(matcher),
+-            parseDuration(duration));
++        final long duration = parseDuration(durationValue);
++        final ConfiguredTTL configuredTTL = new ConfiguredTTL(duration, attributes.get("matcher"), attributes);
++        // Processing TTLs requires access to an initialized/usable IvySettings instance.
++        // we keep track of these configured TTLs and process them when the IvySettings instance becomes usable
++        this.configuredTTLs.add(configuredTTL);
+     }
+ 
+     public void setMemorySize(int size) {
+@@ -1562,4 +1578,31 @@ public void cleanUp() {
+ 
+     }
+ 
++    private static final class ConfiguredTTL {
++        // attributes on the TTL, that don't contribute to module matching
++        private static final Set<String> attributesNotContributingToMatching = new HashSet<String>();
++        static {
++            attributesNotContributingToMatching.add("duration");
++            attributesNotContributingToMatching.add("matcher");
++        }
++
++        private final String matcher;
++        private final long duration;
++        private final Map<String, String> attributes;
++
++        private ConfiguredTTL(final long duration, final String matcher, final Map<String, String> attributes) {
++            this.matcher = matcher;
++            this.duration = duration;
++            if (attributes == null) {
++                this.attributes = Collections.emptyMap();
++            } else {
++                final Map<String, String> attrs = new HashMap<String, String>(attributes);
++                for (final String removable : attributesNotContributingToMatching) {
++                    attrs.remove(removable);
++                }
++                this.attributes = Collections.unmodifiableMap(attrs);
++            }
++        }
++
++    }
+ }
+diff --git a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+index c75ffcf2b..6bbd88533 100644
+--- a/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
++++ b/test/java/org/apache/ivy/core/settings/XmlSettingsParserTest.java
+@@ -23,6 +23,7 @@
+ import java.util.List;
+ 
+ import org.apache.ivy.core.cache.DefaultRepositoryCacheManager;
++import org.apache.ivy.core.cache.RepositoryCacheManager;
+ import org.apache.ivy.core.cache.ResolutionCacheManager;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.id.ModuleId;
+@@ -641,6 +642,31 @@ public void testBaseDirVariables() throws Exception {
+             settings.getVariable("ivy.basedir"));
+     }
+ 
++    /**
++     * Tests that a <code>&lt;ttl&gt;</code> containing the <code>matcher</code> attribute, in a ivy settings file,
++     * works as expected.
++     *
++     * @throws Exception
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1495">IVY-1495</a>
++     */
++    @Test
++    public void testCacheTTLMatcherAttribute() throws Exception {
++        final IvySettings settings = new IvySettings();
++        settings.setBaseDir(new File("test/base/dir"));
++        final XmlSettingsParser parser = new XmlSettingsParser(settings);
++        parser.parse(XmlSettingsParserTest.class.getResource("ivysettings-cache-ttl-matcher.xml"));
++        // verify ttl
++        final DefaultRepositoryCacheManager cacheManager = (DefaultRepositoryCacheManager) settings.getRepositoryCacheManager("foo");
++        assertNotNull("Missing cache manager 'foo'", cacheManager);
++        assertEquals("Unexpected default ttl on cache manager", 30000, cacheManager.getDefaultTTL());
++        final ModuleRevisionId module1 = new ModuleRevisionId(new ModuleId("foo", "bar"), "*");
++        final long module1SpecificTTL = cacheManager.getTTL(module1);
++        assertEquals("Unexpected ttl for module " + module1 + " on cache manager", 60000, module1SpecificTTL);
++        final ModuleRevisionId module2 = new ModuleRevisionId(new ModuleId("food", "*"), "1.2.4");
++        final long module2SpecificTTL = cacheManager.getTTL(module2);
++        assertEquals("Unexpected ttl for module " + module2 + " on cache manager", 60000, module2SpecificTTL);
++    }
++
+     public static class MyOutputter implements ReportOutputter {
+         public void output(ResolveReport report, ResolutionCacheManager cacheMgr,
+                 ResolveOptions options) {
+diff --git a/test/java/org/apache/ivy/core/settings/ivysettings-cache-ttl-matcher.xml b/test/java/org/apache/ivy/core/settings/ivysettings-cache-ttl-matcher.xml
+new file mode 100644
+index 000000000..0dd0e397f
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/settings/ivysettings-cache-ttl-matcher.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivysettings>
++    <caches default="foo">
++        <cache name="foo" defaultTTL="30000ms">
++            <ttl organisation="foo\S*" duration="60000ms" matcher="regexp"/>
++        </cache>
++    </caches>
++</ivysettings>

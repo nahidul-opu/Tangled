@@ -1,0 +1,207 @@
+From b0d69051961c797200ec92b37a1557f1be1c2c58 Mon Sep 17 00:00:00 2001
+From: Kevin Ratnasekera <djkevincr@yahoo.com>
+Date: Thu, 28 Apr 2016 19:45:38 +0530
+Subject: [PATCH] GORA-447 NPE fix removed Persistant API change
+
+---
+ .../apache/gora/memory/store/MemStore.java    | 27 +++++++++++--------
+ .../apache/gora/persistency/Persistent.java   |  7 -----
+ .../gora/persistency/impl/PersistentBase.java | 11 --------
+ .../gora/memory/store/MemStoreTest.java       | 26 +++++++++++++++---
+ .../dynamodb/example/generated/Person.java    |  2 --
+ .../dynamodb/example/generated/Webpage.java   |  2 --
+ .../compiler/GoraDynamoDBCompiler.java        |  2 --
+ 7 files changed, 38 insertions(+), 39 deletions(-)
+
+diff --git a/gora-core/src/main/java/org/apache/gora/memory/store/MemStore.java b/gora-core/src/main/java/org/apache/gora/memory/store/MemStore.java
+index 481b2a7d6..19e3bc0b4 100644
+--- a/gora-core/src/main/java/org/apache/gora/memory/store/MemStore.java
++++ b/gora-core/src/main/java/org/apache/gora/memory/store/MemStore.java
+@@ -19,11 +19,7 @@
+ package org.apache.gora.memory.store;
+ 
+ import java.io.IOException;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.Iterator;
+-import java.util.List;
+-import java.util.NavigableMap;
++import java.util.*;
+ import java.util.concurrent.ConcurrentNavigableMap;
+ import java.util.concurrent.ConcurrentSkipListMap;
+ 
+@@ -117,13 +113,20 @@ public long deleteByQuery(Query<K, T> query) {
+         if (isAllFields) {
+           if (delete(result.getKey())) {
+             deletedRows++;
+-            continue;
++          }
++        } else {
++          ArrayList<String> excludedFields = new ArrayList<>();
++          for (String field : getFields()){
++            if (!Arrays.asList(fields).contains(field)){
++              excludedFields.add(field);
++            }
++          }
++          T newClonedObj = getPersistent(result.get(),excludedFields.toArray(new String[excludedFields.size()]));
++          if (delete(result.getKey())) {
++            put(result.getKey(),newClonedObj);
++            deletedRows++;
+           }
+         }
+-        for (String field : fields) {
+-          result.get().clearField(field);
+-        }
+-        deletedRows++;
+       }
+       return deletedRows;
+     } catch (Exception e) {
+@@ -190,7 +193,9 @@ private static<T extends PersistentBase> T getPersistent(T obj, String[] fields)
+       return obj;
+     }
+     T newObj = AvroUtils.deepClonePersistent(obj);
+-    for (Field otherField : otherFields) {
++    newObj.clear();
++    for (String field : fields) {
++      Field otherField = obj.getSchema().getField(field);
+       int index = otherField.pos();
+       newObj.put(index, obj.get(index));
+     }
+diff --git a/gora-core/src/main/java/org/apache/gora/persistency/Persistent.java b/gora-core/src/main/java/org/apache/gora/persistency/Persistent.java
+index 9d4b6015d..bd520a927 100644
+--- a/gora-core/src/main/java/org/apache/gora/persistency/Persistent.java
++++ b/gora-core/src/main/java/org/apache/gora/persistency/Persistent.java
+@@ -35,13 +35,6 @@ public interface Persistent extends Dirtyable {
+ */
+   void clear();
+ 
+-  /**
+-* Clears the inner state of the object based on field without any modification to the actual
+-* data on the data store. This method should be called before re-using the existing fields on
+-* object to hold the data for another result.
+-*/
+-  void clearField(String Field);
+-
+   /**
+ * Returns whether the field has been modified.
+ *
+diff --git a/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java b/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
+index d436d5658..56c481660 100644
+--- a/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
++++ b/gora-core/src/main/java/org/apache/gora/persistency/impl/PersistentBase.java
+@@ -196,17 +196,6 @@ public void clear() {
+     clearDirty();
+   }
+ 
+-  @Override
+-  public void clearField(String field) {
+-    Collection<Field> unmanagedFields = getUnmanagedFields();
+-    Field specificField = getSchema().getField(field);
+-    if (unmanagedFields.contains(specificField)) {
+-      put(specificField.pos(), PersistentData.get().deepCopy(specificField.schema(),
+-              PersistentData.get().getDefaultValue(specificField)));
+-    }
+-    clearDirynessIfFieldIsDirtyable(specificField.pos());
+-  }
+-
+   @Override
+   public boolean equals(Object that) {
+     if (that == this) {
+diff --git a/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java b/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java
+index 49db17a2e..8e94662d2 100644
+--- a/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java
++++ b/gora-core/src/test/java/org/apache/gora/memory/store/MemStoreTest.java
+@@ -38,6 +38,7 @@
+ 
+ import static org.apache.gora.examples.WebPageDataCreator.SORTED_URLS;
+ import static org.apache.gora.examples.WebPageDataCreator.URLS;
++import static org.apache.gora.examples.WebPageDataCreator.URL_INDEXES;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertNotNull;
+ import static org.junit.Assert.assertNull;
+@@ -52,7 +53,7 @@
+ public class MemStoreTest extends DataStoreTestBase {
+ 
+   private static final Logger LOG = LoggerFactory.getLogger(MemStoreTest.class);
+-  
++
+   private static final int NUM_KEYS = 4;
+ 
+   private Configuration conf;
+@@ -108,9 +109,26 @@ public void testPutGet() throws Exception {
+   @Test
+   public void testDeleteByQueryFields() {}
+ 
+-  @Ignore("GORA-447")
+   @Test
+-  public void testGetWithFields() {}
++  public void testGetWithFields() throws Exception {
++
++    DataStore<String, WebPage> store = new MemStore<>();
++    BeanFactory<String, WebPage> beanFactory = new BeanFactoryImpl<>(String.class, WebPage.class);
++    store.setBeanFactory(beanFactory);
++    WebPageDataCreator.createWebPageData(store);
++    String[] interestFields = new String[2];
++    interestFields[0] = "url";
++    interestFields[1] = "content";
++    WebPage page = store.get(URLS[1], interestFields);
++    assertNotNull(page);
++    assertNotNull(page.getUrl());
++    assertEquals(page.getUrl().toString(), URLS[1]);
++    assertNotNull(page.getContent());
++    assertEquals("Map of Outlinks should have a size of '0' as it is omitted at retrieval",
++            0, page.getOutlinks().size());
++    assertEquals("Map of Parsed Content should have a size of '0' as it is omitted at retrieval",
++            0, page.getParsedContent().size());
++  }
+ 
+   @Test
+   public void testMemStoreDeleteByQueryFields() throws Exception {
+@@ -125,7 +143,7 @@ public void testMemStoreDeleteByQueryFields() throws Exception {
+ 
+     query = store.newQuery();
+     query.setFields("outlinks", "parsedContent", "content");
+-    
++
+     Query<String, WebPage> newQuery = store.newQuery();
+     newQuery.setStartKey(SORTED_URLS[0]);
+     newQuery.setEndKey(SORTED_URLS[9]);
+diff --git a/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Person.java b/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Person.java
+index f9c3ca67f..471fb59bf 100644
+--- a/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Person.java
++++ b/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Person.java
+@@ -51,8 +51,6 @@ public void setDirty(boolean pDirty){}
+     @Override
+     public void clear() { }
+     @Override
+-    public void clearField(String Field) { }
+-    @Override
+     public Person clone() { return null; }
+     @Override
+     public boolean isDirty() { return false; }
+diff --git a/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Webpage.java b/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Webpage.java
+index e3b6024ae..df9eb806b 100644
+--- a/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Webpage.java
++++ b/gora-dynamodb/src/examples/java/org/apache/gora/dynamodb/example/generated/Webpage.java
+@@ -44,8 +44,6 @@ public void setDirty(boolean pDirty){}
+     @Override
+     public void clear() { }
+     @Override
+-    public void clearField(String Field) { }
+-    @Override
+     public Webpage clone() { return null; }
+     @Override
+     public boolean isDirty() { return false; }
+diff --git a/gora-dynamodb/src/main/java/org/apache/gora/dynamodb/compiler/GoraDynamoDBCompiler.java b/gora-dynamodb/src/main/java/org/apache/gora/dynamodb/compiler/GoraDynamoDBCompiler.java
+index 906773b57..be38e361e 100644
+--- a/gora-dynamodb/src/main/java/org/apache/gora/dynamodb/compiler/GoraDynamoDBCompiler.java
++++ b/gora-dynamodb/src/main/java/org/apache/gora/dynamodb/compiler/GoraDynamoDBCompiler.java
+@@ -291,8 +291,6 @@ private void setDefaultMethods(int pIden, String tabName) throws IOException {
+     line(pIden, "@Override");
+     line(pIden, "public void clear() { }");
+     line(pIden, "@Override");
+-    line(pIden, "public void clearField(String Field) { }");
+-    line(pIden, "@Override");
+     line(pIden, "public " + tabName + " clone() { return null; }");
+     line(pIden, "@Override");
+     line(pIden, "public boolean isDirty() { return false; }");

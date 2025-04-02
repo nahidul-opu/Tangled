@@ -1,0 +1,162 @@
+From 70f4b5549622b0ccc70bd2087700c510f10fc6f0 Mon Sep 17 00:00:00 2001
+From: cduffy <cduffy@unknown>
+Date: Fri, 27 Dec 2013 23:07:57 +0000
+Subject: [PATCH] IVY-1423: fix revision mapping across namespaces
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1553758 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/plugins/resolver/BasicResolver.java   |  8 +++---
+ .../apache/ivy/core/resolve/ResolveTest.java  | 11 ++++++++
+ .../ivy/core/resolve/ivy-namespace5.xml       | 25 ++++++++++++++++++
+ test/repositories/namespace/C/C/1.0.0/ivy.xml | 26 +++++++++++++++++++
+ test/repositories/namespace/ivysettings.xml   | 10 +++++++
+ 6 files changed, 78 insertions(+), 3 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/resolve/ivy-namespace5.xml
+ create mode 100644 test/repositories/namespace/C/C/1.0.0/ivy.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e99d43336..78b2e99c4 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -168,6 +168,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Better support for "Bundle-RequiredExecutionEnvironment" from an OSGi MANIFEST.MF
+ - FIX: When inheriting a module descriptor, also merge the exclude rules
+ - FIX: Correct application of mediators (ie. override) during conflict resolution (IVY-1455)
++- FIX: Fix revision number mapping across namespaces (IVY-1423)
+ 
+    2.3.0
+ =====================================
+diff --git a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+index ce327982c..0ab19354c 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+@@ -359,7 +359,7 @@ private void cacheModuleDescriptor(ModuleDescriptor systemMd, ModuleRevisionId s
+         // the metadata artifact which was used to cache the original metadata file
+         Artifact requestedMetadataArtifact = ivyRef == null ? systemMd.getMetadataArtifact()
+                 : parser.getMetadataArtifact(
+-                    ModuleRevisionId.newInstance(systemMrid, ivyRef.getRevision()),
++                    ModuleRevisionId.newInstance(systemMrid, systemMd.getRevision()),
+                     ivyRef.getResource());
+ 
+         cacheManager.originalToCachedModuleDescriptor(this, ivyRef, requestedMetadataArtifact, rmr,
+@@ -608,9 +608,11 @@ private void checkDescriptorConsistency(ModuleRevisionId mrid, ModuleDescriptor
+                     + md.getModuleRevisionId().getBranch() + "'; ");
+             ok = false;
+         }
+-        if (ivyRef.getRevision() != null && !ivyRef.getRevision().startsWith("working@")) {
++        if (ivyRef.getRevision() != null
++                && !ivyRef.getRevision().startsWith("working@")
++                && !mrid.getRevision().equals(md.getModuleRevisionId().getRevision())) {
+             ModuleRevisionId expectedMrid = ModuleRevisionId
+-                    .newInstance(mrid, ivyRef.getRevision());
++                    .newInstance(mrid, mrid.getRevision());
+             if (!getSettings().getVersionMatcher().accept(expectedMrid, md)) {
+                 Message.error("\t" + getName() + ": bad revision found in " + ivyRef.getResource()
+                         + ": expected='" + ivyRef.getRevision() + " found='"
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index e44d522d6..a702479c3 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -4785,6 +4785,17 @@ public void testNamespaceMapping4() throws Exception {
+ 
+         assertTrue(report.hasError());
+     }
++    
++    public void testNamespaceMapping5() throws Exception {
++        // Verifies that mapping version numbers works
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/namespace/ivysettings.xml"));
++        ResolveReport report = ivy.resolve(ResolveTest.class.getResource("ivy-namespace5.xml"),
++            getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("systemorg3", "systemmod3", "1.0");
++        assertTrue(getIvyFileInCache(mrid).exists());
++    }
+ 
+     public void testIVY151() throws Exception {
+         Ivy ivy = new Ivy();
+diff --git a/test/java/org/apache/ivy/core/resolve/ivy-namespace5.xml b/test/java/org/apache/ivy/core/resolve/ivy-namespace5.xml
+new file mode 100644
+index 000000000..776a60bf4
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/resolve/ivy-namespace5.xml
+@@ -0,0 +1,25 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="apache" module="namespace" revision="5.0" />
++    
++    <dependencies>
++ 		   <dependency org="systemorg3" name="systemmod3" rev="1.0" />
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/namespace/C/C/1.0.0/ivy.xml b/test/repositories/namespace/C/C/1.0.0/ivy.xml
+new file mode 100644
+index 000000000..911e20cdf
+--- /dev/null
++++ b/test/repositories/namespace/C/C/1.0.0/ivy.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="C"
++	       module="C"
++	       revision="1.0.0"
++	       status="integration"
++	       publication="20051101110000"/>
++   <publications/>
++</ivy-module>
+diff --git a/test/repositories/namespace/ivysettings.xml b/test/repositories/namespace/ivysettings.xml
+index 040cb91d8..5c9b93fcb 100644
+--- a/test/repositories/namespace/ivysettings.xml
++++ b/test/repositories/namespace/ivysettings.xml
+@@ -60,6 +60,16 @@
+ 					<dest module="systemmod2"/>
+ 				</tosystem>
+ 			</rule>
++			<rule>
++				<fromsystem>
++					<src org="systemorg3" module="systemmod3" rev="1.0"/>
++					<dest org="C" module="C" rev="1.0.0"/>
++				</fromsystem>
++				<tosystem>
++					<src org="C" module="C" rev="1.0.0"/>
++					<dest org="systemorg3" module="systemmod3" rev="1.0"/>
++				</tosystem>
++			</rule>
+ 		</namespace>
+ 	</namespaces>
+ 	<resolvers>

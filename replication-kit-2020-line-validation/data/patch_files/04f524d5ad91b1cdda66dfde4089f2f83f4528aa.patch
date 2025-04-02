@@ -1,0 +1,383 @@
+From 04f524d5ad91b1cdda66dfde4089f2f83f4528aa Mon Sep 17 00:00:00 2001
+From: Ryan Blue <blue@apache.org>
+Date: Thu, 20 Aug 2015 15:23:22 -0700
+Subject: [PATCH] PARQUET-361: Add semver prerelease logic.
+
+This also adds more versions where PARQUET-251 is fixed.
+
+Author: Ryan Blue <blue@apache.org>
+
+Closes #261 from rdblue/PARQUET-361-add-semver-prerelease and squashes the following commits:
+
+c01142d [Ryan Blue] PARQUET-361: Add semver prerelease logic.
+---
+ .../org/apache/parquet/CorruptStatistics.java |   6 +-
+ .../apache/parquet/CorruptStatisticsTest.java |  14 ++
+ .../org/apache/parquet/SemanticVersion.java   | 155 ++++++++++++++++--
+ .../apache/parquet/SemanticVersionTest.java   |  61 ++++++-
+ 4 files changed, 220 insertions(+), 16 deletions(-)
+
+diff --git a/parquet-column/src/main/java/org/apache/parquet/CorruptStatistics.java b/parquet-column/src/main/java/org/apache/parquet/CorruptStatistics.java
+index 3869cdac48..3b9033850e 100644
+--- a/parquet-column/src/main/java/org/apache/parquet/CorruptStatistics.java
++++ b/parquet-column/src/main/java/org/apache/parquet/CorruptStatistics.java
+@@ -41,6 +41,8 @@ public class CorruptStatistics {
+   // the bug involved writing invalid binary statistics, so stats written prior to this
+   // fix must be ignored / assumed invalid
+   private static final SemanticVersion PARQUET_251_FIXED_VERSION = new SemanticVersion(1, 8, 0);
++  private static final SemanticVersion CDH_5_PARQUET_251_FIXED_START = new SemanticVersion(1, 5, 0, null, "cdh5.5.0", null);
++  private static final SemanticVersion CDH_5_PARQUET_251_FIXED_END = new SemanticVersion(1, 5, 0);
+ 
+   /**
+    * Decides if the statistics from a file created by createdBy (the created_by field from parquet format)
+@@ -75,7 +77,9 @@ public static boolean shouldIgnoreStatistics(String createdBy, PrimitiveTypeName
+ 
+       SemanticVersion semver = SemanticVersion.parse(version.version);
+ 
+-      if (semver.compareTo(PARQUET_251_FIXED_VERSION) < 0) {
++      if (semver.compareTo(PARQUET_251_FIXED_VERSION) < 0 &&
++          !(semver.compareTo(CDH_5_PARQUET_251_FIXED_START) >= 0 &&
++              semver.compareTo(CDH_5_PARQUET_251_FIXED_END) < 0)) {
+         warnOnce("Ignoring statistics because this file was created prior to "
+             + PARQUET_251_FIXED_VERSION
+             + ", see PARQUET-251");
+diff --git a/parquet-column/src/test/java/org/apache/parquet/CorruptStatisticsTest.java b/parquet-column/src/test/java/org/apache/parquet/CorruptStatisticsTest.java
+index 084d63ad4b..343d5f26ff 100644
+--- a/parquet-column/src/test/java/org/apache/parquet/CorruptStatisticsTest.java
++++ b/parquet-column/src/test/java/org/apache/parquet/CorruptStatisticsTest.java
+@@ -75,4 +75,18 @@ public void testCorruptStatistics() {
+     assertFalse(CorruptStatistics.shouldIgnoreStatistics("impala version (build)", PrimitiveTypeName.BINARY));
+ 
+   }
++
++  @Test
++  public void testDistributionCorruptStatistics() {
++    assertTrue(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.5.0-cdh5.4.999 (build abcd)", PrimitiveTypeName.BINARY));
++    assertFalse(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.5.0-cdh5.5.0-SNAPSHOT (build 956ed6c14c611b4c4eaaa1d6e5b9a9c6d4dfa336)", PrimitiveTypeName.BINARY));
++    assertFalse(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.5.0-cdh5.5.0 (build abcd)", PrimitiveTypeName.BINARY));
++    assertFalse(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.5.0-cdh5.5.1 (build abcd)", PrimitiveTypeName.BINARY));
++    assertFalse(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.5.0-cdh5.6.0 (build abcd)", PrimitiveTypeName.BINARY));
++    assertTrue(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.4.10 (build abcd)", PrimitiveTypeName.BINARY));
++    assertTrue(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.5.0 (build abcd)", PrimitiveTypeName.BINARY));
++    assertTrue(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.5.1 (build abcd)", PrimitiveTypeName.BINARY));
++    assertTrue(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.6.0 (build abcd)", PrimitiveTypeName.BINARY));
++    assertTrue(CorruptStatistics.shouldIgnoreStatistics("parquet-mr version 1.7.0 (build abcd)", PrimitiveTypeName.BINARY));
++  }
+ }
+diff --git a/parquet-common/src/main/java/org/apache/parquet/SemanticVersion.java b/parquet-common/src/main/java/org/apache/parquet/SemanticVersion.java
+index c6cb406b79..1f1837c5a6 100644
+--- a/parquet-common/src/main/java/org/apache/parquet/SemanticVersion.java
++++ b/parquet-common/src/main/java/org/apache/parquet/SemanticVersion.java
+@@ -18,6 +18,8 @@
+  */
+ package org.apache.parquet;
+ 
++import java.util.ArrayList;
++import java.util.List;
+ import java.util.regex.Matcher;
+ import java.util.regex.Pattern;
+ 
+@@ -30,14 +32,22 @@
+  * prerelease version. All prerelease versions are considered equivalent.
+  */
+ public final class SemanticVersion implements Comparable<SemanticVersion> {
+-  // (major).(minor).(patch)[(rc)(rcnum)]?(-(SNAPSHOT))?
+-  private static final String FORMAT = "^(\\d+)\\.(\\d+)\\.(\\d+)((.*)(\\d+))?(\\-(.*))?$";
++  // this is slightly more permissive than the semver format:
++  // * it allows a pattern after patch and before -prerelease or +buildinfo
++  private static final String FORMAT =
++      // major  . minor  .patch   ???       - prerelease.x + build info
++      "^(\\d+)\\.(\\d+)\\.(\\d+)([^-+]*)?(?:-([^+]*))?(?:\\+(.*))?$";
+   private static final Pattern PATTERN = Pattern.compile(FORMAT);
+ 
+   public final int major;
+   public final int minor;
+   public final int patch;
++  // this is part of the public API and can't be renamed. it is misleading
++  // because it actually signals that there is an unknown component
+   public final boolean prerelease;
++  public final String unknown;
++  public final Prerelease pre;
++  public final String buildInfo;
+ 
+   public SemanticVersion(int major, int minor, int patch) {
+     Preconditions.checkArgument(major >= 0, "major must be >= 0");
+@@ -48,9 +58,12 @@ public SemanticVersion(int major, int minor, int patch) {
+     this.minor = minor;
+     this.patch = patch;
+     this.prerelease = false;
++    this.unknown = null;
++    this.pre = null;
++    this.buildInfo = null;
+   }
+ 
+-  public SemanticVersion(int major, int minor, int patch, boolean isPrerelease) {
++  public SemanticVersion(int major, int minor, int patch, boolean hasUnknown) {
+     Preconditions.checkArgument(major >= 0, "major must be >= 0");
+     Preconditions.checkArgument(minor >= 0, "minor must be >= 0");
+     Preconditions.checkArgument(patch >= 0, "patch must be >= 0");
+@@ -58,7 +71,24 @@ public SemanticVersion(int major, int minor, int patch, boolean isPrerelease) {
+     this.major = major;
+     this.minor = minor;
+     this.patch = patch;
+-    this.prerelease = isPrerelease;
++    this.prerelease = hasUnknown;
++    this.unknown = null;
++    this.pre = null;
++    this.buildInfo = null;
++  }
++
++  public SemanticVersion(int major, int minor, int patch, String unknown, String pre, String buildInfo) {
++    Preconditions.checkArgument(major >= 0, "major must be >= 0");
++    Preconditions.checkArgument(minor >= 0, "minor must be >= 0");
++    Preconditions.checkArgument(patch >= 0, "patch must be >= 0");
++
++    this.major = major;
++    this.minor = minor;
++    this.patch = patch;
++    this.prerelease = (unknown != null && !unknown.isEmpty());
++    this.unknown = unknown;
++    this.pre = (pre != null ? new Prerelease(pre) : null);
++    this.buildInfo = buildInfo;
+   }
+ 
+   public static SemanticVersion parse(String version) throws SemanticVersionParseException {
+@@ -71,25 +101,25 @@ public static SemanticVersion parse(String version) throws SemanticVersionParseE
+     final int major;
+     final int minor;
+     final int patch;
+-    boolean prerelease = false;
+ 
+     try {
+       major = Integer.valueOf(matcher.group(1));
+       minor = Integer.valueOf(matcher.group(2));
+       patch = Integer.valueOf(matcher.group(3));
+-      for (int g = 4; g <= matcher.groupCount(); g += 1) {
+-        prerelease |= (matcher.group(g) != null);
+-      }
+     } catch (NumberFormatException e) {
+       throw new SemanticVersionParseException(e);
+     }
+ 
++    final String unknown = matcher.group(4);
++    final String prerelease = matcher.group(5);
++    final String buildInfo = matcher.group(6);
++
+     if (major < 0 || minor < 0 || patch < 0) {
+       throw new SemanticVersionParseException(
+           String.format("major(%d), minor(%d), and patch(%d) must all be >= 0", major, minor, patch));
+     }
+ 
+-    return new SemanticVersion(major, minor, patch, prerelease);
++    return new SemanticVersion(major, minor, patch, unknown, prerelease, buildInfo);
+   }
+ 
+   @Override
+@@ -111,14 +141,29 @@ public int compareTo(SemanticVersion o) {
+       return cmp;
+     }
+ 
+-    return compareBooleans(o.prerelease, prerelease);
++    cmp = compareBooleans(o.prerelease, prerelease);
++    if (cmp != 0) {
++      return cmp;
++    }
++
++    if (pre != null) {
++      if (o.pre != null) {
++        return pre.compareTo(o.pre);
++      } else {
++        return -1;
++      }
++    } else if (o.pre != null) {
++      return 1;
++    }
++
++    return 0;
+   }
+ 
+-  int compareIntegers(int x, int y) {
++  private static int compareIntegers(int x, int y) {
+     return (x < y) ? -1 : ((x == y) ? 0 : 1);
+   }
+ 
+-  int compareBooleans(boolean x, boolean y) {
++  private static int compareBooleans(boolean x, boolean y) {
+     return (x == y) ? 0 : (x ? 1 : -1);
+   }
+ 
+@@ -141,7 +186,91 @@ public int hashCode() {
+ 
+   @Override
+   public String toString() {
+-    return major + "." + minor + "." + patch;
++    StringBuilder sb = new StringBuilder();
++    sb.append(major).append(".").append(minor).append(".").append(patch);
++    if (prerelease) {
++      sb.append(unknown);
++    }
++    if (pre != null) {
++      sb.append(pre.original);
++    }
++    if (buildInfo != null) {
++      sb.append(buildInfo);
++    }
++    return sb.toString();
++  }
++
++  private static class NumberOrString implements Comparable<NumberOrString> {
++    private static final Pattern NUMERIC = Pattern.compile("\\d+");
++
++    private final String original;
++    private final boolean isNumeric;
++    private final int number;
++
++    public NumberOrString(String numberOrString) {
++      this.original = numberOrString;
++      this.isNumeric = NUMERIC.matcher(numberOrString).matches();
++      if (isNumeric) {
++        this.number = Integer.parseInt(numberOrString);
++      } else {
++        this.number = -1;
++      }
++    }
++
++    @Override
++    public int compareTo(NumberOrString that) {
++      // Numeric identifiers always have lower precedence than non-numeric identifiers.
++      int cmp = compareBooleans(that.isNumeric, this.isNumeric);
++      if (cmp != 0) {
++        return cmp;
++      }
++
++      if (isNumeric) {
++        // identifiers consisting of only digits are compared numerically
++        return compareIntegers(this.number, that.number);
++      }
++
++      // identifiers with letters or hyphens are compared lexically in ASCII sort order
++      return this.original.compareTo(that.original);
++    }
++
++    @Override
++    public String toString() {
++      return original;
++    }
++  }
++
++  private static class Prerelease implements Comparable<Prerelease> {
++    private static final Pattern DOT = Pattern.compile("\\.");
++
++    private final String original;
++    private final List<NumberOrString> identifiers = new ArrayList<NumberOrString>();
++
++    public Prerelease(String original) {
++      this.original = original;
++      for (String identifier : DOT.split(original)) {
++        identifiers.add(new NumberOrString(identifier));
++      }
++    }
++
++    @Override
++    public int compareTo(Prerelease that) {
++      // A larger set of pre-release fields has a higher precedence than a
++      // smaller set, if all of the preceding identifiers are equal
++      int size = Math.min(this.identifiers.size(), that.identifiers.size());
++      for (int i = 0; i < size; i += 1) {
++        int cmp = identifiers.get(i).compareTo(that.identifiers.get(i));
++        if (cmp != 0) {
++          return cmp;
++        }
++      }
++      return compareIntegers(this.identifiers.size(), that.identifiers.size());
++    }
++
++    @Override
++    public String toString() {
++      return original;
++    }
+   }
+ 
+   public static class SemanticVersionParseException extends Exception {
+diff --git a/parquet-common/src/test/java/org/apache/parquet/SemanticVersionTest.java b/parquet-common/src/test/java/org/apache/parquet/SemanticVersionTest.java
+index e969aabf7b..30fce6c6fc 100644
+--- a/parquet-common/src/test/java/org/apache/parquet/SemanticVersionTest.java
++++ b/parquet-common/src/test/java/org/apache/parquet/SemanticVersionTest.java
+@@ -20,6 +20,9 @@
+ 
+ import org.junit.Test;
+ 
++import java.util.Arrays;
++import java.util.List;
++
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertTrue;
+ 
+@@ -47,11 +50,65 @@ public void testCompare() {
+     assertTrue(new SemanticVersion(1, 8, 0, true).compareTo(new SemanticVersion(1, 8, 0)) < 0);
+   }
+ 
++  @Test
++  public void testSemverPrereleaseExamples() throws Exception {
++    List<String> examples = Arrays.asList("1.0.0-alpha", "1.0.0-alpha.1",
++        "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.11",
++        "1.0.0-rc.1", "1.0.0");
++    for (int i = 0; i < examples.size() - 1; i += 1) {
++      assertLessThan(examples.get(i), examples.get(i + 1));
++      assertEqualTo(examples.get(i), examples.get(i));
++    }
++    // the last one didn't get reflexively tested
++    assertEqualTo(examples.get(examples.size() - 1), examples.get(examples.size() - 1));
++  }
++
++  @Test
++  public void testSemverBuildInfoExamples() throws Exception {
++    assertEqualTo("1.0.0-alpha+001", "1.0.0-alpha+001");
++    assertEqualTo("1.0.0-alpha", "1.0.0-alpha+001");
++    assertEqualTo("1.0.0+20130313144700", "1.0.0+20130313144700");
++    assertEqualTo("1.0.0", "1.0.0+20130313144700");
++    assertEqualTo("1.0.0-beta+exp.sha.5114f85", "1.0.0-beta+exp.sha.5114f85");
++    assertEqualTo("1.0.0-beta", "1.0.0-beta+exp.sha.5114f85");
++  }
++
++  @Test
++  public void testUnknownComparisons() throws Exception {
++    // anything with unknown is lower precedence
++    assertLessThan("1.0.0rc0-alpha+001", "1.0.0-alpha");
++  }
++
++  @Test
++  public void testDistributionVersions() throws Exception {
++    assertEqualTo("1.5.0-cdh5.5.0", "1.5.0-cdh5.5.0");
++    assertLessThan("1.5.0-cdh5.5.0", "1.5.0-cdh5.5.1");
++    assertLessThan("1.5.0-cdh5.5.0", "1.5.0-cdh5.5.1-SNAPSHOT");
++    assertLessThan("1.5.0-cdh5.5.0", "1.5.0-cdh5.6.0");
++    assertLessThan("1.5.0-cdh5.5.0", "1.5.0-cdh6.0.0");
++    assertLessThan("1.5.0-cdh5.5.0", "1.5.0");
++    // according to the semver spec, this is true :(
++    assertLessThan("1.5.0-cdh5.5.0", "1.5.0-cdh5.5.0-SNAPSHOT");
++  }
++
+   @Test
+   public void testParse() throws Exception {
+     assertEquals(new SemanticVersion(1, 8, 0), SemanticVersion.parse("1.8.0"));
+     assertEquals(new SemanticVersion(1, 8, 0, true), SemanticVersion.parse("1.8.0rc3"));
+-    assertEquals(new SemanticVersion(1, 8, 0, true), SemanticVersion.parse("1.8.0rc3-SNAPSHOT"));
+-    assertEquals(new SemanticVersion(1, 8, 0, true), SemanticVersion.parse("1.8.0-SNAPSHOT"));
++    assertEquals(new SemanticVersion(1, 8, 0, "rc3", "SNAPSHOT", null),
++        SemanticVersion.parse("1.8.0rc3-SNAPSHOT"));
++    assertEquals(new SemanticVersion(1, 8, 0, null, "SNAPSHOT", null),
++        SemanticVersion.parse("1.8.0-SNAPSHOT"));
++    assertEquals(new SemanticVersion(1, 5, 0, null, "cdh5.5.0", null),
++        SemanticVersion.parse("1.5.0-cdh5.5.0"));
++  }
++
++  private static void assertLessThan(String a, String b) throws SemanticVersion.SemanticVersionParseException {
++    assertTrue(a + " should be < " + b, SemanticVersion.parse(a).compareTo(SemanticVersion.parse(b)) < 0);
++    assertTrue(b + " should be > " + a, SemanticVersion.parse(b).compareTo(SemanticVersion.parse(a)) > 0);
++  }
++
++  private static void assertEqualTo(String a, String b) throws SemanticVersion.SemanticVersionParseException {
++    assertTrue(a + " should equal " + b, SemanticVersion.parse(a).compareTo(SemanticVersion.parse(b)) == 0);
+   }
+ }

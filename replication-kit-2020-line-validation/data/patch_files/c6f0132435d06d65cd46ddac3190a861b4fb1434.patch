@@ -1,0 +1,169 @@
+From c6f0132435d06d65cd46ddac3190a861b4fb1434 Mon Sep 17 00:00:00 2001
+From: Joerg Schaible <joehni@apache.org>
+Date: Sun, 22 Mar 2009 00:55:25 +0000
+Subject: [PATCH] Merge changes from c2 for CONFIGURATION-369,
+ CONFIGURATION-375, CONFIGURATION-376 and CONFIGURATION-377.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@757114 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration/SubnodeConfiguration.java   | 17 ++++++-----
+ .../interpol/ConfigurationInterpolator.java   | 28 ++++++++-----------
+ .../TestSubnodeConfiguration.java             | 19 ++++++++++++-
+ xdocs/changes.xml                             | 16 ++++++++++-
+ 4 files changed, 54 insertions(+), 26 deletions(-)
+
+diff --git a/src/java/org/apache/commons/configuration/SubnodeConfiguration.java b/src/java/org/apache/commons/configuration/SubnodeConfiguration.java
+index 6dfab44ad9..cba4b560c0 100644
+--- a/src/java/org/apache/commons/configuration/SubnodeConfiguration.java
++++ b/src/java/org/apache/commons/configuration/SubnodeConfiguration.java
+@@ -21,6 +21,7 @@
+ import java.util.Iterator;
+ import java.util.List;
+ 
++import org.apache.commons.configuration.interpol.ConfigurationInterpolator;
+ import org.apache.commons.configuration.tree.ConfigurationNode;
+ 
+ /**
+@@ -326,14 +327,16 @@ protected void initFromParent(HierarchicalConfiguration parentConfig)
+     }
+ 
+     /**
+-     * Performs interpolation. This implementation will ask the parent
+-     * configuration to perform the interpolation so that variables can be
+-     * evaluated in the global context.
++     * Creates a ConfigurationInterpolator with a chain to the parent's
++     * interpolator. 
+      *
+-     * @param value the value to be interpolated
++     * @return the new interpolator
+      */
+-    protected Object interpolate(Object value)
+-    {
+-        return getParent().interpolate(value);
++    @Override
++    protected ConfigurationInterpolator createInterpolator() {
++        ConfigurationInterpolator interpolator = super.createInterpolator();
++        interpolator.setParentInterpolator(getParent().getInterpolator());
++        return interpolator;
+     }
++    
+ }
+diff --git a/src/java/org/apache/commons/configuration/interpol/ConfigurationInterpolator.java b/src/java/org/apache/commons/configuration/interpol/ConfigurationInterpolator.java
+index 6103ad30cb..ddca971086 100644
+--- a/src/java/org/apache/commons/configuration/interpol/ConfigurationInterpolator.java
++++ b/src/java/org/apache/commons/configuration/interpol/ConfigurationInterpolator.java
+@@ -286,12 +286,19 @@ public String lookup(String var)
+             String prefix = var.substring(0, prefixPos);
+             String name = var.substring(prefixPos + 1);
+             String value = fetchLookupForPrefix(prefix).lookup(name);
++            if (value == null && getParentInterpolator() != null) {
++                value = getParentInterpolator().fetchLookupForPrefix(prefix).lookup(name);
++            }
+             if (value != null)
+             {
+                 return value;
+-            }
++            } 
++        }
++        String value = fetchNoPrefixLookup().lookup(var);
++        if (value == null && getParentInterpolator() != null) {
++            value = getParentInterpolator().fetchNoPrefixLookup().lookup(var);
+         }
+-        return fetchNoPrefixLookup().lookup(var);
++        return value;
+     }
+ 
+     /**
+@@ -304,17 +311,7 @@ public String lookup(String var)
+      */
+     protected StrLookup fetchNoPrefixLookup()
+     {
+-        StrLookup lookup = null;
+-        if (getDefaultLookup() != null) { 
+-            lookup = getDefaultLookup();
+-        }
+-        if (lookup == null) { 
+-            ConfigurationInterpolator parent = getParentInterpolator();
+-            lookup = (parent == null) 
+-                ? StrLookup.noneLookup() 
+-                : parent.fetchNoPrefixLookup();
+-        }
+-        return lookup;
++        return (getDefaultLookup() != null) ? getDefaultLookup() : StrLookup.noneLookup();
+     }
+ 
+     /**
+@@ -331,10 +328,7 @@ protected StrLookup fetchLookupForPrefix(String prefix)
+         StrLookup lookup = (StrLookup) localLookups.get(prefix);
+         if (lookup == null)
+         {
+-            ConfigurationInterpolator parent = getParentInterpolator();
+-            lookup = (parent == null) 
+-                ? StrLookup.noneLookup() 
+-                : parent.fetchLookupForPrefix(prefix);
++            lookup = StrLookup.noneLookup();
+         }
+         return lookup;
+     }
+diff --git a/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java b/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java
+index cd1feaae02..8bcf1f2091 100644
+--- a/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java
++++ b/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java
+@@ -333,10 +333,27 @@ public void testInterpolationFromConfigurationAt()
+         }
+     }
+ 
++    /**
++     * An additional test for interpolation when the configurationAt() method is
++     * involved for a local interpolation.
++     */
++    public void testLocalInterpolationFromConfigurationAt()
++    {
++        parent.addProperty("base.dir", "/home/foo");
++        parent.addProperty("test.absolute.dir.dir1", "${base.dir}/path1");
++        parent.addProperty("test.absolute.dir.dir2", "${dir1}");
++
++        Configuration sub = parent.configurationAt("test.absolute.dir");
++        assertEquals("Wrong interpolation in subnode",
++            "/home/foo/path1", sub.getString("dir1"));
++        assertEquals("Wrong local interpolation in subnode",
++            "/home/foo/path1", sub.getString("dir2"));
++    }
++
+     /**
+      * Tests manipulating the interpolator.
+      */
+-    public void todoTestInterpolator()
++    public void testInterpolator()
+     {
+         parent.addProperty("tablespaces.tablespace.name", "default");
+         parent.addProperty("tablespaces.tablespace(-1).name", "test");
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index 0eb0690a75..c215bc3ed4 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -37,9 +37,23 @@
+       <action dev="rgoers" type="fix" issue="CONFIGURATION-361">
+         MultiFileHierarchicalConfiguration was not using basepath to
+         construct the file url. It also threw an exception if the
+-        file pattern resolved to a non-existant file. This is now
++        file pattern resolved to a non-existent file. This is now
+         configurable.
+       </action>
++      <action dev="joehni" type="update">
++        <fixes issue="CONFIGURATION-375" />
++        <fixes issue="CONFIGURATION-376" />
++        <fixes issue="CONFIGURATION-377" />
++        Align interpolation functionality of SubnodeConfiguration and
++        SubsetConfiguration. SubsetConfiguration will now also interpolate
++        keys of the parent configuration or use the local lookups of its
++        parent. SubnodeConfiguration is in turn now able to lookup local
++        keys as well.
++      </action>
++      <action dev="joehni" type="fix" issue="CONFIGURATION-369">
++        SubsetConfiguration did not use locally registered lookups of its
++        interpolator.
++      </action>
+       <action dev="oheger" type="fix" issue="CONFIGURATION-359">
+         Fixed broken links to the API documentation in the user's guide.
+       </action>

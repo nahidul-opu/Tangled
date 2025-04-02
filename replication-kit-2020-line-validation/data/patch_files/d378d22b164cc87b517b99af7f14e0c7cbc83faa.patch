@@ -1,0 +1,337 @@
+From d378d22b164cc87b517b99af7f14e0c7cbc83faa Mon Sep 17 00:00:00 2001
+From: Niall Pemberton <niallp@apache.org>
+Date: Sat, 14 Jul 2007 04:19:21 +0000
+Subject: [PATCH] BEANUTILS-289 - JDBCDynaClass "lowerCase" option causes
+ problems when using the DynaProperty name to as the column name when
+ accessing the ResultSet - add a Cross Reference to JDBCDynaClass when the
+ lower case DynaProperty name is different from the column name - provide
+ lookup methods for column names and values - modify RowSetDynaClass and
+ ResultSetIterator to use the new methods
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/beanutils/trunk@556221 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../commons/beanutils/JDBCDynaClass.java      | 47 +++++++++++++--
+ .../commons/beanutils/ResultSetDynaClass.java | 12 ++++
+ .../commons/beanutils/ResultSetIterator.java  |  2 +-
+ .../commons/beanutils/RowSetDynaClass.java    |  2 +-
+ .../beanutils/DynaResultSetTestCase.java      | 59 +++++++++++++++++++
+ .../commons/beanutils/DynaRowSetTestCase.java | 58 +++++++++++++++++-
+ .../commons/beanutils/TestResultSet.java      | 26 ++++----
+ 7 files changed, 185 insertions(+), 21 deletions(-)
+
+diff --git a/src/java/org/apache/commons/beanutils/JDBCDynaClass.java b/src/java/org/apache/commons/beanutils/JDBCDynaClass.java
+index dd236495e..dbd5eb809 100644
+--- a/src/java/org/apache/commons/beanutils/JDBCDynaClass.java
++++ b/src/java/org/apache/commons/beanutils/JDBCDynaClass.java
+@@ -57,6 +57,12 @@ abstract class JDBCDynaClass implements DynaClass, Serializable {
+      */
+     protected Map propertiesMap = new HashMap();
+ 
++    /**
++     * Cross Refernece for column name --> dyna property name
++     * (needed when lowerCase option is true)
++     */
++    private Map columnNameXref;
++
+     // ------------------------------------------------------ DynaClass Methods
+ 
+     /**
+@@ -158,11 +164,13 @@ protected DynaProperty createDynaProperty(
+                                     int i)
+                                     throws SQLException {
+ 
+-        String name = null;
+-        if (lowerCase) {
+-            name = metadata.getColumnName(i).toLowerCase();
+-        } else {
+-            name = metadata.getColumnName(i);
++        String columnName = metadata.getColumnName(i);
++        String name = lowerCase ? columnName.toLowerCase() : columnName;
++        if (!name.equals(columnName)) {
++            if (columnNameXref == null) {
++                columnNameXref = new HashMap();
++            }
++            columnNameXref.put(name, columnName);
+         }
+         String className = null;
+         try {
+@@ -215,4 +223,33 @@ protected void introspect(ResultSet resultSet) throws SQLException {
+ 
+     }
+ 
++    /**
++     * Get a column value from a {@link ResultSet} for the specified name.
++     *
++     * @param resultSet The result set
++     * @param name The property name
++     * @return The value
++     * @throws SQLException if an error occurs
++     */
++    protected Object getObject(ResultSet resultSet, String name) throws SQLException {
++
++        String columnName = getColumnName(name);
++        return resultSet.getObject(columnName);
++    }
++
++    /**
++     * Get the table column name for the specified property name.
++     * 
++     * @param name The property name
++     * @return The column name (which can be different if the <i>lowerCase</i>
++     * option is used).
++     */
++    protected String getColumnName(String name) {
++        if (columnNameXref != null && columnNameXref.containsKey(name)) {
++            return (String)columnNameXref.get(name);
++        } else {
++            return name;
++        }
++    }
++
+ }
+diff --git a/src/java/org/apache/commons/beanutils/ResultSetDynaClass.java b/src/java/org/apache/commons/beanutils/ResultSetDynaClass.java
+index 6d38d4f50..558e458f0 100644
+--- a/src/java/org/apache/commons/beanutils/ResultSetDynaClass.java
++++ b/src/java/org/apache/commons/beanutils/ResultSetDynaClass.java
+@@ -166,6 +166,18 @@ public Iterator iterator() {
+     }
+ 
+ 
++    /**
++     * Get a value from the {@link ResultSet} for the specified
++     * property name.
++     *
++     * @param name The property name
++     * @return The value
++     * @throws SQLException if an error occurs
++     */
++    public Object getObjectFromResultSet(String name) throws SQLException {
++        return getObject(getResultSet(), name);
++    }
++
+     // -------------------------------------------------------- Package Methods
+ 
+ 
+diff --git a/src/java/org/apache/commons/beanutils/ResultSetIterator.java b/src/java/org/apache/commons/beanutils/ResultSetIterator.java
+index c91bad2e0..5da570e12 100644
+--- a/src/java/org/apache/commons/beanutils/ResultSetIterator.java
++++ b/src/java/org/apache/commons/beanutils/ResultSetIterator.java
+@@ -116,7 +116,7 @@ public Object get(String name) {
+             throw new IllegalArgumentException(name);
+         }
+         try {
+-            return (dynaClass.getResultSet().getObject(name));
++            return dynaClass.getObjectFromResultSet(name);
+         } catch (SQLException e) {
+             throw new RuntimeException
+                 ("get(" + name + "): SQLException: " + e);
+diff --git a/src/java/org/apache/commons/beanutils/RowSetDynaClass.java b/src/java/org/apache/commons/beanutils/RowSetDynaClass.java
+index dc7ae2d42..8ee3da9c0 100644
+--- a/src/java/org/apache/commons/beanutils/RowSetDynaClass.java
++++ b/src/java/org/apache/commons/beanutils/RowSetDynaClass.java
+@@ -229,7 +229,7 @@ protected void copy(ResultSet resultSet) throws SQLException {
+             DynaBean bean = createDynaBean();
+             for (int i = 0; i < properties.length; i++) {
+                 String name = properties[i].getName();
+-                Object value = resultSet.getObject(name);
++                Object value = getObject(resultSet, name);
+                 if (value != null) {
+                     Class type = properties[i].getType();
+                     try {
+diff --git a/src/test/org/apache/commons/beanutils/DynaResultSetTestCase.java b/src/test/org/apache/commons/beanutils/DynaResultSetTestCase.java
+index 61407a3f7..b7f8ae3be 100644
+--- a/src/test/org/apache/commons/beanutils/DynaResultSetTestCase.java
++++ b/src/test/org/apache/commons/beanutils/DynaResultSetTestCase.java
+@@ -242,4 +242,63 @@ public void testIteratorResults() {
+     }
+ 
+ 
++    /**
++     * Test normal case column names (i.e. not converted to lower case)
++     */
++    public void testIteratorResultsNormalCase() {
++        ResultSetDynaClass dynaClass = null;
++        try {
++            dynaClass = new ResultSetDynaClass(TestResultSet.createProxy(), false);
++        } catch (Exception e) {
++            fail("Error creating ResultSetDynaClass: " + e);
++        }
++
++        // Grab the third row
++        Iterator rows = dynaClass.iterator();
++        rows.next();
++        rows.next();
++        DynaBean row = (DynaBean) rows.next();
++
++        // Invalid argument test
++        try {
++            row.get("unknownProperty");
++            fail("Did not throw IllegalArgumentException");
++        } catch (IllegalArgumentException e) {
++            // Expected result
++        }
++
++        // Verify property values
++
++        Object bigDecimalProperty = row.get("bigDecimalProperty");
++        assertNotNull("bigDecimalProperty exists", bigDecimalProperty);
++        assertTrue("bigDecimalProperty type",
++                   bigDecimalProperty instanceof BigDecimal);
++        assertEquals("bigDecimalProperty value",
++                     123.45,
++                     ((BigDecimal) bigDecimalProperty).doubleValue(),
++                     0.005);
++
++        Object intProperty = row.get("intProperty");
++        assertNotNull("intProperty exists", intProperty);
++        assertTrue("intProperty type",
++                   intProperty instanceof Integer);
++        assertEquals("intProperty value",
++                     103,
++                     ((Integer) intProperty).intValue());
++
++        Object nullProperty = row.get("nullProperty");
++        assertNull("nullProperty null", nullProperty);
++
++        Object stringProperty = row.get("stringProperty");
++        assertNotNull("stringProperty exists", stringProperty);
++        assertTrue("stringProperty type",
++                   stringProperty instanceof String);
++        assertEquals("stringProperty value",
++                     "This is a string",
++                     (String) stringProperty);
++
++
++    }
++
++
+ }
+diff --git a/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java b/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java
+index 4fb22f328..377f052b2 100644
+--- a/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java
++++ b/src/test/org/apache/commons/beanutils/DynaRowSetTestCase.java
+@@ -232,6 +232,62 @@ public void testListResults() {
+                      (String) stringProperty);
+ 
+ 
++    }
++
++    /**
++     * Test normal case column names (i.e. not converted to lower case)
++     */
++    public void testListResultsNormalCase() {
++        RowSetDynaClass dynaClass = null;
++        try {
++            dynaClass = new RowSetDynaClass(TestResultSet.createProxy(), false);
++        } catch (Exception e) {
++            fail("Error creating RowSetDynaClass: " + e);
++        }
++
++        // Grab the third row
++        List rows = dynaClass.getRows();
++        DynaBean row = (DynaBean) rows.get(2);
++
++        // Invalid argument test
++        try {
++            row.get("unknownProperty");
++            fail("Did not throw IllegalArgumentException");
++        } catch (IllegalArgumentException e) {
++            // Expected result
++        }
++
++        // Verify property values
++
++        Object bigDecimalProperty = row.get("bigDecimalProperty");
++        assertNotNull("bigDecimalProperty exists", bigDecimalProperty);
++        assertTrue("bigDecimalProperty type",
++                   bigDecimalProperty instanceof BigDecimal);
++        assertEquals("bigDecimalProperty value",
++                     123.45,
++                     ((BigDecimal) bigDecimalProperty).doubleValue(),
++                     0.005);
++
++        Object intProperty = row.get("intProperty");
++        assertNotNull("intProperty exists", intProperty);
++        assertTrue("intProperty type",
++                   intProperty instanceof Integer);
++        assertEquals("intProperty value",
++                     103,
++                     ((Integer) intProperty).intValue());
++
++        Object nullProperty = row.get("nullProperty");
++        assertNull("nullProperty null", nullProperty);
++
++        Object stringProperty = row.get("stringProperty");
++        assertNotNull("stringProperty exists", stringProperty);
++        assertTrue("stringProperty type",
++                   stringProperty instanceof String);
++        assertEquals("stringProperty value",
++                     "This is a string",
++                     (String) stringProperty);
++
++
+     }
+ 
+     public void testLimitedRows() throws Exception {
+@@ -252,7 +308,7 @@ public void testInconsistent() throws Exception {
+         int dateColIdx = 4;
+         assertEquals("Meta Column Name",       "dateProperty",       metaData.getColumnName(dateColIdx));
+         assertEquals("Meta Column Class Name", "java.sql.Timestamp", metaData.getColumnClassName(dateColIdx));
+-        assertEquals("ResultSet Value",        java.sql.Date.class,  resultSet.getObject("dateproperty").getClass());
++        assertEquals("ResultSet Value",        java.sql.Date.class,  resultSet.getObject("dateProperty").getClass());
+ 
+         RowSetDynaClass inconsistentDynaClass = new RowSetDynaClass(resultSet);
+         DynaBean firstRow = (DynaBean)inconsistentDynaClass.getRows().get(0);
+diff --git a/src/test/org/apache/commons/beanutils/TestResultSet.java b/src/test/org/apache/commons/beanutils/TestResultSet.java
+index 443a4af86..f72fb2139 100644
+--- a/src/test/org/apache/commons/beanutils/TestResultSet.java
++++ b/src/test/org/apache/commons/beanutils/TestResultSet.java
+@@ -161,35 +161,35 @@ public Object getObject(String columnName) throws SQLException {
+         if (row > 5) {
+             throw new SQLException("No current row");
+         }
+-        if ("bigdecimalproperty".equals(columnName)) {
++        if ("bigDecimalProperty".equals(columnName)) {
+             return (new BigDecimal(123.45));
+-        } else if ("booleanproperty".equals(columnName)) {
++        } else if ("booleanProperty".equals(columnName)) {
+             if ((row % 2) == 0) {
+                 return (Boolean.TRUE);
+             } else {
+                 return (Boolean.FALSE);
+             }
+-        } else if ("byteproperty".equals(columnName)) {
++        } else if ("byteProperty".equals(columnName)) {
+             return (new Byte((byte) row));
+-        } else if ("dateproperty".equals(columnName)) {
++        } else if ("dateProperty".equals(columnName)) {
+             return (new Date(timestamp));
+-        } else if ("doubleproperty".equals(columnName)) {
++        } else if ("doubleProperty".equals(columnName)) {
+             return (new Double(321.0));
+-        } else if ("floatproperty".equals(columnName)) {
++        } else if ("floatProperty".equals(columnName)) {
+             return (new Float((float) 123.0));
+-        } else if ("intproperty".equals(columnName)) {
++        } else if ("intProperty".equals(columnName)) {
+             return (new Integer(100 + row));
+-        } else if ("longproperty".equals(columnName)) {
++        } else if ("longProperty".equals(columnName)) {
+             return (new Long(200 + row));
+-        } else if ("nullproperty".equals(columnName)) {
++        } else if ("nullProperty".equals(columnName)) {
+             return (null);
+-        } else if ("shortproperty".equals(columnName)) {
++        } else if ("shortProperty".equals(columnName)) {
+             return (new Short((short) (300 + row)));
+-        } else if ("stringproperty".equals(columnName)) {
++        } else if ("stringProperty".equals(columnName)) {
+             return ("This is a string");
+-        } else if ("timeproperty".equals(columnName)) {
++        } else if ("timeProperty".equals(columnName)) {
+             return (new Time(timestamp));
+-        } else if ("timestampproperty".equals(columnName)) {
++        } else if ("timestampProperty".equals(columnName)) {
+             return (new Timestamp(timestamp));
+         } else {
+             throw new SQLException("Unknown column name " + columnName);

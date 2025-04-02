@@ -1,0 +1,298 @@
+From f45aa167dd803b746d8d1522c45c8a957b420654 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 23 Feb 2007 17:43:50 +0000
+Subject: [PATCH] FIX: latest-time conflict manager not working properly
+ (IVY-407)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@511035 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/resolve/IvyNode.java  | 12 ++++++
+ .../ivy/core/resolve/IvyNodeEviction.java     |  9 ++--
+ .../ivy/core/resolve/ResolveEngine.java       |  9 ++++
+ .../ivy/plugins/conflict/ConflictManager.java |  9 +++-
+ .../conflict/LatestConflictManager.java       | 32 +++++++++++---
+ .../conflict/LatestConflictManagerTest.java   | 43 +++++++++++++++++++
+ .../plugins/conflict/ivy-latest-time-1.xml    | 10 +++++
+ .../plugins/conflict/ivy-latest-time-2.xml    | 10 +++++
+ .../plugins/conflict/ivyconf-latest-time.xml  | 12 ++++++
+ 10 files changed, 135 insertions(+), 12 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-1.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-2.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 63f4282e9..a34ecbaa9 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -13,6 +13,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - IMPROVE: Refactoring / documentation / test of matcher package (IVY-375) (thanks to Stephane Baillez)
+ - IMPROVE: Add a unit test to verify that latest.integration accepts released modules (IVY-394) (thanks to Gilles Scokart)
+ 
++- FIX: latest-time conflict manager not working properly (IVY-407)
+ - FIX: LatestRevisionStrategy do not consider all dynamic revisions properly (IVY-383) (thanks to John Williams for the unit test)
+ - FIX: IOException during publish causes NullPointerException (IVY-371)
+ - FIX: Comments in ivy.xml duplicated (IVY-336) (thanks to Gilles Scokart)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 76dbd0178..d2cd61d85 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -909,6 +909,18 @@ public long getPublication() {
+         return 0;
+     }
+ 
++    /**
++     * Returns the last modified timestamp of the module represented by this Node,
++     * or 0 if the last modified timestamp is currently unkwown (module not loaded)
++     * @return the last modified timestamp of the module represented by this Node
++     */
++	public long getLastModified() {
++		if (_md != null) {
++			return _md.getLastModified();
++		}
++		return 0;
++	}
++
+     public ModuleRevisionId getResolvedId() {
+         if (_md != null && _md.getResolvedModuleRevisionId().getRevision() != null) {
+             return _md.getResolvedModuleRevisionId();
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+index 8256b0b27..34e94fa38 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+@@ -192,13 +192,14 @@ public void setEvictedNodes(ModuleId moduleId, String rootModuleConf, Collection
+     
+ 
+     public boolean isEvicted(String rootModuleConf) {
+-        cleanEvicted();
++    	cleanEvicted();
+         IvyNode root = _node.getRoot();
+-        return  root != _node 
++        return root != _node 
+         	&& !root.getResolvedRevisions(
+         			_node.getId().getModuleId(), 
+         			rootModuleConf)
+-        				.contains(_node.getResolvedId());
++        				.contains(_node.getResolvedId())
++        	&& getEvictedData(rootModuleConf) != null;
+     }
+ 
+     public boolean isCompletelyEvicted() {
+@@ -242,7 +243,7 @@ public void markEvicted(String rootModuleConf, IvyNode node, ConflictManager con
+     public void markEvicted(EvictionData evictionData) {
+         _evicted.put(evictionData.getRootModuleConf(), evictionData);
+     }
+-    
++
+     public EvictionData getEvictedData(String rootModuleConf) {
+         cleanEvicted();
+         return (EvictionData)_evicted.get(rootModuleConf);
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index d64e62860..c78731ff9 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -590,12 +590,21 @@ private void resolveConflict(VisitNode node, VisitNode ancestor, Collection toev
+         // compute conflicts
+         Collection resolvedNodes = new HashSet(ancestor.getNode().getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
+         Collection conflicts = computeConflicts(node, ancestor, toevict, resolvedNodes);
++        
+         if (_settings.debugConflictResolution()) {
+             Message.debug("found conflicting revisions for "+node+" in "+ancestor+": "+conflicts);
+         }
+         
+         ConflictManager conflictManager = ancestor.getNode().getConflictManager(node.getModuleId());
+ 		Collection resolved = conflictManager.resolveConflicts(ancestor.getNode(), conflicts);
++
++		if (resolved == null) {
++            if (_settings.debugConflictResolution()) {
++                Message.debug("impossible to resolve conflicts for "+node+" in "+ancestor+" yet");
++            }
++            return;
++        }
++        
+         if (_settings.debugConflictResolution()) {
+             Message.debug("selected revisions for "+node+" in "+ancestor+": "+resolved);
+         }
+diff --git a/src/java/org/apache/ivy/plugins/conflict/ConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/ConflictManager.java
+index cab1a4496..6f3c73c56 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/ConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/ConflictManager.java
+@@ -26,9 +26,16 @@ public interface ConflictManager {
+      * Resolves the eventual conflicts found in the given collection of IvyNode.
+      * This method return a Collection of IvyNode which have not been evicted.
+      * The given conflicts Collection contains at least one IvyNode.
++     * 
++     * This method can be called with IvyNodes which are not yet loaded.
++     * If this conflict manager is not able to resolve conflicts with the current
++     * data found in the IvyNodes and need them to be fully loaded, it will 
++     * return null to indicate that no conflict resolution has been done.
++     * 
+      * @param parent the ivy node parent for which the conflict is to be resolved
+      * @param conflicts the collection of IvyNode to check for conflicts
+-     * @return a Collection of IvyNode which have not been evicted
++     * @return a Collection of IvyNode which have not been evicted, or null if
++     *         conflict management resolution is not possible yet
+      */
+     Collection resolveConflicts(IvyNode parent, Collection conflicts);
+     String getName();
+diff --git a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+index 8c23c3dbc..52fe0966d 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+@@ -31,7 +31,11 @@
+ 
+ 
+ public class LatestConflictManager extends AbstractConflictManager {
+-    private static class IvyNodeArtifactInfo implements ArtifactInfo {
++    public static class NoConflictResolvedYetException extends RuntimeException {
++	}
++
++
++	private static class IvyNodeArtifactInfo implements ArtifactInfo {
+         private final IvyNode _node;
+ 
+         private IvyNodeArtifactInfo(IvyNode dep) {
+@@ -39,7 +43,15 @@ private IvyNodeArtifactInfo(IvyNode dep) {
+         }
+ 
+         public long getLastModified() {
+-            return _node.getPublication();
++        	long lastModified = _node.getLastModified();
++        	if (lastModified == 0) {
++        		// if the last modified timestamp is unknown, we can't resolve
++        		// the conflicts now, and trigger an exception which will be catched
++        		// in the main resolveConflicts method
++        		throw new NoConflictResolvedYetException();
++        	} else {
++        		return lastModified;
++        	}
+         }
+ 
+         public String getRevision() {
+@@ -80,11 +92,17 @@ public Collection resolveConflicts(IvyNode parent, Collection conflicts) {
+                 return Collections.singleton(node);
+             }
+         }
+-        ArtifactInfo latest = getStrategy().findLatest(toArtifactInfo(conflicts), null);
+-        if (latest != null) {
+-            return Collections.singleton(((IvyNodeArtifactInfo)latest).getNode());
+-        } else {
+-            return conflicts;
++        try {
++	        ArtifactInfo latest = getStrategy().findLatest(toArtifactInfo(conflicts), null);
++	        if (latest != null) {
++	            return Collections.singleton(((IvyNodeArtifactInfo)latest).getNode());
++	        } else {
++	            return conflicts;
++	        }
++        } catch (NoConflictResolvedYetException ex) {
++        	// we have not enough informations in the nodes to resolve conflict
++        	// according to the resolveConflicts contract, we must return null
++        	return null;
+         }
+     }
+ 
+diff --git a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+index 6c9329261..e285bb535 100644
+--- a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
++++ b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+@@ -83,6 +83,49 @@ else if (mrid.getName().equals("mod1.2")) {
+         }
+     }
+     
++    // Test case for issue IVY-407
++    public void testLatestTime1() throws Exception {
++		ivy = new Ivy();
++		ivy.configure(LatestConflictManagerTest.class
++				.getResource("ivyconf-latest-time.xml"));
++        ResolveReport report =
++            ivy.resolve( LatestConflictManagerTest.class.getResource( "ivy-latest-time-1.xml" ), 
++            		getResolveOptions() );
++        ConfigurationResolveReport defaultReport =
++            report.getConfigurationReport("default");
++        Iterator iter = defaultReport.getModuleRevisionIds().iterator();
++        while (iter.hasNext()) {
++            ModuleRevisionId mrid = (ModuleRevisionId)iter.next();
++            if (mrid.getName().equals("mod1.1")) {
++                assertEquals("1.0", mrid.getRevision());
++            }
++            else if (mrid.getName().equals("mod1.2")) {
++                assertEquals("2.2", mrid.getRevision());
++            }
++        }
++    }
++    
++    public void testLatestTime2() throws Exception {
++		ivy = new Ivy();
++		ivy.configure(LatestConflictManagerTest.class
++				.getResource("ivyconf-latest-time.xml"));
++        ResolveReport report =
++            ivy.resolve( LatestConflictManagerTest.class.getResource( "ivy-latest-time-2.xml" ), 
++            		getResolveOptions() );
++        ConfigurationResolveReport defaultReport =
++            report.getConfigurationReport("default");
++        Iterator iter = defaultReport.getModuleRevisionIds().iterator();
++        while (iter.hasNext()) {
++            ModuleRevisionId mrid = (ModuleRevisionId)iter.next();
++            if (mrid.getName().equals("mod1.1")) {
++                assertEquals("1.0", mrid.getRevision());
++            }
++            else if (mrid.getName().equals("mod1.2")) {
++                assertEquals("2.2", mrid.getRevision());
++            }
++        }
++    }
++    
+     private ResolveOptions getResolveOptions() {
+ 		return new ResolveOptions().setCache(CacheManager.getInstance(ivy.getSettings())).setValidate(false);
+ 	}
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-1.xml b/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-1.xml
+new file mode 100644
+index 000000000..d9e998070
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-1.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<ivy-module version="1.0"> 
++        <info organisation="apache" module="resolve-latest-conflict" revision="1.0" status="release"/>
++        <dependencies>
++            <!-- mod1.1 1.0 depends on mod1.2 2.0 -->
++            <dependency org="org1" name="mod1.1" rev="1.0"/>
++
++            <dependency org="org1" name="mod1.2" rev="2.2"/>
++        </dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-2.xml b/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-2.xml
+new file mode 100644
+index 000000000..6518e121f
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-2.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?>
++<ivy-module version="1.0"> 
++        <info organisation="apache" module="resolve-latest-conflict" revision="1.0" status="release"/>
++        <dependencies>
++            <dependency org="org1" name="mod1.2" rev="2.2"/>
++
++            <!-- mod1.1 1.0 depends on mod1.2 2.0 -->
++            <dependency org="org1" name="mod1.1" rev="1.0"/>
++        </dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time.xml b/test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time.xml
+new file mode 100644
+index 000000000..b2dd5eb75
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time.xml
+@@ -0,0 +1,12 @@
++<ivyconf>
++
++    <conf defaultResolver="test" defaultConflictManager="latest-time" />
++
++    <resolvers>
++        <filesystem name="test">
++            <artifact
++                    pattern="test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[type]"/>
++            <ivy pattern="test/repositories/1/[organisation]/[module]/ivys/ivy-[revision].xml"/>
++        </filesystem>
++    </resolvers>
++</ivyconf>

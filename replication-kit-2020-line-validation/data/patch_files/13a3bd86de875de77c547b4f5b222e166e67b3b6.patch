@@ -1,0 +1,558 @@
+From 13a3bd86de875de77c547b4f5b222e166e67b3b6 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Wed, 21 Jun 2017 15:14:56 +0000
+Subject: [PATCH] JCS-179: Fix different/duplicate loading methods of
+ RemoteCacheServer configuration
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1799469 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../jcs/auxiliary/remote/RemoteUtils.java     |   9 ++
+ .../remote/server/RemoteCacheServer.java      |  87 ++++++++++++--
+ .../server/RemoteCacheServerFactory.java      | 111 +++++++++++-------
+ .../server/RemoteCacheStartupServlet.java     |  10 +-
+ .../IRemoteCacheServerAttributes.java         |   4 +-
+ .../jcs/auxiliary/remote/TestRemoteCache.java |   5 +-
+ .../server/RemoteCacheServerStartupUtil.java  |  15 ++-
+ .../server/RemoteCacheServerUnitTest.java     |  15 ++-
+ 8 files changed, 181 insertions(+), 75 deletions(-)
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteUtils.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteUtils.java
+index 181328118..fef1ac927 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteUtils.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/RemoteUtils.java
+@@ -122,6 +122,15 @@ public static Properties loadProps(String propFile)
+     {
+         InputStream is = RemoteUtils.class.getResourceAsStream(propFile);
+ 
++        if (null == is) // not found in class path
++        {
++            // Try root of class path
++            if (propFile != null && !propFile.startsWith("/"))
++            {
++                is = RemoteUtils.class.getResourceAsStream("/" + propFile);
++            }
++        }
++        
+         if (null == is) // not found in class path
+         {
+             if (new File(propFile).exists())
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServer.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServer.java
+index 5d3140b67..271f7ca48 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServer.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServer.java
+@@ -29,12 +29,14 @@
+ import java.util.Collections;
+ import java.util.Iterator;
+ import java.util.Map;
++import java.util.Properties;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import java.util.concurrent.ConcurrentMap;
+ import java.util.concurrent.locks.ReentrantLock;
+ 
+ import org.apache.commons.jcs.access.exception.CacheException;
++import org.apache.commons.jcs.auxiliary.remote.RemoteUtils;
+ import org.apache.commons.jcs.auxiliary.remote.behavior.IRemoteCacheListener;
+ import org.apache.commons.jcs.auxiliary.remote.server.behavior.IRemoteCacheServer;
+ import org.apache.commons.jcs.auxiliary.remote.server.behavior.IRemoteCacheServerAttributes;
+@@ -71,6 +73,8 @@ public class RemoteCacheServer<K, V>
+     extends UnicastRemoteObject
+     implements IRemoteCacheServer<K, V>, Unreferenced
+ {
++    public static final String DFEAULT_REMOTE_CONFIGURATION_FILE = "/remote.cache.ccf";
++
+     /** For serialization. Don't change. */
+     private static final long serialVersionUID = -8072345435941473116L;
+ 
+@@ -119,13 +123,49 @@ public class RemoteCacheServer<K, V>
+     /** Lock for Cluster listener initialization */
+     private ReentrantLock clusterListenersLock = new ReentrantLock();
+ 
++    /**
++     * Constructor for the RemoteCacheServer object. This initializes the server with the values
++     * from the properties object.
++     * <p>
++     * @param rcsa 
++     * @param config cache hub configuration
++     * @throws RemoteException
++     */
++    protected RemoteCacheServer( IRemoteCacheServerAttributes rcsa, Properties config )
++        throws RemoteException
++    {
++        super( rcsa.getServicePort() );
++        this.remoteCacheServerAttributes = rcsa;
++        init( config );
++    }
++
++    /**
++     * Constructor for the RemoteCacheServer object. This initializes the server with the values
++     * from the properties object.
++     * <p>
++     * @param rcsa
++     * @param config cache hub configuration
++     * @param customRMISocketFactory
++     * @throws RemoteException
++     */
++    protected RemoteCacheServer( IRemoteCacheServerAttributes rcsa, Properties config, RMISocketFactory customRMISocketFactory )
++        throws RemoteException
++    {
++        super( rcsa.getServicePort(), customRMISocketFactory, customRMISocketFactory );
++        this.remoteCacheServerAttributes = rcsa;
++        init( config );
++    }
++
+     /**
+      * Constructor for the RemoteCacheServer object. This initializes the server with the values
+      * from the config file.
+      * <p>
+      * @param rcsa
+      * @throws RemoteException
++     * 
++     * @deprecated Use version with Properties object instead
+      */
++    @Deprecated
+     protected RemoteCacheServer( IRemoteCacheServerAttributes rcsa )
+         throws RemoteException
+     {
+@@ -141,7 +181,10 @@ protected RemoteCacheServer( IRemoteCacheServerAttributes rcsa )
+      * @param rcsa
+      * @param customRMISocketFactory
+      * @throws RemoteException
++     * 
++     * @deprecated Use version with Properties object instead
+      */
++    @Deprecated
+     protected RemoteCacheServer( IRemoteCacheServerAttributes rcsa, RMISocketFactory customRMISocketFactory )
+         throws RemoteException
+     {
+@@ -155,8 +198,34 @@ protected RemoteCacheServer( IRemoteCacheServerAttributes rcsa, RMISocketFactory
+      * <p>
+      * @param prop
+      * @throws RemoteException if the configuration of the cache manager instance fails
++     * 
++     * @deprecated Use version with Properties parameter instead
+      */
+-    private void init( String prop ) throws RemoteException
++    @Deprecated
++    private void init( String propFile ) throws RemoteException
++    {
++        String propFileName = propFile == null ? DFEAULT_REMOTE_CONFIGURATION_FILE : propFile;
++        
++        Properties prop = null;
++        try
++        {
++            prop = RemoteUtils.loadProps(propFileName);
++        }
++        catch (IOException e)
++        {
++            throw new RemoteException(e.getMessage(), e);
++        }
++        
++        init(prop);
++    }
++    
++    /**
++     * Initialize the RMI Cache Server from a properties object.
++     * <p>
++     * @param prop the configuration properties
++     * @throws RemoteException if the configuration of the cache manager instance fails
++     */
++    private void init( Properties prop ) throws RemoteException
+     {
+         try
+         {
+@@ -181,23 +250,15 @@ private void init( String prop ) throws RemoteException
+     /**
+      * Subclass can override this method to create the specific cache manager.
+      * <p>
+-     * @param prop The name of the configuration file.
+-     * @return The cache hub configured with this configuration file.
++     * @param prop the configuration object.
++     * @return The cache hub configured with this configuration.
+      *
+      * @throws CacheException if the configuration cannot be loaded
+      */
+-    private CompositeCacheManager createCacheManager( String prop ) throws CacheException
++    private CompositeCacheManager createCacheManager( Properties prop ) throws CacheException
+     {
+         CompositeCacheManager hub = CompositeCacheManager.getUnconfiguredInstance();
+-
+-        if ( prop == null )
+-        {
+-            hub.configure( "/remote.cache.ccf" );
+-        }
+-        else
+-        {
+-            hub.configure( prop );
+-        }
++        hub.configure( prop );
+         return hub;
+     }
+ 
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java
+index 964459158..2b6f1a345 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerFactory.java
+@@ -94,32 +94,48 @@ public static <K, V> RemoteCacheServer<K, V> getRemoteCacheServer()
+      * <p>
+      * A remote cache is either a local cache or a cluster cache.
+      * <p>
+-     * @param host
+-     * @param port
+-     * @param propFile
++     * @param host the host name 
++     * @param port the port number
++     * @param propFile the remote cache hub configuration file
+      * @throws IOException
++     * 
++     * @deprecated Use startup(String, int, Properties) instead
+      */
++    @Deprecated
+     public static void startup( String host, int port, String propFile )
+         throws IOException
+     {
+-        if ( remoteCacheServer != null )
++        if ( log.isInfoEnabled() )
+         {
+-            throw new IllegalArgumentException( "Server already started." );
++            log.info( "ConfigFileName = [" + propFile + "]" );
+         }
++        Properties props = RemoteUtils.loadProps( propFile );
++        startup(host, port, props);
++    }
+ 
+-        synchronized ( RemoteCacheServer.class )
++    /**
++     * Starts up the remote cache server on this JVM, and binds it to the registry on the given host
++     * and port.
++     * <p>
++     * A remote cache is either a local cache or a cluster cache.
++     * <p>
++     * @param host the host name 
++     * @param port the port number
++     * @param props the remote cache hub configuration
++     * @param propFile the remote cache hub configuration file
++     * @throws IOException
++     * 
++     * @deprecated Use startup(String, int, Properties) instead
++     */
++    @Deprecated
++    public static void startup( String host, int port, Properties props, String propFile )
++        throws IOException
++    {
++        if ( log.isWarnEnabled() )
+         {
+-            if ( remoteCacheServer != null )
+-            {
+-                return;
+-            }
+-            if ( log.isInfoEnabled() )
+-            {
+-                log.info( "ConfigFileName = [" + propFile + "]" );
+-            }
+-            Properties props = RemoteUtils.loadProps( propFile );
+-            startup(host, port, props, propFile);
++            log.warn( "ConfigFileName = [" + propFile + "] ignored" );
+         }
++        startup(host, port, props);
+     }
+ 
+     /**
+@@ -133,7 +149,7 @@ public static void startup( String host, int port, String propFile )
+      * @param props
+      * @throws IOException
+      */
+-    public static void startup( String host, int port, Properties props, String propFile )
++    public static void startup( String host, int port, Properties props)
+         throws IOException
+     {
+         if ( remoteCacheServer != null )
+@@ -153,7 +169,6 @@ public static void startup( String host, int port, Properties props, String prop
+             }
+ 
+             RemoteCacheServerAttributes rcsa = configureRemoteCacheServerAttributes(props);
+-            rcsa.setConfigFileName( propFile );
+ 
+             // These should come from the file!
+             rcsa.setRemoteLocation( host, port );
+@@ -174,11 +189,11 @@ public static void startup( String host, int port, Properties props, String prop
+             // CREATE SERVER
+             if ( customRMISocketFactory != null )
+             {
+-                remoteCacheServer = new RemoteCacheServer<Serializable, Serializable>( rcsa, customRMISocketFactory );
++                remoteCacheServer = new RemoteCacheServer<Serializable, Serializable>( rcsa, props, customRMISocketFactory );
+             }
+             else
+             {
+-                remoteCacheServer = new RemoteCacheServer<Serializable, Serializable>( rcsa );
++                remoteCacheServer = new RemoteCacheServer<Serializable, Serializable>( rcsa, props );
+             }
+ 
+             remoteCacheServer.setCacheEventLogger( cacheEventLogger );
+@@ -446,21 +461,9 @@ public static void main( String[] args )
+         // shutdown
+         if ( args.length > 0 && args[0].toLowerCase().indexOf( "-shutdown" ) != -1 )
+         {
+-            String remoteServiceName = prop.getProperty( REMOTE_CACHE_SERVICE_NAME, REMOTE_CACHE_SERVICE_VAL ).trim();
+-            String registry = RemoteUtils.getNamingURL("", port, remoteServiceName);
+-
+-            if ( log.isDebugEnabled() )
+-            {
+-                log.debug( "looking up server " + registry );
+-            }
+-            Object obj = Naming.lookup( registry );
+-            if ( log.isDebugEnabled() )
+-            {
+-                log.debug( "server found" );
+-            }
+-            ICacheServiceAdmin admin = (ICacheServiceAdmin) obj;
+             try
+             {
++                ICacheServiceAdmin admin = lookupCacheServiceAdmin(prop, port);
+                 admin.shutdown();
+             }
+             catch ( Exception ex )
+@@ -474,30 +477,21 @@ public static void main( String[] args )
+         // STATS
+         if ( args.length > 0 && args[0].toLowerCase().indexOf( "-stats" ) != -1 )
+         {
+-
+             log.debug( "getting cache stats" );
+ 
+             try
+             {
+-                String sz = prop.getProperty( REMOTE_CACHE_SERVICE_NAME, REMOTE_CACHE_SERVICE_VAL ).trim();
+-                String registry = RemoteUtils.getNamingURL("", port, sz);
+-                log.debug( "looking up server " + registry );
+-                Object obj = Naming.lookup( registry );
+-                log.debug( "server found" );
+-
+-                log.debug( "obj = " + obj );
+-                ICacheServiceAdmin admin = (ICacheServiceAdmin) obj;
++                ICacheServiceAdmin admin = lookupCacheServiceAdmin(prop, port);
+ 
+                 try
+                 {
+ //                    System.out.println( admin.getStats().toString() );
+                     log.debug( admin.getStats() );
+                 }
+-                catch ( Exception es )
++                catch ( IOException es )
+                 {
+                     log.error( es );
+                 }
+-
+             }
+             catch ( Exception ex )
+             {
+@@ -516,10 +510,37 @@ public static void main( String[] args )
+             RemoteUtils.createRegistry( port );
+         }
+         log.debug( "main> starting up RemoteCacheServer" );
+-        RemoteCacheServerFactory.startup( host, port, args.length > 0 ? args[0] : null );
++        startup( host, port, prop);
+         log.debug( "main> done" );
+     }
+ 
++    /**
++     * Look up the remote cache service admin instance
++     *  
++     * @param config the configuration properties
++     * @param port the local port
++     * @return the admin object instance
++     * 
++     * @throws Exception if lookup fails 
++     */
++    private static ICacheServiceAdmin lookupCacheServiceAdmin(Properties config, int port) throws Exception
++    {
++        String remoteServiceName = config.getProperty( REMOTE_CACHE_SERVICE_NAME, REMOTE_CACHE_SERVICE_VAL ).trim();
++        String registry = RemoteUtils.getNamingURL("", port, remoteServiceName);
++
++        if ( log.isDebugEnabled() )
++        {
++            log.debug( "looking up server " + registry );
++        }
++        Object obj = Naming.lookup( registry );
++        if ( log.isDebugEnabled() )
++        {
++            log.debug( "server found" );
++        }
++        
++        return (ICacheServiceAdmin) obj;
++    }
++    
+     /**
+      * @param serviceName the serviceName to set
+      */
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java
+index d05f00a54..59241f69e 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheStartupServlet.java
+@@ -131,12 +131,10 @@ public void init()
+         {
+             if (props == null)
+             {
+-                RemoteCacheServerFactory.startup(registryHost, registryPort, propsFileName);
+-            }
+-            else
+-            {
+-                RemoteCacheServerFactory.startup(registryHost, registryPort, props, propsFileName);
++                throw new ServletException("Could not load configuration from " + propsFileName);
+             }
++
++            RemoteCacheServerFactory.startup(registryHost, registryPort, props);
+             if (log.isInfoEnabled())
+             {
+                 log.info("Remote JCS Server started with properties from " + propsFileName);
+@@ -144,7 +142,7 @@ public void init()
+         }
+         catch (IOException e)
+         {
+-            log.error("Problem starting remote cache server.", e);
++            throw new ServletException("Problem starting remote cache server.", e);
+         }
+     }
+ 
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/behavior/IRemoteCacheServerAttributes.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/behavior/IRemoteCacheServerAttributes.java
+index 2f968dc88..1c8500df9 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/behavior/IRemoteCacheServerAttributes.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/remote/server/behavior/IRemoteCacheServerAttributes.java
+@@ -66,7 +66,7 @@ public interface IRemoteCacheServerAttributes
+     /**
+      * Gets the ConfigFileName attribute of the IRemoteCacheAttributes object.
+      * <p>
+-     * @return The clusterServers value
++     * @return The configuration file name
+      */
+     String getConfigFileName();
+ 
+@@ -74,7 +74,7 @@ public interface IRemoteCacheServerAttributes
+      * Sets the ConfigFileName attribute of the IRemoteCacheAttributes object.
+      * <p>
+      * @param s
+-     *            The new clusterServers value
++     *            The new configuration file name
+      */
+     void setConfigFileName( String s );
+ 
+diff --git a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/TestRemoteCache.java b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/TestRemoteCache.java
+index 4e1092fce..694194d38 100644
+--- a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/TestRemoteCache.java
++++ b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/TestRemoteCache.java
+@@ -1,5 +1,7 @@
+ package org.apache.commons.jcs.auxiliary.remote;
+ 
++import java.util.Properties;
++
+ import org.apache.commons.jcs.JCS;
+ import org.apache.commons.jcs.access.CacheAccess;
+ import org.apache.commons.jcs.auxiliary.AuxiliaryCache;
+@@ -52,8 +54,9 @@ public TestRemoteCache()
+         {
+             System.out.println( "main> creating registry on the localhost" );
+             RemoteUtils.createRegistry( 1101 );
++            Properties config = RemoteUtils.loadProps("/TestRemoteServer.ccf");
+ 
+-            RemoteCacheServerFactory.startup( "localhost", 1101, "/TestRemoteServer.ccf" );
++            RemoteCacheServerFactory.startup( "localhost", 1101, config);
+         }
+         catch ( Exception e )
+         {
+diff --git a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java
+index 3b6ed81dd..38ef26fa3 100644
+--- a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java
++++ b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerStartupUtil.java
+@@ -23,8 +23,8 @@
+ import java.net.UnknownHostException;
+ import java.util.Properties;
+ 
++import org.apache.commons.jcs.auxiliary.remote.RemoteUtils;
+ import org.apache.commons.jcs.utils.net.HostNameUtil;
+-import org.apache.commons.jcs.utils.props.PropertyLoader;
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ 
+@@ -53,7 +53,16 @@ public static <K, V> RemoteCacheServer<K, V> startServerUsingProperties( String
+         // all three
+         int registryPort = DEFAULT_REGISTRY_PORT;
+ 
+-        Properties props = PropertyLoader.loadProperties( propsFileName );
++        Properties props = null;
++        try
++        {
++            props = RemoteUtils.loadProps(propsFileName);
++        }
++        catch (IOException e)
++        {
++            log.error( "Problem loading configuration from " + propsFileName, e);
++        }
++        
+         if ( props != null )
+         {
+             String portS = props.getProperty( "registry.port", String.valueOf( DEFAULT_REGISTRY_PORT ) );
+@@ -86,7 +95,7 @@ public static <K, V> RemoteCacheServer<K, V> startServerUsingProperties( String
+ 
+             try
+             {
+-                RemoteCacheServerFactory.startup( registryHost, registryPort, "/" + propsFileName );
++                RemoteCacheServerFactory.startup( registryHost, registryPort, props );
+             }
+             catch ( IOException e )
+             {
+diff --git a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerUnitTest.java b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerUnitTest.java
+index 14193ab23..cf0921973 100644
+--- a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerUnitTest.java
++++ b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/remote/server/RemoteCacheServerUnitTest.java
+@@ -22,17 +22,19 @@
+ import java.util.HashSet;
+ import java.util.LinkedList;
+ import java.util.List;
+-
+-import junit.framework.TestCase;
++import java.util.Properties;
+ 
+ import org.apache.commons.jcs.auxiliary.MockCacheEventLogger;
+ import org.apache.commons.jcs.auxiliary.remote.MockRemoteCacheListener;
++import org.apache.commons.jcs.auxiliary.remote.RemoteUtils;
+ import org.apache.commons.jcs.auxiliary.remote.server.behavior.IRemoteCacheServerAttributes;
+ import org.apache.commons.jcs.auxiliary.remote.server.behavior.RemoteType;
+ import org.apache.commons.jcs.engine.CacheElement;
+ import org.apache.commons.jcs.engine.behavior.ICacheElement;
+ import org.apache.commons.jcs.utils.timing.SleepUtil;
+ 
++import junit.framework.TestCase;
++
+ /**
+  * Since the server does not know that it is a server, it is easy to unit test. The factory does all
+  * the rmi work.
+@@ -54,7 +56,8 @@ protected void setUp() throws Exception
+ 
+         IRemoteCacheServerAttributes rcsa = new RemoteCacheServerAttributes();
+         rcsa.setConfigFileName( "/TestRemoteCacheServer.ccf" );
+-        this.server = new RemoteCacheServer<String, String>( rcsa );
++        Properties config = RemoteUtils.loadProps(rcsa.getConfigFileName());
++        this.server = new RemoteCacheServer<String, String>( rcsa, config );
+     }
+ 
+     @Override
+@@ -223,8 +226,9 @@ public void testSimpleRegisterListenerAndPut()
+         IRemoteCacheServerAttributes rcsa = new RemoteCacheServerAttributes();
+         rcsa.setConfigFileName( "/TestRemoteCacheServer.ccf" );
+ 
++        Properties config = RemoteUtils.loadProps(rcsa.getConfigFileName());
+         MockRemoteCacheListener<String, Long> mockListener = new MockRemoteCacheListener<String, Long>();
+-        RemoteCacheServer<String, Long> server = new RemoteCacheServer<String, Long>( rcsa );
++        RemoteCacheServer<String, Long> server = new RemoteCacheServer<String, Long>( rcsa, config );
+ 
+         String cacheName = "testSimpleRegisterListenerAndPut";
+         server.addCacheListener( cacheName, mockListener );
+@@ -268,7 +272,8 @@ public void testSimpleRegisterListenerAndPut_FromClusterWithLCC()
+         IRemoteCacheServerAttributes rcsa = new RemoteCacheServerAttributes();
+         rcsa.setLocalClusterConsistency( true );
+         rcsa.setConfigFileName( "/TestRemoteCacheServer.ccf" );
+-        RemoteCacheServer<String, Long> server = new RemoteCacheServer<String, Long>( rcsa );
++        Properties config = RemoteUtils.loadProps(rcsa.getConfigFileName());
++        RemoteCacheServer<String, Long> server = new RemoteCacheServer<String, Long>( rcsa, config );
+ 
+         // this is to get the listener id for inserts.
+         MockRemoteCacheListener<String, Long> clusterListener = new MockRemoteCacheListener<String, Long>();

@@ -1,0 +1,454 @@
+From a80ccabf3955c45ab92e832a2b7906b74b42e18d Mon Sep 17 00:00:00 2001
+From: Mark Thomas <markt@apache.org>
+Date: Thu, 30 Jan 2014 14:43:20 +0000
+Subject: [PATCH] Fix DBCP-376 Fix thread safety issues in the
+ SharedPoolDataSource and the PerUserPoolDataSource. Test case and fix based
+ on patches suggested by Dave Oxley.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/branches/DBCP_1_5_x_BRANCH@1562842 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 +
+ .../datasources/CPDSConnectionFactory.java    | 39 +++++----
+ .../KeyedCPDSConnectionFactory.java           | 43 +++++-----
+ .../cpdsadapter/TestDriverAdapterCPDS.java    | 84 +++++++++++++++++--
+ 4 files changed, 119 insertions(+), 51 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 7d1fad5460..f7d56e0b5c 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -66,6 +66,10 @@ The <action> type attribute can be add,update,fix,remove.
+         documentation and javadoc, replacing it with negative where that is the
+         correct definition to use.
+       </action>
++      <action dev="markt" issue="DBCP-376" type="fix" due-to="Dave Oxley">
++        Fix thread safety issues in the SharedPoolDataSource and the
++        PerUserPoolDataSource. 
++      </action>
+     </release>
+     <release version="1.4.1" date="TBD" description="TBD">
+       <action dev="psteitz" issue="DBCP-367" type="fix" due-to="Ken Tatsushita">
+diff --git a/src/java/org/apache/commons/dbcp/datasources/CPDSConnectionFactory.java b/src/java/org/apache/commons/dbcp/datasources/CPDSConnectionFactory.java
+index 876d67331a..1e92e96c30 100644
+--- a/src/java/org/apache/commons/dbcp/datasources/CPDSConnectionFactory.java
++++ b/src/java/org/apache/commons/dbcp/datasources/CPDSConnectionFactory.java
+@@ -21,9 +21,8 @@
+ import java.sql.ResultSet;
+ import java.sql.SQLException;
+ import java.sql.Statement;
+-import java.util.HashMap;
+ import java.util.Map;
+-import java.util.WeakHashMap;
++import java.util.concurrent.ConcurrentHashMap;
+ 
+ import javax.sql.ConnectionEvent;
+ import javax.sql.ConnectionEventListener;
+@@ -54,26 +53,26 @@ class CPDSConnectionFactory
+     private String _username = null;
+     private String _password = null;
+ 
+-    /** 
++    /**
+      * Map of PooledConnections for which close events are ignored.
+      * Connections are muted when they are being validated.
+      */
+-    private final Map /* <PooledConnection, null> */ validatingMap = new HashMap();
++    private final Map /* <PooledConnection, null> */ validatingMap = new ConcurrentHashMap();
+ 
+     /**
+      * Map of PooledConnectionAndInfo instances
+      */
+-    private final WeakHashMap /* <PooledConnection, PooledConnectionAndInfo> */ pcMap = new WeakHashMap();
++    private final Map /* <PooledConnection, PooledConnectionAndInfo> */ pcMap = new ConcurrentHashMap();
+ 
+     /**
+      * Create a new <tt>PoolableConnectionFactory</tt>.
+-     * 
++     *
+      * @param cpds the ConnectionPoolDataSource from which to obtain
+      * PooledConnection's
+      * @param pool the {@link ObjectPool} in which to pool those
+      * {@link Connection}s
+      * @param validationQuery a query to use to {@link #validateObject validate}
+-     * {@link Connection}s. Should return at least one row. May be 
++     * {@link Connection}s. Should return at least one row. May be
+      * <tt>null</tt>
+      * @param username
+      * @param password
+@@ -85,10 +84,10 @@ public CPDSConnectionFactory(ConnectionPoolDataSource cpds,
+                                  String password) {
+         this(cpds, pool, validationQuery, false, username, password);
+     }
+-    
++
+     /**
+      * Create a new <tt>PoolableConnectionFactory</tt>.
+-     * 
++     *
+      * @param cpds the ConnectionPoolDataSource from which to obtain
+      * PooledConnection's
+      * @param pool the {@link ObjectPool} in which to pool those {@link
+@@ -115,10 +114,10 @@ public CPDSConnectionFactory(ConnectionPoolDataSource cpds,
+          _password = password;
+          _rollbackAfterValidation = rollbackAfterValidation;
+      }
+-     
++
+      /**
+       * Returns the object pool used to pool connections created by this factory.
+-      * 
++      *
+       * @return ObjectPool managing pooled connections
+       */
+      public ObjectPool getPool() {
+@@ -158,7 +157,7 @@ public void destroyObject(Object obj) throws Exception {
+             PooledConnection pc = ((PooledConnectionAndInfo)obj).getPooledConnection();
+             pc.removeConnectionEventListener(this);
+             pcMap.remove(pc);
+-            pc.close(); 
++            pc.close();
+         }
+     }
+ 
+@@ -291,11 +290,11 @@ public void connectionErrorOccurred(ConnectionEvent event) {
+             e.printStackTrace();
+         }
+     }
+-    
++
+     // ***********************************************************************
+     // PooledConnectionManager implementation
+     // ***********************************************************************
+-    
++
+     /**
+      * Invalidates the PooledConnection in the pool.  The CPDSConnectionFactory
+      * closes the connection and pool counters are updated appropriately.
+@@ -312,18 +311,18 @@ public void invalidate(PooledConnection pc) throws SQLException {
+             _pool.close();  // Clear any other instances in this pool and kill others as they come back
+         } catch (Exception ex) {
+             throw (SQLException) new SQLException("Error invalidating connection").initCause(ex);
+-        }   
++        }
+     }
+-    
++
+     /**
+      * Sets the database password used when creating new connections.
+-     * 
++     *
+      * @param password new password
+      */
+     public synchronized void setPassword(String password) {
+         _password = password;
+     }
+-    
++
+     /**
+      * Verifies that the username matches the user whose connections are being managed by this
+      * factory and closes the pool if this is the case; otherwise does nothing.
+@@ -338,7 +337,7 @@ public void closePool(String username) throws SQLException {
+             _pool.close();
+         } catch (Exception ex) {
+             throw (SQLException) new SQLException("Error closing connection pool").initCause(ex);
+-        } 
++        }
+     }
+-    
++
+ }
+diff --git a/src/java/org/apache/commons/dbcp/datasources/KeyedCPDSConnectionFactory.java b/src/java/org/apache/commons/dbcp/datasources/KeyedCPDSConnectionFactory.java
+index 33b6c2c30e..a5ce0bdc96 100644
+--- a/src/java/org/apache/commons/dbcp/datasources/KeyedCPDSConnectionFactory.java
++++ b/src/java/org/apache/commons/dbcp/datasources/KeyedCPDSConnectionFactory.java
+@@ -21,9 +21,8 @@
+ import java.sql.ResultSet;
+ import java.sql.SQLException;
+ import java.sql.Statement;
+-import java.util.HashMap;
+ import java.util.Map;
+-import java.util.WeakHashMap;
++import java.util.concurrent.ConcurrentHashMap;
+ 
+ import javax.sql.ConnectionEvent;
+ import javax.sql.ConnectionEventListener;
+@@ -51,17 +50,17 @@ class KeyedCPDSConnectionFactory
+     private final String _validationQuery;
+     private final boolean _rollbackAfterValidation;
+     private final KeyedObjectPool _pool;
+-    
+-    /** 
++
++    /**
+      * Map of PooledConnections for which close events are ignored.
+      * Connections are muted when they are being validated.
+      */
+-    private final Map /* <PooledConnection, null> */ validatingMap = new HashMap();
+-    
++    private final Map /* <PooledConnection, null> */ validatingMap = new ConcurrentHashMap();
++
+     /**
+      * Map of PooledConnectionAndInfo instances
+      */
+-    private final WeakHashMap /* <PooledConnection, PooledConnectionAndInfo> */ pcMap = new WeakHashMap();
++    private final Map /* <PooledConnection, PooledConnectionAndInfo> */ pcMap = new ConcurrentHashMap();
+ 
+     /**
+      * Create a new <tt>KeyedPoolableConnectionFactory</tt>.
+@@ -73,7 +72,7 @@ class KeyedCPDSConnectionFactory
+     public KeyedCPDSConnectionFactory(ConnectionPoolDataSource cpds,
+                                       KeyedObjectPool pool,
+                                       String validationQuery) {
+-        this(cpds , pool, validationQuery, false);  
++        this(cpds , pool, validationQuery, false);
+     }
+ 
+     /**
+@@ -87,8 +86,8 @@ public KeyedCPDSConnectionFactory(ConnectionPoolDataSource cpds,
+      * @param rollbackAfterValidation whether a rollback should be issued after
+      * {@link #validateObject validating} {@link Connection}s.
+      */
+-    public KeyedCPDSConnectionFactory(ConnectionPoolDataSource cpds, 
+-                                      KeyedObjectPool pool, 
++    public KeyedCPDSConnectionFactory(ConnectionPoolDataSource cpds,
++                                      KeyedObjectPool pool,
+                                       String validationQuery,
+                                       boolean rollbackAfterValidation) {
+         _cpds = cpds;
+@@ -97,10 +96,10 @@ public KeyedCPDSConnectionFactory(ConnectionPoolDataSource cpds,
+         _validationQuery = validationQuery;
+         _rollbackAfterValidation = rollbackAfterValidation;
+     }
+-    
++
+     /**
+      * Returns the keyed object pool used to pool connections created by this factory.
+-     * 
++     *
+      * @return KeyedObjectPool managing pooled connections
+      */
+     public KeyedObjectPool getPool() {
+@@ -109,7 +108,7 @@ public KeyedObjectPool getPool() {
+ 
+     /**
+      * Creates a new {@link PooledConnectionAndInfo} from the given {@link UserPassKey}.
+-     * 
++     *
+      * @param key {@link UserPassKey} containing user credentials
+      * @throws SQLException if the connection could not be created.
+      * @see org.apache.commons.pool.KeyedPoolableObjectFactory#makeObject(java.lang.Object)
+@@ -148,13 +147,13 @@ public void destroyObject(Object key, Object obj) throws Exception {
+             PooledConnection pc = ((PooledConnectionAndInfo)obj).getPooledConnection();
+             pc.removeConnectionEventListener(this);
+             pcMap.remove(pc);
+-            pc.close(); 
++            pc.close();
+         }
+     }
+ 
+     /**
+      * Validates a pooled connection.
+-     * 
++     *
+      * @param key ignored
+      * @param obj {@link PooledConnectionAndInfo} containing the connection to validate
+      * @return true if validation suceeds
+@@ -173,7 +172,7 @@ public boolean validateObject(Object key, Object obj) {
+                 // before another one can be requested and closing it will
+                 // generate an event. Keep track so we know not to return
+                 // the PooledConnection
+-                validatingMap.put(pconn, null);
++                validatingMap.put(pconn, Boolean.FALSE);
+                 try {
+                     conn = pconn.getConnection();
+                     stmt = conn.createStatement();
+@@ -289,11 +288,11 @@ public void connectionErrorOccurred(ConnectionEvent event) {
+             e.printStackTrace();
+         }
+     }
+-    
++
+     // ***********************************************************************
+     // PooledConnectionManager implementation
+     // ***********************************************************************
+-    
++
+     /**
+      * Invalidates the PooledConnection in the pool.  The KeyedCPDSConnectionFactory
+      * closes the connection and pool counters are updated appropriately.
+@@ -314,13 +313,13 @@ public void invalidate(PooledConnection pc) throws SQLException {
+             throw (SQLException) new SQLException("Error invalidating connection").initCause(ex);
+         }
+     }
+-    
++
+     /**
+      * Does nothing.  This factory does not cache user credentials.
+      */
+     public void setPassword(String password) {
+     }
+-    
++
+     /**
+      * This implementation does not fully close the KeyedObjectPool, as
+      * this would affect all users.  Instead, it clears the pool associated
+@@ -331,7 +330,7 @@ public void closePool(String username) throws SQLException {
+             _pool.clear(new UserPassKey(username, null));
+         } catch (Exception ex) {
+             throw (SQLException) new SQLException("Error closing connection pool").initCause(ex);
+-        } 
++        }
+     }
+-    
++
+ }
+diff --git a/src/test/org/apache/commons/dbcp/cpdsadapter/TestDriverAdapterCPDS.java b/src/test/org/apache/commons/dbcp/cpdsadapter/TestDriverAdapterCPDS.java
+index cf37a1ecbe..4c67aa133a 100644
+--- a/src/test/org/apache/commons/dbcp/cpdsadapter/TestDriverAdapterCPDS.java
++++ b/src/test/org/apache/commons/dbcp/cpdsadapter/TestDriverAdapterCPDS.java
+@@ -5,9 +5,9 @@
+  * The ASF licenses this file to You under the Apache License, Version 2.0
+  * (the "License"); you may not use this file except in compliance with
+  * the License.  You may obtain a copy of the License at
+- * 
++ *
+  *      http://www.apache.org/licenses/LICENSE-2.0
+- * 
++ *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+@@ -24,13 +24,17 @@
+ import java.sql.ResultSet;
+ import java.sql.SQLException;
+ 
++import javax.sql.DataSource;
++
++import org.apache.commons.dbcp.datasources.SharedPoolDataSource;
++
+ import junit.framework.Test;
+ import junit.framework.TestCase;
+ import junit.framework.TestSuite;
+ 
+ /**
+  * Tests for DriverAdapterCPDS
+- * 
++ *
+  * @version $Revision:$ $Date:$
+  */
+ public class TestDriverAdapterCPDS extends TestCase {
+@@ -56,7 +60,7 @@ public void setUp() throws Exception {
+     /**
+      * JIRA: DBCP-245
+      */
+-    public void testIncorrectPassword() throws Exception 
++    public void testIncorrectPassword() throws Exception
+     {
+         pcds.getPooledConnection("u2", "p2").close();
+         try {
+@@ -67,7 +71,7 @@ public void testIncorrectPassword() throws Exception
+             // should fail
+ 
+         }
+-        
++
+         // Use good password
+         pcds.getPooledConnection("u1", "p1").close();
+         try {
+@@ -80,7 +84,7 @@ public void testIncorrectPassword() throws Exception
+             }
+             // else the exception was expected
+         }
+-        
++
+         // Make sure we can still use our good password.
+         pcds.getPooledConnection("u1", "p1").close();
+     }
+@@ -112,7 +116,7 @@ public void testSimpleWithUsername() throws Exception {
+         conn.close();
+     }
+ 
+-    public void testClosingWithUserName() 
++    public void testClosingWithUserName()
+         throws Exception {
+         Connection[] c = new Connection[pcds.getMaxActive()];
+         // open the maximum connections
+@@ -138,7 +142,7 @@ public void testClosingWithUserName()
+             c[i].close();
+         }
+     }
+-    
++
+     public void testSetProperties() throws Exception {
+         // Set user property to bad value
+         pcds.setUser("bad");
+@@ -156,6 +160,68 @@ public void testSetProperties() throws Exception {
+         // Supply correct password in getPooledConnection
+         // Call will succeed and overwrite property
+         pcds.getPooledConnection("foo", "bar").close();
+-        assertEquals("bar", pcds.getConnectionProperties().getProperty("password"));     
++        assertEquals("bar", pcds.getConnectionProperties().getProperty("password"));
++    }
++
++    // https://issues.apache.org/jira/browse/DBCP-376
++    public void testDbcp367() throws Exception {
++        ThreadDbcp367[] threads = new ThreadDbcp367[20];
++
++        pcds.setPoolPreparedStatements(true);
++        pcds.setMaxPreparedStatements(-1);
++        pcds.setAccessToUnderlyingConnectionAllowed(true);
++
++        SharedPoolDataSource spds = new SharedPoolDataSource();
++        spds.setConnectionPoolDataSource(pcds);
++        spds.setMaxActive(threads.length + 10);
++        spds.setMaxWait(-1);
++        spds.setMaxIdle(10);
++        spds.setDefaultAutoCommit(false);
++
++        spds.setValidationQuery("SELECT 1");
++        spds.setTimeBetweenEvictionRunsMillis(10000);
++        spds.setNumTestsPerEvictionRun(-1);
++        spds.setTestWhileIdle(true);
++        spds.setTestOnBorrow(true);
++        spds.setTestOnReturn(false);
++
++        for (int i = 0; i < threads.length; i++) {
++            threads[i] = new ThreadDbcp367(spds);
++            threads[i].start();
++        }
++
++        for (int i = 0; i < threads.length; i++) {
++            threads[i].join();
++            assertFalse(threads[i].isFailed());
++        }
++    }
++
++    private static class ThreadDbcp367 extends Thread {
++
++        private final DataSource ds;
++
++        private volatile boolean failed = false;
++
++        public ThreadDbcp367(DataSource ds) {
++            this.ds = ds;
++        }
++
++        @Override
++        public void run() {
++            Connection c = null;
++            try {
++                for (int j=0; j < 5000; j++) {
++                    c = ds.getConnection();
++                    c.close();
++                }
++            } catch (SQLException sqle) {
++                failed = true;
++                sqle.printStackTrace();
++            }
++        }
++
++        public boolean isFailed() {
++            return failed;
++        }
+     }
+ }

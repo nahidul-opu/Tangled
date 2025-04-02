@@ -1,0 +1,324 @@
+From da7d5df6de444468ebdb4b79ae0d0dc3ac90b59d Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran.pai@gmail.com>
+Date: Sun, 19 Jul 2015 21:50:14 +0530
+Subject: [PATCH] IVY-1526 Use parent pom's license (if any) if the child pom
+ doesn't explicitly have licenses of its own
+
+---
+ doc/release-notes.html                        |  2 +
+ .../parser/m2/PomModuleDescriptorParser.java  | 11 ++-
+ .../m2/PomModuleDescriptorParserTest.java     | 84 ++++++++++++++++++-
+ .../parser/m2/test-parent-with-licenses.pom   | 36 ++++++++
+ .../test-project-with-overridden-licenses.pom | 43 ++++++++++
+ .../m2/test-project-with-parent-licenses.pom  | 34 ++++++++
+ 6 files changed, 207 insertions(+), 3 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/m2/test-parent-with-licenses.pom
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/m2/test-project-with-overridden-licenses.pom
+ create mode 100644 test/java/org/apache/ivy/plugins/parser/m2/test-project-with-parent-licenses.pom
+
+diff --git a/doc/release-notes.html b/doc/release-notes.html
+index 48c5fe453..b29528ce5 100644
+--- a/doc/release-notes.html
++++ b/doc/release-notes.html
+@@ -59,6 +59,7 @@ <h2>List of Changes in this Release</h2>
+ 
+ - FIX: ArrayIndexOutOfBoundsException when using a p2 repository for dependencies (IVY-1504)
+ - FIX: fixdeps remove transitive 'kept' dependencies
++- FIX: PomModuleDescriptorParser should parse licenses from parent POM (IVY-1526) (Thanks to Jaikiran Pai)
+ 
+ - IMPROVEMENT: Optimization: limit the revision numbers scanned if revision prefix is specified (Thanks to Ernestas Vaiciukevi&#269;ius)
+ 
+@@ -172,6 +173,7 @@ <h2>Committers and Contributors</h2>
+ <li>Mathias Muller</li>
+ <li>Randy Nott</li>
+ <li>Peter Oxenham</li>
++<li>Jaikiran Pai</li>
+ <li>Douglas Palmer</li>
+ <li>Jesper Pedersen</li>
+ <li>Emmanuel Pellereau</li>
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 6017e3ae8..f4d6206f8 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -35,6 +35,7 @@
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+ import org.apache.ivy.core.module.descriptor.DefaultDependencyDescriptor;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
++import org.apache.ivy.core.module.descriptor.License;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.resolve.ResolveData;
+@@ -159,7 +160,15 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+ 
+             mdBuilder.setHomePage(domReader.getHomePage());
+             mdBuilder.setDescription(domReader.getDescription());
+-            mdBuilder.setLicenses(domReader.getLicenses());
++            // if this module doesn't have an explicit license, use the parent's license (if any)
++            final License[] licenses = domReader.getLicenses();
++            if (licenses != null && licenses.length > 0) {
++                mdBuilder.setLicenses(licenses);
++            } else {
++                if (parentDescr != null) {
++                    mdBuilder.setLicenses(parentDescr.getLicenses());
++                }
++            }
+ 
+             ModuleRevisionId relocation = domReader.getRelocation();
+ 
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index d22d6ab4a..3b3c3238e 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -19,6 +19,8 @@
+ 
+ import java.io.File;
+ import java.io.IOException;
++import java.io.InputStream;
++import java.net.URL;
+ import java.text.ParseException;
+ import java.util.Arrays;
+ import java.util.Collections;
+@@ -40,8 +42,13 @@
+ import org.apache.ivy.plugins.parser.AbstractModuleDescriptorParserTester;
+ import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorParser;
+ import org.apache.ivy.plugins.parser.xml.XmlModuleDescriptorParserTest;
++import org.apache.ivy.plugins.repository.BasicResource;
++import org.apache.ivy.plugins.repository.LazyResource;
++import org.apache.ivy.plugins.repository.Resource;
+ import org.apache.ivy.plugins.repository.url.URLResource;
++import org.apache.ivy.plugins.resolver.DependencyResolver;
+ import org.apache.ivy.plugins.resolver.MockResolver;
++import org.xml.sax.SAXException;
+ 
+ public class PomModuleDescriptorParserTest extends AbstractModuleDescriptorParserTester {
+     // junit test -- DO NOT REMOVE used by ant to know it's a junit test
+@@ -52,11 +59,14 @@ private class MockedDependencyResolver extends MockResolver {
+         public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+                 throws ParseException {
+             // TODO make it a real mock and check that dd and data are the one that are expected
+-            DefaultModuleDescriptor moduleDesc = DefaultModuleDescriptor.newDefaultInstance(dd
+-                    .getDependencyRevisionId());
++            final ModuleDescriptor moduleDesc = getModuleDescriptor(dd);
+             ResolvedModuleRevision r = new ResolvedModuleRevision(this, this, moduleDesc, null);
+             return r;
+         }
++
++        protected ModuleDescriptor getModuleDescriptor(final DependencyDescriptor dependencyDescriptor) {
++            return DefaultModuleDescriptor.newDefaultInstance(dependencyDescriptor.getDependencyRevisionId());
++        }
+     }
+ 
+     private File dest = new File("build/test/test-write.xml");
+@@ -608,6 +618,47 @@ public void testLicense() throws Exception {
+         assertEquals("http://www.apache.org/licenses/LICENSE-2.0.txt", licenses[0].getUrl());
+     }
+ 
++    /**
++     * Tests that if a module doesn't have a license specified, then parent pom's license (if any) is used for the child
++     * module
++     *
++     * @throws Exception
++     */
++    public void testLicenseFromParent() throws Exception {
++        final IvySettings customIvySettings = createIvySettingsForParentLicenseTesting("test-parent-with-licenses.pom",
++                "org.apache", "test-ivy-license-parent");
++        final String pomFile = "test-project-with-parent-licenses.pom";
++        final ModuleDescriptor childModule = PomModuleDescriptorParser.getInstance().parseDescriptor(customIvySettings,
++                this.getClass().getResource(pomFile), false);
++        assertNotNull("Could not find " + pomFile, pomFile);
++        final License[] licenses = childModule.getLicenses();
++        assertNotNull("No licenses found in the module " + childModule, licenses);
++        assertEquals("Unexpected number of licenses found in the module " + childModule, 1, licenses.length);
++        assertEquals("Unexpected license name", "MIT License", licenses[0].getName());
++        assertEquals("Unexpected license URL", "http://opensource.org/licenses/MIT", licenses[0].getUrl());
++    }
++
++    /**
++     * Tests that if a project explicitly specifies the licenses, then the licenses (if any) from its parent pom
++     * aren't applied to the child project
++     *
++     * @throws Exception
++     */
++    public void testOverriddenLicense() throws Exception {
++        final IvySettings customIvySettings = createIvySettingsForParentLicenseTesting("test-parent-with-licenses.pom",
++                "org.apache", "test-ivy-license-parent");
++        final String pomFile = "test-project-with-overridden-licenses.pom";
++        final ModuleDescriptor childModule = PomModuleDescriptorParser.getInstance().parseDescriptor(customIvySettings,
++                this.getClass().getResource(pomFile), false);
++        assertNotNull("Could not find " + pomFile, pomFile);
++        final License[] licenses = childModule.getLicenses();
++        assertNotNull("No licenses found in the module " + childModule, licenses);
++        assertEquals("Unexpected number of licenses found in the module " + childModule, 1, licenses.length);
++        assertEquals("Unexpected license name", "The Apache Software License, Version 2.0", licenses[0].getName());
++        assertEquals("Unexpected license URL", "http://www.apache.org/licenses/LICENSE-2.0.txt", licenses[0].getUrl());
++    }
++
++
+     public void testDependencyManagment() throws ParseException, IOException {
+         ModuleDescriptor md = PomModuleDescriptorParser.getInstance().parseDescriptor(settings,
+             getClass().getResource("test-dependencyMgt.pom"), false);
+@@ -842,4 +893,33 @@ public void testModel() throws Exception {
+         assertEquals("jar", artifact[0].getType());
+     }
+ 
++    private IvySettings createIvySettingsForParentLicenseTesting(final String parentPomFileName, final String parentOrgName,
++                                                                 final String parentModuleName) throws Exception {
++        final URL parentPomURL = this.getClass().getResource(parentPomFileName);
++        assertNotNull("Could not find " + parentPomFileName, parentPomURL);
++        final PomReader parentPomReader = new PomReader(parentPomURL, new URLResource(parentPomURL));
++        final License[] parentLicenses = parentPomReader.getLicenses();
++        assertNotNull("Missing licenses in parent pom " + parentPomFileName, parentLicenses);
++        assertEquals("Unexpected number of licenses in parent pom " + parentPomFileName, 1, parentLicenses.length);
++        final DependencyResolver dependencyResolver = new MockedDependencyResolver() {
++            @Override
++            protected ModuleDescriptor getModuleDescriptor(DependencyDescriptor dependencyDescriptor) {
++                final String depOrg = dependencyDescriptor.getDependencyId().getOrganisation();
++                final String depModuleName = dependencyDescriptor.getDependencyId().getName();
++                if (depOrg.equals(parentOrgName) && depModuleName.equals(parentModuleName)) {
++                    final DefaultModuleDescriptor moduleDescriptor = DefaultModuleDescriptor.newDefaultInstance(dependencyDescriptor.getDependencyRevisionId());
++                    for (final License license : parentLicenses) {
++                        moduleDescriptor.addLicense(license);
++                    }
++                    return moduleDescriptor;
++                } else {
++                    return super.getModuleDescriptor(dependencyDescriptor);
++                }
++            }
++        };
++        final IvySettings ivySettings = new IvySettings();
++        ivySettings.setDictatorResolver(dependencyResolver);
++
++        return ivySettings;
++    }
+ }
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-parent-with-licenses.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-parent-with-licenses.pom
+new file mode 100644
+index 000000000..e39eb23ea
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-parent-with-licenses.pom
+@@ -0,0 +1,36 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
++    <modelVersion>4.0.0</modelVersion>
++    <groupId>org.apache</groupId>
++    <artifactId>test-ivy-license-parent</artifactId>
++    <packaging>jar</packaging>
++    <name>Test License parent project</name>
++
++    <version>1.0.1</version>
++    <licenses>
++        <license>
++            <name>MIT License</name>
++            <url>http://opensource.org/licenses/MIT</url>
++            <distribution>repo</distribution>
++        </license>
++    </licenses>
++</project>
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-project-with-overridden-licenses.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-project-with-overridden-licenses.pom
+new file mode 100644
+index 000000000..9b6a91b1c
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-project-with-overridden-licenses.pom
+@@ -0,0 +1,43 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
++    <modelVersion>4.0.0</modelVersion>
++    <parent>
++        <groupId>org.apache</groupId>
++        <artifactId>test-ivy-license-parent</artifactId>
++        <version>1.0.1</version>
++    </parent>
++    <groupId>org.apache</groupId>
++    <artifactId>test-ivy-license-overridden</artifactId>
++    <packaging>jar</packaging>
++    <name>Test License project</name>
++
++    <version>1.0.2</version>
++
++    <licenses>
++        <license>
++            <name>The Apache Software License, Version 2.0</name>
++            <url>http://www.apache.org/licenses/LICENSE-2.0.txt</url>
++            <distribution>repo</distribution>
++        </license>
++    </licenses>
++
++</project>
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-project-with-parent-licenses.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-project-with-parent-licenses.pom
+new file mode 100644
+index 000000000..a856df86d
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-project-with-parent-licenses.pom
+@@ -0,0 +1,34 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
++    <modelVersion>4.0.0</modelVersion>
++    <parent>
++        <groupId>org.apache</groupId>
++        <artifactId>test-ivy-license-parent</artifactId>
++        <version>1.0.1</version>
++    </parent>
++    <groupId>org.apache</groupId>
++    <artifactId>test-ivy-license</artifactId>
++    <packaging>jar</packaging>
++    <name>Test License project</name>
++
++    <version>1.0.2</version>
++</project>

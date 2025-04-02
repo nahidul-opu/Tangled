@@ -1,0 +1,77 @@
+From 32a9c6d42a3a48314d3f9fe2956bfc8bf49ac5d5 Mon Sep 17 00:00:00 2001
+From: Jim Carroll <jim@dontcallme.com>
+Date: Thu, 29 Jan 2015 17:32:54 -0800
+Subject: [PATCH] PARQUET-157: Divide by zero fix
+
+There is a divide by zero error in logging code inside the InternalParquetRecordReader. I've been running with this fixed for a while but everytime I revert I hit the problem again. I can't believe anyone else hasn't had this problem. I submitted a Jira ticket a few weeks ago but didn't hear anything on the list so here's the fix.
+
+This also avoids compiling log statements in some cases where it's unnecessary inside the checkRead method of InternalParquetRecordReader.
+
+Also added a .gitignore entry to clean up a build artifact.
+
+Author: Jim Carroll <jim@dontcallme.com>
+
+Closes #102 from jimfcarroll/divide-by-zero-fix and squashes the following commits:
+
+423200c [Jim Carroll] Filter out parquet-scrooge build artifact from git.
+22337f3 [Jim Carroll] PARQUET-157: Fix a divide by zero error when Parquet runs quickly. Also avoid compiling log statements in some cases where it's unnecessary.
+---
+ .gitignore                                    |  1 +
+ .../hadoop/InternalParquetRecordReader.java   | 21 +++++++++++--------
+ 2 files changed, 13 insertions(+), 9 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index 18748a7b45..cd3c0669ca 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,5 +13,6 @@ target
+ *.orig
+ *.rej
+ dependency-reduced-pom.xml
++parquet-scrooge/.cache
+ .idea/*
+ target/
+diff --git a/parquet-hadoop/src/main/java/parquet/hadoop/InternalParquetRecordReader.java b/parquet-hadoop/src/main/java/parquet/hadoop/InternalParquetRecordReader.java
+index 9a0d5d0cef..ca601a84a4 100644
+--- a/parquet-hadoop/src/main/java/parquet/hadoop/InternalParquetRecordReader.java
++++ b/parquet-hadoop/src/main/java/parquet/hadoop/InternalParquetRecordReader.java
+@@ -102,13 +102,16 @@ public InternalParquetRecordReader(ReadSupport<T> readSupport, UnboundRecordFilt
+   private void checkRead() throws IOException {
+     if (current == totalCountLoadedSoFar) {
+       if (current != 0) {
+-        long timeAssembling = System.currentTimeMillis() - startedAssemblingCurrentBlockAt;
+-        totalTimeSpentProcessingRecords += timeAssembling;
+-        LOG.info("Assembled and processed " + totalCountLoadedSoFar + " records from " + columnCount + " columns in " + totalTimeSpentProcessingRecords + " ms: "+((float)totalCountLoadedSoFar / totalTimeSpentProcessingRecords) + " rec/ms, " + ((float)totalCountLoadedSoFar * columnCount / totalTimeSpentProcessingRecords) + " cell/ms");
+-        long totalTime = totalTimeSpentProcessingRecords + totalTimeSpentReadingBytes;
+-        long percentReading = 100 * totalTimeSpentReadingBytes / totalTime;
+-        long percentProcessing = 100 * totalTimeSpentProcessingRecords / totalTime;
+-        LOG.info("time spent so far " + percentReading + "% reading ("+totalTimeSpentReadingBytes+" ms) and " + percentProcessing + "% processing ("+totalTimeSpentProcessingRecords+" ms)");
++        totalTimeSpentProcessingRecords += (System.currentTimeMillis() - startedAssemblingCurrentBlockAt);
++        if (Log.INFO) {
++            LOG.info("Assembled and processed " + totalCountLoadedSoFar + " records from " + columnCount + " columns in " + totalTimeSpentProcessingRecords + " ms: "+((float)totalCountLoadedSoFar / totalTimeSpentProcessingRecords) + " rec/ms, " + ((float)totalCountLoadedSoFar * columnCount / totalTimeSpentProcessingRecords) + " cell/ms");
++            final long totalTime = totalTimeSpentProcessingRecords + totalTimeSpentReadingBytes;
++            if (totalTime != 0) {
++                final long percentReading = 100 * totalTimeSpentReadingBytes / totalTime;
++                final long percentProcessing = 100 * totalTimeSpentProcessingRecords / totalTime;
++                LOG.info("time spent so far " + percentReading + "% reading ("+totalTimeSpentReadingBytes+" ms) and " + percentProcessing + "% processing ("+totalTimeSpentProcessingRecords+" ms)");
++            }
++        }
+       }
+ 
+       LOG.info("at row " + current + ". reading next block");
+@@ -120,7 +123,7 @@ private void checkRead() throws IOException {
+       long timeSpentReading = System.currentTimeMillis() - t0;
+       totalTimeSpentReadingBytes += timeSpentReading;
+       BenchmarkCounter.incrementTime(timeSpentReading);
+-      LOG.info("block read in memory in " + timeSpentReading + " ms. row count = " + pages.getRowCount());
++      if (Log.INFO) LOG.info("block read in memory in " + timeSpentReading + " ms. row count = " + pages.getRowCount());
+       if (Log.DEBUG) LOG.debug("initializing Record assembly with requested schema " + requestedSchema);
+       MessageColumnIO columnIO = columnIOFactory.getColumnIO(requestedSchema, fileSchema, strictTypeChecking);
+       recordReader = columnIO.getRecordReader(pages, recordConverter, filter);
+@@ -217,4 +220,4 @@ public boolean nextKeyValue() throws IOException, InterruptedException {
+     }
+     return true;
+   }
+-}
+\ No newline at end of file
++}

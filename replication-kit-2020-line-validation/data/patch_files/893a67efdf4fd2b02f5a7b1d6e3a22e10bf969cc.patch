@@ -1,0 +1,118 @@
+From 893a67efdf4fd2b02f5a7b1d6e3a22e10bf969cc Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sun, 16 Sep 2018 20:22:14 +0000
+Subject: [PATCH] [CONFIGURATION-712] Added a refresh() method to reloading
+ detector.
+
+FileHandlerReloadingDetector had the problem that the first invocation
+of the isReloadingRequired() method the file's last-modified date was
+initialized. So a changed file could only be recognized on a 2nd
+invocation.
+
+Now the class offers a dedicated method to initialize the
+last-modified date from the underlying file.
+DefaultReloadingDetectorFactory was changed to call this method after
+the detector has been created. So reloading checks are active from the
+very beginning.
+
+Thanks to Rolland Hobbie for the patch.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1841033 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../DefaultReloadingDetectorFactory.java      |  8 +++-
+ .../FileHandlerReloadingDetector.java         | 10 +++++
+ .../TestFileHandlerReloadingDetector.java     | 40 +++++++++++++++++++
+ 3 files changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/builder/DefaultReloadingDetectorFactory.java b/src/main/java/org/apache/commons/configuration2/builder/DefaultReloadingDetectorFactory.java
+index c17b8bfc62..4ec28dd3eb 100644
+--- a/src/main/java/org/apache/commons/configuration2/builder/DefaultReloadingDetectorFactory.java
++++ b/src/main/java/org/apache/commons/configuration2/builder/DefaultReloadingDetectorFactory.java
+@@ -42,8 +42,14 @@ public ReloadingDetector createReloadingDetector(FileHandler handler,
+             throws ConfigurationException
+     {
+         Long refreshDelay = params.getReloadingRefreshDelay();
+-        return (refreshDelay != null) ? new FileHandlerReloadingDetector(
++
++        FileHandlerReloadingDetector fileHandlerReloadingDetector =
++                (refreshDelay != null) ? new FileHandlerReloadingDetector(
+                 handler, refreshDelay) : new FileHandlerReloadingDetector(
+                 handler);
++
++        fileHandlerReloadingDetector.refresh();
++
++        return fileHandlerReloadingDetector;
+     }
+ }
+diff --git a/src/main/java/org/apache/commons/configuration2/reloading/FileHandlerReloadingDetector.java b/src/main/java/org/apache/commons/configuration2/reloading/FileHandlerReloadingDetector.java
+index f2d6ef4132..f86bf098b4 100644
+--- a/src/main/java/org/apache/commons/configuration2/reloading/FileHandlerReloadingDetector.java
++++ b/src/main/java/org/apache/commons/configuration2/reloading/FileHandlerReloadingDetector.java
+@@ -187,6 +187,16 @@ public void reloadingPerformed()
+         updateLastModified(getLastModificationDate());
+     }
+ 
++    /**
++     * Tells this implementation that the internally stored state should be
++     * refreshed. This method is intended to be called after the creation
++     * of an instance.
++     */
++    public void refresh()
++    {
++        updateLastModified(getLastModificationDate());
++    }
++
+     /**
+      * Returns the date of the last modification of the monitored file. A return
+      * value of 0 indicates, that the monitored file does not exist.
+diff --git a/src/test/java/org/apache/commons/configuration2/reloading/TestFileHandlerReloadingDetector.java b/src/test/java/org/apache/commons/configuration2/reloading/TestFileHandlerReloadingDetector.java
+index 5695a18451..191a5c7abe 100644
+--- a/src/test/java/org/apache/commons/configuration2/reloading/TestFileHandlerReloadingDetector.java
++++ b/src/test/java/org/apache/commons/configuration2/reloading/TestFileHandlerReloadingDetector.java
+@@ -121,6 +121,46 @@ public void testReloadingAndReset() throws Exception
+                 detector.isReloadingRequired());
+     }
+ 
++    /**
++     * Tests whether a changed file is detected after initialization and invoking
++     * refresh.
++     */
++    @Test
++    public void testRefreshIsReloadingRequiredTrue() throws Exception
++    {
++        File f = EasyMock.createMock(File.class);
++        EasyMock.expect(f.exists()).andReturn(Boolean.TRUE).anyTimes();
++        EasyMock.expect(f.lastModified()).andReturn(LAST_MODIFIED);
++        EasyMock.expect(f.lastModified()).andReturn(LAST_MODIFIED + 1);
++        EasyMock.replay(f);
++        FileHandlerReloadingDetector detector = new FileHandlerReloadingDetectorTestImpl(f);
++        detector.refresh();
++        assertTrue("Reloading not detected", detector.isReloadingRequired());
++    }
++
++    /**
++     * Tests a refresh cycle with a detected reload operation and a notification that
++     * reloading was performed.
++     */
++    @Test
++    public void testRefreshReloadingAndReset() throws Exception
++    {
++        File f = EasyMock.createMock(File.class);
++        EasyMock.expect(f.exists()).andReturn(Boolean.TRUE).anyTimes();
++        EasyMock.expect(f.lastModified()).andReturn(LAST_MODIFIED).times(2);
++        EasyMock.expect(f.lastModified()).andReturn(LAST_MODIFIED + 1).times(3);
++        EasyMock.expect(f.lastModified()).andReturn(LAST_MODIFIED + 2);
++        EasyMock.replay(f);
++        FileHandlerReloadingDetector detector = new FileHandlerReloadingDetectorTestImpl(f);
++        detector.refresh();
++        assertFalse("Reloading required", detector.isReloadingRequired());
++        assertTrue("Reloading not detected", detector.isReloadingRequired());
++        detector.reloadingPerformed();
++        assertFalse("Still reloading required", detector.isReloadingRequired());
++        assertTrue("Next reloading not detected",
++                detector.isReloadingRequired());
++    }
++
+     /**
+      * Tests whether the refresh delay is taken into account.
+      */

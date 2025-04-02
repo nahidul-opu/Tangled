@@ -1,0 +1,157 @@
+From 23c7a752242a37247e0e72667dd268b4911ddebe Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Thu, 4 Jun 2015 09:26:33 +0000
+Subject: [PATCH] [SANTUARIO-431] - Use of algorithm from given parameter not
+ field. Thanks to Zoran Regvart for the patch. This closes #1.
+
+Conflicts:
+	src/main/java/org/apache/xml/security/encryption/XMLCipher.java
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/branches/1.5.x-fixes@1683496 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../xml/security/encryption/XMLCipher.java    | 15 ++++--
+ .../test/encryption/XMLCipherTest.java        | 50 ++++++++++++++++++-
+ 2 files changed, 59 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/org/apache/xml/security/encryption/XMLCipher.java b/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
+index 77831f5088..f0eee73cd6 100644
+--- a/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
++++ b/src/main/java/org/apache/xml/security/encryption/XMLCipher.java
+@@ -1774,13 +1774,13 @@ public byte[] decryptToByteArray(Element element) throws XMLEncryptionException
+         }
+ 
+         EncryptedData encryptedData = factory.newEncryptedData(element);
++        String encMethodAlgorithm = encryptedData.getEncryptionMethod().getAlgorithm();
+ 
+         if (key == null) {
+             KeyInfo ki = encryptedData.getKeyInfo();
+             if (ki != null) {
+                 try {
+                     // Add an EncryptedKey resolver
+-                    String encMethodAlgorithm = encryptedData.getEncryptionMethod().getAlgorithm();
+                     EncryptedKeyResolver resolver = new EncryptedKeyResolver(encMethodAlgorithm, kek);
+                     if (internalKeyResolvers != null) {
+                         int size = internalKeyResolvers.size();
+@@ -1813,7 +1813,7 @@ public byte[] decryptToByteArray(Element element) throws XMLEncryptionException
+ 
+         // Now create the working cipher
+         String jceAlgorithm = 
+-            JCEMapper.translateURItoJCEID(encryptedData.getEncryptionMethod().getAlgorithm());
++            JCEMapper.translateURItoJCEID(encMethodAlgorithm);
+         if (log.isDebugEnabled()) {
+             log.debug("JCE Algorithm = " + jceAlgorithm);
+         }
+@@ -1839,8 +1839,8 @@ public byte[] decryptToByteArray(Element element) throws XMLEncryptionException
+         // This should probably be put into the JCE mapper.
+ 
+         int ivLen = c.getBlockSize();
+-        String alg = encryptedData.getEncryptionMethod().getAlgorithm();
+-        if (AES_128_GCM.equals(alg) || AES_192_GCM.equals(alg) || AES_256_GCM.equals(alg)) {
++        if (AES_128_GCM.equals(encMethodAlgorithm) || AES_192_GCM.equals(encMethodAlgorithm) 
++            || AES_256_GCM.equals(encMethodAlgorithm)) {
+             ivLen = 12;
+         }
+         byte[] ivBytes = new byte[ivLen];
+@@ -1851,7 +1851,12 @@ public byte[] decryptToByteArray(Element element) throws XMLEncryptionException
+         // necessary bytes into a dedicated array.
+ 
+         System.arraycopy(encryptedBytes, 0, ivBytes, 0, ivLen);
+-        AlgorithmParameterSpec paramSpec = constructBlockCipherParameters(algorithm, ivBytes);
++        
++        String blockCipherAlg = algorithm;
++        if (blockCipherAlg == null) {
++            blockCipherAlg = encMethodAlgorithm;
++        }
++        AlgorithmParameterSpec paramSpec = constructBlockCipherParameters(blockCipherAlg, ivBytes);
+ 
+         try {
+             c.init(cipherMode, key, paramSpec);
+diff --git a/src/test/java/org/apache/xml/security/test/encryption/XMLCipherTest.java b/src/test/java/org/apache/xml/security/test/encryption/XMLCipherTest.java
+index 73885d6a4d..d11df60c5a 100644
+--- a/src/test/java/org/apache/xml/security/test/encryption/XMLCipherTest.java
++++ b/src/test/java/org/apache/xml/security/test/encryption/XMLCipherTest.java
+@@ -21,12 +21,15 @@
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+ import java.io.File;
++import java.lang.reflect.Constructor;
+ import java.security.Key;
+ import java.security.KeyPairGenerator;
+ import java.security.KeyPair;
+ import java.security.NoSuchAlgorithmException;
+ import java.security.PrivateKey;
++import java.security.Provider;
+ import java.security.PublicKey;
++import java.security.Security;
+ 
+ import javax.crypto.Cipher;
+ import javax.crypto.KeyGenerator;
+@@ -79,8 +82,9 @@ public class XMLCipherTest extends org.junit.Assert {
+     private boolean haveISOPadding;
+     private boolean haveKeyWraps;
+     private String tstBase64EncodedString;
++    private boolean bcInstalled;
+ 
+-    public XMLCipherTest() {
++    public XMLCipherTest() throws Exception {
+         basedir = System.getProperty("basedir",".");
+         documentName = System.getProperty("org.apache.xml.enc.test.doc",
+                                           basedir + "/build.xml");
+@@ -111,6 +115,26 @@ public XMLCipherTest() {
+ 
+         haveKeyWraps = 
+             (JCEMapper.translateURItoJCEID(EncryptionConstants.ALGO_ID_KEYWRAP_AES128) != null);
++        
++        //
++        // If the BouncyCastle provider is not installed, then try to load it 
++        // via reflection. 
++        //
++        if (Security.getProvider("BC") == null) {
++            Constructor<?> cons = null;
++            try {
++                Class<?> c = Class.forName("org.bouncycastle.jce.provider.BouncyCastleProvider");
++                cons = c.getConstructor(new Class[] {});
++            } catch (Exception e) {
++                //ignore
++            }
++            if (cons != null) {
++                Provider provider = (java.security.Provider)cons.newInstance();
++                Security.insertProviderAt(provider, 2);
++                bcInstalled = true;
++            }
++        }
++        
+     }
+ 
+     /**
+@@ -866,6 +890,30 @@ public void testEncryptedKeyWithRecipient() throws Exception {
+         }
+     }
+ 
++    @org.junit.Test
++    public void testEecryptToByteArray() throws Exception {
++        if (!bcInstalled) {
++            return;
++        }
++        KeyGenerator keygen = KeyGenerator.getInstance("AES");
++        keygen.init(128);
++        Key key = keygen.generateKey();
++
++        Document document = document();
++
++        XMLCipher cipher = XMLCipher.getInstance(XMLCipher.AES_128_GCM);
++        cipher.init(XMLCipher.ENCRYPT_MODE, key);
++        cipher.getEncryptedData();
++
++        Document encrypted = cipher.doFinal(document, document);
++
++        XMLCipher xmlCipher = XMLCipher.getInstance();
++        xmlCipher.init(XMLCipher.DECRYPT_MODE, key);
++        Element encryptedData = (Element) encrypted.getElementsByTagNameNS(EncryptionConstants.EncryptionSpecNS, EncryptionConstants._TAG_ENCRYPTEDDATA).item(0);
++
++        xmlCipher.decryptToByteArray(encryptedData);
++    }
++
+     private String toString (Node n) throws Exception {
+         ByteArrayOutputStream baos = new ByteArrayOutputStream();
+         Canonicalizer c14n = Canonicalizer.getInstance

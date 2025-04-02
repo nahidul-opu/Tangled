@@ -1,0 +1,156 @@
+From 71ddda217815019e3d29b8458e9a1a05da3eee55 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 9 Jul 2008 15:30:03 +0000
+Subject: [PATCH] FIX: Reports showing double dependencies in certain cases
+ (IVY-578)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@675227 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  3 +-
+ .../report/ConfigurationResolveReport.java    |  4 +++
+ .../apache/ivy/core/resolve/ResolveData.java  |  2 ++
+ .../org/apache/ivy/ant/IvyReportTest.java     | 30 ++++++++++++++++++
+ .../ivy/core/resolve/ResolveEngineTest.java   |  1 -
+ .../1/org6/mod6.2/ivys/ivy-0.7.xml            | 31 +++++++++++++++++++
+ 6 files changed, 69 insertions(+), 2 deletions(-)
+ create mode 100644 test/repositories/1/org6/mod6.2/ivys/ivy-0.7.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index da532eecf..7e670f416 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -95,7 +95,8 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
+-- FIX: dynamic revision resolve does not throw error when configuration is missing (IVY-861)
++- FIX: Reports showing double dependencies in certain cases (IVY-578)
++- FIX: Dynamic revision resolve does not throw error when configuration is missing (IVY-861)
+ - FIX: Referenced resolver not found in macro (IVY-860)
+ - FIX: Ivy files are not retrieved when using useOrigin=true (IVY-713)
+ - FIX: NPE in Ivy:install task if the repository cache dir has been cleared (IVY-843)
+diff --git a/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java b/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java
+index fd4e30d0b..a26e68c94 100644
+--- a/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java
++++ b/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java
+@@ -122,6 +122,10 @@ public void addDependency(IvyNode node) {
+         dependencyReports.put(node, Collections.EMPTY_LIST);
+     }
+ 
++    public void updateDependency(ModuleRevisionId mrid, IvyNode node) {
++        dependencies.put(mrid, node);
++    }
++
+     public void addDependency(IvyNode node, DownloadReport report) {
+         dependencies.put(node.getId(), node);
+         dependencies.put(node.getResolvedId(), node);
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveData.java b/src/java/org/apache/ivy/core/resolve/ResolveData.java
+index 5884c69b1..6cd3ac1d5 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveData.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveData.java
+@@ -156,6 +156,8 @@ void replaceNode(ModuleRevisionId mrid, IvyNode node, String rootModuleConf) {
+         this.visitData.put(mrid, keptVisitData);
+         // update visit data with discarde visit nodes
+         keptVisitData.addVisitNodes(rootModuleConf, visitData.getVisitNodes(rootModuleConf));
++        
++        report.updateDependency(mrid, node);
+     }
+ 
+     public void setReport(ConfigurationResolveReport report) {
+diff --git a/test/java/org/apache/ivy/ant/IvyReportTest.java b/test/java/org/apache/ivy/ant/IvyReportTest.java
+index b04ecbff0..76d84d748 100644
+--- a/test/java/org/apache/ivy/ant/IvyReportTest.java
++++ b/test/java/org/apache/ivy/ant/IvyReportTest.java
+@@ -22,6 +22,7 @@
+ 
+ import junit.framework.TestCase;
+ 
++import org.apache.ivy.util.FileUtil;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Delete;
+ 
+@@ -82,6 +83,35 @@ public void testSimple() throws Exception {
+         }
+     }
+     
++    public void testWithLatest() throws Exception {
++        Locale oldLocale = Locale.getDefault();
++        
++        try {
++            // set the locale to UK as workaround for SUN bug 6240963
++            Locale.setDefault(Locale.UK);
++
++            IvyResolve res = new IvyResolve();
++            res.setProject(project);
++            res.setFile(new File("test/repositories/1/org6/mod6.2/ivys/ivy-0.7.xml"));
++            res.execute();
++    
++            report.setTodir(new File(cache, "report"));
++            report.setXml(true);
++            report.execute();
++            
++            File xmlReport = new File(cache, "report/org6-mod6.2-default.xml");
++            assertTrue(xmlReport.exists());
++            // check that revision 2.2 of mod1.2 is only present once
++            String reportContent = FileUtil.readEntirely(xmlReport);
++            int index = reportContent.indexOf("<revision name=\"2.2\"");
++            assertTrue(index != -1);
++            index = reportContent.indexOf("<revision name=\"2.2\"", index + 1);
++            assertTrue(index == -1);
++        } finally {
++            Locale.setDefault(oldLocale);
++        }
++    }
++    
+     public void testCopyCssIfTodirNotSet() {
+         Locale oldLocale = Locale.getDefault();
+         
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java b/test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java
+index 5ce380f9c..a292a515e 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveEngineTest.java
+@@ -57,7 +57,6 @@ public void testInlineResolveWithNonExistingModule() throws Exception {
+         
+         assertNotNull("The ResolveReport may never be null", report);
+         assertTrue(report.hasError());
+-        assertTrue(report.getModuleIds().isEmpty());
+     }
+ 
+     private void createCache() {
+diff --git a/test/repositories/1/org6/mod6.2/ivys/ivy-0.7.xml b/test/repositories/1/org6/mod6.2/ivys/ivy-0.7.xml
+new file mode 100644
+index 000000000..ccee67e6e
+--- /dev/null
++++ b/test/repositories/1/org6/mod6.2/ivys/ivy-0.7.xml
+@@ -0,0 +1,31 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org6"
++	       module="mod6.2"
++	       revision="0.7"
++	       status="integration"
++	       publication="20080312110000"
++	/>
++	<publications />
++	<dependencies>
++		<dependency org="org6" name="mod6.1" rev="0.6" conf="default"/>
++		<dependency org="org1" name="mod1.2" rev="latest.integration" conf="default"/>
++	</dependencies>
++</ivy-module>

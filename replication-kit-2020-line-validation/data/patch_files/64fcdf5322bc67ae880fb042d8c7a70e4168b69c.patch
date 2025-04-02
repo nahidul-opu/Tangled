@@ -1,0 +1,431 @@
+From 64fcdf5322bc67ae880fb042d8c7a70e4168b69c Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 14 Oct 2005 15:18:19 +0000
+Subject: [PATCH] FIX: chain resolver now support latest strategy configuration
+ (IVY-90)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484050 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/resolver/AbstractResolver.java        | 47 ++++++++++-
+ .../jayasoft/ivy/resolver/BasicResolver.java  | 37 --------
+ .../jayasoft/ivy/resolver/ChainResolver.java  | 84 ++++++++++++++++++-
+ .../ivy/resolver/HasLatestStrategy.java       | 15 ++++
+ .../ivy/resolver/ChainResolverTest.java       | 40 ++++++++-
+ .../jayasoft/ivy/resolver/MockResolver.java   |  6 +-
+ 7 files changed, 187 insertions(+), 43 deletions(-)
+ create mode 100644 src/java/fr/jayasoft/ivy/resolver/HasLatestStrategy.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 7e4b297f4..2abf05d4a 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,5 +1,6 @@
+ - NEW: overwrite attribute in the publish task now let force overwrite of read only files (IVY-83) 
+ - IMPROVE: better error message when publish fails due to readonly destination (IVY-83)
++- FIX: chain resolver now support latest strategy configuration (IVY-90)
+ - FIX: raise a clean error when a cyclic variable definition is found (IVY-75)
+ - FIX: reinitiliase ant project instance at each new task to avoid using a bad ant project instance in some ide (like netbeans) (IVY-87)
+ - FIX: ivy is now able to use simple ivy files in cache (doesn't need resolver info, use default one if no resolver is given) (IVY-86)
+diff --git a/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java b/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
+index f111b0c74..6a662dfa2 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/AbstractResolver.java
+@@ -9,6 +9,7 @@
+ import fr.jayasoft.ivy.DependencyResolver;
+ import fr.jayasoft.ivy.Ivy;
+ import fr.jayasoft.ivy.IvyAware;
++import fr.jayasoft.ivy.LatestStrategy;
+ import fr.jayasoft.ivy.ResolveData;
+ import fr.jayasoft.ivy.report.ArtifactDownloadReport;
+ import fr.jayasoft.ivy.report.DownloadReport;
+@@ -18,7 +19,7 @@
+ /**
+  * This abstract resolver only provides handling for resolver name
+  */
+-public abstract class AbstractResolver implements DependencyResolver, IvyAware {
++public abstract class AbstractResolver implements DependencyResolver, IvyAware, HasLatestStrategy {
+ 
+     /**
+      * True if parsed ivy files should be validated against xsd, false if they should not,
+@@ -28,6 +29,13 @@ public abstract class AbstractResolver implements DependencyResolver, IvyAware {
+     private String _name;
+     private Ivy _ivy;
+ 
++    /**
++     * The latest strategy to use to find latest among several artifacts
++     */
++    private LatestStrategy _latestStrategy;
++
++    private String _latestStrategyName;
++
+     public Ivy getIvy() {
+         return _ivy;
+     }    
+@@ -98,4 +106,41 @@ public boolean exists(Artifact artifact) {
+         ArtifactDownloadReport adr = dr.getArtifactReport(artifact);
+         return adr.getDownloadStatus() != DownloadStatus.FAILED;
+     }
++
++    public LatestStrategy getLatestStrategy() {        
++        if (_latestStrategy == null) {
++            if (getIvy() != null) {
++                if (_latestStrategyName != null && !"default".equals(_latestStrategyName)) {
++                    _latestStrategy = getIvy().getLatestStrategy(_latestStrategyName);
++                    if (_latestStrategy == null) {
++                        Message.error("unknown latest strategy: "+_latestStrategyName);
++                        _latestStrategy = getIvy().getDefaultLatestStrategy();
++                    }
++                } else {
++                    _latestStrategy = getIvy().getDefaultLatestStrategy();
++                    Message.debug(getName()+": no latest strategy defined: using default");
++                }
++            } else {
++                throw new IllegalStateException("no ivy instance found: impossible to get a latest strategy without ivy instance");
++            }
++        }
++        return _latestStrategy;
++    }
++    
++
++    public void setLatestStrategy(LatestStrategy latestStrategy) {
++        _latestStrategy = latestStrategy;
++    }    
++
++    public void setLatest(String strategyName) {
++        _latestStrategyName = strategyName;
++    }    
++    
++    public String getLatest() {
++        if (_latestStrategyName == null) {
++            _latestStrategyName = "default";
++        }
++        return _latestStrategyName;
++    }
++
+ }
+diff --git a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+index 7cce35b3a..8ff6d5745 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+@@ -29,7 +29,6 @@
+ import fr.jayasoft.ivy.DependencyResolver;
+ import fr.jayasoft.ivy.Ivy;
+ import fr.jayasoft.ivy.IvyNode;
+-import fr.jayasoft.ivy.LatestStrategy;
+ import fr.jayasoft.ivy.ModuleDescriptor;
+ import fr.jayasoft.ivy.ModuleRevisionId;
+ import fr.jayasoft.ivy.ResolveData;
+@@ -59,13 +58,6 @@ public abstract class BasicResolver extends AbstractResolver {
+      */
+     private boolean _envDependent = true;
+ 
+-    /**
+-     * The latest strategy to use to find latest among several artifacts
+-     */
+-    private LatestStrategy _latestStrategy;
+-
+-    private String _latestStrategyName;
+-
+     private List _ivyattempts = new ArrayList();
+     private Map _artattempts = new HashMap();
+ 
+@@ -114,35 +106,6 @@ public void setCheckmodified(boolean check) {
+         _checkmodified = Boolean.valueOf(check);
+     }
+     
+-    public LatestStrategy getLatestStrategy() {        
+-        if (_latestStrategy == null) {
+-            if (getIvy() != null) {
+-                if (_latestStrategyName != null) {
+-                    _latestStrategy = getIvy().getLatestStrategy(_latestStrategyName);
+-                    if (_latestStrategy == null) {
+-                        Message.error("unknown latest strategy: "+_latestStrategyName);
+-                        _latestStrategy = getIvy().getDefaultLatestStrategy();
+-                    }
+-                } else {
+-                    _latestStrategy = getIvy().getDefaultLatestStrategy();
+-                    Message.debug(getName()+": no latest strategy defined: using default");
+-                }
+-            } else {
+-                throw new IllegalStateException("no ivy instance found: impossible to get a latest strategy without ivy instance");
+-            }
+-        }
+-        return _latestStrategy;
+-    }
+-    
+-
+-    public void setLatestStrategy(LatestStrategy latestStrategy) {
+-        _latestStrategy = latestStrategy;
+-    }    
+-
+-    public void setLatest(String strategyName) {
+-        _latestStrategyName = strategyName;
+-    }    
+-
+     public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data) throws ParseException {
+         clearIvyAttempts();
+         boolean downloaded = false;
+diff --git a/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java b/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java
+index 910a1dd7f..f895296d9 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/ChainResolver.java
+@@ -10,13 +10,16 @@
+ import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Date;
+ import java.util.Iterator;
+ import java.util.List;
+ 
+ import fr.jayasoft.ivy.Artifact;
++import fr.jayasoft.ivy.ArtifactInfo;
+ import fr.jayasoft.ivy.DependencyDescriptor;
+ import fr.jayasoft.ivy.DependencyResolver;
+ import fr.jayasoft.ivy.Ivy;
++import fr.jayasoft.ivy.LatestStrategy;
+ import fr.jayasoft.ivy.ResolveData;
+ import fr.jayasoft.ivy.ResolvedModuleRevision;
+ import fr.jayasoft.ivy.report.ArtifactDownloadReport;
+@@ -29,6 +32,23 @@
+  *
+  */
+ public class ChainResolver extends AbstractResolver {
++    public static class ResolvedModuleRevisionArtifactInfo implements ArtifactInfo {
++        private ResolvedModuleRevision _rmr;
++
++        public ResolvedModuleRevisionArtifactInfo(ResolvedModuleRevision rmr) {
++            _rmr = rmr;
++        }
++
++        public String getRevision() {
++            return _rmr.getId().getRevision();
++        }
++
++        public long getLastModified() {
++            return _rmr.getPublicationDate().getTime();
++        }
++
++    }
++
+     private boolean _returnFirst = false;
+     private List _chain = new ArrayList();
+ 
+@@ -42,11 +62,19 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+         
+         for (Iterator iter = _chain.iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            ResolvedModuleRevision mr = resolver.getDependency(dd, data);
++            LatestStrategy oldLatest = setLatestIfRequired(resolver, getLatestStrategy());
++            ResolvedModuleRevision mr = null;
++            try {
++                mr = resolver.getDependency(dd, data);
++            } finally {
++                if (oldLatest != null) {
++                    setLatest(resolver, oldLatest);
++                }
++            }
+             if (mr != null) {
+                 // check if latest is asked and compare to return the most recent
+                 if (!_returnFirst && !dd.getDependencyRevisionId().isExactRevision()) {
+-                    if (ret == null || mr.getPublicationDate().after(ret.getPublicationDate())) {
++                    if (ret == null || isAfter(mr, ret, data.getDate())) {
+                         Message.debug("\tmodule revision kept as younger: "+mr.getId());
+                         ret = mr;
+                     } else {
+@@ -60,6 +88,33 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+         return ret;
+     }
+     
++
++    private LatestStrategy setLatestIfRequired(DependencyResolver resolver, LatestStrategy latestStrategy) {
++        String latestName = getLatestStrategyName(resolver);
++        if (latestName != null && !"default".equals(latestName)) {
++            LatestStrategy oldLatest = getLatest(resolver);
++            setLatest(resolver, latestStrategy);
++            return oldLatest;
++        } else {
++            return null;
++        }
++    }
++
++    /**
++     * Returns true if rmr1 is after rmr2, using the latest strategy to determine
++     * which is the latest
++     * @param rmr1
++     * @param rmr2
++     * @return
++     */
++    private boolean isAfter(ResolvedModuleRevision rmr1, ResolvedModuleRevision rmr2, Date date) {
++        ArtifactInfo[] ais = new ArtifactInfo[] {
++                new ResolvedModuleRevisionArtifactInfo(rmr1),
++                new ResolvedModuleRevisionArtifactInfo(rmr2)
++        };
++        return getLatestStrategy().findLatest(ais, date) == ais[0];
++    }
++
+     public void reportFailure() {
+         for (Iterator iter = _chain.iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+@@ -131,4 +186,29 @@ public boolean exists(Artifact artifact) {
+         }
+         return false;
+     }
++
++
++    private static void setLatest(DependencyResolver resolver, LatestStrategy latest) {
++        if (resolver instanceof HasLatestStrategy) {
++            HasLatestStrategy r = (HasLatestStrategy)resolver;
++            r.setLatestStrategy(latest);
++        }
++    }
++
++    private static LatestStrategy getLatest(DependencyResolver resolver) {
++        if (resolver instanceof HasLatestStrategy) {
++            HasLatestStrategy r = (HasLatestStrategy)resolver;
++            return r.getLatestStrategy();
++        }
++        return null;
++    }
++
++    private static String getLatestStrategyName(DependencyResolver resolver) {
++        if (resolver instanceof HasLatestStrategy) {
++            HasLatestStrategy r = (HasLatestStrategy)resolver;
++            return r.getLatest();
++        }
++        return null;
++    }
++
+ }
+diff --git a/src/java/fr/jayasoft/ivy/resolver/HasLatestStrategy.java b/src/java/fr/jayasoft/ivy/resolver/HasLatestStrategy.java
+new file mode 100644
+index 000000000..1d53db07f
+--- /dev/null
++++ b/src/java/fr/jayasoft/ivy/resolver/HasLatestStrategy.java
+@@ -0,0 +1,15 @@
++/*
++ * This file is subject to the licence found in LICENCE.TXT in the root directory of the project.
++ * Copyright Jayasoft 2005 - All rights reserved
++ * 
++ * #SNAPSHOT#
++ */
++package fr.jayasoft.ivy.resolver;
++
++import fr.jayasoft.ivy.LatestStrategy;
++
++public interface HasLatestStrategy {
++    public LatestStrategy getLatestStrategy(); 
++    public void setLatestStrategy(LatestStrategy latestStrategy);
++    public String getLatest();
++}
+diff --git a/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java b/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java
+index 004d7946d..ec1ca0042 100644
+--- a/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java
++++ b/test/java/fr/jayasoft/ivy/resolver/ChainResolverTest.java
+@@ -17,13 +17,16 @@
+ import fr.jayasoft.ivy.ModuleRevisionId;
+ import fr.jayasoft.ivy.ResolveData;
+ import fr.jayasoft.ivy.ResolvedModuleRevision;
++import fr.jayasoft.ivy.latest.LatestRevisionStrategy;
++import fr.jayasoft.ivy.latest.LatestTimeStrategy;
+ import fr.jayasoft.ivy.xml.XmlIvyConfigurationParser;
+ 
+ /**
+  * Tests ChainResolver
+  */
+ public class ChainResolverTest extends TestCase {
+-    private ResolveData _data = new ResolveData(new Ivy(), null, null, null, true);
++    private Ivy _ivy = new Ivy();
++    private ResolveData _data = new ResolveData(_ivy, null, null, null, true);
+     public void testOrderFromConf() throws Exception {
+         new XmlIvyConfigurationParser(_data.getIvy()).parse(ChainResolverTest.class.getResource("chainresolverconf.xml"));
+         DependencyResolver resolver = _data.getIvy().getResolver("chain");
+@@ -44,12 +47,14 @@ private void assertResolversSizeAndNames(ChainResolver chain, int size) {
+     
+     public void testName() throws Exception {
+         ChainResolver chain = new ChainResolver();
++        chain.setIvy(_ivy);
+         chain.setName("chain");
+         assertEquals("chain", chain.getName());
+     }
+     
+     public void testResolveOrder() throws Exception {
+         ChainResolver chain = new ChainResolver();
++        chain.setIvy(_ivy);
+         MockResolver[] resolvers = new MockResolver[] {
+                 MockResolver.buildMockResolver("1", false, null), 
+                 MockResolver.buildMockResolver("2", true, null), 
+@@ -70,8 +75,10 @@ public void testResolveOrder() throws Exception {
+         assertTrue(resolvers[2].askedDeps.isEmpty());
+     }
+     
+-    public void testLatestResolve() throws Exception {
++    public void testLatestTimeResolve() throws Exception {
+         ChainResolver chain = new ChainResolver();
++        chain.setIvy(_ivy);
++        chain.setLatestStrategy(new LatestTimeStrategy());
+         MockResolver[] resolvers = new MockResolver[] {
+                 MockResolver.buildMockResolver("1", true, new GregorianCalendar(2005, 1, 20).getTime()), 
+                 MockResolver.buildMockResolver("2", false, null), 
+@@ -96,8 +103,37 @@ public void testLatestResolve() throws Exception {
+         }
+     }
+     
++    public void testLatestRevisionResolve() throws Exception {
++        ChainResolver chain = new ChainResolver();
++        chain.setIvy(_ivy);
++        chain.setLatestStrategy(new LatestRevisionStrategy());
++        MockResolver[] resolvers = new MockResolver[] {
++                MockResolver.buildMockResolver("1", true, ModuleRevisionId.newInstance("org", "mod", "1"), new GregorianCalendar(2005, 1, 20).getTime()), 
++                MockResolver.buildMockResolver("2", false, null), 
++                MockResolver.buildMockResolver("3", true, ModuleRevisionId.newInstance("org", "mod", "2"), new GregorianCalendar(2005, 1, 25).getTime()),
++                MockResolver.buildMockResolver("4", false, null), 
++                MockResolver.buildMockResolver("5", true, ModuleRevisionId.newInstance("org", "mod", "4"), new GregorianCalendar(2005, 1, 22).getTime()), // latest -> should the one kept 
++                MockResolver.buildMockResolver("6", true, ModuleRevisionId.newInstance("org", "mod", "3"), new GregorianCalendar(2005, 1, 18).getTime()),
++                MockResolver.buildMockResolver("7", false, null)
++            };
++        for (int i = 0; i < resolvers.length; i++) {
++            chain.add(resolvers[i]);
++        }
++        assertResolversSizeAndNames(chain, resolvers.length);
++        
++        DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(ModuleRevisionId.newInstance("org","mod", "latest.integration"), false);
++        ResolvedModuleRevision rmr = chain.getDependency(dd, _data);
++        assertNotNull(rmr);
++        assertEquals("5", rmr.getResolver().getName());
++        List ddAsList = Arrays.asList(new DependencyDescriptor[] {dd});
++        for (int i = 0; i < resolvers.length; i++) {
++            assertEquals(ddAsList, resolvers[i].askedDeps);
++        }
++    }
++    
+     public void testReturnFirst() throws Exception {
+         ChainResolver chain = new ChainResolver();
++        chain.setIvy(_ivy);
+         chain.setReturnFirst(true);
+         MockResolver[] resolvers = new MockResolver[] {
+                 MockResolver.buildMockResolver("1", true, new GregorianCalendar(2005, 1, 20).getTime()), 
+diff --git a/test/java/fr/jayasoft/ivy/resolver/MockResolver.java b/test/java/fr/jayasoft/ivy/resolver/MockResolver.java
+index f59097e3f..149c7ebf3 100644
+--- a/test/java/fr/jayasoft/ivy/resolver/MockResolver.java
++++ b/test/java/fr/jayasoft/ivy/resolver/MockResolver.java
+@@ -25,6 +25,10 @@
+ 
+ public class MockResolver extends AbstractResolver {
+     static MockResolver buildMockResolver(String name, boolean findRevision, final Date publicationDate) {
++        return buildMockResolver(name, findRevision, null, publicationDate);
++    }
++
++    static MockResolver buildMockResolver(String name, boolean findRevision, final ModuleRevisionId mrid, final Date publicationDate) {
+         final MockResolver r = new MockResolver();
+         r.setName(name);
+         if (findRevision) {
+@@ -34,7 +38,7 @@ public DependencyResolver getResolver() {
+                 }
+ 
+                 public ModuleRevisionId getId() {
+-                    return null;
++                    return mrid;
+                 }
+ 
+                 public Date getPublicationDate() {

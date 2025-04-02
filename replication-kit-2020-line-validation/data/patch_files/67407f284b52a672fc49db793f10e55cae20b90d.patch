@@ -1,0 +1,250 @@
+From 67407f284b52a672fc49db793f10e55cae20b90d Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Thu, 26 May 2016 19:12:33 +0000
+Subject: [PATCH] Merge branch 'arrayInterpolation_CONF-633' into trunk
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1745634 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 ++
+ .../interpol/ConfigurationInterpolator.java   | 60 ++++++++++++++++++-
+ .../InterpolationTestHelper.java              |  6 +-
+ ...estAbstractConfigurationBasicFeatures.java | 32 ++++++++++
+ .../TestConfigurationInterpolator.java        | 49 ++++++++++++++-
+ 5 files changed, 146 insertions(+), 5 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 42c11f4a7a..eeb089a57a 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -27,6 +27,10 @@
+   <body>
+     <release version="2.1" date="in SVN"
+       description="TBD">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-633">
++        Interpolation was improved to better support properties with multiple
++        values.
++      </action>
+       <action dev="oheger" type="update" issue="CONFIGURATION-626">
+         ImmutableConfiguration.getArray() has been deprecated. Arrays can now
+         be queried using the generic get() method in a type-safe way.
+diff --git a/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java b/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java
+index 3b63db35ed..d0ee2b6afa 100644
+--- a/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java
++++ b/src/main/java/org/apache/commons/configuration2/interpol/ConfigurationInterpolator.java
+@@ -91,6 +91,12 @@ public class ConfigurationInterpolator
+     /** Constant for the prefix separator. */
+     private static final char PREFIX_SEPARATOR = ':';
+ 
++    /** The variable prefix. */
++    private static final String VAR_START = "${";
++
++    /** The variable suffix. */
++    private static final String VAR_END = "}";
++
+     /** A map containing the default prefix lookups. */
+     private static final Map<String, Lookup> DEFAULT_PREFIX_LOOKUPS;
+ 
+@@ -378,7 +384,20 @@ public Object interpolate(Object value)
+     {
+         if (value instanceof String)
+         {
+-            return substitutor.replace((String) value);
++            String strValue = (String) value;
++            if (looksLikeSingleVariable(strValue))
++            {
++                Object resolvedValue = resolveSingleVariable(strValue);
++                if (resolvedValue != null && !(resolvedValue instanceof String))
++                {
++                    // If the value is again a string, it needs no special
++                    // treatment; it may also contain further variables which
++                    // must be resolved; therefore, the default mechanism is
++                    // applied.
++                    return resolvedValue;
++                }
++            }
++            return substitutor.replace(strValue);
+         }
+         return value;
+     }
+@@ -468,6 +487,45 @@ public String lookup(String key)
+         });
+     }
+ 
++    /**
++     * Interpolates a string value that seems to be a single variable.
++     *
++     * @param strValue the string to be interpolated
++     * @return the resolved value or <b>null</b> if resolving failed
++     */
++    private Object resolveSingleVariable(String strValue)
++    {
++        return resolve(extractVariableName(strValue));
++    }
++
++    /**
++     * Checks whether a value to be interpolated seems to be a single variable.
++     * In this case, it is resolved directly without using the
++     * {@code StrSubstitutor}. Note that it is okay if this method returns a
++     * false positive: In this case, resolving is going to fail, and standard
++     * mechanism is used.
++     *
++     * @param strValue the value to be interpolated
++     * @return a flag whether this value seems to be a single variable
++     */
++    private static boolean looksLikeSingleVariable(String strValue)
++    {
++        return strValue.startsWith(VAR_START) && strValue.endsWith(VAR_END);
++    }
++
++    /**
++     * Extracts the variable name from a value that consists of a single
++     * variable.
++     *
++     * @param strValue the value
++     * @return the extracted variable name
++     */
++    private static String extractVariableName(String strValue)
++    {
++        return strValue.substring(VAR_START.length(),
++                strValue.length() - VAR_END.length());
++    }
++
+     /**
+      * Creates a new instance based on the properties in the given specification
+      * object.
+diff --git a/src/test/java/org/apache/commons/configuration2/InterpolationTestHelper.java b/src/test/java/org/apache/commons/configuration2/InterpolationTestHelper.java
+index cf43bcdf9e..53226abd82 100644
+--- a/src/test/java/org/apache/commons/configuration2/InterpolationTestHelper.java
++++ b/src/test/java/org/apache/commons/configuration2/InterpolationTestHelper.java
+@@ -20,6 +20,7 @@
+ import static org.junit.Assert.fail;
+ 
+ import java.awt.event.KeyEvent;
++import java.util.Arrays;
+ import java.util.List;
+ import java.util.Map;
+ 
+@@ -61,11 +62,10 @@ public static void testInterpolation(Configuration config)
+         assertEquals("check first entry was interpolated",
+                 "/home/applicationRoot/1", arrayInt[0]);
+ 
+-        config.addProperty("path", "/temp,C:\\Temp,/usr/local/tmp");
++        config.addProperty("path", Arrays.asList("/temp", "C:\\Temp","/usr/local/tmp"));
+         config.setProperty("path.current", "${path}");
+         assertEquals("Interpolation with multi-valued property",
+-                String.valueOf(config.getProperty("path")),
+-                config.getString("path.current"));
++                "/temp", config.getString("path.current"));
+     }
+ 
+     /**
+diff --git a/src/test/java/org/apache/commons/configuration2/TestAbstractConfigurationBasicFeatures.java b/src/test/java/org/apache/commons/configuration2/TestAbstractConfigurationBasicFeatures.java
+index 51e300266e..ad4b70ecbf 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestAbstractConfigurationBasicFeatures.java
++++ b/src/test/java/org/apache/commons/configuration2/TestAbstractConfigurationBasicFeatures.java
+@@ -460,6 +460,38 @@ public void testSetParentInterpolatorNoInterpolator()
+                 .getParentInterpolator());
+     }
+ 
++    /**
++     * Tests whether a property can reference an array using interpolation.
++     * This is related to CONFIGURATION-633.
++     */
++    @Test
++    public void testInterpolateArray()
++    {
++        PropertiesConfiguration config = new PropertiesConfiguration();
++        String[] values = {"some", "test", "values"};
++        final String keyArray = "testArray";
++        config.addProperty(keyArray, values);
++        config.addProperty(KEY_PREFIX, "${" + keyArray + "}");
++
++        assertArrayEquals("Wrong property", values, config.getStringArray(KEY_PREFIX));
++    }
++
++    /**
++     * Tests whether a property can reference a list using interpolation.
++     * This is related to CONFIGURATION-633.
++     */
++    @Test
++    public void testInterpolateList()
++    {
++        PropertiesConfiguration config = new PropertiesConfiguration();
++        List<String> values = Arrays.asList("some", "test", "values");
++        final String keyList = "testList";
++        config.addProperty(keyList, values);
++        config.addProperty(KEY_PREFIX, "${" + keyList + "}");
++
++        assertEquals("Wrong property", values, config.getList(String.class, KEY_PREFIX));
++    }
++
+     /**
+      * Tests getList() for single non-string values.
+      */
+diff --git a/src/test/java/org/apache/commons/configuration2/interpol/TestConfigurationInterpolator.java b/src/test/java/org/apache/commons/configuration2/interpol/TestConfigurationInterpolator.java
+index b21b6a99f8..b0d50a44fe 100644
+--- a/src/test/java/org/apache/commons/configuration2/interpol/TestConfigurationInterpolator.java
++++ b/src/test/java/org/apache/commons/configuration2/interpol/TestConfigurationInterpolator.java
+@@ -77,7 +77,7 @@ private static Lookup setUpTestLookup()
+      * @param value the value of this variable
+      * @return the test lookup object
+      */
+-    private static Lookup setUpTestLookup(final String var, final String value)
++    private static Lookup setUpTestLookup(final String var, final Object value)
+     {
+         Lookup lookup = EasyMock.createMock(Lookup.class);
+         EasyMock.expect(lookup.lookup(EasyMock.anyObject(String.class)))
+@@ -486,6 +486,53 @@ public void testEnableSubstitutionInVariables()
+                 interpolator.interpolate(var));
+     }
+ 
++    /**
++     * Tests a property value consisting of multiple variables.
++     */
++    @Test
++    public void testInterpolationMultipleVariables()
++    {
++        String value = "The ${subject} jumps over ${object}.";
++        interpolator.addDefaultLookup(setUpTestLookup("subject", "quick brown fox"));
++        interpolator.addDefaultLookup(setUpTestLookup("object", "the lazy dog"));
++        assertEquals("Wrong result", "The quick brown fox jumps over the lazy dog.",
++                interpolator.interpolate(value));
++    }
++
++    /**
++     * Tests an interpolation that consists of a single variable only. The
++     * variable's value should be returned verbatim.
++     */
++    @Test
++    public void testInterpolationSingleVariable()
++    {
++        Object value = 42;
++        interpolator.addDefaultLookup(setUpTestLookup(TEST_NAME, value));
++        assertEquals("Wrong result", value,
++                interpolator.interpolate("${" + TEST_NAME + "}"));
++    }
++
++    /**
++     * Tests a variable declaration which lacks the trailing closing bracket.
++     */
++    @Test
++    public void testInterpolationVariableIncomplete()
++    {
++        String value = "${" + TEST_NAME;
++        interpolator.addDefaultLookup(setUpTestLookup(TEST_NAME, "someValue"));
++        assertEquals("Wrong result", value, interpolator.interpolate(value));
++    }
++
++    /**
++     * Tests that an empty variable definition does not cause problems.
++     */
++    @Test
++    public void testInterpolateEmptyVariable()
++    {
++        String value = "${}";
++        assertEquals("Wrong result", value, interpolator.interpolate(value));
++    }
++
+     /**
+      * Tries to obtain an instance from a null specification.
+      */

@@ -1,0 +1,119 @@
+From 3c1dedc704313c610cbd3c3431e6afc4fd6daf30 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Fri, 13 Oct 2006 19:34:23 +0000
+Subject: [PATCH] - FIX: IVY complains about non-existent reports in the cache
+ directory (IVY-315)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484561 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                       |  2 ++
+ .../fr/jayasoft/ivy/ant/IvyPostResolveTask.java   | 11 ++++++++++-
+ src/java/fr/jayasoft/ivy/ant/IvyTask.java         |  6 +++---
+ .../java/fr/jayasoft/ivy/ant/IvyRetrieveTest.java | 15 +++++++++++++++
+ .../fr/jayasoft/ivy/ant/ivy-doubleretrieve.xml    | 12 ++++++++++++
+ 5 files changed, 42 insertions(+), 4 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/ivy-doubleretrieve.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 3d44d52b4..dd5d935be 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -10,6 +10,8 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - IMPROVE: Measure code coverage (IVY-323)
+ - IMPROVE: Add a 'conf' parameter to the ivy 'publish' ant task (IVY-322) (thanks to Emmanuel Pellereau)
+ 
++- FIX: IVY complains about non-existent reports in the cache directory (IVY-315)
++
+    version 1.4 - 2006-10-09
+ =====================================
+ Version 1.4-RC2 has been promoted to 1.4 on 2006-10-09, with documentation update.
+diff --git a/src/java/fr/jayasoft/ivy/ant/IvyPostResolveTask.java b/src/java/fr/jayasoft/ivy/ant/IvyPostResolveTask.java
+index 0be1ca20e..ce0124df3 100644
+--- a/src/java/fr/jayasoft/ivy/ant/IvyPostResolveTask.java
++++ b/src/java/fr/jayasoft/ivy/ant/IvyPostResolveTask.java
+@@ -47,6 +47,8 @@ public void setUseOrigin(boolean useOrigin) {
+     protected void prepareAndCheck() {
+         Ivy ivy = getIvyInstance();
+         
++        boolean orgAndModSetManually = (_organisation != null) && (_module != null);
++        
+         _organisation = getProperty(_organisation, ivy, "ivy.organisation");
+         _module = getProperty(_module, ivy, "ivy.module");
+ 
+@@ -76,7 +78,14 @@ protected void prepareAndCheck() {
+         	}
+         } else {        
+         	Message.debug("using standard ensure resolved");
+-        	ensureResolved(isHaltonfailure(), isUseOrigin(), isTransitive(), getOrganisation(), getModule(), getProperty(_conf, ivy, "ivy.resolved.configurations"));
++        	
++        	// if the organization and module has been manually specified, we'll reuse the resolved
++        	// data from another build (there is no way to know which configurations were resolved
++        	// there (TODO: maybe we can check which reports exist and extract the configurations
++        	// from these report names?)
++        	if (!orgAndModSetManually) {
++        		ensureResolved(isHaltonfailure(), isUseOrigin(), isTransitive(), getOrganisation(), getModule(), getProperty(_conf, ivy, "ivy.resolved.configurations"));
++        	}
+         	
+ 	        _conf = getProperty(_conf, ivy, "ivy.resolved.configurations");
+ 	        if ("*".equals(_conf)) {
+diff --git a/src/java/fr/jayasoft/ivy/ant/IvyTask.java b/src/java/fr/jayasoft/ivy/ant/IvyTask.java
+index 472edf6ac..889ef1710 100644
+--- a/src/java/fr/jayasoft/ivy/ant/IvyTask.java
++++ b/src/java/fr/jayasoft/ivy/ant/IvyTask.java
+@@ -113,9 +113,9 @@ protected void ensureResolved(boolean haltOnFailure, boolean useOrigin, String o
+     }
+     protected void ensureResolved(boolean haltOnFailure, boolean useOrigin, boolean transitive, String org, String module, String conf) {
+         ensureMessageInitialised();
+-        if (org != null  && module != null) {
+-            return;
+-        }
++//        if (org != null  && module != null) {
++//            return;
++//        }
+         String[] confs = getConfsToResolve(org, module, conf, false);
+         
+         if (confs.length > 0)  {
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyRetrieveTest.java b/test/java/fr/jayasoft/ivy/ant/IvyRetrieveTest.java
+index 2fdb30ef2..293c6a370 100644
+--- a/test/java/fr/jayasoft/ivy/ant/IvyRetrieveTest.java
++++ b/test/java/fr/jayasoft/ivy/ant/IvyRetrieveTest.java
+@@ -256,6 +256,21 @@ public void testSyncWithIvyPattern() throws Exception {
+         assertFalse(new File("build/test/lib/unk").exists()); 
+         assertFalse(new File("build/test/lib/default/unknown").exists()); 
+     }
++    
++    public void testDoubleRetrieveWithDifferentConfigurations() {
++    	// IVY-315
++        _project.setProperty("ivy.dep.file", "test/java/fr/jayasoft/ivy/ant/ivy-doubleretrieve.xml");
++        
++        _retrieve.setConf("compile");
++        _retrieve.execute();
++    	
++        _retrieve = new IvyRetrieve();
++        _retrieve.setProject(_project);
++        _retrieve.setCache(_cache);
++        _retrieve.setPattern(RETRIEVE_PATTERN);
++        _retrieve.setConf("compile,unittest");
++        _retrieve.execute();
++    }
+ 
+     // creates an empty file, creating parent directories if necessary
+     private void touch(File file) throws IOException {
+diff --git a/test/java/fr/jayasoft/ivy/ant/ivy-doubleretrieve.xml b/test/java/fr/jayasoft/ivy/ant/ivy-doubleretrieve.xml
+new file mode 100644
+index 000000000..69412df9d
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/ivy-doubleretrieve.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0"> 
++	<info organisation="jayasoft"
++	       module="retrieve-double"
++	       revision="1.0"
++	       status="release"
++	/>
++	<configurations>
++	    <conf name="default"/>
++	    <conf name="compile" extends="default"/>
++	    <conf name="unittest" extends="default"/>
++	</configurations>
++</ivy-module>

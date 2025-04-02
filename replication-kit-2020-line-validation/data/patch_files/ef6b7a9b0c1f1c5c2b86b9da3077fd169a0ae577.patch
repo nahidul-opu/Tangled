@@ -1,0 +1,188 @@
+From ef6b7a9b0c1f1c5c2b86b9da3077fd169a0ae577 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Sun, 11 May 2014 16:20:49 +0000
+Subject: [PATCH] Fix JCS-115: JDBCDiskCachePoolAccessManager is thread hostile
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1593811 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../auxiliary/disk/jdbc/JDBCDiskCache.java    |  7 +--
+ .../jdbc/JDBCDiskCachePoolAccessManager.java  | 47 +++++--------------
+ ...DBCDiskCachePoolAccessManagerUnitTest.java | 12 ++---
+ src/changes/changes.xml                       |  3 ++
+ 4 files changed, 23 insertions(+), 46 deletions(-)
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java
+index 01b6d33da..e3df030de 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java
+@@ -152,9 +152,10 @@ protected JDBCDiskCachePoolAccess initializePoolAccess( JDBCDiskCacheAttributes
+         JDBCDiskCachePoolAccess poolAccess1 = null;
+         if ( cattr.getConnectionPoolName() != null )
+         {
+-            JDBCDiskCachePoolAccessManager manager = JDBCDiskCachePoolAccessManager.getInstance( compositeCacheManager
+-                .getConfigurationProperties() );
+-            poolAccess1 = manager.getJDBCDiskCachePoolAccess( cattr.getConnectionPoolName() );
++            JDBCDiskCachePoolAccessManager manager = JDBCDiskCachePoolAccessManager.getInstance();
++            poolAccess1 = manager.getJDBCDiskCachePoolAccess(
++                    cattr.getConnectionPoolName(),
++                    compositeCacheManager.getConfigurationProperties() );
+         }
+         else
+         {
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManager.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManager.java
+index 9cbd7d2f6..458ccd185 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManager.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManager.java
+@@ -56,33 +56,24 @@ public class JDBCDiskCachePoolAccessManager
+     /** The logger. */
+     private static final Log log = LogFactory.getLog( JDBCDiskCachePoolAccessManager.class );
+ 
+-    /**
+-     * You can specify the properties to be used to configure the thread pool. Setting this post
+-     * initialization will have no effect.
+-     */
+-    private Properties props = null;
+-
+     /**
+      * Singleton, private
+-     * <p>
+-     * @param props
+      */
+-    private JDBCDiskCachePoolAccessManager( Properties props )
++    private JDBCDiskCachePoolAccessManager()
+     {
+-        this.setProps( props );
++        // empty
+     }
+ 
+     /**
+      * returns a singleton instance
+      * <p>
+-     * @param props
+      * @return JDBCDiskCachePoolAccessManager
+      */
+-    public static synchronized JDBCDiskCachePoolAccessManager getInstance( Properties props )
++    public static synchronized JDBCDiskCachePoolAccessManager getInstance()
+     {
+         if ( instance == null )
+         {
+-            instance = new JDBCDiskCachePoolAccessManager( props );
++            instance = new JDBCDiskCachePoolAccessManager();
+         }
+         return instance;
+     }
+@@ -90,16 +81,17 @@ public static synchronized JDBCDiskCachePoolAccessManager getInstance( Propertie
+     /**
+      * Returns a pool for the name if one has been created. Otherwise it creates a pool.
+      * <p>
+-     * @param poolName
++     * @param poolName the name of the pool
++     * @param props the configuration properties for the pool
+      * @return JDBCDiskCachePoolAccess
+      */
+-    public synchronized JDBCDiskCachePoolAccess getJDBCDiskCachePoolAccess( String poolName )
++    public synchronized JDBCDiskCachePoolAccess getJDBCDiskCachePoolAccess( String poolName, Properties props )
+     {
+         JDBCDiskCachePoolAccess poolAccess = pools.get( poolName );
+ 
+         if ( poolAccess == null )
+         {
+-            JDBCDiskCachePoolAccessAttributes poolAttributes = configurePoolAccessAttributes( poolName );
++            JDBCDiskCachePoolAccessAttributes poolAttributes = configurePoolAccessAttributes( poolName, props );
+             try
+             {
+                 poolAccess = JDBCDiskCachePoolAccessFactory.createPoolAccess( poolAttributes );
+@@ -124,15 +116,16 @@ public synchronized JDBCDiskCachePoolAccess getJDBCDiskCachePoolAccess( String p
+     /**
+      * Configures the attributes using the properties.
+      * <p>
+-     * @param poolName
++     * @param poolName the name of the pool
++     * @param props the configuration properties for the pool
+      * @return JDBCDiskCachePoolAccessAttributes
+      */
+-    protected JDBCDiskCachePoolAccessAttributes configurePoolAccessAttributes( String poolName )
++    protected JDBCDiskCachePoolAccessAttributes configurePoolAccessAttributes( String poolName, Properties props )
+     {
+         JDBCDiskCachePoolAccessAttributes poolAttributes = new JDBCDiskCachePoolAccessAttributes();
+ 
+         String poolAccessAttributePrefix = POOL_CONFIGURATION_PREFIX + poolName + ATTRIBUTE_PREFIX;
+-        PropertySetter.setProperties( poolAttributes, getProps(), poolAccessAttributePrefix + "." );
++        PropertySetter.setProperties( poolAttributes, props, poolAccessAttributePrefix + "." );
+ 
+         poolAttributes.setPoolName( poolName );
+ 
+@@ -142,20 +135,4 @@ protected JDBCDiskCachePoolAccessAttributes configurePoolAccessAttributes( Strin
+         }
+         return poolAttributes;
+     }
+-
+-    /**
+-     * @param props the props to set
+-     */
+-    protected void setProps( Properties props )
+-    {
+-        this.props = props;
+-    }
+-
+-    /**
+-     * @return the props
+-     */
+-    protected Properties getProps()
+-    {
+-        return props;
+-    }
+ }
+diff --git a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManagerUnitTest.java b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManagerUnitTest.java
+index 329d828ea..5bea66196 100644
+--- a/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManagerUnitTest.java
++++ b/commons-jcs-core/src/test/java/org/apache/commons/jcs/auxiliary/disk/jdbc/JDBCDiskCachePoolAccessManagerUnitTest.java
+@@ -50,12 +50,10 @@ public void testConfigurePoolAccessAttributes_Simple()
+         props.put( prefix + ".maxActive", String.valueOf( maxActive ) );
+         props.put( prefix + ".driverClassName", driverClassName );
+ 
+-        JDBCDiskCachePoolAccessManager manager = JDBCDiskCachePoolAccessManager.getInstance( props );
+-        // in case another test has initilized this. See: JCS-114, JCS-115
+-        manager.setProps( props );
++        JDBCDiskCachePoolAccessManager manager = JDBCDiskCachePoolAccessManager.getInstance();
+ 
+         // DO WORK
+-        JDBCDiskCachePoolAccessAttributes result = manager.configurePoolAccessAttributes( poolName );
++        JDBCDiskCachePoolAccessAttributes result = manager.configurePoolAccessAttributes( poolName, props );
+ 
+         // VERIFY
+         assertEquals( "Wrong url value", url, result.getUrl() );
+@@ -91,9 +89,7 @@ public void testGetJDBCDiskCachePoolAccess_Simple()
+         props.put( prefix + ".maxActive", String.valueOf( maxActive ) );
+         props.put( prefix + ".driverClassName", driverClassName );
+ 
+-        JDBCDiskCachePoolAccessManager manager = JDBCDiskCachePoolAccessManager.getInstance( props );
+-        // in case another test has initilized this. See: JCS-114, JCS-115
+-        manager.setProps( props );
++        JDBCDiskCachePoolAccessManager manager = JDBCDiskCachePoolAccessManager.getInstance();
+ 
+         System.setProperty( "hsqldb.cache_scale", "8" );
+ 
+@@ -106,7 +102,7 @@ public void testGetJDBCDiskCachePoolAccess_Simple()
+         HsqlSetupTableUtil.setupTABLE( cConn, "JCSTESTTABLE_ACCESS" );
+ 
+         // DO WORK
+-        JDBCDiskCachePoolAccess result = manager.getJDBCDiskCachePoolAccess( poolName );
++        JDBCDiskCachePoolAccess result = manager.getJDBCDiskCachePoolAccess( poolName, props );
+ 
+         // VERIFY
+         assertNotNull( "Should have an access class", result );
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 962db9c32..cbc0e498e 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,9 @@
+ 	</properties>
+ 	<body>
+ 		<release version="2.0" date="unreleased" description="JDK 1.6 based major release">
++            <action issue="JCS-115" dev="tv" type="fix" due-to="Sebastian Bazley">
++                JDBCDiskCachePoolAccessManager is thread hostile
++            </action>
+             <action issue="JCS-118" dev="olamy" type="add" due-to="Romain Manni-Bucau">
+                 Add jcache implementation
+             </action>

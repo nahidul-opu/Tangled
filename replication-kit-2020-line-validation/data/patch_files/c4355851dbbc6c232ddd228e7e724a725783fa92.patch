@@ -1,0 +1,349 @@
+From c4355851dbbc6c232ddd228e7e724a725783fa92 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 21 Apr 2010 21:40:59 +0000
+Subject: [PATCH] FIX: Packager resolver always extracts all files from
+ archives even when the packaging instructions contains include tags
+ (IVY-1179) (thanks to Stefan De Boey)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@936523 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   2 +
+ .../plugins/resolver/packager/packager.xsl    |   8 +-
+ .../resolver/PackagerResolverTest.java        |  85 +++++++++++++++++-
+ .../IVY-1179/repo/org/A/1.0/ivy.xml           |  29 ++++++
+ .../IVY-1179/repo/org/A/1.0/packager.xml      |  34 +++++++
+ .../IVY-1179/repo/org/B/1.0/ivy.xml           |  29 ++++++
+ .../IVY-1179/repo/org/B/1.0/packager.xml      |  34 +++++++
+ .../IVY-1179/website/dist/A-1.0.zip           | Bin 0 -> 308 bytes
+ .../IVY-1179/website/dist/B-1.0.tar.gz        | Bin 0 -> 138 bytes
+ 9 files changed, 216 insertions(+), 5 deletions(-)
+ create mode 100644 test/repositories/IVY-1179/repo/org/A/1.0/ivy.xml
+ create mode 100644 test/repositories/IVY-1179/repo/org/A/1.0/packager.xml
+ create mode 100644 test/repositories/IVY-1179/repo/org/B/1.0/ivy.xml
+ create mode 100644 test/repositories/IVY-1179/repo/org/B/1.0/packager.xml
+ create mode 100644 test/repositories/IVY-1179/website/dist/A-1.0.zip
+ create mode 100644 test/repositories/IVY-1179/website/dist/B-1.0.tar.gz
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e6adeacd0..fc527fac7 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -34,6 +34,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Andrea Bernardo Ciddio
+ 	Archie Cobbs
+ 	Flavio Coutinho da Costa
++	Stefan De Boey
+ 	Martin Eigenbrodt
+ 	Gregory Fernandez
+ 	Danno Ferrin
+@@ -120,6 +121,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Trace a message when a property file referenced from the settings doesn't exixts (IVY-1074)
+ - IMPROVEMENT: use defaultconf in combination with defaultconfmapping (IVY-1135) (thanks to Jon Schneider)
+ 
++- FIX: Packager resolver always extracts all files from archives even when the packaging instructions contains include tags (IVY-1179) (thanks to Stefan De Boey)
+ - FIX: Ivy cannot connect to URLs with '_' in their hostname
+ - FIX: Transitive dependencies resolutions issue when eviction is triggered (IVY-1178)
+ - FIX: Can't deal with [VERSION] version pattern from Maven (IVY-1177) (thanks to Richard Vowles)
+diff --git a/src/java/org/apache/ivy/plugins/resolver/packager/packager.xsl b/src/java/org/apache/ivy/plugins/resolver/packager/packager.xsl
+index 286750b01..2bb118dda 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/packager/packager.xsl
++++ b/src/java/org/apache/ivy/plugins/resolver/packager/packager.xsl
+@@ -419,9 +419,9 @@
+             <xsl:when test="$type = 'zip' or $type = 'war' or $type = 'jar'">
+                 <unzip src="{$file}" dest="{$dir}">
+                     <xsl:if test="$includes">
+-                        <fileset dir=".">
++                        <patternset>
+                             <xsl:copy-of select="$includes"/>
+-                        </fileset>
++                        </patternset>
+                     </xsl:if>
+                 </unzip>
+             </xsl:when>
+@@ -438,9 +438,9 @@
+                         </xsl:when>
+                     </xsl:choose>
+                     <xsl:if test="$includes">
+-                        <fileset dir=".">
++                        <patternset>
+                             <xsl:copy-of select="$includes"/>
+-                        </fileset>
++                        </patternset>
+                     </xsl:if>
+                 </untar>
+             </xsl:when>
+diff --git a/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java
+index 67bf9ded7..e73cbb51d 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/PackagerResolverTest.java
+@@ -107,7 +107,6 @@ public void testFile() throws Exception {
+         try {
+             // set the locale to UK as workaround for SUN bug 6240963
+             Locale.setDefault(Locale.UK);
+-
+     
+             // Create and configure resolver
+             PackagerResolver resolver = new PackagerResolver();
+@@ -183,4 +182,88 @@ public void testFile() throws Exception {
+             Locale.setDefault(oldLocale);
+         }
+     }
++    
++    public void testZipResourceInclusion() throws Exception {
++        Locale oldLocale = Locale.getDefault();
++        
++        try {
++            // set the locale to UK as workaround for SUN bug 6240963
++            Locale.setDefault(Locale.UK);
++    
++            // Create and configure resolver
++            PackagerResolver resolver = new PackagerResolver();
++            resolver.setSettings(_settings);
++            File repoRoot = new File("test/repositories/IVY-1179/repo");
++            resolver.addIvyPattern(
++              "" + new File(repoRoot, "[organisation]/[module]/[revision]/ivy.xml").getAbsoluteFile().toURL().toExternalForm());
++            resolver.setPackagerPattern(
++              "" + new File(repoRoot, "[organisation]/[module]/[revision]/packager.xml").getAbsoluteFile().toURL().toExternalForm());
++            resolver.setBuildRoot(_builddir);
++            resolver.setResourceCache(_cachedir);
++            resolver.setPreserveBuildDirectories(true);
++            resolver.setVerbose(true);
++            
++            resolver.setProperty("packager.website.url", 
++                new File("test/repositories/IVY-1179/website").getAbsoluteFile().toURL().toExternalForm());
++    
++            resolver.setName("packager");
++    
++            // Get module descriptor
++            ModuleRevisionId mrid = ModuleRevisionId.newInstance("org", "A", "1.0");
++            ResolvedModuleRevision rmr = resolver.getDependency(
++              new DefaultDependencyDescriptor(mrid, false), _data);
++    
++            // Download artifact
++            Artifact artifact = new DefaultArtifact(mrid, rmr.getPublicationDate(), "A", "jar", "jar");
++            resolver.download(new Artifact[] {artifact}, downloadOptions());
++            
++            // assert that the file README is not extracted from the archive
++            File readme = new File(_builddir, "org/A/1.0/extract/A-1.0/README");
++            assertFalse(readme.exists());
++        } finally {
++            Locale.setDefault(oldLocale);
++        }
++    }
++    
++    public void testTarResourceInclusion() throws Exception {
++        Locale oldLocale = Locale.getDefault();
++        
++        try {
++            // set the locale to UK as workaround for SUN bug 6240963
++            Locale.setDefault(Locale.UK);
++
++            // Create and configure resolver
++            PackagerResolver resolver = new PackagerResolver();
++            resolver.setSettings(_settings);
++            File repoRoot = new File("test/repositories/IVY-1179/repo");
++            resolver.addIvyPattern(
++              "" + new File(repoRoot, "[organisation]/[module]/[revision]/ivy.xml").getAbsoluteFile().toURL().toExternalForm());
++            resolver.setPackagerPattern(
++              "" + new File(repoRoot, "[organisation]/[module]/[revision]/packager.xml").getAbsoluteFile().toURL().toExternalForm());
++            resolver.setBuildRoot(_builddir);
++            resolver.setResourceCache(_cachedir);
++            resolver.setPreserveBuildDirectories(true);
++            resolver.setVerbose(true);
++            
++            resolver.setProperty("packager.website.url", 
++                new File("test/repositories/IVY-1179/website").getAbsoluteFile().toURL().toExternalForm());
++    
++            resolver.setName("packager");
++    
++            // Get module descriptor
++            ModuleRevisionId mrid = ModuleRevisionId.newInstance("org", "B", "1.0");
++            ResolvedModuleRevision rmr = resolver.getDependency(
++              new DefaultDependencyDescriptor(mrid, false), _data);
++    
++            // Download artifact
++            Artifact artifact = new DefaultArtifact(mrid, rmr.getPublicationDate(), "B", "jar", "jar");
++            resolver.download(new Artifact[] {artifact}, downloadOptions());
++            
++            // assert that the file README is not extracted from the archive
++            File readme = new File(_builddir, "org/B/1.0/extract/B-1.0/README");
++            assertFalse(readme.exists());
++        } finally {
++            Locale.setDefault(oldLocale);
++        }
++    }
+ }
+diff --git a/test/repositories/IVY-1179/repo/org/A/1.0/ivy.xml b/test/repositories/IVY-1179/repo/org/A/1.0/ivy.xml
+new file mode 100644
+index 000000000..8a8dc96ae
+--- /dev/null
++++ b/test/repositories/IVY-1179/repo/org/A/1.0/ivy.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivy-module version="1.3">
++	<info organisation="org"
++	       module="A"
++	       revision="1.0"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++	<publications>
++        <artifact />
++	</publications>
++</ivy-module>
+diff --git a/test/repositories/IVY-1179/repo/org/A/1.0/packager.xml b/test/repositories/IVY-1179/repo/org/A/1.0/packager.xml
+new file mode 100644
+index 000000000..640c7d20d
+--- /dev/null
++++ b/test/repositories/IVY-1179/repo/org/A/1.0/packager.xml
+@@ -0,0 +1,34 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<packager-module version="1.0">
++
++    <property name="name" value="${ivy.packager.module}"/>
++    <property name="version" value="${ivy.packager.revision}"/>
++    <property name="archive" value="${name}-${version}"/>
++
++    <resource dest="extract" url="${packager.website.url}/dist/${archive}.zip"
++      sha1="c79d0b496dbb7f0d5affda645f3a0476f8999871">
++        <include name="${archive}/${name}.jar"/>
++    </resource>
++
++    <build>
++        <move file="extract/${archive}/${name}.jar" todir="artifacts/jars"/>
++    </build>
++
++</packager-module>
+diff --git a/test/repositories/IVY-1179/repo/org/B/1.0/ivy.xml b/test/repositories/IVY-1179/repo/org/B/1.0/ivy.xml
+new file mode 100644
+index 000000000..8dace37ce
+--- /dev/null
++++ b/test/repositories/IVY-1179/repo/org/B/1.0/ivy.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<ivy-module version="1.3">
++	<info organisation="org"
++	       module="B"
++	       revision="1.0"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++	<publications>
++        <artifact />
++	</publications>
++</ivy-module>
+diff --git a/test/repositories/IVY-1179/repo/org/B/1.0/packager.xml b/test/repositories/IVY-1179/repo/org/B/1.0/packager.xml
+new file mode 100644
+index 000000000..e9b61b4ce
+--- /dev/null
++++ b/test/repositories/IVY-1179/repo/org/B/1.0/packager.xml
+@@ -0,0 +1,34 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.
++-->
++<packager-module version="1.0">
++
++    <property name="name" value="${ivy.packager.module}"/>
++    <property name="version" value="${ivy.packager.revision}"/>
++    <property name="archive" value="${name}-${version}"/>
++
++    <resource dest="extract" url="${packager.website.url}/dist/${archive}.tar.gz"
++      sha1="9cc9462ce72ad46d7dd6741d2cf97551ebec7df2">
++        <include name="${archive}/${name}.jar"/>
++    </resource>
++
++    <build>
++        <move file="extract/${archive}/${name}.jar" todir="artifacts/jars"/>
++    </build>
++
++</packager-module>
+diff --git a/test/repositories/IVY-1179/website/dist/A-1.0.zip b/test/repositories/IVY-1179/website/dist/A-1.0.zip
+new file mode 100644
+index 0000000000000000000000000000000000000000..b497ed08b7aa079164fbc80087bb52821cedc473
+GIT binary patch
+literal 308
+zcmWIWW@h1H0D&Dzoi<<wlwbqWj=F|=2KoVTHQ!cDus~MB4Oio+mz7wAP?#8wY8Ve(
+zVUVk%i?3^dHzSh>18$2UmIy%Yf;j`B2b)76iWPvA3J^o|K%Irqh|OULjlOV=FlVxY
+Qf`Ne<2$uutauA0B0BLq0J^%m!
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/repositories/IVY-1179/website/dist/B-1.0.tar.gz b/test/repositories/IVY-1179/website/dist/B-1.0.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6f634c7795f0ab813e09026d869062025b01e65
+GIT binary patch
+literal 138
+zcmV;50CoQ#iwFp$0>4WD075M>E-)^1VR8WN(<>6fPz;6PEF~MDob=|Q=}?Jb2UsNg
+z7i8M1s+zcbCUf*ZS#C1nPNkSRA~<it=^jI5SU3dXxz$9Oj9Rt5|1y0)KdN%AKOm|x
+s1G#PJU;?#jd;j<Pc)nIDa;<;<zq!loTmR_(t+iI_4^gu}_5cb100DDARsaA1
+
+literal 0
+HcmV?d00001
+

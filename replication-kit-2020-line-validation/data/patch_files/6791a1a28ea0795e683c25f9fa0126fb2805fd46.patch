@@ -1,0 +1,250 @@
+From 6791a1a28ea0795e683c25f9fa0126fb2805fd46 Mon Sep 17 00:00:00 2001
+From: Aaron Smuts <asmuts@apache.org>
+Date: Mon, 19 Mar 2007 00:55:31 +0000
+Subject: [PATCH] FIX JCS-20
+
+Fixed partial key removal sql bug.  Added a unit test for the fix.
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/jcs/trunk@519770 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../auxiliary/disk/jdbc/JDBCDiskCache.java    |   4 +-
+ src/test-conf/TestJDBCDiskCacheRemoval.ccf    |  46 ++++++
+ .../jdbc/JDBCDiskCacheRemovalUnitTest.java    | 154 ++++++++++++++++++
+ 3 files changed, 202 insertions(+), 2 deletions(-)
+ create mode 100644 src/test-conf/TestJDBCDiskCacheRemoval.ccf
+ create mode 100644 src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheRemovalUnitTest.java
+
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java b/src/java/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java
+index 65b21702d..6db821707 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCache.java
+@@ -554,7 +554,7 @@ public boolean doRemove( Serializable key )
+             {
+                 // remove all keys of the same name group.
+                 sql = "delete from " + getJdbcDiskCacheAttributes().getTableName() + " where REGION = '"
+-                    + this.getCacheName() + "' and CACHE_KEY = like '" + key + "%'";
++                    + this.getCacheName() + "' and CACHE_KEY like '" + key + "%'";
+             }
+             Connection con = poolAccess.getConnection();
+             Statement sStatement = null;
+@@ -567,7 +567,7 @@ public boolean doRemove( Serializable key )
+             }
+             catch ( SQLException e )
+             {
+-                log.error( "Problem creating statement.", e );
++                log.error( "Problem creating statement. sql [" + sql + "]", e );
+                 alive = false;
+             }
+             finally
+diff --git a/src/test-conf/TestJDBCDiskCacheRemoval.ccf b/src/test-conf/TestJDBCDiskCacheRemoval.ccf
+new file mode 100644
+index 000000000..909968b88
+--- /dev/null
++++ b/src/test-conf/TestJDBCDiskCacheRemoval.ccf
+@@ -0,0 +1,46 @@
++# Cache configuration for the 'TestHSQLDiskCache' test. The memory cache has a
++# a maximum of 100 objects, so objects should get pushed into the disk cache
++
++jcs.default=JDBC
++jcs.default.cacheattributes=org.apache.jcs.engine.CompositeCacheAttributes
++jcs.default.cacheattributes.MaxObjects=0
++jcs.default.cacheattributes.MemoryCacheName=org.apache.jcs.engine.memory.lru.LRUMemoryCache
++jcs.default.cacheattributes.UseMemoryShrinker=false
++jcs.default.cacheattributes.MaxMemoryIdleTimeSeconds=3600
++jcs.default.cacheattributes.ShrinkerIntervalSeconds=60
++jcs.default.elementattributes=org.apache.jcs.engine.ElementAttributes
++jcs.default.elementattributes.IsEternal=false
++jcs.default.elementattributes.MaxLifeSeconds=700
++jcs.default.elementattributes.IdleTime=1800
++jcs.default.elementattributes.IsSpool=true
++jcs.default.elementattributes.IsRemote=true
++jcs.default.elementattributes.IsLateral=true
++
++##############################################################
++################## AUXILIARY CACHES AVAILABLE ################
++# JDBC disk cache
++jcs.auxiliary.JDBC=org.apache.jcs.auxiliary.disk.jdbc.JDBCDiskCacheFactory
++jcs.auxiliary.JDBC.attributes=org.apache.jcs.auxiliary.disk.jdbc.JDBCDiskCacheAttributes
++jcs.auxiliary.JDBC.attributes.userName=sa
++jcs.auxiliary.JDBC.attributes.password=
++jcs.auxiliary.JDBC.attributes.url=jdbc:hsqldb:target/cache_hsql_db
++jcs.auxiliary.JDBC.attributes.driverClassName=org.hsqldb.jdbcDriver
++jcs.auxiliary.JDBC.attributes.tableName=${DATABASE_NAME}
++jcs.auxiliary.JDBC.attributes.testBeforeInsert=false
++jcs.auxiliary.JDBC.attributes.maxActive=15
++jcs.auxiliary.JDBC.attributes.allowRemoveAll=true
++jcs.auxiliary.JDBC.attributes.MaxPurgatorySize=10000000
++jcs.auxiliary.JDBC.attributes.EventQueueType=POOLED
++jcs.auxiliary.JDBC.attributes.EventQueuePoolName=disk_cache_event_queue
++
++
++##############################################################
++################## OPTIONAL THREAD POOL CONFIGURATION #########
++# Disk Cache pool
++thread_pool.disk_cache_event_queue.useBoundary=false
++thread_pool.disk_cache_event_queue.boundarySize=500
++thread_pool.disk_cache_event_queue.maximumPoolSize=15
++thread_pool.disk_cache_event_queue.minimumPoolSize=10
++thread_pool.disk_cache_event_queue.keepAliveTime=3500
++thread_pool.disk_cache_event_queue.whenBlockedPolicy=RUN
++thread_pool.disk_cache_event_queue.startUpSize=10
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheRemovalUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheRemovalUnitTest.java
+new file mode 100644
+index 000000000..3b92ad8de
+--- /dev/null
++++ b/src/test/org/apache/jcs/auxiliary/disk/jdbc/JDBCDiskCacheRemovalUnitTest.java
+@@ -0,0 +1,154 @@
++package org.apache.jcs.auxiliary.disk.jdbc;
++
++import java.sql.Connection;
++import java.sql.DriverManager;
++import java.sql.SQLException;
++import java.sql.Statement;
++import java.util.Properties;
++
++import junit.framework.TestCase;
++
++import org.apache.jcs.JCS;
++
++/** Tests for the removal functionality. */
++public class JDBCDiskCacheRemovalUnitTest
++    extends TestCase
++{
++    /** db name -- set in system props */
++    private String databaseName = "JCS_STORE_REMOVAL";
++
++    /**
++     * Test setup
++     */
++    public void setUp()
++    {
++        System.setProperty( "DATABASE_NAME", databaseName );
++        JCS.setConfigFilename( "/TestJDBCDiskCacheRemoval.ccf" );
++    }
++
++    /**
++     * Verify the fix for BUG JCS-20
++     * <p>
++     * Setup an hsql db. Add an item. Remove using partial key.
++     */
++    public void testPartialKeyRemoval_Good()
++        throws Exception
++    {
++        // SETUP
++        setupDatabase();
++
++        String keyPart1 = "part1";
++        String keyPart2 = "part2";
++        String region = "testCache1";
++        String data = "adfadsfasfddsafasasd";
++
++        JCS jcs = JCS.getInstance( region );
++
++        // DO WORK
++        jcs.put( keyPart1 + ":" + keyPart2, data );
++        Thread.sleep( 1000 );
++
++        // VERIFY
++        String resultBeforeRemove = (String) jcs.get( keyPart1 + ":" + keyPart2 );
++        assertEquals( "Wrong result", data, resultBeforeRemove );
++
++        jcs.remove( keyPart1 + ":" );
++        String resultAfterRemove = (String) jcs.get( keyPart1 + ":" + keyPart2 );
++        assertNull( "Should not have a result after removal.", resultAfterRemove );
++        
++        System.out.println( jcs.getStats() );
++    }
++
++    /**
++     * Create the database.
++     * @throws SQLException
++     */
++    private void setupDatabase()
++        throws InstantiationException, IllegalAccessException, ClassNotFoundException, SQLException
++    {
++        System.setProperty( "hsqldb.cache_scale", "8" );
++
++        String rafroot = "target";
++        Properties p = new Properties();
++        String driver = p.getProperty( "driver", "org.hsqldb.jdbcDriver" );
++        String url = p.getProperty( "url", "jdbc:hsqldb:" );
++        String database = p.getProperty( "database", rafroot + "/cache_hsql_db" );
++        String user = p.getProperty( "user", "sa" );
++        String password = p.getProperty( "password", "" );
++
++        new org.hsqldb.jdbcDriver();
++        Class.forName( driver ).newInstance();
++        Connection cConn = DriverManager.getConnection( url + database, user, password );
++
++        setupTABLE( cConn );
++    }
++
++    /**
++     * SETUP TABLE FOR CACHE
++     * @param cConn
++     */
++    private void setupTABLE( Connection cConn )
++    {
++        boolean newT = true;
++
++        StringBuffer createSql = new StringBuffer();
++        createSql.append( "CREATE CACHED TABLE " + databaseName );
++        createSql.append( "( " );
++        createSql.append( "CACHE_KEY             VARCHAR(250)          NOT NULL, " );
++        createSql.append( "REGION                VARCHAR(250)          NOT NULL, " );
++        createSql.append( "ELEMENT               BINARY, " );
++        createSql.append( "CREATE_TIME           DATE, " );
++        createSql.append( "CREATE_TIME_SECONDS   BIGINT, " );
++        createSql.append( "MAX_LIFE_SECONDS      BIGINT, " );
++        createSql.append( "SYSTEM_EXPIRE_TIME_SECONDS      BIGINT, " );
++        createSql.append( "IS_ETERNAL            CHAR(1), " );
++        createSql.append( "PRIMARY KEY (CACHE_KEY, REGION) " );
++        createSql.append( ");" );
++
++        Statement sStatement = null;
++        try
++        {
++            sStatement = cConn.createStatement();
++        }
++        catch ( SQLException e )
++        {
++            e.printStackTrace();
++        }
++
++        try
++        {
++            sStatement.executeQuery( createSql.toString() );
++            sStatement.close();
++        }
++        catch ( SQLException e )
++        {
++            if ( e.toString().indexOf( "already exists" ) != -1 )
++            {
++                newT = false;
++            }
++            else
++            {
++                // TODO figure out if it exists prior to trying to create it.
++                // log.error( "Problem creating table.", e );
++                e.printStackTrace();
++            }
++        }
++
++        String setupData[] = { "create index iKEY on " + databaseName + " (CACHE_KEY, REGION)" };
++
++        if ( newT )
++        {
++            for ( int i = 1; i < setupData.length; i++ )
++            {
++                try
++                {
++                    sStatement.executeQuery( setupData[i] );
++                }
++                catch ( SQLException e )
++                {
++                    System.out.println( "Exception: " + e );
++                }
++            }
++        } // end ifnew
++    }
++}

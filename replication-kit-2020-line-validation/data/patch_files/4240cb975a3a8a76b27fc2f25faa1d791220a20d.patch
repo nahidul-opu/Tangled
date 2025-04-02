@@ -1,0 +1,60 @@
+From 4240cb975a3a8a76b27fc2f25faa1d791220a20d Mon Sep 17 00:00:00 2001
+From: Mark Reddy <mark.l.reddy@gmail.com>
+Date: Thu, 30 Jun 2016 09:41:51 -0700
+Subject: [PATCH] PARQUET-544: Add closed flag to allow for closeable contract
+ adherence
+
+The closeable interface states:
+> Closes this stream and releases any system resources associated with it. If the stream is already closed then invoking this method has no effect.
+
+As InternalParquetRecordWriter implements this interface we should adhere to this contract.
+
+Author: Mark Reddy <mark.l.reddy@gmail.com>
+
+Closes #345 from markreddy/PARQUET-544-adhere-to-closeable-contract and squashes the following commits:
+
+135db9b [Mark Reddy] PARQUET-544: add closed flag to allow for adherence to closeable contract
+---
+ .../hadoop/InternalParquetRecordWriter.java   | 21 ++++++++++++-------
+ 1 file changed, 13 insertions(+), 8 deletions(-)
+
+diff --git a/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/InternalParquetRecordWriter.java b/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/InternalParquetRecordWriter.java
+index 26d9c50728..d5c57ab95b 100644
+--- a/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/InternalParquetRecordWriter.java
++++ b/parquet-hadoop/src/main/java/org/apache/parquet/hadoop/InternalParquetRecordWriter.java
+@@ -56,6 +56,8 @@ class InternalParquetRecordWriter<T> {
+   private final boolean validating;
+   private final ParquetProperties props;
+ 
++  private boolean closed;
++
+   private long recordCount = 0;
+   private long recordCountForNextMemCheck = MINIMUM_RECORD_COUNT_FOR_CHECK;
+   private long lastRowGroupEndPos = 0;
+@@ -103,15 +105,18 @@ private void initStore() {
+   }
+ 
+   public void close() throws IOException, InterruptedException {
+-    flushRowGroupToStore();
+-    FinalizedWriteContext finalWriteContext = writeSupport.finalizeWrite();
+-    Map<String, String> finalMetadata = new HashMap<String, String>(extraMetaData);
+-    String modelName = writeSupport.getName();
+-    if (modelName != null) {
+-      finalMetadata.put(ParquetWriter.OBJECT_MODEL_NAME_PROP, modelName);
++    if (!closed) {
++      flushRowGroupToStore();
++      FinalizedWriteContext finalWriteContext = writeSupport.finalizeWrite();
++      Map<String, String> finalMetadata = new HashMap<String, String>(extraMetaData);
++      String modelName = writeSupport.getName();
++      if (modelName != null) {
++        finalMetadata.put(ParquetWriter.OBJECT_MODEL_NAME_PROP, modelName);
++      }
++      finalMetadata.putAll(finalWriteContext.getExtraMetaData());
++      parquetFileWriter.end(finalMetadata);
++      closed = true;
+     }
+-    finalMetadata.putAll(finalWriteContext.getExtraMetaData());
+-    parquetFileWriter.end(finalMetadata);
+   }
+ 
+   public void write(T value) throws IOException, InterruptedException {

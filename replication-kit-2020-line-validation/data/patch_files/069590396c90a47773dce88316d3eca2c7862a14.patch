@@ -1,0 +1,97 @@
+From 069590396c90a47773dce88316d3eca2c7862a14 Mon Sep 17 00:00:00 2001
+From: Sebastien Brisard <celestin@apache.org>
+Date: Mon, 11 Jun 2012 05:52:16 +0000
+Subject: [PATCH] MATH-803:   - modified OpenMapRealVector.ebeMultiply() and
+ ebeDivide() to handle special cases  0d * NaN, 0d * Infinity, 0d / 0d and 0d
+ / NaN.   - added implementation of isNaN() and isInfinite() to
+ SparseRealVectorTest.SparseRealVectorTestImpl in order to allow for testing
+ of OpenMapRealVector.ebeMultiply() and ebeDivide() with mixed types.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/math/trunk@1348721 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../math3/linear/OpenMapRealVector.java       | 31 ++++++++++++++++---
+ .../math3/linear/SparseRealVectorTest.java    | 17 ++++++++--
+ 2 files changed, 41 insertions(+), 7 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/math3/linear/OpenMapRealVector.java b/src/main/java/org/apache/commons/math3/linear/OpenMapRealVector.java
+index 2ca34470c0..294ac5726e 100644
+--- a/src/main/java/org/apache/commons/math3/linear/OpenMapRealVector.java
++++ b/src/main/java/org/apache/commons/math3/linear/OpenMapRealVector.java
+@@ -341,10 +341,14 @@ public double dotProduct(RealVector v) {
+     public OpenMapRealVector ebeDivide(RealVector v) {
+         checkVectorDimensions(v.getDimension());
+         OpenMapRealVector res = new OpenMapRealVector(this);
+-        Iterator iter = entries.iterator();
+-        while (iter.hasNext()) {
+-            iter.advance();
+-            res.setEntry(iter.key(), iter.value() / v.getEntry(iter.key()));
++        /*
++         * MATH-803: it is not sufficient to loop through non zero entries of
++         * this only. Indeed, if this[i] = 0d and v[i] = 0d, then
++         * this[i] / v[i] = NaN, and not 0d.
++         */
++        final int n = getDimension();
++        for (int i = 0; i < n; i++) {
++            res.setEntry(i, this.getEntry(i) / v.getEntry(i));
+         }
+         return res;
+     }
+@@ -359,6 +363,25 @@ public OpenMapRealVector ebeMultiply(RealVector v) {
+             iter.advance();
+             res.setEntry(iter.key(), iter.value() * v.getEntry(iter.key()));
+         }
++        /*
++         * MATH-803: the above loop assumes that 0d * x  = 0d for any double x,
++         * which allows to consider only the non-zero entries of this. However,
++         * this fails if this[i] == 0d and (v[i] = NaN or v[i] = Infinity).
++         *
++         * These special cases are handled below.
++         */
++        if (v.isNaN() || v.isInfinite()) {
++            final int n = getDimension();
++            for (int i = 0; i < n; i++) {
++                final double y = v.getEntry(i);
++                if (Double.isNaN(y)) {
++                    res.setEntry(i, Double.NaN);
++                } else if (Double.isInfinite(y)) {
++                    final double x = this.getEntry(i);
++                    res.setEntry(i, x * y);
++                }
++            }
++        }
+         return res;
+     }
+ 
+diff --git a/src/test/java/org/apache/commons/math3/linear/SparseRealVectorTest.java b/src/test/java/org/apache/commons/math3/linear/SparseRealVectorTest.java
+index d5e09f9064..3978fa552b 100644
+--- a/src/test/java/org/apache/commons/math3/linear/SparseRealVectorTest.java
++++ b/src/test/java/org/apache/commons/math3/linear/SparseRealVectorTest.java
+@@ -237,14 +237,25 @@ public double[] toArray() {
+ 
+         @Override
+         public boolean isNaN() {
+-            throw unsupported();
++            boolean isNaN = false;
++            for (int i = 0; i < data.length; i++) {
++                isNaN |= Double.isNaN(data[i]);
++            }
++            return isNaN;
+         }
+ 
+         @Override
+         public boolean isInfinite() {
+-            throw unsupported();
++            boolean isInfinite = false;
++            for (int i = 0; i < data.length; i++) {
++                final double x = data[i];
++                if (Double.isNaN(x)) {
++                    return false;
++                }
++                isInfinite |= Double.isInfinite(x);
++            }
++            return isInfinite;
+         }
+-
+     }
+ 
+     @Override

@@ -1,0 +1,96 @@
+From f9a8a38405a6c0c269b21318d1e469a7c392be1f Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Sat, 17 Jan 2015 15:06:53 +0000
+Subject: [PATCH] NET-566 UnixFTPEntryParser Drops Leading Spaces from File
+ Names Add option to parser to not skip leading spaces TODO make this the
+ default but still allow reversion
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/net/trunk@1652621 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../net/ftp/parser/UnixFTPEntryParser.java    | 28 ++++++++++++++++++-
+ .../ftp/parser/UnixFTPEntryParserTest.java    | 12 ++++++++
+ 2 files changed, 39 insertions(+), 1 deletion(-)
+
+diff --git a/src/main/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParser.java b/src/main/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParser.java
+index fe38d9fb9..a476cd0c7 100644
+--- a/src/main/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParser.java
++++ b/src/main/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParser.java
+@@ -122,11 +122,15 @@ or time (for numeric or recent standard format) [h]h:mm
+         */
+         + "(\\d+(?::\\d+)?)" // (20)
+ 
+-        + "\\s+" // separator
++        + "\\s" // separator
+ 
+         + "(.*)"; // the rest (21)
+ 
+ 
++    // if true, leading spaces are trimmed from file names
++    // this was the case for the original implementation
++    private final boolean trimLeadingSpaces;
++
+     /**
+      * The default constructor for a UnixFTPEntryParser object.
+      *
+@@ -153,9 +157,28 @@ public UnixFTPEntryParser()
+      * @since 1.4
+      */
+     public UnixFTPEntryParser(FTPClientConfig config)
++    {
++        this(config, true); // retain original behaviour (for now)
++    }
++
++    /**
++     * This constructor allows the creation of a UnixFTPEntryParser object with
++     * something other than the default configuration.
++     *
++     * @param config The {@link FTPClientConfig configuration} object used to
++     * configure this parser.
++     * @param trimLeadingSpaces if {@code true}, trim leading spaces from file names
++     * @exception IllegalArgumentException
++     * Thrown if the regular expression is unparseable.  Should not be seen
++     * under normal conditions.  It it is seen, this is a sign that
++     * <code>REGEX</code> is  not a valid regular expression.
++     * @since 1.4
++     */
++    public UnixFTPEntryParser(FTPClientConfig config, boolean trimLeadingSpaces)
+     {
+         super(REGEX);
+         configure(config);
++        this.trimLeadingSpaces = trimLeadingSpaces;
+     }
+ 
+     /**
+@@ -199,6 +222,9 @@ public FTPFile parseFTPEntry(String entry) {
+             String filesize = group(18);
+             String datestr = group(19) + " " + group(20);
+             String name = group(21);
++            if (trimLeadingSpaces) {
++                name = name.replaceFirst("^\\s+", "");
++            }
+ 
+             try
+             {
+diff --git a/src/test/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParserTest.java b/src/test/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParserTest.java
+index 3b074d923..edadce0f0 100644
+--- a/src/test/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParserTest.java
++++ b/src/test/java/org/apache/commons/net/ftp/parser/UnixFTPEntryParserTest.java
+@@ -166,6 +166,18 @@ public void testTrailingSpaces() {
+         assertEquals(f.getName(), "zxbox     ");
+     }
+ 
++    public void testLeadingSpacesOriginal() { // this is the original (non-ideal) behaviour
++        FTPFile f = getParser().parseFTPEntry("drwxr-xr-x   2 john smith     group         4096 Mar  2 15:13   zxbox");
++        assertNotNull(f);
++        assertEquals("zxbox", f.getName() ); // leading spaces dropped
++    }
++
++    public void testLeadingSpacesNET566() { // check new behaviour
++        FTPFile f = new UnixFTPEntryParser(null, false).parseFTPEntry("drwxr-xr-x   2 john smith     group         4096 Mar  2 15:13   zxbox");
++        assertNotNull(f);
++        assertEquals("  zxbox", f.getName() ); // leading spaces retained
++    }
++
+     public void testNameWIthPunctuation() {
+         FTPFile f = getParser().parseFTPEntry("drwx------ 4 maxm Domain Users 512 Oct 2 10:59 abc(test)123.pdf");
+         assertNotNull(f);

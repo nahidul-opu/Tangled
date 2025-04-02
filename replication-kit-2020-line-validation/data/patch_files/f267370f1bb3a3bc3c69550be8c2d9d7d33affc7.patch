@@ -1,0 +1,206 @@
+From f267370f1bb3a3bc3c69550be8c2d9d7d33affc7 Mon Sep 17 00:00:00 2001
+From: Damien Raude-Morvan <drazzib@drazzib.com>
+Date: Sat, 1 Nov 2014 12:20:00 +0100
+Subject: [PATCH] GORA-389: Document or List mapping change cause NPE in
+ clearDirty()
+
+This close PR #15
+
+Squashed commit of the following:
+
+commit f07ac202b1890afd27d5e071dff5eafdc34bc044
+Author: Damien Raude-Morvan <drazzib@drazzib.com>
+Date:   Sat Nov 1 12:16:38 2014 +0100
+
+    GORA-389 Add MongoStore specific tests for Map/List handling
+
+commit 75805e2eaf3c1c69573dc1b2b2df12a25aec8d25
+Author: Damien Raude-Morvan <damien@dictanova.com>
+Date:   Wed Oct 8 20:03:36 2014 +0200
+
+    Don't perform clearDirty() multiple times.
+
+commit d7a6a4794f2fef492f1e116e1108b59d8e9c81bb
+Author: Damien Raude-Morvan <damien@dictanova.com>
+Date:   Wed Oct 8 20:04:06 2014 +0200
+
+    Return empty DirtyListWrapper or DirtyMapWrapper instead of null.
+---
+ .../gora/mongodb/query/MongoDBResult.java     |  4 --
+ .../apache/gora/mongodb/store/MongoStore.java | 33 ++++++-------
+ .../gora/mongodb/store/TestMongoStore.java    | 46 +++++++++++++++++++
+ 3 files changed, 60 insertions(+), 23 deletions(-)
+
+diff --git a/gora-mongodb/src/main/java/org/apache/gora/mongodb/query/MongoDBResult.java b/gora-mongodb/src/main/java/org/apache/gora/mongodb/query/MongoDBResult.java
+index 7f1b9eba4..5524345ac 100644
+--- a/gora-mongodb/src/main/java/org/apache/gora/mongodb/query/MongoDBResult.java
++++ b/gora-mongodb/src/main/java/org/apache/gora/mongodb/query/MongoDBResult.java
+@@ -74,10 +74,6 @@ protected boolean nextInner() throws IOException {
+     key = (K) obj.get("_id");
+     persistent = ((MongoStore<K, T>) getDataStore()).newInstance(obj,
+         getQuery().getFields());
+-    if (persistent != null) {
+-      persistent.clearDirty();
+-    }
+-
+     return persistent != null;
+   }
+ 
+diff --git a/gora-mongodb/src/main/java/org/apache/gora/mongodb/store/MongoStore.java b/gora-mongodb/src/main/java/org/apache/gora/mongodb/store/MongoStore.java
+index c2b6b351a..2eea3b89d 100644
+--- a/gora-mongodb/src/main/java/org/apache/gora/mongodb/store/MongoStore.java
++++ b/gora-mongodb/src/main/java/org/apache/gora/mongodb/store/MongoStore.java
+@@ -369,13 +369,8 @@ public T get(final K key, final String[] fields) {
+     }
+     // Execute the query
+     DBObject res = mongoClientColl.findOne(q, proj);
+-    // Build the corresponding persistent and clears its states
+-    T persistent = newInstance(res, dbFields);
+-    if (persistent != null) {
+-      persistent.clearDirty();
+-    }
+-    // Done
+-    return persistent;
++    // Build the corresponding persistent
++    return newInstance(res, dbFields);
+   }
+ 
+   /**
+@@ -666,14 +661,14 @@ private Object fromMongoRecord(final Schema fieldSchema, final String docf,
+     return result;
+   }
+ 
+-  private Object fromMongoList(final String docf, final Schema fieldSchema,
+-      final BSONDecorator easybson, final Field f) {
++  /* pp */ Object fromMongoList(final String docf, final Schema fieldSchema,
++                       final BSONDecorator easybson, final Field f) {
+     List<Object> list = easybson.getDBList(docf);
++    List<Object> rlist = new ArrayList<Object>();
+     if (list == null) {
+-      return null;
++      return new DirtyListWrapper(rlist);
+     }
+ 
+-    List<Object> rlist = new ArrayList<Object>();
+ 
+     for (Object item : list) {
+       DocumentFieldType storeType = mapping.getDocumentFieldType(docf);
+@@ -684,13 +679,13 @@ private Object fromMongoList(final String docf, final Schema fieldSchema,
+     return new DirtyListWrapper<Object>(rlist);
+   }
+ 
+-  private Object fromMongoMap(final String docf, final Schema fieldSchema,
+-      final BSONDecorator easybson, final Field f) {
++  /* pp */ Object fromMongoMap(final String docf, final Schema fieldSchema,
++                      final BSONDecorator easybson, final Field f) {
+     BasicDBObject map = easybson.getDBObject(docf);
++    Map<Utf8, Object> rmap = new HashMap<Utf8, Object>();
+     if (map == null) {
+-      return null;
++        return new DirtyMapWrapper(rmap);
+     }
+-    Map<Utf8, Object> rmap = new HashMap<Utf8, Object>();
+     for (Entry<String, Object> e : map.entrySet()) {
+       String mapKey = e.getKey();
+       String decodedMapKey = decodeFieldKey(mapKey);
+@@ -960,12 +955,12 @@ private Object stringToMongo(final Schema fieldSchema,
+   private BasicDBObject mapToMongo(final String docf,
+       final Map<CharSequence, ?> value, final Schema fieldSchema,
+       final Type fieldType) {
++    BasicDBObject map = new BasicDBObject();
+     // Handle null case
+     if (value == null)
+-      return null;
++      return map;
+ 
+     // Handle regular cases
+-    BasicDBObject map = new BasicDBObject();
+     for (Entry<CharSequence, ?> e : value.entrySet()) {
+       String mapKey = e.getKey().toString();
+       String encodedMapKey = encodeFieldKey(mapKey);
+@@ -993,12 +988,12 @@ private BasicDBObject mapToMongo(final String docf,
+    */
+   private BasicDBList listToMongo(final String docf, final Collection<?> array,
+       final Schema fieldSchema, final Type fieldType) {
++    BasicDBList list = new BasicDBList();
+     // Handle null case
+     if (array == null)
+-      return null;
++      return list;
+ 
+     // Handle regular cases
+-    BasicDBList list = new BasicDBList();
+     for (Object item : array) {
+       DocumentFieldType storeType = mapping.getDocumentFieldType(docf);
+       Object result = toDBObject(docf, fieldSchema, fieldType, storeType, item);
+diff --git a/gora-mongodb/src/test/java/org/apache/gora/mongodb/store/TestMongoStore.java b/gora-mongodb/src/test/java/org/apache/gora/mongodb/store/TestMongoStore.java
+index a754c2be1..0f0117393 100644
+--- a/gora-mongodb/src/test/java/org/apache/gora/mongodb/store/TestMongoStore.java
++++ b/gora-mongodb/src/test/java/org/apache/gora/mongodb/store/TestMongoStore.java
+@@ -17,15 +17,22 @@
+  */
+ package org.apache.gora.mongodb.store;
+ 
++import static org.junit.Assert.assertNotNull;
++
+ import java.io.IOException;
+ 
+ import org.apache.gora.examples.generated.Employee;
+ import org.apache.gora.examples.generated.WebPage;
+ import org.apache.gora.mongodb.GoraMongodbTestDriver;
++import org.apache.gora.mongodb.utils.BSONDecorator;
+ import org.apache.gora.store.DataStore;
+ import org.apache.gora.store.DataStoreTestBase;
+ import org.junit.Before;
+ import org.junit.Ignore;
++import org.junit.Test;
++
++import com.mongodb.BasicDBList;
++import com.mongodb.BasicDBObject;
+ 
+ public class TestMongoStore extends DataStoreTestBase {
+ 
+@@ -74,4 +81,43 @@ public void testGet3UnionField() throws IOException, Exception {
+     // MongoStore doesn't support 3 types union field yet
+   }
+ 
++  @Test
++  public void testFromMongoList_null() throws Exception {
++    MongoStore store = new MongoStore();
++    BasicDBObject noField = new BasicDBObject();
++    String field = "myField";
++    Object item = store.fromMongoList(field, null, new BSONDecorator(noField),
++        null);
++    assertNotNull(item);
++  }
++
++  @Test
++  public void testFromMongoList_empty() throws Exception {
++    MongoStore store = new MongoStore();
++    String field = "myField";
++    BasicDBObject emptyField = new BasicDBObject(field, new BasicDBList());
++    Object item = store.fromMongoList(field, null,
++        new BSONDecorator(emptyField), null);
++    assertNotNull(item);
++  }
++
++  @Test
++  public void testFromMongoMap_null() throws Exception {
++    MongoStore store = new MongoStore();
++    BasicDBObject noField = new BasicDBObject();
++    String field = "myField";
++    Object item = store.fromMongoMap(field, null, new BSONDecorator(noField),
++        null);
++    assertNotNull(item);
++  }
++
++  @Test
++  public void testFromMongoMap_empty() throws Exception {
++    MongoStore store = new MongoStore();
++    String field = "myField";
++    BasicDBObject emptyField = new BasicDBObject(field, new BasicDBObject());
++    Object item = store.fromMongoMap(field, null,
++        new BSONDecorator(emptyField), null);
++    assertNotNull(item);
++  }
+ }

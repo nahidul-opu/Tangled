@@ -1,0 +1,340 @@
+From 1f0c99d0e012d84863e6a818facb143c9f03fac3 Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran.pai@gmail.com>
+Date: Sun, 28 May 2017 09:49:27 +0530
+Subject: [PATCH] IVY-1528 Don't ignore the "classifier" when creating pom
+ module descriptor from ivy module descriptor, in makepom task
+
+---
+ .../parser/m2/PomModuleDescriptorWriter.java  |   3 +-
+ .../module/descriptor/IvyMakePomTest.java     | 194 ++++++++++++++++++
+ .../descriptor/ivy-to-pom-classifier.xml      |  23 +++
+ .../org/apache/ivy/util/TestXmlHelper.java    |  74 +++++++
+ 4 files changed, 293 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/org/apache/ivy/core/module/descriptor/IvyMakePomTest.java
+ create mode 100644 test/java/org/apache/ivy/core/module/descriptor/ivy-to-pom-classifier.xml
+ create mode 100644 test/java/org/apache/ivy/util/TestXmlHelper.java
+
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java
+index e2f72c01f..3c222547e 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorWriter.java
+@@ -261,8 +261,9 @@ private static void printDependencies(ModuleDescriptor md, PrintWriter out,
+                 } else {
+                     String scope = mapping.getScope(dds[i].getModuleConfigurations());
+                     boolean optional = mapping.isOptional(dds[i].getModuleConfigurations());
++                    final String classifier = dds[i].getExtraAttribute("classifier");
+                     printDependency(out, indent, mrid.getOrganisation(), mrid.getName(),
+-                        mrid.getRevision(), null, null, scope, optional, dds[i].isTransitive(),
++                        mrid.getRevision(), null, classifier, scope, optional, dds[i].isTransitive(),
+                         excludes);
+                 }
+             }
+diff --git a/test/java/org/apache/ivy/core/module/descriptor/IvyMakePomTest.java b/test/java/org/apache/ivy/core/module/descriptor/IvyMakePomTest.java
+new file mode 100644
+index 000000000..d962e8d85
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/module/descriptor/IvyMakePomTest.java
+@@ -0,0 +1,194 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.ivy.core.module.descriptor;
++
++import org.apache.ivy.TestHelper;
++import org.apache.ivy.ant.IvyMakePom;
++import org.apache.ivy.util.TestXmlHelper;
++import org.apache.tools.ant.Project;
++import org.junit.Before;
++import org.junit.Rule;
++import org.junit.Test;
++import org.junit.rules.TemporaryFolder;
++import org.w3c.dom.Node;
++import org.w3c.dom.NodeList;
++
++import javax.xml.xpath.XPathConstants;
++import java.io.File;
++import java.util.HashSet;
++import java.util.Set;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertNull;
++import static org.junit.Assert.assertTrue;
++
++/**
++ * Tests {@link IvyMakePom}
++ */
++public class IvyMakePomTest {
++
++    private Project project;
++
++    @Rule
++    public TemporaryFolder workdir = new TemporaryFolder();
++
++    @Before
++    public void beforeTest() throws Exception {
++        this.project = TestHelper.newProject();
++    }
++
++    /**
++     * Tests that a Ivy file containing a <code>classifier</code> extra-attribute in its dependency, when converted to a
++     * POM file through {@link IvyMakePom}, retains the <code>classifier</code> in the generated POM
++     *
++     * @throws Exception
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1528">IVY-1528</a> for more details
++     */
++    @Test
++    public void testClassifier() throws Exception {
++        final File ivyFile = new File(IvyMakePomTest.class.getResource("ivy-to-pom-classifier.xml").toURI());
++        assertTrue(ivyFile + " is either missing or not a file", ivyFile.isFile());
++        final IvyMakePom makepom = new IvyMakePom();
++        makepom.setProject(project);
++        final File generatedPomFile = workdir.newFile("test-ivy-to-pom-classifier.pom");
++        makepom.setPomFile(generatedPomFile);
++        makepom.setIvyFile(ivyFile);
++        // run the task
++        makepom.execute();
++
++        // read the generated pom
++        final NodeList dependencies = (NodeList) TestXmlHelper.evaluateXPathExpr(generatedPomFile, "/project/dependencies/dependency", XPathConstants.NODESET);
++        assertNotNull("Dependencies element wasn't found in the generated POM file", dependencies);
++        assertEquals("Unexpected number of dependencies in the generated POM file", 2, dependencies.getLength());
++
++        final Set<String> expectedPomArtifactIds = new HashSet<String>();
++        expectedPomArtifactIds.add("foo");
++        expectedPomArtifactIds.add("bar");
++        for (int i = 0; i < dependencies.getLength(); i++) {
++            final PomDependency pomDependency = PomDependency.parse(dependencies.item(i));
++            assertNotNull("Dependency generated was null", pomDependency);
++            assertTrue("Unexpected dependency " + pomDependency, expectedPomArtifactIds.contains(pomDependency.artifactId));
++            // we no longer expect this, so remove it
++            expectedPomArtifactIds.remove(pomDependency.artifactId);
++
++            if (pomDependency.artifactId.equals("foo")) {
++                assertEquals("Unexpected group id for generated dependency " + pomDependency, "org", pomDependency.groupId);
++                assertEquals("Unexpected version for generated dependency " + pomDependency, "1.2.3", pomDependency.version);
++                assertNull("Classifier was expected to be absent for dependency " + pomDependency, pomDependency.classifier);
++            } else if (pomDependency.artifactId.equals("bar")) {
++                assertEquals("Unexpected group id for generated dependency " + pomDependency, "apache", pomDependency.groupId);
++                assertEquals("Unexpected version for generated dependency " + pomDependency, "2.0.0", pomDependency.version);
++                assertEquals("Unexpected classifier for dependency " + pomDependency, "class1", pomDependency.classifier);
++            }
++        }
++        assertTrue("Some expected dependencies " + expectedPomArtifactIds + " were not found in the generated POM file", expectedPomArtifactIds.isEmpty());
++    }
++
++    private static final class PomDependency {
++        private final String groupId;
++        private final String artifactId;
++        private final String version;
++        private final String scope;
++        private final String classifier;
++        private final boolean optional;
++
++        private PomDependency(final String groupId, final String artifactId, final String version,
++                              final String scope, final String classifier) {
++            this(groupId, artifactId, version, scope, classifier, false);
++        }
++
++        private PomDependency(final String groupId, final String artifactId, final String version,
++                              final String scope, final String classifier, final boolean optional) {
++            this.groupId = groupId;
++            this.artifactId = artifactId;
++            this.version = version;
++            this.scope = scope;
++            this.classifier = classifier;
++            this.optional = optional;
++        }
++
++
++        static PomDependency parse(final Node dependencyNode) {
++            if (dependencyNode == null) {
++                return null;
++            }
++            final NodeList children = dependencyNode.getChildNodes();
++            if (children == null) {
++                return new PomDependency(null, null, null, null, null);
++            }
++            String groupId = null;
++            String artifactId = null;
++            String version = null;
++            String scope = null;
++            String classifier = null;
++            String optional = null;
++            Node nextChild = children.item(0);
++            while (nextChild != null) {
++                nextChild = skipIfTextNode(nextChild);
++                if (nextChild == null) {
++                    break;
++                }
++                final String nodeName = nextChild.getNodeName();
++                switch (nodeName) {
++                    case "groupId":
++                        groupId = nextChild.getTextContent();
++                        break;
++                    case "artifactId":
++                        artifactId = nextChild.getTextContent();
++                        break;
++                    case "version":
++                        version = nextChild.getTextContent();
++                        break;
++                    case "classifier":
++                        classifier = nextChild.getTextContent();
++                        break;
++                    case "scope":
++                        scope = nextChild.getTextContent();
++                        break;
++                    case "optional":
++                        optional = nextChild.getTextContent();
++                        break;
++                    default:
++                        throw new RuntimeException("Unexpected child element " + nextChild.getNodeName() + " under dependency element");
++                }
++                // move to next sibling
++                nextChild = nextChild.getNextSibling();
++            }
++            return new PomDependency(groupId, artifactId, version, scope, classifier, optional != null ? Boolean.parseBoolean(optional) : false);
++        }
++
++        private static Node skipIfTextNode(final Node node) {
++            if (node.getNodeType() == Node.TEXT_NODE) {
++                return node.getNextSibling();
++            }
++            return node;
++        }
++
++        @Override
++        public String toString() {
++            return "PomDependency{" +
++                    "groupId='" + groupId + '\'' +
++                    ", artifactId='" + artifactId + '\'' +
++                    ", version='" + version + '\'' +
++                    ", scope='" + scope + '\'' +
++                    ", classifier='" + classifier + '\'' +
++                    '}';
++        }
++    }
++}
+diff --git a/test/java/org/apache/ivy/core/module/descriptor/ivy-to-pom-classifier.xml b/test/java/org/apache/ivy/core/module/descriptor/ivy-to-pom-classifier.xml
+new file mode 100644
+index 000000000..210100124
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/module/descriptor/ivy-to-pom-classifier.xml
+@@ -0,0 +1,23 @@
++<!--
++  ~ Licensed to the Apache Software Foundation (ASF) under one or more
++  ~ contributor license agreements.  See the NOTICE file distributed with
++  ~ this work for additional information regarding copyright ownership.
++  ~ The ASF licenses this file to You under the Apache License, Version 2.0
++  ~ (the "License"); you may not use this file except in compliance with
++  ~ the License.  You may obtain a copy of the License at
++  ~
++  ~    http://www.apache.org/licenses/LICENSE-2.0
++  ~
++  ~ Unless required by applicable law or agreed to in writing, software
++  ~ distributed under the License is distributed on an "AS IS" BASIS,
++  ~ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  ~ See the License for the specific language governing permissions and
++  ~ limitations under the License.
++  -->
++<ivy-module version="2.0" xmlns:m="http://ant.apache.org/ivy/maven">
++    <info organisation="apache" module="convert-to-pom" revision="1.0"/>
++    <dependencies>
++        <dependency org="org" name="foo" rev="1.2.3" />
++        <dependency name="bar" rev="2.0.0" m:classifier="class1"/>
++    </dependencies>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/util/TestXmlHelper.java b/test/java/org/apache/ivy/util/TestXmlHelper.java
+new file mode 100644
+index 000000000..e0c191e3b
+--- /dev/null
++++ b/test/java/org/apache/ivy/util/TestXmlHelper.java
+@@ -0,0 +1,74 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.ivy.util;
++
++import org.w3c.dom.Document;
++
++import javax.xml.namespace.QName;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
++import javax.xml.xpath.XPathExpression;
++import javax.xml.xpath.XPathFactory;
++import java.io.File;
++
++/**
++ * An utility class to help with XML file parsing and XML content handling
++ */
++public class TestXmlHelper {
++
++    /**
++     * Evaluates the passed {@link XPathExpression} against the {@link Document} created out of the passed <code>xmlFile</code>
++     * and returns the result of the evaluation.
++     *
++     * @param xmlFile         The XML file to parse
++     * @param xPathExpression The XPath expression to evaluate
++     * @param returnType      The expected return type of the {@link XPathExpression#evaluate(Object, QName) evaluation}
++     * @return
++     * @throws Exception
++     */
++    public static Object evaluateXPathExpr(final File xmlFile, final XPathExpression xPathExpression, final QName returnType)
++            throws Exception {
++        if (xmlFile == null) {
++            throw new IllegalArgumentException("XML file cannot be null");
++        }
++        if (!xmlFile.isFile()) {
++            throw new IllegalArgumentException(xmlFile + " is either missing or not a file");
++        }
++        if (xPathExpression == null) {
++            throw new IllegalArgumentException("XPath expression cannot be null");
++        }
++        final DocumentBuilder documentBuilder = DocumentBuilderFactory.newInstance().newDocumentBuilder();
++        final Document document = documentBuilder.parse(xmlFile);
++        return xPathExpression.evaluate(document, returnType);
++    }
++
++    /**
++     * Evaluates the passed <code>xpathExpression</code> against the {@link Document} created out of the passed <code>xmlFile</code>
++     * and returns the result of the evaluation.
++     * This is the same as calling {@link #evaluateXPathExpr(File, XPathExpression, QName)}, with <code>XPathFactory.newInstance().newXPath().compile(xpathExpression)</code> as the {@link XPathExpression} parameter
++     *
++     * @param xmlFile         The XML file to parse
++     * @param xpathExpression The XPath expression to evaluate
++     * @param returnType      The expected return type of the {@link XPathExpression#evaluate(Object, QName) evaluation}
++     * @return
++     * @throws Exception
++     */
++    public static Object evaluateXPathExpr(final File xmlFile, final String xpathExpression, final QName returnType) throws Exception {
++        return evaluateXPathExpr(xmlFile, XPathFactory.newInstance().newXPath().compile(xpathExpression), returnType);
++    }
++}

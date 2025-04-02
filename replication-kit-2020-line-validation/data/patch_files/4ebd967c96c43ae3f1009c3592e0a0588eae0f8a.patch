@@ -1,0 +1,127 @@
+From 4ebd967c96c43ae3f1009c3592e0a0588eae0f8a Mon Sep 17 00:00:00 2001
+From: Gilles Sadowski <erans@apache.org>
+Date: Tue, 5 Nov 2013 13:51:24 +0000
+Subject: [PATCH] MATH-1058 Precision improvements by using "expm1" and
+ "log1p". Thanks to Sean Owen.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/math/trunk@1538998 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                                |  4 ++++
+ .../math3/distribution/LogNormalDistribution.java      |  2 +-
+ .../math3/distribution/WeibullDistribution.java        |  2 +-
+ .../java/org/apache/commons/math3/special/Beta.java    |  2 +-
+ .../math3/distribution/LogNormalDistributionTest.java  |  8 ++++++++
+ .../math3/distribution/WeibullDistributionTest.java    | 10 ++++++++++
+ .../org/apache/commons/math3/special/BetaTest.java     |  7 +++++++
+ 7 files changed, 32 insertions(+), 3 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 4a8dbf3846..cd2c7c951d 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -51,6 +51,10 @@ If the output is not quite correct, check for invisible trailing spaces!
+   </properties>
+   <body>
+     <release version="3.3" date="TBD" description="TBD">
++      <action dev="erans" type="fix" issue="MATH-1058" due-to="Sean Owen">
++        Precision improvements (for small values of the argument) in "Beta" function
++        and in "LogNormalDistribution" and "WeibullDistribution".
++      </action>
+       <action dev="tn" type="fix" issue="MATH-1055" due-to="Sean Owen">
+         Fixed some invalid links inside javadoc and added missing deprecated annotations.
+       </action>
+diff --git a/src/main/java/org/apache/commons/math3/distribution/LogNormalDistribution.java b/src/main/java/org/apache/commons/math3/distribution/LogNormalDistribution.java
+index 810c9e4079..ab7a13be4d 100644
+--- a/src/main/java/org/apache/commons/math3/distribution/LogNormalDistribution.java
++++ b/src/main/java/org/apache/commons/math3/distribution/LogNormalDistribution.java
+@@ -289,7 +289,7 @@ public double getNumericalMean() {
+     public double getNumericalVariance() {
+         final double s = shape;
+         final double ss = s * s;
+-        return (FastMath.exp(ss) - 1) * FastMath.exp(2 * scale + ss);
++        return (FastMath.expm1(ss)) * FastMath.exp(2 * scale + ss);
+     }
+ 
+     /**
+diff --git a/src/main/java/org/apache/commons/math3/distribution/WeibullDistribution.java b/src/main/java/org/apache/commons/math3/distribution/WeibullDistribution.java
+index ec34b508c1..6e69bc9be4 100644
+--- a/src/main/java/org/apache/commons/math3/distribution/WeibullDistribution.java
++++ b/src/main/java/org/apache/commons/math3/distribution/WeibullDistribution.java
+@@ -221,7 +221,7 @@ public double inverseCumulativeProbability(double p) {
+         } else  if (p == 1) {
+             ret = Double.POSITIVE_INFINITY;
+         } else {
+-            ret = scale * FastMath.pow(-FastMath.log(1.0 - p), 1.0 / shape);
++            ret = scale * FastMath.pow(-FastMath.log1p(-p), 1.0 / shape);
+         }
+         return ret;
+     }
+diff --git a/src/main/java/org/apache/commons/math3/special/Beta.java b/src/main/java/org/apache/commons/math3/special/Beta.java
+index 59f696a0bb..c6091b48ce 100644
+--- a/src/main/java/org/apache/commons/math3/special/Beta.java
++++ b/src/main/java/org/apache/commons/math3/special/Beta.java
+@@ -218,7 +218,7 @@ protected double getA(int n, double x) {
+                     return 1.0;
+                 }
+             };
+-            ret = FastMath.exp((a * FastMath.log(x)) + (b * FastMath.log(1.0 - x)) -
++            ret = FastMath.exp((a * FastMath.log(x)) + (b * FastMath.log1p(-x)) -
+                 FastMath.log(a) - logBeta(a, b)) *
+                 1.0 / fraction.evaluate(x, epsilon, maxIterations);
+         }
+diff --git a/src/test/java/org/apache/commons/math3/distribution/LogNormalDistributionTest.java b/src/test/java/org/apache/commons/math3/distribution/LogNormalDistributionTest.java
+index 595a10f49c..ffb151338b 100644
+--- a/src/test/java/org/apache/commons/math3/distribution/LogNormalDistributionTest.java
++++ b/src/test/java/org/apache/commons/math3/distribution/LogNormalDistributionTest.java
+@@ -243,4 +243,12 @@ public void testMeanVariance() {
+         Assert.assertEquals(dist.getNumericalMean(), 0.0, tol);
+         Assert.assertEquals(dist.getNumericalVariance(), 0.0, tol);
+     }
++
++    @Test
++    public void testTinyVariance() {
++        LogNormalDistribution dist = new LogNormalDistribution(0, 1e-9);
++        double t = dist.getNumericalVariance();
++        Assert.assertEquals(1e-18, t, 1e-20);
++    }
++
+ }
+diff --git a/src/test/java/org/apache/commons/math3/distribution/WeibullDistributionTest.java b/src/test/java/org/apache/commons/math3/distribution/WeibullDistributionTest.java
+index b09ae80c4f..94a42813fa 100644
+--- a/src/test/java/org/apache/commons/math3/distribution/WeibullDistributionTest.java
++++ b/src/test/java/org/apache/commons/math3/distribution/WeibullDistributionTest.java
+@@ -63,6 +63,16 @@ public double[] makeDensityTestValues() {
+ 
+     //---------------------------- Additional test cases -------------------------
+ 
++    @Test
++    public void testInverseCumulativeProbabilitySmallPAccuracy() {
++        WeibullDistribution dist = new WeibullDistribution(2, 3);
++        double t = dist.inverseCumulativeProbability(1e-17);
++        // Analytically, answer is solution to 1e-17 = 1-exp(-(x/3)^2)
++        // x = sqrt(-9*log(1-1e-17))
++        // If we're not careful, answer will be 0. Answer below is computed with care in Octave:
++        Assert.assertEquals(9.48683298050514e-9, t, 1e-17);
++    }
++
+     @Test
+     public void testInverseCumulativeProbabilityExtremes() {
+         setInverseCumulativeTestPoints(new double[] {0.0, 1.0});
+diff --git a/src/test/java/org/apache/commons/math3/special/BetaTest.java b/src/test/java/org/apache/commons/math3/special/BetaTest.java
+index 26aad9b2cd..fc9ac9c27e 100644
+--- a/src/test/java/org/apache/commons/math3/special/BetaTest.java
++++ b/src/test/java/org/apache/commons/math3/special/BetaTest.java
+@@ -134,6 +134,13 @@ public void testRegularizedBetaPositivePositivePositive() {
+         testRegularizedBeta(0.75, 0.5, 1.0, 2.0);
+     }
+ 
++    @Test
++    public void testRegularizedBetaTinyArgument() {
++        double actual = Beta.regularizedBeta(1e-17, 1.0, 1e12);
++        // This value is from R: pbeta(1e-17,1,1e12)
++        TestUtils.assertEquals(9.999950000166648e-6, actual, 1e-16);
++    }
++
+     @Test
+     public void testLogBetaNanPositive() {
+         testLogBeta(Double.NaN, Double.NaN, 2.0);

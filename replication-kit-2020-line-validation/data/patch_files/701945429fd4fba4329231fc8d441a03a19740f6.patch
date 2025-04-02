@@ -1,0 +1,475 @@
+From 701945429fd4fba4329231fc8d441a03a19740f6 Mon Sep 17 00:00:00 2001
+From: Joakim Erdfelt <joakime@apache.org>
+Date: Fri, 25 May 2007 17:11:37 +0000
+Subject: [PATCH] [MRM-330]: Searching gives an HTTP 500 Functionality is now
+ the same as archiva 0.9
+
+git-svn-id: https://svn.apache.org/repos/asf/maven/archiva/trunk@541723 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../lucene/IndexContentConsumer.java          | 44 ++++++++++++++---
+ .../filecontent/FileContentConverter.java     | 31 ++++++++++++
+ .../indexer/filecontent/FileContentKeys.java  |  3 ++
+ .../filecontent/FileContentRecord.java        | 16 +++++++
+ ...serAllowedToSearchRepositoryPredicate.java |  2 -
+ .../indexer/search/SearchResultHit.java       | 36 ++++++++++++--
+ .../archiva/indexer/search/SearchResults.java |  6 +++
+ .../DefaultCrossRepositorySearchTest.java     |  1 -
+ .../src/main/webapp/WEB-INF/jsp/results.jsp   | 47 ++++++++-----------
+ .../src/sql/mysql/drop_archiva_tables.sql     | 26 +++++-----
+ 10 files changed, 157 insertions(+), 55 deletions(-)
+
+diff --git a/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java b/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java
+index 64c3e56035..f4be03282f 100644
+--- a/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java
++++ b/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java
+@@ -29,7 +29,11 @@
+ import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
+ import org.apache.maven.archiva.indexer.RepositoryIndexException;
+ import org.apache.maven.archiva.indexer.filecontent.FileContentRecord;
++import org.apache.maven.archiva.model.ArchivaArtifact;
+ import org.apache.maven.archiva.model.ArchivaRepository;
++import org.apache.maven.archiva.repository.layout.BidirectionalRepositoryLayout;
++import org.apache.maven.archiva.repository.layout.BidirectionalRepositoryLayoutFactory;
++import org.apache.maven.archiva.repository.layout.LayoutException;
+ import org.codehaus.plexus.personality.plexus.lifecycle.phase.Initializable;
+ import org.codehaus.plexus.personality.plexus.lifecycle.phase.InitializationException;
+ import org.codehaus.plexus.registry.Registry;
+@@ -72,7 +76,7 @@ public class IndexContentConsumer
+      * @plexus.requirement
+      */
+     private ArchivaConfiguration configuration;
+-    
++
+     /**
+      * @plexus.requirement
+      */
+@@ -83,15 +87,22 @@ public class IndexContentConsumer
+      */
+     private RepositoryContentIndexFactory indexFactory;
+ 
++    /**
++     * @plexus.requirement
++     */
++    private BidirectionalRepositoryLayoutFactory layoutFactory;
++
+     private List propertyNameTriggers = new ArrayList();
+ 
+     private List includes = new ArrayList();
+ 
+     private RepositoryContentIndex index;
+ 
++    private ArchivaRepository repository;
++
+     private File repositoryDir;
+-    
+-    private String repositoryId;
++
++    private BidirectionalRepositoryLayout repositoryLayout;
+ 
+     public String getId()
+     {
+@@ -126,9 +137,19 @@ public void beginScan( ArchivaRepository repository )
+             throw new ConsumerException( "Consumer requires managed repository." );
+         }
+ 
+-        this.repositoryId = repository.getId();
++        this.repository = repository;
+         this.repositoryDir = new File( repository.getUrl().getPath() );
+         this.index = indexFactory.createFileContentIndex( repository );
++
++        try
++        {
++            this.repositoryLayout = layoutFactory.getLayout( this.repository.getLayoutType() );
++        }
++        catch ( LayoutException e )
++        {
++            throw new ConsumerException( "Unable to initialize consumer due to unknown repository layout: "
++                + e.getMessage(), e );
++        }
+     }
+ 
+     public void processFile( String path )
+@@ -138,10 +159,21 @@ public void processFile( String path )
+         try
+         {
+             File file = new File( repositoryDir, path );
+-            record.setRepositoryId( this.repositoryId );
++            record.setRepositoryId( this.repository.getId() );
+             record.setFilename( path );
+             record.setContents( FileUtils.readFileToString( file, null ) );
+ 
++            // Test for possible artifact reference syntax.
++            try
++            {
++                ArchivaArtifact artifact = this.repositoryLayout.toArtifact( path );
++                record.setArtifact( artifact );
++            }
++            catch ( LayoutException e )
++            {
++                // Not an artifact.
++            }
++
+             index.modifyRecord( record );
+         }
+         catch ( IOException e )
+@@ -176,7 +208,7 @@ private void initIncludes()
+     {
+         includes.clear();
+ 
+-        includes.addAll( filetypes.getFileTypePatterns( FileTypes.INDEXABLE_CONTENT ));
++        includes.addAll( filetypes.getFileTypePatterns( FileTypes.INDEXABLE_CONTENT ) );
+     }
+ 
+     public void initialize()
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java
+index 4d352fb501..d6592beaa4 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java
+@@ -19,10 +19,13 @@
+  * under the License.
+  */
+ 
++import org.apache.commons.lang.StringUtils;
+ import org.apache.lucene.document.Document;
++import org.apache.maven.archiva.indexer.ArtifactKeys;
+ import org.apache.maven.archiva.indexer.lucene.LuceneDocumentMaker;
+ import org.apache.maven.archiva.indexer.lucene.LuceneEntryConverter;
+ import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentRecord;
++import org.apache.maven.archiva.model.ArchivaArtifact;
+ 
+ import java.text.ParseException;
+ 
+@@ -48,6 +51,19 @@ public Document convert( LuceneRepositoryContentRecord record )
+ 
+         LuceneDocumentMaker doc = new LuceneDocumentMaker( filecontent );
+ 
++        if( filecontent.getArtifact() != null )
++        {
++            // Artifact Reference
++            doc.addFieldTokenized( ArtifactKeys.GROUPID, filecontent.getArtifact().getGroupId() );
++            doc.addFieldExact( ArtifactKeys.GROUPID_EXACT, filecontent.getArtifact().getGroupId() );
++            doc.addFieldTokenized( ArtifactKeys.ARTIFACTID, filecontent.getArtifact().getArtifactId() );
++            doc.addFieldExact( ArtifactKeys.ARTIFACTID_EXACT, filecontent.getArtifact().getArtifactId() );
++            doc.addFieldTokenized( ArtifactKeys.VERSION, filecontent.getArtifact().getVersion() );
++            doc.addFieldExact( ArtifactKeys.VERSION_EXACT, filecontent.getArtifact().getVersion() );
++            doc.addFieldTokenized( ArtifactKeys.TYPE, filecontent.getArtifact().getType() );
++            doc.addFieldUntokenized( ArtifactKeys.CLASSIFIER, filecontent.getArtifact().getClassifier() );
++        }
++        
+         doc.addFieldTokenized( FileContentKeys.FILENAME, filecontent.getFilename() );
+         doc.addFieldTokenized( FileContentKeys.CONTENT, filecontent.getContents() );
+ 
+@@ -60,6 +76,21 @@ public LuceneRepositoryContentRecord convert( Document document )
+         FileContentRecord record = new FileContentRecord();
+ 
+         record.setRepositoryId( document.get( LuceneDocumentMaker.REPOSITORY_ID ) );
++        
++        // Artifact Reference
++        String groupId = document.get( ArtifactKeys.GROUPID );
++        String artifactId = document.get( ArtifactKeys.ARTIFACTID );
++        String version = document.get( ArtifactKeys.VERSION );
++        String classifier = document.get( ArtifactKeys.CLASSIFIER );
++        String type = document.get( ArtifactKeys.TYPE );
++        
++        if( StringUtils.isNotBlank( groupId ) && StringUtils.isNotBlank( artifactId ) )
++        {
++            ArchivaArtifact artifact = new ArchivaArtifact( groupId, artifactId, version, classifier, type );
++            record.setArtifact( artifact );
++        }
++
++        // Filecontent Specifics
+         record.setFilename( document.get( FileContentKeys.FILENAME ) );
+         record.setContents( document.get( FileContentKeys.CONTENT ) );
+ 
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentKeys.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentKeys.java
+index 7fcab6eb19..fd0473c176 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentKeys.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentKeys.java
+@@ -19,6 +19,8 @@
+  * under the License.
+  */
+ 
++import org.apache.maven.archiva.indexer.ArtifactKeys;
++
+ /**
+  * Lucene Index Keys for the various fields in the FileContent index. 
+  *
+@@ -26,6 +28,7 @@
+  * @version $Id$
+  */
+ public class FileContentKeys
++    extends ArtifactKeys
+ {
+     public static final String ID = "filecontent";
+ 
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java
+index 5ca95282a4..bb8ed20a03 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java
+@@ -20,6 +20,7 @@
+  */
+ 
+ import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentRecord;
++import org.apache.maven.archiva.model.ArchivaArtifact;
+ 
+ import java.io.File;
+ 
+@@ -35,6 +36,11 @@ public class FileContentRecord
+     private String repositoryId;
+ 
+     private String filename;
++    
++    /**
++     * Optional artifact reference for the file content.
++     */
++    private ArchivaArtifact artifact;
+ 
+     private String contents;
+ 
+@@ -113,4 +119,14 @@ public void setFilename( String filename )
+     {
+         this.filename = filename;
+     }
++
++    public ArchivaArtifact getArtifact()
++    {
++        return artifact;
++    }
++
++    public void setArtifact( ArchivaArtifact artifact )
++    {
++        this.artifact = artifact;
++    }
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java
+index e408010128..7e8b7218b0 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java
+@@ -41,8 +41,6 @@ public boolean evaluate( Object object )
+             satisfies = true; // Everyone is allowed! (for now)
+         }
+ 
+-        System.out.println( "AllowedToSearchRepo: " + satisfies );
+-
+         return satisfies;
+     }
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java
+index aed7671cd7..002d02249d 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java
+@@ -45,9 +45,13 @@ public class SearchResultHit
+     //  Advanced hit, reference to artifactId.
+     private String artifactId;
+ 
++    private String version = "";
++
+     // Advanced hit, if artifact, all versions of artifact
+     private List artifacts = new ArrayList();
+ 
++    private List versions = new ArrayList();
++
+     public String getContext()
+     {
+         return context;
+@@ -68,6 +72,11 @@ public void setUrl( String url )
+         this.url = url;
+     }
+ 
++    public String getUrlFilename()
++    {
++        return this.url.substring( this.url.lastIndexOf( '/' ) );
++    }
++
+     public String getArtifactId()
+     {
+         return artifactId;
+@@ -82,6 +91,13 @@ public void addArtifact( ArchivaArtifact artifact )
+     {
+         this.artifacts.add( artifact );
+ 
++        String ver = artifact.getBaseVersion();
++
++        if ( !this.versions.contains( ver ) )
++        {
++            this.versions.add( ver );
++        }
++
+         if ( StringUtils.isBlank( this.groupId ) )
+         {
+             this.groupId = artifact.getGroupId();
+@@ -91,6 +107,11 @@ public void addArtifact( ArchivaArtifact artifact )
+         {
+             this.artifactId = artifact.getArtifactId();
+         }
++
++        if ( StringUtils.isBlank( this.version ) )
++        {
++            this.version = ver;
++        }
+     }
+ 
+     public List getArtifacts()
+@@ -98,11 +119,6 @@ public List getArtifacts()
+         return artifacts;
+     }
+ 
+-    public void setArtifacts( List artifacts )
+-    {
+-        this.artifacts = artifacts;
+-    }
+-
+     public String getGroupId()
+     {
+         return groupId;
+@@ -112,4 +128,14 @@ public void setGroupId( String groupId )
+     {
+         this.groupId = groupId;
+     }
++
++    public String getVersion()
++    {
++        return version;
++    }
++
++    public List getVersions()
++    {
++        return versions;
++    }
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java
+index 8ecbf22371..744b5490df 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java
+@@ -128,6 +128,12 @@ public void addFileContentHit( FileContentRecord filecontent )
+ 
+             hit.setUrl( filecontent.getRepositoryId() + "/" + filecontent.getFilename() );
+             hit.setContext( null ); // TODO: handle context + highlight later.
++            
++            // Test for possible artifact reference ...
++            if( filecontent.getArtifact() != null )
++            {
++                hit.addArtifact( filecontent.getArtifact() );
++            }
+ 
+             this.hits.put( key, hit );
+         }
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java
+index 8928381281..bb2a489999 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java
+@@ -29,7 +29,6 @@
+ import org.apache.maven.archiva.indexer.MockConfiguration;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndex;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
+-import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
+ import org.apache.maven.archiva.model.ArchivaRepository;
+ import org.codehaus.plexus.PlexusTestCase;
+ import org.codehaus.plexus.util.FileUtils;
+diff --git a/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp b/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp
+index 5c11f5a4cd..1da2664afc 100644
+--- a/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp
++++ b/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp
+@@ -40,7 +40,7 @@
+   <h1>Results</h1>
+ 
+   <div id="resultsBox">
+-    <p>Hits: ${fn:length(results.hits)}</p>
++    <p>Hits: ${fn:length(results.hits)} of ${results.totalHits}</p>
+     
+     <c:choose>
+       <c:when test="${empty results.hits}">
+@@ -48,34 +48,25 @@
+       </c:when>
+       <c:otherwise>
+         <c:forEach items="${results.hits}" var="record" varStatus="i">
+-          <p>${record.url}</p>
+-          <p>${record.groupId}</p>
+-          <p>${record.artifactId}</p>
++          <c:choose>
++            <c:when test="${not empty (record.groupId)}">
++              <h3 class="artifact-title">
++                <my:showArtifactTitle groupId="${record.groupId}" artifactId="${record.artifactId}"
++                                      version="${record.version}"/>
++              </h3>
++              <p>
++                <my:showArtifactLink groupId="${record.groupId}" artifactId="${record.artifactId}"
++                                     version="${record.version}" versions="${record.versions}"/>
++              </p>
++            </c:when>
++            <c:otherwise>
++              <p>
++                <c:url var="hiturl" value="/repository/${record.url}" />
++                <a href="${hiturl}">${record.urlFilename}</a>
++              </p>
++            </c:otherwise>
++          </c:choose>
+         </c:forEach>
+-        <%--
+-        <c:forEach items="${results.hachcodeHits}" var="record" varStatus="i">
+-          <p>${record}</p>
+-          <h3 class="artifact-title">
+-            <my:showArtifactTitle groupId="${record.groupId}" artifactId="${record.artifactId}"
+-                                  version="${record.version}"/>
+-          </h3>
+-          <p>
+-            <my:showArtifactLink groupId="${record.groupId}" artifactId="${record.artifactId}"
+-                                 version="${record.version}" versions="${record.versions}"/>
+-          </p>
+-        </c:forEach>
+-        <c:forEach items="${results.bytecodeHits}" var="record" varStatus="i">
+-          <p>${record}</p>
+-          <h3 class="artifact-title">
+-            <my:showArtifactTitle groupId="${record.groupId}" artifactId="${record.artifactId}"
+-                                  version="${record.version}"/>
+-          </h3>
+-          <p>
+-            <my:showArtifactLink groupId="${record.groupId}" artifactId="${record.artifactId}"
+-                                 version="${record.version}" versions="${record.versions}"/>
+-          </p>
+-        </c:forEach>
+-         --%>
+       </c:otherwise>
+     </c:choose>
+   </div>
+diff --git a/archiva-web/archiva-webapp/src/sql/mysql/drop_archiva_tables.sql b/archiva-web/archiva-webapp/src/sql/mysql/drop_archiva_tables.sql
+index 55c6ffe97d..edcee164ba 100644
+--- a/archiva-web/archiva-webapp/src/sql/mysql/drop_archiva_tables.sql
++++ b/archiva-web/archiva-webapp/src/sql/mysql/drop_archiva_tables.sql
+@@ -10,23 +10,23 @@ DROP TABLE IF EXISTS `ARCHIVAPROJECTMODEL_PLUGINS` ;
+ DROP TABLE IF EXISTS `ARCHIVAPROJECTMODEL_REPORTS` ;
+ DROP TABLE IF EXISTS `ARCHIVAPROJECTMODEL_REPOSITORIES` ;
+ DROP TABLE IF EXISTS `ARCHIVA_ARTIFACT` ;
+-DROP TABLE IF EXISTS `ARCHIVA_ARTIFACT_REFERENCE` ;
+-DROP TABLE IF EXISTS `ARCHIVA_CIMANAGEMENT` ;
+-DROP TABLE IF EXISTS `ARCHIVA_DEPENDENCY` ;
+-DROP TABLE IF EXISTS `ARCHIVA_EXCLUSIONS` ;
++DROP TABLE IF EXISTS `INDIVIDUAL_ROLES` ;
+ DROP TABLE IF EXISTS `ARCHIVA_INDIVIDUAL` ;
+-DROP TABLE IF EXISTS `ARCHIVA_ISSUE_MANAGEMENT` ;
++DROP TABLE IF EXISTS `ARCHIVA_EXCLUSIONS` ;
++DROP TABLE IF EXISTS `ARCHIVA_DEPENDENCY` ;
++DROP TABLE IF EXISTS `DEPENDENCY_EXCLUSIONS` ;
++DROP TABLE IF EXISTS `SEQUENCE_TABLE` ;
+ DROP TABLE IF EXISTS `ARCHIVA_LICENSES` ;
++DROP TABLE IF EXISTS `ARCHIVA_PROJECT_REPOSITORIES` ;
++DROP TABLE IF EXISTS `ARCHIVA_REPOSITORY_STATS` ;
++DROP TABLE IF EXISTS `MAILINGLIST_OTHERARCHIVES` ;
+ DROP TABLE IF EXISTS `ARCHIVA_MAILING_LISTS` ;
+-DROP TABLE IF EXISTS `ARCHIVA_ORGANIZATION` ;
++
+ DROP TABLE IF EXISTS `ARCHIVA_PROJECT` ;
+-DROP TABLE IF EXISTS `ARCHIVA_PROJECT_REPOSITORIES` ;
++DROP TABLE IF EXISTS `ARCHIVA_CIMANAGEMENT` ;
+ DROP TABLE IF EXISTS `ARCHIVA_REPOSITORIES` ;
+-DROP TABLE IF EXISTS `ARCHIVA_REPOSITORY_STATS` ;
+ DROP TABLE IF EXISTS `ARCHIVA_SCM` ;
++DROP TABLE IF EXISTS `ARCHIVA_ORGANIZATION` ;
++DROP TABLE IF EXISTS `ARCHIVA_ISSUE_MANAGEMENT` ;
++DROP TABLE IF EXISTS `ARCHIVA_ARTIFACT_REFERENCE` ;
+ DROP TABLE IF EXISTS `ARCHIVA_VERSIONED_REFERENCE` ;
+-DROP TABLE IF EXISTS `DEPENDENCY_EXCLUSIONS` ;
+-DROP TABLE IF EXISTS `INDIVIDUAL_ROLES` ;
+-DROP TABLE IF EXISTS `MAILINGLIST_OTHERARCHIVES` ;
+-DROP TABLE IF EXISTS `SEQUENCE_TABLE` ;
+-

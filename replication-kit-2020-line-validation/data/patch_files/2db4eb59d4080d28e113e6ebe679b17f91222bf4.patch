@@ -1,0 +1,125 @@
+From 2db4eb59d4080d28e113e6ebe679b17f91222bf4 Mon Sep 17 00:00:00 2001
+From: Nicolas Lalevee <hibou@apache.org>
+Date: Sun, 15 Jan 2012 17:51:24 +0000
+Subject: [PATCH] IVY-1329: fix the parse of ! (NOT) in the OSGi requirement
+ filter
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1231711 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../obr/filter/RequirementFilterParser.java   | 23 ++++++++++++-------
+ .../osgi/obr/filter/UniOperatorFilter.java    |  2 +-
+ .../ivy/osgi/obr/RequirementFilterTest.java   | 21 +++++++++++++----
+ 3 files changed, 33 insertions(+), 13 deletions(-)
+
+diff --git a/src/java/org/apache/ivy/osgi/obr/filter/RequirementFilterParser.java b/src/java/org/apache/ivy/osgi/obr/filter/RequirementFilterParser.java
+index 7229d5168..f1a0c20ea 100644
+--- a/src/java/org/apache/ivy/osgi/obr/filter/RequirementFilterParser.java
++++ b/src/java/org/apache/ivy/osgi/obr/filter/RequirementFilterParser.java
+@@ -93,27 +93,33 @@ private RequirementFilter parseFilter() throws ParseException {
+             if (c != '(') {
+                 throw new ParseException("Expecting '(' as the start of the filter", pos);
+             }
++            RequirementFilter filter;
+             switch (readNext()) {
+                 case '&':
+-                    return parseAnd();
++                    filter = parseAnd();
++                    break;
+                 case '|':
+-                    return parseOr();
++                    filter = parseOr();
++                    break;
+                 case '!':
+-                    return parseNot();
++                    filter = parseNot();
++                    break;
+                 default:
+                     unread();
+-                    return parseCompare();
++                    filter = parseCompare();
++                    break;
++            }
++            readNext();
++            if (c != ')') {
++                throw new ParseException("Expecting ')' as the end of the filter", pos);
+             }
++            return filter;
+         }
+ 
+         private RequirementFilter parseCompare() throws ParseException {
+             String leftValue = parseCompareValue();
+             Operator operator = parseCompareOperator();
+             String rightValue = parseCompareValue();
+-            readNext();
+-            if (c != ')') {
+-                throw new ParseException("Expecting ')' as the end of the filter", pos);
+-            }
+             return new CompareFilter(leftValue, operator, rightValue);
+         }
+ 
+@@ -177,6 +183,7 @@ private void parseMultiOperator(MultiOperatorFilter filter) throws ParseExceptio
+                     unread();
+                     filter.add(parseFilter());
+                 } else {
++                    unread();
+                     break;
+                 }
+             } while (pos < length);
+diff --git a/src/java/org/apache/ivy/osgi/obr/filter/UniOperatorFilter.java b/src/java/org/apache/ivy/osgi/obr/filter/UniOperatorFilter.java
+index ee440b254..da67c740c 100644
+--- a/src/java/org/apache/ivy/osgi/obr/filter/UniOperatorFilter.java
++++ b/src/java/org/apache/ivy/osgi/obr/filter/UniOperatorFilter.java
+@@ -54,7 +54,7 @@ public boolean equals(Object obj) {
+         if (obj == null) {
+             return false;
+         }
+-        if (!(obj instanceof MultiOperatorFilter)) {
++        if (!(obj instanceof UniOperatorFilter)) {
+             return false;
+         }
+         UniOperatorFilter other = (UniOperatorFilter) obj;
+diff --git a/test/java/org/apache/ivy/osgi/obr/RequirementFilterTest.java b/test/java/org/apache/ivy/osgi/obr/RequirementFilterTest.java
+index 618820750..15ffc754f 100644
+--- a/test/java/org/apache/ivy/osgi/obr/RequirementFilterTest.java
++++ b/test/java/org/apache/ivy/osgi/obr/RequirementFilterTest.java
+@@ -25,6 +25,7 @@
+ import org.apache.ivy.osgi.obr.filter.AndFilter;
+ import org.apache.ivy.osgi.obr.filter.CompareFilter;
+ import org.apache.ivy.osgi.obr.filter.CompareFilter.Operator;
++import org.apache.ivy.osgi.obr.filter.NotFilter;
+ import org.apache.ivy.osgi.obr.filter.RequirementFilterParser;
+ import org.apache.ivy.osgi.obr.xml.RequirementFilter;
+ 
+@@ -38,16 +39,28 @@ public void testParser() throws Exception {
+         checkParse(cgt2, "(c>2)");
+         RequirementFilter twoeqd = new CompareFilter("2", Operator.EQUALS, "d");
+         checkParse(twoeqd, "(2=d)");
+-        RequirementFilter foodorbarge0dot0 = new CompareFilter("foo.bar",
++        RequirementFilter foodotbarge0dot0 = new CompareFilter("foo.bar",
+                 Operator.GREATER_OR_EQUAL, "0.0");
+-        checkParse(foodorbarge0dot0, "(foo.bar>=0.0)");
+-        RequirementFilter and = new AndFilter(new RequirementFilter[] {foodorbarge0dot0});
++        checkParse(foodotbarge0dot0, "(foo.bar>=0.0)");
++        RequirementFilter and = new AndFilter(new RequirementFilter[] {foodotbarge0dot0});
+         checkParse(and, "(&(foo.bar>=0.0))");
+         RequirementFilter and2 = new AndFilter(new RequirementFilter[] {cgt2, twoeqd,
+-                foodorbarge0dot0});
++                foodotbarge0dot0});
+         checkParse(and2, "(&(c>2)(2=d)(foo.bar>=0.0))");
+         RequirementFilter spaceAfterAnd = new AndFilter(new RequirementFilter[] {twoeqd});
+         checkParse(spaceAfterAnd, "(& (2=d))");
++
++        RequirementFilter version350 = new CompareFilter("version", Operator.GREATER_OR_EQUAL,
++                "3.5.0");
++        RequirementFilter version400 = new CompareFilter("version", Operator.GREATER_OR_EQUAL,
++                "4.0.0");
++        RequirementFilter notVersion400 = new NotFilter(version400);
++        RequirementFilter bundle = new CompareFilter("bundle", Operator.EQUALS,
++                "org.eclipse.core.runtime");
++        RequirementFilter andEverythingWithSpace = new AndFilter(new RequirementFilter[] {
++                version350, notVersion400, bundle});
++        checkParse(andEverythingWithSpace,
++            "(&     (version>=3.5.0)     (!(version>=4.0.0))     (bundle=org.eclipse.core.runtime)    )");
+     }
+ 
+     private void assertParseFail(String toParse) {

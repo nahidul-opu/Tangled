@@ -1,0 +1,184 @@
+From 4dd3c589eebcb28b3c99c8c42a1e443655f7b0d9 Mon Sep 17 00:00:00 2001
+From: Niall Pemberton <niallp@apache.org>
+Date: Sun, 21 Feb 2010 02:52:56 +0000
+Subject: [PATCH] LANG-76 EnumUtils.getEnum() doesn't work in 1.5+ - force
+ initialization of the Enum class using Class.forName() thanks to Marcus
+ Schulte for the solution (Note: for JDK 1.5+ the Ant build compiles
+ EnumUtilsLang76Test with source/target 1.5 which causes this problem to
+ occur)
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/lang/branches/LANG_2_X@912292 13f79535-47bb-0310-9956-ffa450edef68
+---
+ build.xml                                     | 15 +++++-
+ .../org/apache/commons/lang/enum/Enum.java    | 11 ++++
+ .../org/apache/commons/lang/enums/Enum.java   | 11 ++++
+ .../lang/enums/EnumUtilsLang76Test.java       | 53 +++++++++++++++++++
+ .../commons/lang/enums/EnumUtilsTest.java     | 18 -------
+ 5 files changed, 89 insertions(+), 19 deletions(-)
+ create mode 100644 src/test/java/org/apache/commons/lang/enums/EnumUtilsLang76Test.java
+
+diff --git a/build.xml b/build.xml
+index eb38f727c18..7c160704963 100644
+--- a/build.xml
++++ b/build.xml
+@@ -53,6 +53,7 @@
+         <filter token="compile.source" value="${compile.source}"/>
+         <filter token="compile.target" value="${compile.target}"/>
+         <mkdir dir="${build.home}"/>
++        <available property="jdk.1.5.present" classname="java.lang.StringBuilder"/>
+     </target>
+ 
+     <!-- ========== Compile Targets ========================================= -->
+@@ -66,9 +67,21 @@
+         </copy>
+     </target>
+ 
+-    <target name="compile.tests" depends="compile" description="Compile unit test cases">
++    <!-- Compile EnumUtilsLang76Test using source/target 1.5 if JDK 1.5 present (see LANG-76) -->
++    <target name="test.compile.jdk15" depends="compile" description="Run test for LANG-76" if="jdk.1.5.present">
++        <echo message="Compiling EnumUtilsLang76Test using source/target 1.5"/>
++        <mkdir dir="${build.home}/tests"/>
++        <javac srcdir="${test.home}" destdir="${build.home}/tests"
++               target="1.5" source="1.5"
++               includes="org/apache/commons/lang/enums/EnumUtilsLang76Test.java">
++            <classpath refid="test.classpath"/>
++        </javac>
++    </target>
++
++    <target name="compile.tests" depends="compile,test.compile.jdk15" description="Compile unit test cases">
+         <mkdir dir="${build.home}/tests"/>
+         <javac srcdir="${test.home}" destdir="${build.home}/tests" debug="${compile.debug}" deprecation="off" target="${compile.target}" source="${compile.source}" optimize="${compile.optimize}">
++            <exclude name="org/apache/commons/lang/enums/EnumUtilsLang76Test.java" if="jdk.1.5.present"/>
+             <classpath refid="test.classpath"/>
+         </javac>
+         <copy todir="${build.home}/tests" filtering="on">
+diff --git a/src/main/java/org/apache/commons/lang/enum/Enum.java b/src/main/java/org/apache/commons/lang/enum/Enum.java
+index 1755e685f83..06f8572ef02 100644
+--- a/src/main/java/org/apache/commons/lang/enum/Enum.java
++++ b/src/main/java/org/apache/commons/lang/enum/Enum.java
+@@ -484,6 +484,17 @@ private static Entry getEntry(Class enumClass) {
+             throw new IllegalArgumentException("The Class must be a subclass of Enum");
+         }
+         Entry entry = (Entry) cEnumClasses.get(enumClass);
++
++        if (entry == null) {
++            try {
++                // LANG-76 - try to force class initialization for JDK 1.5+
++                Class.forName(enumClass.getName(), true, enumClass.getClassLoader());
++                entry = (Entry) cEnumClasses.get(enumClass);
++            } catch (Throwable t) {
++                // Ignore
++            }
++        }
++
+         return entry;
+     }
+     
+diff --git a/src/main/java/org/apache/commons/lang/enums/Enum.java b/src/main/java/org/apache/commons/lang/enums/Enum.java
+index 571e7afdc77..112b5d254b1 100644
+--- a/src/main/java/org/apache/commons/lang/enums/Enum.java
++++ b/src/main/java/org/apache/commons/lang/enums/Enum.java
+@@ -530,6 +530,17 @@ private static Entry getEntry(Class enumClass) {
+             throw new IllegalArgumentException("The Class must be a subclass of Enum");
+         }
+         Entry entry = (Entry) cEnumClasses.get(enumClass);
++
++        if (entry == null) {
++            try {
++                // LANG-76 - try to force class initialization for JDK 1.5+
++                Class.forName(enumClass.getName(), true, enumClass.getClassLoader());
++                entry = (Entry) cEnumClasses.get(enumClass);
++            } catch (Throwable t) {
++                // Ignore
++            }
++        }
++
+         return entry;
+     }
+     
+diff --git a/src/test/java/org/apache/commons/lang/enums/EnumUtilsLang76Test.java b/src/test/java/org/apache/commons/lang/enums/EnumUtilsLang76Test.java
+new file mode 100644
+index 00000000000..b2b8aeecb8f
+--- /dev/null
++++ b/src/test/java/org/apache/commons/lang/enums/EnumUtilsLang76Test.java
+@@ -0,0 +1,53 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ * 
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.lang.enums;
++
++import junit.framework.TestCase;
++
++/**
++ * Test cases for the LANG-76 issue with {@link EnumUtils}.
++ *
++ * NOTE: this needs to be compiled with source/target versions set to 1.5
++ *       in order to replicate/test the issue properly
++ */
++public class EnumUtilsLang76Test extends TestCase {
++
++    public EnumUtilsLang76Test(String name) {
++        super(name);
++    }
++
++    /**
++     * Test LANG-76
++     */
++    public void test_EnumUtils_getEnum_LANG76() {
++        Object obj = EnumUtils.getEnum(TestEnum.class, "1");
++        assertNotNull("Enum is not intialized", obj);
++        assertEquals("EnumUtilsLang76Test.TestEnum[1]", obj.toString());
++    }
++
++    /** Test Enum for LANG-76 **/
++    public static final class TestEnum  extends Enum {
++        private static final long serialVersionUID = 1L;
++        public static final TestEnum ONE     = new TestEnum("1");
++        public static final TestEnum TWO     = new TestEnum("2");
++        public static final TestEnum THREE   = new TestEnum("3");
++
++        private TestEnum(String value) {
++            super(value);
++        }
++    }
++}
+diff --git a/src/test/java/org/apache/commons/lang/enums/EnumUtilsTest.java b/src/test/java/org/apache/commons/lang/enums/EnumUtilsTest.java
+index 2f8c694bc14..c0ab1e103e2 100644
+--- a/src/test/java/org/apache/commons/lang/enums/EnumUtilsTest.java
++++ b/src/test/java/org/apache/commons/lang/enums/EnumUtilsTest.java
+@@ -156,22 +156,4 @@ public void testGetValueEx() {
+             fail();
+         } catch (IllegalArgumentException ex) {}
+     }
+-
+-    /** Test for LANG-76 **/
+-    public void testGetEnum_LANG76() {
+-        Object obj = EnumUtils.getEnum(Lang76Enum.class, "1");
+-        assertNotNull(obj);
+-        assertEquals("EnumUtilsTest.Lang76Enum[1]", obj.toString());
+-    }
+-
+-    /** Test Enum for LANG-76 **/
+-    public static final class Lang76Enum  extends Enum {
+-        public static final Lang76Enum ONE     = new Lang76Enum("1");
+-        public static final Lang76Enum TWO     = new Lang76Enum("2");
+-        public static final Lang76Enum THREE   = new Lang76Enum("3");
+-
+-        private Lang76Enum(String suit) {
+-            super(suit);
+-        }
+-    }
+ }

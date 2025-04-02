@@ -1,0 +1,140 @@
+From 030f1a0b11b02d96991bfeeb46c8b07743186817 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 31 Mar 2008 22:15:41 +0000
+Subject: [PATCH] FIX: resolve fails to put metadata in cache (IVY-779)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@643180 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../plugins/resolver/RepositoryResolver.java  | 29 +++++++++++++++++--
+ .../org/apache/ivy/ant/IvyResolveTest.java    | 21 ++++++++++++++
+ test/repositories/norev/ivy.xml               |  2 +-
+ 4 files changed, 50 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 151c9909d..356a98852 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -75,6 +75,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Parse description and home page from poms (IVY-767)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: resolve fails to put metadata in cache (IVY-779)
+ - FIX: multiple cleancache and inline retrieve error (IVY-778)
+ - FIX: buildlist evicts modules with the same name, but different organisation (IVY-731)
+ - FIX: Out of memory/Stack overflow for new highly coupled project (IVY-595)
+diff --git a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+index f1bcecc2c..8edfa8046 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+@@ -20,6 +20,7 @@
+ import java.io.ByteArrayInputStream;
+ import java.io.File;
+ import java.io.IOException;
++import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Collection;
+@@ -32,9 +33,12 @@
+ import org.apache.ivy.core.event.EventManager;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
++import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.report.DownloadReport;
+ import org.apache.ivy.core.resolve.DownloadOptions;
++import org.apache.ivy.plugins.parser.ModuleDescriptorParser;
++import org.apache.ivy.plugins.parser.ModuleDescriptorParserRegistry;
+ import org.apache.ivy.plugins.repository.AbstractRepository;
+ import org.apache.ivy.plugins.repository.Repository;
+ import org.apache.ivy.plugins.repository.Resource;
+@@ -85,8 +89,26 @@ protected ResolvedResource findResourceUsingPattern(ModuleRevisionId mrid, Strin
+                 Resource res = repository.getResource(resourceName);
+                 boolean reachable = res.exists();
+                 if (reachable) {
+-                    String revision = pattern.indexOf(IvyPatternHelper.REVISION_KEY) == -1 
+-                        ? "working@" + name : mrid.getRevision();
++                    String revision;
++                    if (pattern.indexOf(IvyPatternHelper.REVISION_KEY) == -1) {
++                        if ("ivy".equals(artifact.getType()) || "pom".equals(artifact.getType())) {
++                            // we can't determine the revision from the pattern, get it
++                            // from the moduledescriptor itself
++                            File temp = File.createTempFile("ivy", artifact.getExt());
++                            temp.deleteOnExit();
++                            repository.get(res.getName(), temp);
++                            ModuleDescriptorParser parser = ModuleDescriptorParserRegistry.getInstance().getParser(res);
++                            ModuleDescriptor md = parser.parseDescriptor(getSettings(), temp.toURL(), res, false);
++                            revision = md.getRevision();
++                            if ((revision == null) || (revision.length() == 0)) {
++                                revision = "working@" + name;
++                            }
++                        } else {
++                            revision = "working@" + name;
++                        }
++                    } else {
++                        revision = mrid.getRevision();
++                    }
+                     return new ResolvedResource(res, revision);
+                 } else if (versionMatcher.isDynamic(mrid)) {
+                     return findDynamicResourceUsingPattern(
+@@ -102,6 +124,9 @@ protected ResolvedResource findResourceUsingPattern(ModuleRevisionId mrid, Strin
+         } catch (IOException ex) {
+             throw new RuntimeException(name + ": unable to get resource for " + mrid + ": res="
+                     + IvyPatternHelper.substitute(pattern, mrid, artifact) + ": " + ex, ex);
++        } catch (ParseException ex) {
++            throw new RuntimeException(name + ": unable to get resource for " + mrid + ": res="
++                    + IvyPatternHelper.substitute(pattern, mrid, artifact) + ": " + ex, ex);
+         }
+     }
+ 
+diff --git a/test/java/org/apache/ivy/ant/IvyResolveTest.java b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+index 57f2e0213..7887dff9c 100644
+--- a/test/java/org/apache/ivy/ant/IvyResolveTest.java
++++ b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+@@ -24,6 +24,9 @@
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.TestHelper;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.report.ResolveReport;
++import org.apache.ivy.util.DefaultMessageLogger;
++import org.apache.ivy.util.Message;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Delete;
+@@ -58,6 +61,24 @@ private void cleanCache() {
+         del.setDir(cache);
+         del.execute();
+     }
++    
++    public void testIVY779() throws Exception {
++        Project project = new Project();
++        project.setProperty("ivy.local.default.root", "test/repositories/norev");
++        project.setProperty("ivy.local.default.ivy.pattern", "[module]/[artifact].[ext]");
++        project.setProperty("ivy.local.default.artifact.pattern", "[module]/[artifact].[ext]");
++
++        resolve.setProject(project);
++        project.setProperty("ivy.cache.dir", cache.getAbsolutePath());
++        resolve.setFile(new File("test/repositories/norev/ivy.xml"));
++        resolve.setKeep(true);
++        resolve.execute();
++        
++        ResolveReport report = (ResolveReport) project.getReference("ivy.resolved.report");
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        assertEquals(1, report.getArtifacts().size());
++    }
+ 
+     public void testSimple() throws Exception {
+         // depends on org="org1" name="mod1.2" rev="2.0"
+diff --git a/test/repositories/norev/ivy.xml b/test/repositories/norev/ivy.xml
+index 7b929c3bb..e40e1d73e 100644
+--- a/test/repositories/norev/ivy.xml
++++ b/test/repositories/norev/ivy.xml
+@@ -22,6 +22,6 @@
+     	<conf name="myconf"/>
+     </configurations>
+     <dependencies>
+-        <dependency conf="myconf -> *" org="myorg" name="module2" rev="latest.integration" />
++        <dependency conf="myconf -> *" org="myorg" name="module2" rev="2.0" />
+ 	</dependencies>
+ </ivy-module>

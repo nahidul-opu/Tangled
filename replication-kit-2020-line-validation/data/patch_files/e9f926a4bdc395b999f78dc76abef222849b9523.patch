@@ -1,0 +1,102 @@
+From e9f926a4bdc395b999f78dc76abef222849b9523 Mon Sep 17 00:00:00 2001
+From: Mario Ivankovits <imario@apache.org>
+Date: Mon, 2 Oct 2006 18:49:41 +0000
+Subject: [PATCH] VFS-73: fix for handling move operations where only the case
+ of the file changes (ie on windows filesytems)
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/vfs/trunk@452172 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../vfs/provider/AbstractFileObject.java      | 24 ++++++++++++++++-
+ .../commons/vfs/provider/local/LocalFile.java | 26 +++++++++++++++++++
+ 2 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/src/java/org/apache/commons/vfs/provider/AbstractFileObject.java b/src/java/org/apache/commons/vfs/provider/AbstractFileObject.java
+index d93116c88d..5f094829cb 100644
+--- a/src/java/org/apache/commons/vfs/provider/AbstractFileObject.java
++++ b/src/java/org/apache/commons/vfs/provider/AbstractFileObject.java
+@@ -921,7 +921,8 @@ public void moveTo(FileObject destFile) throws FileSystemException
+                 throw new FileSystemException("vfs.provider/rename-read-only.error", getName());
+             }
+         }
+-        if (destFile.exists())
++
++        if (destFile.exists() && !isSameFile(destFile))
+         {
+             destFile.delete(Selectors.SELECT_ALL);
+             // throw new FileSystemException("vfs.provider/rename-dest-exists.error", destFile.getName());
+@@ -972,6 +973,27 @@ public void moveTo(FileObject destFile) throws FileSystemException
+ 
+     }
+ 
++    /**
++     * Checks if this fileObject is the same file as <code>destFile</code> just with a different
++     * name.<br />
++     * E.g. for case insensitive filesystems like windows. 
++     */
++    protected boolean isSameFile(FileObject destFile) throws FileSystemException
++    {
++        attach();
++        return doIsSameFile(destFile);
++    }
++
++    /**
++     * Checks if this fileObject is the same file as <code>destFile</code> just with a different
++     * name.<br />
++     * E.g. for case insensitive filesystems like windows.
++     */
++    protected boolean doIsSameFile(FileObject destFile) throws FileSystemException
++    {
++        return false;
++    }
++
+     /**
+      * Queries the object if a simple rename to the filename of <code>newfile</code>
+      * is possible.
+diff --git a/src/java/org/apache/commons/vfs/provider/local/LocalFile.java b/src/java/org/apache/commons/vfs/provider/local/LocalFile.java
+index f1b631a5a2..ebb8e67f25 100644
+--- a/src/java/org/apache/commons/vfs/provider/local/LocalFile.java
++++ b/src/java/org/apache/commons/vfs/provider/local/LocalFile.java
+@@ -23,12 +23,14 @@
+ import org.apache.commons.vfs.provider.AbstractFileObject;
+ import org.apache.commons.vfs.provider.UriParser;
+ import org.apache.commons.vfs.util.RandomAccessMode;
++import org.apache.commons.vfs.util.FileObjectUtils;
+ 
+ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+ import java.io.InputStream;
+ import java.io.OutputStream;
++import java.io.IOException;
+ 
+ /**
+  * A file object implementation which uses direct file access.
+@@ -224,4 +226,28 @@ protected RandomAccessContent doGetRandomAccessContent(final RandomAccessMode mo
+     {
+         return new LocalFileRandomAccessContent(file, mode);
+     }
++
++    protected boolean doIsSameFile(FileObject destFile) throws FileSystemException
++    {
++        if (!FileObjectUtils.isInstanceOf(destFile, LocalFile.class))
++        {
++            return false;
++        }
++
++        LocalFile destLocalFile = (LocalFile) FileObjectUtils.getAbstractFileObject(destFile);
++        if (!exists() || !destLocalFile.exists())
++        {
++            return false;
++        }
++
++        try
++        {
++            return file.getCanonicalPath().equals(destLocalFile.file.getCanonicalPath());
++        }
++        catch (IOException e)
++        {
++            throw new FileSystemException(e);
++        }
++
++    }
+ }

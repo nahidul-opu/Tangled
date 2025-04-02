@@ -1,0 +1,362 @@
+From b44da9ac7e91ecc9e0e2130ca7fef06c4904e68b Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 29 Feb 2008 17:32:23 +0000
+Subject: [PATCH] FIX: ivy-resolve fails when a project has different
+ dependencies in different branches (IVY-717)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@632399 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../cache/DefaultRepositoryCacheManager.java  |  6 +--
+ test/java/org/apache/ivy/TestHelper.java      |  8 ++++
+ .../apache/ivy/core/resolve/ResolveTest.java  | 48 ++++++++++++++++---
+ .../branches/bar/bar1/trunk/1/ivy.xml         |  2 +-
+ .../branches/bar/bar1/trunk/2/ivy.xml         |  2 +-
+ .../branches/bar/bar1/trunk/3/ivy.xml         |  2 +-
+ .../branches/bar/bar1/trunk/4/bar1.jar        |  1 +
+ .../branches/bar/bar1/trunk/4/ivy.xml         | 24 ++++++++++
+ .../branches/foo/foo1/branch1/5/foo1.jar      |  1 +
+ .../branches/foo/foo1/branch1/5/ivy.xml       | 24 ++++++++++
+ .../branches/foo/foo1/trunk/5/foo1.jar        |  1 +
+ .../branches/foo/foo1/trunk/5/ivy.xml         | 21 ++++++++
+ .../branches/foo/foo2/branch1/1/foo2.jar      |  1 +
+ .../branches/foo/foo2/branch1/1/ivy.xml       | 21 ++++++++
+ 15 files changed, 150 insertions(+), 13 deletions(-)
+ create mode 100644 test/repositories/branches/bar/bar1/trunk/4/bar1.jar
+ create mode 100644 test/repositories/branches/bar/bar1/trunk/4/ivy.xml
+ create mode 100644 test/repositories/branches/foo/foo1/branch1/5/foo1.jar
+ create mode 100644 test/repositories/branches/foo/foo1/branch1/5/ivy.xml
+ create mode 100644 test/repositories/branches/foo/foo1/trunk/5/foo1.jar
+ create mode 100644 test/repositories/branches/foo/foo1/trunk/5/ivy.xml
+ create mode 100644 test/repositories/branches/foo/foo2/branch1/1/foo2.jar
+ create mode 100644 test/repositories/branches/foo/foo2/branch1/1/ivy.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 3cce5e960..51e981118 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -66,6 +66,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - IMPROVEMENT: Make Ivy standalone runnable with no required dependencies (IVY-757)
+ 
++- FIX: ivy-resolve fails when a project has different dependencies in different branches (IVY-717)
+ - FIX: PublishEventsTest fails when Ivy sources are located in a directory with a + (IVY-755)
+ - FIX: XML entity parsing does not work properly (IVY-737) (thanks to Patrick Woodworth)
+ - FIX: Cachefileset task silently fails with parent dir ".." construct (IVY-638)
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index 4cafcbb7d..2fad4d2ab 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -60,13 +60,13 @@
+ 
+ public class DefaultRepositoryCacheManager implements RepositoryCacheManager, IvySettingsAware {
+     private static final String DEFAULT_ARTIFACT_PATTERN =
+-        "[organisation]/[module]/[type]s/[artifact]-[revision](.[ext])";
++        "[organisation]/[module](/[branch])/[type]s/[artifact]-[revision](.[ext])";
+ 
+     private static final String DEFAULT_DATA_FILE_PATTERN = 
+-        "[organisation]/[module]/ivydata-[revision].properties";
++        "[organisation]/[module](/[branch])/ivydata-[revision].properties";
+ 
+     private static final String DEFAULT_IVY_PATTERN = 
+-        "[organisation]/[module]/ivy-[revision].xml";
++        "[organisation]/[module](/[branch])/ivy-[revision].xml";
+     
+     private IvySettings settings;
+     
+diff --git a/test/java/org/apache/ivy/TestHelper.java b/test/java/org/apache/ivy/TestHelper.java
+index c9acfb8f5..d4c7e4834 100644
+--- a/test/java/org/apache/ivy/TestHelper.java
++++ b/test/java/org/apache/ivy/TestHelper.java
+@@ -57,6 +57,14 @@ public static DefaultArtifact newArtifact(
+     }
+     
+ 
++    public static File getArchiveFileInCache(Ivy ivy, String mrid, 
++            String artifactName, String type, String ext) {
++        DefaultArtifact artifact = new DefaultArtifact(ModuleRevisionId.parse(mrid), 
++            new Date(), artifactName, type, ext);
++        return getRepositoryCacheManager(ivy, artifact.getModuleRevisionId())
++            .getArchiveFileInCache(artifact);
++    }
++
+     public static File getArchiveFileInCache(Ivy ivy, String organisation, String module, 
+             String revision, String artifactName, String type, String ext) {
+         DefaultArtifact artifact = newArtifact(organisation, module, revision,
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 71322a804..90a6215d6 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3706,7 +3706,7 @@ public void testBranches1() throws Exception {
+             new String[] {"*"}).setValidate(false));
+         assertFalse(report.hasError());
+ 
+-        assertTrue(getArchiveFileInCache(ivy, "foo", "foo1", "3", "foo1", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#trunk;3", "foo1", "jar", "jar").exists());
+     }
+ 
+     public void testBranches2() throws Exception {
+@@ -3718,7 +3718,7 @@ public void testBranches2() throws Exception {
+             new String[] {"*"}).setValidate(false));
+         assertFalse(report.hasError());
+ 
+-        assertTrue(getArchiveFileInCache(ivy, "foo", "foo1", "4", "foo1", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#branch1;4", "foo1", "jar", "jar").exists());
+     }
+ 
+     public void testBranches3() throws Exception {
+@@ -3730,7 +3730,7 @@ public void testBranches3() throws Exception {
+             new String[] {"*"}).setValidate(false));
+         assertFalse(report.hasError());
+ 
+-        assertTrue(getArchiveFileInCache(ivy, "foo", "foo1", "4", "foo1", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#branch1;4", "foo1", "jar", "jar").exists());
+     }
+ 
+     public void testBranches4() throws Exception {
+@@ -3742,8 +3742,8 @@ public void testBranches4() throws Exception {
+             new String[] {"*"}).setValidate(false));
+         assertFalse(report.hasError());
+ 
+-        assertTrue(getArchiveFileInCache(ivy, "foo", "foo1", "3", "foo1", "jar", "jar").exists());
+-        assertTrue(getArchiveFileInCache(ivy, "bar", "bar2", "2", "bar2", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#trunk;3", "foo1", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "bar#bar2#trunk;2", "bar2", "jar", "jar").exists());
+     }
+ 
+     public void testBranches5() throws Exception {
+@@ -3755,8 +3755,36 @@ public void testBranches5() throws Exception {
+             new String[] {"*"}).setValidate(false));
+         assertFalse(report.hasError());
+ 
+-        assertTrue(getArchiveFileInCache(ivy, "foo", "foo1", "4", "foo1", "jar", "jar").exists());
+-        assertTrue(getArchiveFileInCache(ivy, "bar", "bar2", "2", "bar2", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#branch1;4", "foo1", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "bar#bar2#trunk;2", "bar2", "jar", "jar").exists());
++    }
++
++    public void testBranches6() throws Exception {
++        // test case for IVY-717
++        
++        // bar1;4 -> foo#foo1#${ivy.branch};5
++        // foo#foo1#branch1;5 -> foo#foo2#${ivy.branch};1
++        // foo#foo1#trunk;5 -> {}
++        
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/branches/ivysettings.xml"));
++
++        ivy.setVariable("ivy.branch", "branch1");
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/branches/bar/bar1/trunk/4/ivy.xml").toURL(), 
++                getResolveOptions(new String[] {"*"}).setValidate(false));
++        assertFalse(report.hasError());
++
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#branch1;5", "foo1", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo2#branch1;1", "foo2", "jar", "jar").exists());
++
++        ivy.setVariable("ivy.branch", "trunk");
++        report = ivy.resolve(new File(
++                "test/repositories/branches/bar/bar1/trunk/4/ivy.xml").toURL(), 
++                getResolveOptions(new String[] {"*"}).setValidate(false));
++        assertFalse(report.hasError());
++        assertEquals(1, report.getConfigurationReport("default").getNodesNumber());
++        assertTrue(getArchiveFileInCache(ivy, "foo#foo1#trunk;5", "foo1", "jar", "jar").exists());
+     }
+ 
+     public void testExternalArtifacts() throws Exception {
+@@ -3904,6 +3932,12 @@ private File getArchiveFileInCache(Ivy ivy, String organisation, String module,
+             ivy, organisation, module, revision, artifactName, type, ext);
+     }
+ 
++    private File getArchiveFileInCache(Ivy ivy, String mrid,
++            String artifactName, String type, String ext) {
++        return TestHelper.getArchiveFileInCache(
++            ivy, mrid, artifactName, type, ext);
++    }
++
+     private ResolveOptions getResolveOptions(String[] confs) {
+         return getResolveOptions(ivy.getSettings(), confs);
+     }
+diff --git a/test/repositories/branches/bar/bar1/trunk/1/ivy.xml b/test/repositories/branches/bar/bar1/trunk/1/ivy.xml
+index fa717ae1d..28e9ae8e6 100644
+--- a/test/repositories/branches/bar/bar1/trunk/1/ivy.xml
++++ b/test/repositories/branches/bar/bar1/trunk/1/ivy.xml
+@@ -19,6 +19,6 @@
+ <ivy-module version="1.4">
+ 	<info organisation="bar" module="bar1" revision="1"/>
+ 	<dependencies>
+-		<dependency org="foo" name="foo1" rev="latest.integration" />
++		<dependency org="foo" name="foo1" rev="[0,4]" />
+ 	</dependencies>
+ </ivy-module>
+diff --git a/test/repositories/branches/bar/bar1/trunk/2/ivy.xml b/test/repositories/branches/bar/bar1/trunk/2/ivy.xml
+index 6677c6fa3..c1246ae68 100644
+--- a/test/repositories/branches/bar/bar1/trunk/2/ivy.xml
++++ b/test/repositories/branches/bar/bar1/trunk/2/ivy.xml
+@@ -19,6 +19,6 @@
+ <ivy-module version="1.4">
+ 	<info organisation="bar" module="bar1" revision="2"/>
+ 	<dependencies>
+-		<dependency org="foo" name="foo1" branch="branch1" rev="latest.integration" />
++		<dependency org="foo" name="foo1" branch="branch1" rev="[0,4]" />
+ 	</dependencies>
+ </ivy-module>
+diff --git a/test/repositories/branches/bar/bar1/trunk/3/ivy.xml b/test/repositories/branches/bar/bar1/trunk/3/ivy.xml
+index ae7cb157a..d142c2674 100644
+--- a/test/repositories/branches/bar/bar1/trunk/3/ivy.xml
++++ b/test/repositories/branches/bar/bar1/trunk/3/ivy.xml
+@@ -19,7 +19,7 @@
+ <ivy-module version="1.4">
+ 	<info organisation="bar" module="bar1" revision="3"/>
+ 	<dependencies>
+-		<dependency org="foo" name="foo1" rev="latest.integration" />
++		<dependency org="foo" name="foo1" rev="[0,4]" />
+ 		<dependency org="bar" name="bar2" rev="latest.integration" />
+ 	</dependencies>
+ </ivy-module>
+diff --git a/test/repositories/branches/bar/bar1/trunk/4/bar1.jar b/test/repositories/branches/bar/bar1/trunk/4/bar1.jar
+new file mode 100644
+index 000000000..56a6051ca
+--- /dev/null
++++ b/test/repositories/branches/bar/bar1/trunk/4/bar1.jar
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/test/repositories/branches/bar/bar1/trunk/4/ivy.xml b/test/repositories/branches/bar/bar1/trunk/4/ivy.xml
+new file mode 100644
+index 000000000..8a042121d
+--- /dev/null
++++ b/test/repositories/branches/bar/bar1/trunk/4/ivy.xml
+@@ -0,0 +1,24 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.4">
++	<info organisation="bar" module="bar1" revision="2"/>
++	<dependencies>
++		<dependency org="foo" name="foo1" branch="${ivy.branch}" rev="5" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/branches/foo/foo1/branch1/5/foo1.jar b/test/repositories/branches/foo/foo1/branch1/5/foo1.jar
+new file mode 100644
+index 000000000..56a6051ca
+--- /dev/null
++++ b/test/repositories/branches/foo/foo1/branch1/5/foo1.jar
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/test/repositories/branches/foo/foo1/branch1/5/ivy.xml b/test/repositories/branches/foo/foo1/branch1/5/ivy.xml
+new file mode 100644
+index 000000000..71c0f7fc7
+--- /dev/null
++++ b/test/repositories/branches/foo/foo1/branch1/5/ivy.xml
+@@ -0,0 +1,24 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.4">
++	<info organisation="foo" module="foo1" branch="branch1" revision="5"/>
++	<dependencies>
++		<dependency org="foo" name="foo2" branch="branch1" rev="1" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/branches/foo/foo1/trunk/5/foo1.jar b/test/repositories/branches/foo/foo1/trunk/5/foo1.jar
+new file mode 100644
+index 000000000..56a6051ca
+--- /dev/null
++++ b/test/repositories/branches/foo/foo1/trunk/5/foo1.jar
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/test/repositories/branches/foo/foo1/trunk/5/ivy.xml b/test/repositories/branches/foo/foo1/trunk/5/ivy.xml
+new file mode 100644
+index 000000000..7ccf4fbc1
+--- /dev/null
++++ b/test/repositories/branches/foo/foo1/trunk/5/ivy.xml
+@@ -0,0 +1,21 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.4">
++	<info organisation="foo" module="foo1" branch="trunk" revision="5"/>
++</ivy-module>
+diff --git a/test/repositories/branches/foo/foo2/branch1/1/foo2.jar b/test/repositories/branches/foo/foo2/branch1/1/foo2.jar
+new file mode 100644
+index 000000000..56a6051ca
+--- /dev/null
++++ b/test/repositories/branches/foo/foo2/branch1/1/foo2.jar
+@@ -0,0 +1 @@
++1
+\ No newline at end of file
+diff --git a/test/repositories/branches/foo/foo2/branch1/1/ivy.xml b/test/repositories/branches/foo/foo2/branch1/1/ivy.xml
+new file mode 100644
+index 000000000..51e8c05bc
+--- /dev/null
++++ b/test/repositories/branches/foo/foo2/branch1/1/ivy.xml
+@@ -0,0 +1,21 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.4">
++	<info organisation="foo" module="foo2" branch="branch1" revision="1"/>
++</ivy-module>

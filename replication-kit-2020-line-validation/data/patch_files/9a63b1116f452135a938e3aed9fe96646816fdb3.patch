@@ -1,0 +1,250 @@
+From 9a63b1116f452135a938e3aed9fe96646816fdb3 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Fri, 1 Aug 2008 19:42:53 +0000
+Subject: [PATCH] CONFIGURATION-332: DataConfiguration now collaborates better
+ with PropertiesConfiguration. Ported fix from trunk.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@681802 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration2/DataConfiguration.java     | 14 ++++++++
+ .../configuration2/TestDataConfiguration.java | 33 +++++++++++++++++--
+ .../TestPropertiesConfiguration.java          | 32 ++++++++++++++++--
+ xdocs/changes.xml                             |  5 +++
+ 4 files changed, 79 insertions(+), 5 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/DataConfiguration.java b/src/main/java/org/apache/commons/configuration2/DataConfiguration.java
+index 261d676763..c29edc81f1 100644
+--- a/src/main/java/org/apache/commons/configuration2/DataConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/DataConfiguration.java
+@@ -128,6 +128,7 @@ public Object getProperty(String key)
+         return configuration.getProperty(key);
+     }
+ 
++    @Override
+     protected void addPropertyDirect(String key, Object obj)
+     {
+         if (configuration instanceof AbstractConfiguration)
+@@ -140,6 +141,12 @@ protected void addPropertyDirect(String key, Object obj)
+         }
+     }
+ 
++    @Override
++    public void addProperty(String key, Object value)
++    {
++        getConfiguration().addProperty(key, value);
++    }
++
+     public boolean isEmpty()
+     {
+         return configuration.isEmpty();
+@@ -150,11 +157,18 @@ public boolean containsKey(String key)
+         return configuration.containsKey(key);
+     }
+ 
++    @Override
+     public void clearProperty(String key)
+     {
+         configuration.clearProperty(key);
+     }
+ 
++    @Override
++    public void setProperty(String key, Object value)
++    {
++        configuration.setProperty(key, value);
++    }
++
+     public Iterator<String> getKeys()
+     {
+         return configuration.getKeys();
+diff --git a/src/test/java/org/apache/commons/configuration2/TestDataConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestDataConfiguration.java
+index 4233a27f35..8a60824ec1 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestDataConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestDataConfiguration.java
+@@ -31,22 +31,31 @@
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.NoSuchElementException;
+-import javax.mail.internet.InternetAddress;
+ 
+-import org.apache.commons.configuration2.flat.BaseConfiguration;
++import javax.mail.internet.InternetAddress;
+ 
+ import junit.framework.TestCase;
+ import junitx.framework.ArrayAssert;
+ import junitx.framework.ListAssert;
+ 
++import org.apache.commons.configuration2.flat.BaseConfiguration;
++import org.easymock.EasyMock;
++
+ /**
+  * @author Emmanuel Bourg
+  * @version $Revision$, $Date$
+  */
+ public class TestDataConfiguration extends TestCase
+ {
++    /** Constant for a test key.*/
++    private static final String KEY = "test.key";
++
++    /** Constant for a test value.*/
++    private static final Object VALUE = 42;
++
+     private DataConfiguration conf;
+ 
++    @Override
+     protected void setUp() throws Exception
+     {
+         conf = new DataConfiguration(new BaseConfiguration());
+@@ -2342,4 +2351,24 @@ public void testConversionException() throws Exception
+             // expected
+         }
+     }
++
++    public void testAddProperty()
++    {
++        Configuration mock = EasyMock.createMock(Configuration.class);
++        mock.addProperty(KEY, VALUE);
++        EasyMock.replay(mock);
++        conf = new DataConfiguration(mock);
++        conf.addProperty(KEY, VALUE);
++        EasyMock.verify(mock);
++    }
++
++    public void testSetProperty()
++    {
++        Configuration mock = EasyMock.createMock(Configuration.class);
++        mock.setProperty(KEY, VALUE);
++        EasyMock.replay(mock);
++        conf = new DataConfiguration(mock);
++        conf.setProperty(KEY, VALUE);
++        EasyMock.verify(mock);
++    }
+ }
+diff --git a/src/test/java/org/apache/commons/configuration2/TestPropertiesConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestPropertiesConfiguration.java
+index 3d3f3ef00e..72293c22fe 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestPropertiesConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestPropertiesConfiguration.java
+@@ -34,11 +34,11 @@
+ import java.util.Iterator;
+ import java.util.List;
+ 
++import junit.framework.TestCase;
++
+ import org.apache.commons.configuration2.flat.BaseConfiguration;
+ import org.apache.commons.configuration2.reloading.FileChangedReloadingStrategy;
+ 
+-import junit.framework.TestCase;
+-
+ /**
+  * Test for loading and saving properties files.
+  *
+@@ -55,6 +55,7 @@ public class TestPropertiesConfiguration extends TestCase
+     private String testBasePath2 = ConfigurationAssert.TEST_DIR.getAbsoluteFile().getParentFile().getAbsolutePath();
+     private File testSavePropertiesFile = ConfigurationAssert.getOutFile("testsave.properties");
+ 
++    @Override
+     protected void setUp() throws Exception
+     {
+         conf = new PropertiesConfiguration(testProperties);
+@@ -239,7 +240,7 @@ public void testSaveMissingFilename()
+     public void testSaveWithBasePath() throws Exception
+     {
+         conf.setProperty("test", "true");
+-        conf.setBasePath(testSavePropertiesFile.getParentFile().toURL().toString());
++        conf.setBasePath(testSavePropertiesFile.getParentFile().toURI().toString());
+         conf.setFileName(testSavePropertiesFile.getName());
+         conf.save();
+         assertTrue(testSavePropertiesFile.exists());
+@@ -600,6 +601,7 @@ public void testReentrantReload()
+         conf.setProperty("shouldReload", Boolean.FALSE);
+         conf.setReloadingStrategy(new FileChangedReloadingStrategy()
+         {
++            @Override
+             public boolean reloadingRequired()
+             {
+                 return configuration.getBoolean("shouldReload");
+@@ -792,6 +794,23 @@ public void testAppendAndSave() throws ConfigurationException
+         checkCopiedConfig(copyConf);
+     }
+ 
++    /**
++     * Tests adding properties through a DataConfiguration. This is related to
++     * CONFIGURATION-332.
++     */
++    public void testSaveWithDataConfig() throws ConfigurationException
++    {
++        conf = new PropertiesConfiguration(testSavePropertiesFile);
++        DataConfiguration dataConfig = new DataConfiguration(conf);
++        dataConfig.setProperty("foo", "bar");
++        assertEquals("Property not set", "bar", conf.getString("foo"));
++
++        conf.save();
++        PropertiesConfiguration config2 = new PropertiesConfiguration(
++                testSavePropertiesFile);
++        assertEquals("Property not saved", "bar", config2.getString("foo"));
++    }
++
+     /**
+      * Creates a configuration that can be used for testing copy operations.
+      *
+@@ -843,6 +862,7 @@ public DummyLayout(PropertiesConfiguration config)
+             super(config);
+         }
+ 
++        @Override
+         public void load(Reader in) throws ConfigurationException
+         {
+             loadCalls++;
+@@ -868,24 +888,29 @@ protected MockHttpURLConnection(URL u, int respCode, File outFile)
+             outputFile = outFile;
+         }
+ 
++        @Override
+         public void disconnect()
+         {
+         }
+ 
++        @Override
+         public boolean usingProxy()
+         {
+             return false;
+         }
+ 
++        @Override
+         public void connect() throws IOException
+         {
+         }
+ 
++        @Override
+         public int getResponseCode() throws IOException
+         {
+             return responseCode;
+         }
+ 
++        @Override
+         public OutputStream getOutputStream() throws IOException
+         {
+             return new FileOutputStream(outputFile);
+@@ -917,6 +942,7 @@ public MockHttpURLConnection getMockConnection()
+             return connection;
+         }
+ 
++        @Override
+         protected URLConnection openConnection(URL u) throws IOException
+         {
+             connection = new MockHttpURLConnection(u, responseCode, outputFile);
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index bd7d4358cf..11414f2f56 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -85,6 +85,11 @@
+     </release>
+ 
+     <release version="1.6" date="in SVN" description="">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-332">
++        Properties written through a DataConfiguration to a wrapped
++        PropertiesConfiguration got lost when the PropertiesConfiguration was
++        saved. This has been fixed.
++      </action>
+       <action dev="oheger" type="add" issue="CONFIGURATION-331">
+         XMLBeanDeclaration now defines a factory method createBeanDeclaration()
+         for creating the declarations for complex nested properties. This

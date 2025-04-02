@@ -1,0 +1,202 @@
+From 0d219fa88279d2efe2c2df21e9c5dc2031f20ae1 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Thu, 28 Oct 2010 19:35:45 +0000
+Subject: [PATCH] [CONFIGURATION-424] Fixed a bug in the handling of the global
+ section in INIConfiguration. Ported fix from trunk to configuration2 branch.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@1028445 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 +
+ .../configuration2/INIConfiguration.java      | 13 ++--
+ .../configuration2/TestINIConfiguration.java  | 76 +++++++++++++------
+ 3 files changed, 63 insertions(+), 30 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 3557e875cb..37b99bb58e 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -79,6 +79,10 @@
+     </release>
+ 
+     <release version="1.7" date="in SVN" description="">
++      <action dev="oheger" type="fix" issue="CONFIGURATION-424">
++        HierarchicalINIConfiguration now works correctly with configurations
++        that contain only properties in the global section.
++      </action>
+       <action dev="rgoers" type="fix" issue="CONFIGURATION-423" due-to="william_buckley@intuit.com">
+         testFromClassPath() can fail when it should not because of inconsistent escaping of output from
+         PropertiesConfiguration.getURL() and FileChangedReloadingStrategy.getFile().toURL().
+diff --git a/src/main/java/org/apache/commons/configuration2/INIConfiguration.java b/src/main/java/org/apache/commons/configuration2/INIConfiguration.java
+index 607ab0dfcb..bdc5c67e11 100644
+--- a/src/main/java/org/apache/commons/configuration2/INIConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration2/INIConfiguration.java
+@@ -600,21 +600,22 @@ public Set<String> getSections()
+     {
+         Set<String> sections = new LinkedHashSet<String>();
+         boolean globalSection = false;
++        boolean inSection = false;
+ 
+         for (ConfigurationNode node : getRootNode().getChildren())
+         {
+             if (isSectionNode(node))
+             {
+-                if (globalSection)
+-                {
+-                    sections.add(null);
+-                    globalSection = false;
+-                }
++                inSection = true;
+                 sections.add(node.getName());
+             }
+             else
+             {
+-                globalSection = true;
++                if(!inSection && !globalSection)
++                {
++                    globalSection = true;
++                    sections.add(null);
++                }
+             }
+         }
+ 
+diff --git a/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java b/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java
+index 25421a8065..e6a7dfeff1 100644
+--- a/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration2/TestINIConfiguration.java
+@@ -80,9 +80,13 @@ public class TestINIConfiguration extends TestCase
+             + "  line 2" + LINE_SEPARATOR
+             + "continueNoLine = one \\" + LINE_SEPARATOR;
+ 
++    /** An ini file that contains only a property in the global section. */
++    private static final String INI_DATA_GLOBAL_ONLY = "globalVar = testGlobal"
++            + LINE_SEPARATOR + LINE_SEPARATOR;
++
+     /** An ini file with a global section. */
+-    private static final String INI_DATA_GLOBAL = "globalVar = testGlobal"
+-            + LINE_SEPARATOR + LINE_SEPARATOR + INI_DATA;
++    private static final String INI_DATA_GLOBAL = INI_DATA_GLOBAL_ONLY
++            + INI_DATA;
+ 
+     /** A test ini file. */
+     private static final File TEST_FILE = ConfigurationAssert.getOutFile("test.ini");
+@@ -157,15 +161,36 @@ public void testSave() throws Exception
+     }
+ 
+     /**
+-     * Tests saving a configuration that contains a global section.
++     * Helper method for testing a save operation. This method constructs a
++     * configuration from the specified content string. Then it saves this
++     * configuration and checks whether the result matches the original content.
++     *
++     * @param content the content of the configuration
++     * @throws ConfigurationException if an error occurs
+      */
+-    public void testSaveWithGlobalSection() throws ConfigurationException
++    private void checkSave(String content) throws ConfigurationException
+     {
+-        INIConfiguration config = setUpConfig(INI_DATA_GLOBAL);
++        INIConfiguration config = setUpConfig(content);
+         StringWriter writer = new StringWriter();
+         config.save(writer);
+-        assertEquals("Wrong content of ini file", INI_DATA_GLOBAL, writer
+-                .toString());
++        assertEquals("Wrong content of ini file", content, writer.toString());
++    }
++
++    /**
++     * Tests saving a configuration that contains a global section.
++     */
++    public void testSaveWithGlobalSection() throws ConfigurationException
++    {
++        checkSave(INI_DATA_GLOBAL);
++    }
++
++    /**
++     * Tests whether a configuration that contains only a global section can be
++     * saved correctly.
++     */
++    public void testSaveWithOnlyGlobalSection() throws ConfigurationException
++    {
++        checkSave(INI_DATA_GLOBAL_ONLY);
+     }
+ 
+     /**
+@@ -407,7 +432,7 @@ public void testGlobalProperty() throws ConfigurationException
+      * @param expected an array with the expected sections
+      */
+     private void checkSectionNames(INIConfiguration config,
+-            String[] expected)
++            String... expected)
+     {
+         Set<String> sectionNames = config.getSections();
+         Iterator<String> it = sectionNames.iterator();
+@@ -426,7 +451,7 @@ private void checkSectionNames(INIConfiguration config,
+      * @return the configuration instance
+      */
+     private INIConfiguration checkSectionNames(String data,
+-            String[] expected) throws ConfigurationException
++            String... expected) throws ConfigurationException
+     {
+         INIConfiguration config = setUpConfig(data);
+         checkSectionNames(config, expected);
+@@ -438,9 +463,8 @@ private INIConfiguration checkSectionNames(String data,
+      */
+     public void testGetSectionsWithGlobal() throws ConfigurationException
+     {
+-        checkSectionNames(INI_DATA_GLOBAL, new String[] {
+-                null, "section1", "section2", "section3"
+-        });
++        checkSectionNames(INI_DATA_GLOBAL, null, "section1", "section2",
++                "section3");
+     }
+ 
+     /**
+@@ -448,9 +472,16 @@ public void testGetSectionsWithGlobal() throws ConfigurationException
+      */
+     public void testGetSectionsNoGlobal() throws ConfigurationException
+     {
+-        checkSectionNames(INI_DATA, new String[] {
+-                "section1", "section2", "section3"
+-        });
++        checkSectionNames(INI_DATA, "section1", "section2", "section3");
++    }
++
++    /**
++     * Tests whether the sections of a configuration can be queried that
++     * contains only a global section.
++     */
++    public void testGetSectionsGlobalOnly() throws ConfigurationException
++    {
++        checkSectionNames(INI_DATA_GLOBAL_ONLY, (String) null);
+     }
+ 
+     /**
+@@ -460,12 +491,11 @@ public void testGetSectionsNoGlobal() throws ConfigurationException
+     public void testGetSectionsDottedVar() throws ConfigurationException
+     {
+         final String data = "dotted.var = 1" + LINE_SEPARATOR + INI_DATA_GLOBAL;
+-        INIConfiguration config = checkSectionNames(data,
+-                new String[] {
+-                        null, "section1", "section2", "section3"
+-                });
+-        assertEquals("Wrong value of dotted variable", 1, config
+-                .getInt("dotted..var"));
++        INIConfiguration config =
++                checkSectionNames(data, null, "section1", "section2",
++                        "section3");
++        assertEquals("Wrong value of dotted variable", 1,
++                config.getInt("dotted..var"));
+     }
+ 
+     /**
+@@ -475,9 +505,7 @@ public void testGetSectionsAdded() throws ConfigurationException
+     {
+         INIConfiguration config = setUpConfig(INI_DATA2);
+         config.addProperty("section5.test", Boolean.TRUE);
+-        checkSectionNames(config, new String[] {
+-                "section4", "section5"
+-        });
++        checkSectionNames(config, "section4", "section5");
+     }
+ 
+     /**

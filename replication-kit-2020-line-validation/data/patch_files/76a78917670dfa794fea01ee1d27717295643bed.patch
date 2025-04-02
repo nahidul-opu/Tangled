@@ -1,0 +1,135 @@
+From 76a78917670dfa794fea01ee1d27717295643bed Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sat, 2 Dec 2006 18:20:43 +0000
+Subject: [PATCH] The subset configuration of a HierarchicalConfiguration now
+ takes its parent configuration into account for variable interpolation; fix
+ for CONFIGURATION-242
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/configuration/trunk@481592 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../HierarchicalConfiguration.java            | 10 +++++++-
+ .../TestHierarchicalConfiguration.java        | 24 +++++++++++++++++--
+ .../TestSubnodeConfiguration.java             | 21 ++++++++++++++++
+ xdocs/changes.xml                             |  7 ++++++
+ 4 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/src/java/org/apache/commons/configuration/HierarchicalConfiguration.java b/src/java/org/apache/commons/configuration/HierarchicalConfiguration.java
+index b5a45a68d4..2f06360a09 100644
+--- a/src/java/org/apache/commons/configuration/HierarchicalConfiguration.java
++++ b/src/java/org/apache/commons/configuration/HierarchicalConfiguration.java
+@@ -410,7 +410,15 @@ public Configuration subset(String prefix)
+             return new HierarchicalConfiguration();
+         }
+ 
+-        HierarchicalConfiguration result = new HierarchicalConfiguration();
++        final HierarchicalConfiguration parent = this;
++        HierarchicalConfiguration result = new HierarchicalConfiguration()
++        {
++            // Override interpolate to always interpolate on the parent
++            protected Object interpolate(Object value)
++            {
++                return parent.interpolate(value);
++            }
++        };
+         CloneVisitor visitor = new CloneVisitor();
+ 
+         for (Iterator it = nodes.iterator(); it.hasNext();)
+diff --git a/src/test/org/apache/commons/configuration/TestHierarchicalConfiguration.java b/src/test/org/apache/commons/configuration/TestHierarchicalConfiguration.java
+index c0481ed754..4957f6c703 100644
+--- a/src/test/org/apache/commons/configuration/TestHierarchicalConfiguration.java
++++ b/src/test/org/apache/commons/configuration/TestHierarchicalConfiguration.java
+@@ -668,6 +668,26 @@ public void testInitCopyUpdate()
+ 		checkContent(copy);
+ 	}
+ 
++    /**
++     * Tests interpolation facilities.
++     */
++    public void testInterpolation()
++    {
++        config.addProperty("base.dir", "/home/foo");
++        config.addProperty("test.absolute.dir.dir1", "${base.dir}/path1");
++        config.addProperty("test.absolute.dir.dir2", "${base.dir}/path2");
++        config.addProperty("test.absolute.dir.dir3", "${base.dir}/path3");
++
++        Configuration sub = config.subset("test.absolute.dir");
++        for (int i = 1; i < 4; i++)
++        {
++            assertEquals("Wrong interpolation in parent", "/home/foo/path" + i,
++                    config.getString("test.absolute.dir.dir" + i));
++            assertEquals("Wrong interpolation in subnode",
++                    "/home/foo/path" + i, sub.getString("dir" + i));
++        }
++    }
++
+ 	/**
+      * Tests the copy constructor when a null reference is passed.
+      */
+@@ -679,7 +699,7 @@ public void testInitCopyNull()
+ 
+ 	/**
+      * Helper method for testing the getKeys(String) method.
+-     * 
++     *
+      * @param prefix the key to pass into getKeys()
+      * @param expected the expected result
+      */
+@@ -746,7 +766,7 @@ private void checkAlternativeSyntax()
+ 	/**
+      * Checks the content of the passed in configuration object. Used by some
+      * tests that copy a configuration.
+-     * 
++     *
+      * @param c the configuration to check
+      */
+ 	private void checkContent(Configuration c)
+diff --git a/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java b/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java
+index 958466f176..9629baf3d0 100644
+--- a/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java
++++ b/src/test/org/apache/commons/configuration/TestSubnodeConfiguration.java
+@@ -292,6 +292,27 @@ public void testInterpolation()
+                 config.getString("tablespace"));
+     }
+ 
++    /**
++     * An additional test for interpolation when the configurationAt() method is
++     * involved.
++     */
++    public void testInterpolationFromConfigurationAt()
++    {
++        parent.addProperty("base.dir", "/home/foo");
++        parent.addProperty("test.absolute.dir.dir1", "${base.dir}/path1");
++        parent.addProperty("test.absolute.dir.dir2", "${base.dir}/path2");
++        parent.addProperty("test.absolute.dir.dir3", "${base.dir}/path3");
++
++        Configuration sub = parent.configurationAt("test.absolute.dir");
++        for (int i = 1; i < 4; i++)
++        {
++            assertEquals("Wrong interpolation in parent", "/home/foo/path" + i,
++                    parent.getString("test.absolute.dir.dir" + i));
++            assertEquals("Wrong interpolation in subnode",
++                    "/home/foo/path" + i, sub.getString("dir" + i));
++        }
++    }
++
+     /**
+      * Initializes the parent configuration. This method creates the typical
+      * structure of tables and fields nodes.
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index 05cd11b10e..70e2a1fc7e 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -23,6 +23,13 @@
+ 
+   <body>
+     <release version="1.4-dev" date="in SVN">
++      <action dev="oheger" type="update" issue="CONFIGURATION-242">
++        The configuration returned by HierarchicalConfiguration.subset()
++        performed variable interpolation only in the keys that belong to the
++        subset. Now the parent configuration is searched, too, to resolve the
++        value of the referenced property. This is consistent with the way
++        SubnodeConfiguration works.
++      </action>
+       <action dev="oheger" type="update" issue="CONFIGURATION-234">
+         DefaultConfigurationBuilder now internally uses the standard expression
+         engine for hierarchical configurations. So the dependency to Commons

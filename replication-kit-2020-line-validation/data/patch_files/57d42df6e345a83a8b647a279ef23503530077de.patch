@@ -1,0 +1,115 @@
+From 57d42df6e345a83a8b647a279ef23503530077de Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Sat, 3 Jan 2015 21:27:33 +0000
+Subject: [PATCH] VALIDATOR-297 - Punycode url is not valid. Top-level domain
+ regex matching was wrong;                 e.g. it did not allow embedded "-"
+ as per RFC2396
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/validator/trunk@1649251 13f79535-47bb-0310-9956-ffa450edef68
+---
+ RELEASE-NOTES.txt                             |  2 ++
+ src/changes/changes.xml                       |  4 +++
+ .../validator/routines/DomainValidator.java   | 13 ++++++++-
+ .../routines/DomainValidatorTest.java         | 29 +++++++++++++++++++
+ 4 files changed, 47 insertions(+), 1 deletion(-)
+
+diff --git a/RELEASE-NOTES.txt b/RELEASE-NOTES.txt
+index 7b6c6cb14..5b23b39a7 100644
+--- a/RELEASE-NOTES.txt
++++ b/RELEASE-NOTES.txt
+@@ -69,6 +69,8 @@ BUGS FROM PREVIOUS RELEASE
+  * [VALIDATOR-348] - Update TLD list to latest version (Version 2014123000)
+  * [VALIDATOR-309] - UrlValidator does not validate uppercase URL schemes
+                      Thanks to Rashid Rashidov
++ * [VALIDATOR-297] - Punycode url is not valid. Top-level domain regex matching was wrong;
++                     e.g. it did not allow embedded "-" as per RFC2396
+ 
+ IMPROVEMENTS OVER PREVIOUS RELEASE
+ ===================================
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 02193dd88..30a7161a3 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -43,6 +43,10 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+ 
+   <release version="1.4.1" date="tba" description="1.4 Maintenance release">
++    <action issue="VALIDATOR-297" dev="sebb" type="fix">
++      Punycode url is not valid
++      Top-level domain regex matching was wrong; did not allow embedded "-" as per RFC2396
++    </action>
+     <action issue="VALIDATOR-334" dev="sebb" type="update">
+       UrlValidator: isValidAuthority() returning true when supplied authority validator fails
+     </action>
+diff --git a/src/main/java/org/apache/commons/validator/routines/DomainValidator.java b/src/main/java/org/apache/commons/validator/routines/DomainValidator.java
+index 11cfd4423..2f0a9dfd2 100644
+--- a/src/main/java/org/apache/commons/validator/routines/DomainValidator.java
++++ b/src/main/java/org/apache/commons/validator/routines/DomainValidator.java
+@@ -65,8 +65,13 @@ public class DomainValidator implements Serializable {
+     private static final long serialVersionUID = -4407125112880174009L;
+ 
+     // Regular expression strings for hostnames (derived from RFC2396 and RFC 1123)
++
++    // RFC2396: domainlabel   = alphanum | alphanum *( alphanum | "-" ) alphanum
+     private static final String DOMAIN_LABEL_REGEX = "\\p{Alnum}(?>[\\p{Alnum}-]*\\p{Alnum})*";
+-    private static final String TOP_LABEL_REGEX = "\\p{Alpha}{2,}";
++
++    // RFC2396 toplabel = alpha | alpha *( alphanum | "-" ) alphanum
++    private static final String TOP_LABEL_REGEX = "\\p{Alpha}|(?:\\p{Alpha}(?:[\\p{Alnum}-])*\\p{Alnum})";
++
+     private static final String DOMAIN_NAME_REGEX =
+             "^(?:" + DOMAIN_LABEL_REGEX + "\\.)+" + "(" + TOP_LABEL_REGEX + ")$";
+ 
+@@ -137,6 +142,12 @@ public boolean isValid(String domain) {
+         return allowLocal && hostnameRegex.isValid(domain);
+     }
+ 
++    // package protected for unit test access 
++    final boolean isValidDomainSyntax(String domain) {
++        String[] groups = domainRegex.match(domain);
++        return (groups != null && groups.length > 0);
++    }
++
+     /**
+      * Returns true if the specified <code>String</code> matches any
+      * IANA-defined top-level domain. Leading dots are ignored if present.
+diff --git a/src/test/java/org/apache/commons/validator/routines/DomainValidatorTest.java b/src/test/java/org/apache/commons/validator/routines/DomainValidatorTest.java
+index 0eafc3d28..ee9b60d9c 100644
+--- a/src/test/java/org/apache/commons/validator/routines/DomainValidatorTest.java
++++ b/src/test/java/org/apache/commons/validator/routines/DomainValidatorTest.java
+@@ -134,6 +134,35 @@ public void testIDN() {
+        assertTrue("b\u00fccher.ch in IDN should validate", validator.isValid("www.xn--bcher-kva.ch"));
+     }
+ 
++    // RFC2396: domainlabel   = alphanum | alphanum *( alphanum | "-" ) alphanum
++    public void testRFC2396domainlabel() {
++        assertTrue("a.ch should validate", validator.isValid("a.ch"));
++        assertTrue("9.ch should validate", validator.isValid("9.ch"));
++        assertTrue("az.ch should validate", validator.isValid("az.ch"));
++        assertTrue("09.ch should validate", validator.isValid("09.ch"));
++        assertTrue("9-1.ch should validate", validator.isValid("9-1.ch"));
++        assertFalse("91-.ch should not validate", validator.isValid("91-.ch"));
++        assertFalse("-.ch should not validate", validator.isValid("-.ch"));
++    }
++
++    // RFC2396 toplabel = alpha | alpha *( alphanum | "-" ) alphanum
++    public void testRFC2396toplabel() {
++        // These tests use non-existent TLDs so currently need to use a package protected method
++        assertTrue("a.c (alpha) should validate", validator.isValidDomainSyntax("a.c"));
++        assertTrue("a.cc (alpha alpha) should validate", validator.isValidDomainSyntax("a.cc"));
++        assertTrue("a.c9 (alpha alphanum) should validate", validator.isValidDomainSyntax("a.c9"));
++        assertTrue("a.c-9 (alpha - alphanum) should validate", validator.isValidDomainSyntax("a.c-9"));
++        assertTrue("a.c-z (alpha - alpha) should validate", validator.isValidDomainSyntax("a.c-z"));
++
++        assertFalse("a.c- (alpha -) should fail", validator.isValidDomainSyntax("a.c-"));
++        assertFalse("a.- (-) should fail", validator.isValidDomainSyntax("a.-"));
++        assertFalse("a.-9 (- alphanum) should fail", validator.isValidDomainSyntax("a.-9"));
++    }
++
++    public void testValidator297() {
++        assertTrue("xn--d1abbgf6aiiy.xn--p1ai should validate", validator.isValid("xn--d1abbgf6aiiy.xn--p1ai")); // This uses a valid TLD
++     }
++
+     // Check array is sorted and is lower-case
+     public void test_INFRASTRUCTURE_TLDS_sortedAndLowerCase() throws Exception {
+         final boolean sorted = isSortedLowerCase("INFRASTRUCTURE_TLDS");

@@ -1,0 +1,218 @@
+From 659ceab807685f844bb8194ac75d50486bd9a87e Mon Sep 17 00:00:00 2001
+From: Sean Joseph Mullan <mullan@apache.org>
+Date: Mon, 18 Jul 2011 15:02:38 +0000
+Subject: [PATCH] Fixed SANTUARIO-283: JSR105 does not retain namespace
+ definitions on Object element when unmarshalling
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/branches/1.4.x-fixes@1147917 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG.txt                                 |  1 +
+ .../signature-enveloping-rsa-template.xml     | 17 +++++++
+ .../xml/dsig/internal/dom/DOMXMLObject.java   | 37 ++++++++-------
+ .../internal/dom/DOMXMLSignatureFactory.java  | 13 ++++--
+ .../crypto/test/dsig/XMLSignatureTest.java    | 45 ++++++++++++++++++-
+ 5 files changed, 90 insertions(+), 23 deletions(-)
+ create mode 100644 data/javax/xml/crypto/dsig/signature-enveloping-rsa-template.xml
+
+diff --git a/CHANGELOG.txt b/CHANGELOG.txt
+index eb210d4c96..68ba2a87a4 100644
+--- a/CHANGELOG.txt
++++ b/CHANGELOG.txt
+@@ -6,6 +6,7 @@ New in v.1.4.6-SNAPSHOT:
+     Fixed SANTUARIO-273: xml:base attribute not processed correctly in C14N11 canonicalization.
+ 
+ New in v1.4.5
++    Fixed SANTUARIO-283: JSR105 does not retain namespace definitions on Object element when unmarshalling
+     Fixed SANTUARIO-250: VerifyMerlinsExamplesFifteen/TwentyThree.java samples should ignore signature-enveloping-hmac-sha1-40.xml
+     Fixed SANTUARIO-191: xml:id attributes are not correctly handled when using c14n11.
+     Fixed SANTUARIO-266: c14n11 produces different signatures using version 1.4.3 and 1.4.4.
+diff --git a/data/javax/xml/crypto/dsig/signature-enveloping-rsa-template.xml b/data/javax/xml/crypto/dsig/signature-enveloping-rsa-template.xml
+new file mode 100644
+index 0000000000..75946c7e57
+--- /dev/null
++++ b/data/javax/xml/crypto/dsig/signature-enveloping-rsa-template.xml
+@@ -0,0 +1,17 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<Signature xmlns="http://www.w3.org/2000/09/xmldsig#">
++  <SignedInfo>
++    <CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315" />
++    <SignatureMethod Algorithm="http://www.w3.org/2000/09/xmldsig#dsa-sha1" />
++    <Reference URI="#object">
++      <DigestMethod Algorithm="http://www.w3.org/2000/09/xmldsig#sha1" />
++      <DigestValue></DigestValue>
++    </Reference>
++  </SignedInfo>
++  <SignatureValue>
++  </SignatureValue>
++  <Object xmlns:test="http://www.example.org/ns" Id="object">
++    <test:someElem />
++    <test:someElem />
++  </Object>
++</Signature>
+diff --git a/src/org/jcp/xml/dsig/internal/dom/DOMXMLObject.java b/src/org/jcp/xml/dsig/internal/dom/DOMXMLObject.java
+index 3b18b7ebea..8a3b0c0088 100644
+--- a/src/org/jcp/xml/dsig/internal/dom/DOMXMLObject.java
++++ b/src/org/jcp/xml/dsig/internal/dom/DOMXMLObject.java
+@@ -44,6 +44,7 @@ public final class DOMXMLObject extends DOMStructure implements XMLObject {
+     private final String mimeType;
+     private final String encoding;
+     private final List content;
++    private Element objectElem;
+ 
+     /**
+      * Creates an <code>XMLObject</code> from the specified parameters.
+@@ -117,6 +118,7 @@ public DOMXMLObject(Element objElem, XMLCryptoContext context,
+         } else {
+             this.content = Collections.unmodifiableList(content);
+         }
++        this.objectElem = objElem;
+     }
+ 
+     public List getContent() {
+@@ -139,23 +141,24 @@ public void marshal(Node parent, String dsPrefix, DOMCryptoContext context)
+ 	throws MarshalException {
+         Document ownerDoc = DOMUtils.getOwnerDocument(parent);
+ 
+-        Element objElem = DOMUtils.createElement
+-            (ownerDoc, "Object", XMLSignature.XMLNS, dsPrefix);
+-
+-	// set attributes
+-        DOMUtils.setAttributeID(objElem, "Id", id);
+-	DOMUtils.setAttribute(objElem, "MimeType", mimeType);
+-        DOMUtils.setAttribute(objElem, "Encoding", encoding);
+-
+-        // create and append any elements and mixed content, if necessary
+-	for (int i = 0, size = content.size(); i < size; i++) {
+-            XMLStructure object = (XMLStructure) content.get(i);
+-            if (object instanceof DOMStructure) {
+-                ((DOMStructure) object).marshal(objElem, dsPrefix, context);
+-            } else {
+-	        javax.xml.crypto.dom.DOMStructure domObject = 
+-		    (javax.xml.crypto.dom.DOMStructure) object;
+-		DOMUtils.appendChild(objElem, domObject.getNode());
++        Element objElem = objectElem != null ? objectElem : null;
++        if (objElem == null) {
++            objElem = DOMUtils.createElement(ownerDoc, "Object",
++                                             XMLSignature.XMLNS, dsPrefix);
++            // set attributes
++            DOMUtils.setAttributeID(objElem, "Id", id);
++            DOMUtils.setAttribute(objElem, "MimeType", mimeType);
++            DOMUtils.setAttribute(objElem, "Encoding", encoding);
++            // create and append any elements and mixed content, if necessary
++            for (int i = 0, size = content.size(); i < size; i++) {
++                XMLStructure object = (XMLStructure)content.get(i);
++                if (object instanceof DOMStructure) {
++                    ((DOMStructure)object).marshal(objElem, dsPrefix, context);
++                } else {
++                    javax.xml.crypto.dom.DOMStructure domObject = 
++                        (javax.xml.crypto.dom.DOMStructure)object;
++                    DOMUtils.appendChild(objElem, domObject.getNode());
++                }
+             }
+         }
+ 	    
+diff --git a/src/org/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java b/src/org/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java
+index 1b855b0e9a..e75795f6a1 100644
+--- a/src/org/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java
++++ b/src/org/jcp/xml/dsig/internal/dom/DOMXMLSignatureFactory.java
+@@ -23,6 +23,7 @@
+ package org.jcp.xml.dsig.internal.dom;
+ 
+ import javax.xml.crypto.*;
++import javax.xml.crypto.dom.DOMCryptoContext;
+ import javax.xml.crypto.dsig.*;
+ import javax.xml.crypto.dsig.dom.DOMValidateContext;
+ import javax.xml.crypto.dsig.keyinfo.*;
+@@ -138,12 +139,16 @@ public XMLSignature unmarshalXMLSignature(XMLStructure xmlStructure)
+         if (xmlStructure == null) {
+             throw new NullPointerException("xmlStructure cannot be null");
+         }
+-	return unmarshal
+-	    (((javax.xml.crypto.dom.DOMStructure) xmlStructure).getNode(), 
+-	     null);
++        return unmarshal
++            (((javax.xml.crypto.dom.DOMStructure) xmlStructure).getNode(), 
++             new UnmarshalContext());
+     }
+ 
+-    private XMLSignature unmarshal(Node node, XMLValidateContext context) 
++    private static class UnmarshalContext extends DOMCryptoContext {
++        UnmarshalContext() {}
++    }
++
++    private XMLSignature unmarshal(Node node, XMLCryptoContext context) 
+ 	throws MarshalException {
+ 
+         node.normalize();
+diff --git a/src_unitTests/javax/xml/crypto/test/dsig/XMLSignatureTest.java b/src_unitTests/javax/xml/crypto/test/dsig/XMLSignatureTest.java
+index 7befc5b699..9f9adc40f6 100644
+--- a/src_unitTests/javax/xml/crypto/test/dsig/XMLSignatureTest.java
++++ b/src_unitTests/javax/xml/crypto/test/dsig/XMLSignatureTest.java
+@@ -19,6 +19,7 @@
+  */
+ package javax.xml.crypto.test.dsig;
+ 
++import java.io.*;
+ import java.util.*;
+ import java.security.*;
+ import javax.xml.crypto.dom.DOMStructure;
+@@ -27,10 +28,10 @@
+ import javax.xml.crypto.dsig.spec.C14NMethodParameterSpec;
+ import javax.xml.crypto.dsig.dom.DOMSignContext;
+ import javax.xml.crypto.dsig.dom.DOMValidateContext;
++import javax.xml.parsers.*;
+ import javax.crypto.spec.SecretKeySpec;
+ 
+-import org.w3c.dom.Document;
+-import org.w3c.dom.Element;
++import org.w3c.dom.*;
+ 
+ import junit.framework.*;
+ 
+@@ -288,6 +289,46 @@ public void testSignWithReferenceManifestDependencies() throws Exception {
+         }
+     }
+ 
++    public void testSignTemplateWithObjectNSDefs() throws Exception {
++        String base = System.getProperty("basedir") == null ? "./"
++                      : System.getProperty("basedir");
++ 
++        File f = new File(base + "/data/javax/xml/crypto/dsig/" +
++            "signature-enveloping-rsa-template.xml");
++
++        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
++        dbf.setNamespaceAware(true);
++        Document doc = dbf.newDocumentBuilder().parse(new FileInputStream(f));
++
++        // Find Signature element
++        NodeList nl =
++            doc.getElementsByTagNameNS(XMLSignature.XMLNS, "Signature");
++        if (nl.getLength() == 0) {
++            throw new Exception("Cannot find Signature element");
++        }
++        DOMStructure domSignature = new DOMStructure(nl.item(0));
++        // unmarshal the XMLSignature
++        XMLSignature signature = fac.unmarshalXMLSignature(domSignature);
++
++        // create copy of Signature
++        XMLSignature newSignature = fac.newXMLSignature
++            (signature.getSignedInfo(), null, signature.getObjects(),
++             signature.getId(), signature.getSignatureValue().getId());
++
++        // Sign the template
++        Node parent = domSignature.getNode().getParentNode();
++        DOMSignContext signContext = new DOMSignContext(SIGN_KEYS[0], parent);
++        // remove the signature node (since it will get recreated)
++        parent.removeChild(domSignature.getNode());
++        newSignature.sign(signContext);
++
++        // check that Object element retained namespace definitions
++        Element objElem = (Element)parent.getFirstChild().getLastChild();
++        Attr a = objElem.getAttributeNode("xmlns:test");
++        if (!a.getValue().equals("http://www.example.org/ns"))
++            throw new Exception("Object namespace definition not retained");
++    }
++
+     private SignedInfo createSignedInfo(SignatureMethod sm) throws Exception {
+ 	// set up the building blocks
+ 	CanonicalizationMethod cm = fac.newCanonicalizationMethod

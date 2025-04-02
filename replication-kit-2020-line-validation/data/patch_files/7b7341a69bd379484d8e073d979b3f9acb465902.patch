@@ -1,0 +1,112 @@
+From 7b7341a69bd379484d8e073d979b3f9acb465902 Mon Sep 17 00:00:00 2001
+From: Thomas Vandahl <tv@apache.org>
+Date: Mon, 9 May 2016 12:07:32 +0000
+Subject: [PATCH] Fix JCS-161: Dynamic regions leak memory upon dispose due to
+ ShrinkerTask
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/jcs/trunk@1742934 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../jcs/auxiliary/disk/block/BlockDiskCache.java      | 10 +++++++++-
+ .../commons/jcs/engine/control/CompositeCache.java    | 11 ++++++++++-
+ src/changes/changes.xml                               |  3 +++
+ 3 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java
+index 5db1c481a..f7af8b55c 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/auxiliary/disk/block/BlockDiskCache.java
+@@ -29,6 +29,7 @@
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ScheduledFuture;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.locks.ReentrantReadWriteLock;
+ 
+@@ -82,6 +83,8 @@ public class BlockDiskCache<K, V>
+      */
+     private final ReentrantReadWriteLock storageLock = new ReentrantReadWriteLock();
+ 
++    private ScheduledFuture<?> future;
++
+     /**
+      * Constructs the BlockDisk after setting up the root directory.
+      * <p>
+@@ -167,7 +170,7 @@ public void setScheduledExecutorService(ScheduledExecutorService scheduledExecut
+         // TODO we might need to stagger this a bit.
+         if ( this.blockDiskCacheAttributes.getKeyPersistenceIntervalSeconds() > 0 )
+         {
+-            scheduledExecutor.scheduleAtFixedRate(
++            future = scheduledExecutor.scheduleAtFixedRate(
+                     new Runnable()
+                     {
+                         @Override
+@@ -585,6 +588,11 @@ protected void disposeInternal()
+             setAlive(false);
+             this.keyStore.saveKeys();
+ 
++            if (future != null)
++            {
++                future.cancel(true);
++            }
++
+             try
+             {
+                 if ( log.isDebugEnabled() )
+diff --git a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
+index 4596a3ad6..f1a8c8a1d 100644
+--- a/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
++++ b/commons-jcs-core/src/main/java/org/apache/commons/jcs/engine/control/CompositeCache.java
+@@ -27,6 +27,7 @@
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ScheduledFuture;
+ import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.concurrent.atomic.AtomicInteger;
+@@ -119,6 +120,8 @@ public class CompositeCache<K, V>
+     /** Key matcher used by the getMatching API */
+     private IKeyMatcher<K> keyMatcher = new KeyMatcherPatternImpl<K>();
+ 
++    private ScheduledFuture<?> future;
++
+     /**
+      * Constructor for the Cache object
+      * <p>
+@@ -163,7 +166,7 @@ public void setScheduledExecutorService(ScheduledExecutorService scheduledExecut
+     {
+         if ( cacheAttr.isUseMemoryShrinker() )
+         {
+-            scheduledExecutor.scheduleAtFixedRate(
++            future = scheduledExecutor.scheduleAtFixedRate(
+                     new ShrinkerThread<K, V>(this), 0, cacheAttr.getShrinkerIntervalSeconds(),
+                     TimeUnit.SECONDS);
+         }
+@@ -1296,6 +1299,12 @@ public void dispose( boolean fromRemote )
+ 
+         synchronized (this)
+         {
++            // Try to stop shrinker thread
++            if (future != null)
++            {
++                future.cancel(true);
++            }
++
+             // Now, shut down the event queue
+             if (elementEventQ != null)
+             {
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index fb8a2cc4a..283dcf541 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -20,6 +20,9 @@
+ 	</properties>
+ 	<body>
+         <release version="2.0" date="unreleased" description="JDK 1.6 based major release">
++            <action issue="JCS-161" dev="tv" type="fix" due-to="Ryan Fong">
++                Fix: Dynamic regions leak memory upon dispose due to ShrinkerTask
++            </action>
+             <action issue="JCS-54" dev="tv" type="add" due-to="Tore Halset">
+                 Add soft reference memory cache
+             </action>

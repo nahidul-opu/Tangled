@@ -1,0 +1,295 @@
+From b188b5ccc0f1f8702313eab62a5dcc164f817200 Mon Sep 17 00:00:00 2001
+From: William D C M SILVA <colen@apache.org>
+Date: Fri, 14 Apr 2017 09:35:36 -0300
+Subject: [PATCH] OPENNLP-1010: Fix NaiveBayes model writer
+
+The previous sortValues method was based on Perceptron, but for some reason it was not working
+for NaiveBayes. Changed it to the one from GIS fixed it.
+
+this closes apache/opennlp#154
+---
+ .../ml/naivebayes/NaiveBayesModelWriter.java  |  71 ++++---
+ .../NaiveBayesSerializedCorrectnessTest.java  | 184 ++++++++++++++++++
+ 2 files changed, 225 insertions(+), 30 deletions(-)
+ create mode 100644 opennlp-tools/src/test/java/opennlp/tools/ml/naivebayes/NaiveBayesSerializedCorrectnessTest.java
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/ml/naivebayes/NaiveBayesModelWriter.java b/opennlp-tools/src/main/java/opennlp/tools/ml/naivebayes/NaiveBayesModelWriter.java
+index bbb6eee08..510bf763d 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/ml/naivebayes/NaiveBayesModelWriter.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/ml/naivebayes/NaiveBayesModelWriter.java
+@@ -55,44 +55,55 @@ public NaiveBayesModelWriter(AbstractModel model) {
+     }
+   }
+ 
++
+   protected ComparablePredicate[] sortValues() {
+-    ComparablePredicate[] sortPreds;
+-    ComparablePredicate[] tmpPreds = new ComparablePredicate[PARAMS.length];
+-    int[] tmpOutcomes = new int[numOutcomes];
+-    double[] tmpParams = new double[numOutcomes];
+-    int numPreds = 0;
+-    //remove parameters with 0 weight and predicates with no parameters
+-    for (int pid = 0; pid < PARAMS.length; pid++) {
+-      int numParams = 0;
+-      double[] predParams = PARAMS[pid].getParameters();
+-      int[] outcomePattern = PARAMS[pid].getOutcomes();
+-      for (int pi = 0; pi < predParams.length; pi++) {
+-        if (predParams[pi] != 0d) {
+-          tmpOutcomes[numParams] = outcomePattern[pi];
+-          tmpParams[numParams] = predParams[pi];
+-          numParams++;
+-        }
+-      }
+ 
+-      int[] activeOutcomes = new int[numParams];
+-      double[] activeParams = new double[numParams];
++    ComparablePredicate[] sortPreds = new ComparablePredicate[PARAMS.length];
+ 
+-      for (int pi = 0; pi < numParams; pi++) {
+-        activeOutcomes[pi] = tmpOutcomes[pi];
+-        activeParams[pi] = tmpParams[pi];
+-      }
+-      if (numParams != 0) {
+-        tmpPreds[numPreds] = new ComparablePredicate(PRED_LABELS[pid], activeOutcomes, activeParams);
+-        numPreds++;
+-      }
++    int numParams = 0;
++    for (int pid = 0; pid < PARAMS.length; pid++) {
++      int[] predkeys = PARAMS[pid].getOutcomes();
++      // Arrays.sort(predkeys);
++      int numActive = predkeys.length;
++      double[] activeParams = PARAMS[pid].getParameters();
++
++      numParams += numActive;
++      /*
++       * double[] activeParams = new double[numActive];
++       *
++       * int id = 0; for (int i=0; i < predkeys.length; i++) { int oid =
++       * predkeys[i]; activeOutcomes[id] = oid; activeParams[id] =
++       * PARAMS[pid].getParams(oid); id++; }
++       */
++      sortPreds[pid] = new ComparablePredicate(PRED_LABELS[pid],
++          predkeys, activeParams);
+     }
+-    System.err.println("Compressed " + PARAMS.length + " parameters to " + numPreds);
+-    sortPreds = new ComparablePredicate[numPreds];
+-    System.arraycopy(tmpPreds, 0, sortPreds, 0, numPreds);
++
+     Arrays.sort(sortPreds);
+     return sortPreds;
+   }
+ 
++  protected List<List<ComparablePredicate>> compressOutcomes(ComparablePredicate[] sorted) {
++    List<List<ComparablePredicate>> outcomePatterns = new ArrayList<>();
++    if (sorted.length > 0) {
++      ComparablePredicate cp = sorted[0];
++      List<ComparablePredicate> newGroup = new ArrayList<>();
++      for (int i = 0; i < sorted.length; i++) {
++        if (cp.compareTo(sorted[i]) == 0) {
++          newGroup.add(sorted[i]);
++        } else {
++          cp = sorted[i];
++          outcomePatterns.add(newGroup);
++          newGroup = new ArrayList<>();
++          newGroup.add(sorted[i]);
++        }
++      }
++      outcomePatterns.add(newGroup);
++    }
++    return outcomePatterns;
++  }
++
++
+ 
+   protected List<List<ComparablePredicate>> computeOutcomePatterns(ComparablePredicate[] sorted) {
+     ComparablePredicate cp = sorted[0];
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/ml/naivebayes/NaiveBayesSerializedCorrectnessTest.java b/opennlp-tools/src/test/java/opennlp/tools/ml/naivebayes/NaiveBayesSerializedCorrectnessTest.java
+new file mode 100644
+index 000000000..0146885af
+--- /dev/null
++++ b/opennlp-tools/src/test/java/opennlp/tools/ml/naivebayes/NaiveBayesSerializedCorrectnessTest.java
+@@ -0,0 +1,184 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.ml.naivebayes;
++
++import java.io.BufferedReader;
++import java.io.BufferedWriter;
++import java.io.File;
++import java.io.IOException;
++import java.io.StringReader;
++import java.io.StringWriter;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.HashMap;
++
++import org.junit.Assert;
++import org.junit.Before;
++import org.junit.Test;
++
++import opennlp.tools.ml.AbstractTrainer;
++import opennlp.tools.ml.model.AbstractDataIndexer;
++import opennlp.tools.ml.model.DataIndexer;
++import opennlp.tools.ml.model.Event;
++import opennlp.tools.ml.model.TwoPassDataIndexer;
++import opennlp.tools.util.TrainingParameters;
++
++/**
++ * Test for naive bayes classification correctness without smoothing
++ */
++public class NaiveBayesSerializedCorrectnessTest {
++
++  private DataIndexer testDataIndexer;
++
++  @Before
++  public void initIndexer() {
++    TrainingParameters trainingParameters = new TrainingParameters();
++    trainingParameters.put(AbstractTrainer.CUTOFF_PARAM, "1");
++    trainingParameters.put(AbstractDataIndexer.SORT_PARAM, "false");;
++    testDataIndexer = new TwoPassDataIndexer();
++    testDataIndexer.init(trainingParameters, new HashMap<>());
++  }
++
++  @Test
++  public void testNaiveBayes1() throws IOException {
++
++    testDataIndexer.index(NaiveBayesCorrectnessTest.createTrainingStream());
++    NaiveBayesModel model1 =
++        (NaiveBayesModel) new NaiveBayesTrainer().trainModel(testDataIndexer);
++
++    NaiveBayesModel model2 = persistedModel(model1);
++
++    String label = "politics";
++    String[] context = {"bow=united", "bow=nations"};
++    Event event = new Event(label, context);
++
++    testModelOutcome(model1, model2, event);
++
++  }
++
++  @Test
++  public void testNaiveBayes2() throws IOException {
++
++    testDataIndexer.index(NaiveBayesCorrectnessTest.createTrainingStream());
++    NaiveBayesModel model1 =
++        (NaiveBayesModel) new NaiveBayesTrainer().trainModel(testDataIndexer);
++
++    NaiveBayesModel model2 = persistedModel(model1);
++
++    String label = "sports";
++    String[] context = {"bow=manchester", "bow=united"};
++    Event event = new Event(label, context);
++
++    testModelOutcome(model1, model2, event);
++
++  }
++
++  @Test
++  public void testNaiveBayes3() throws IOException {
++
++    testDataIndexer.index(NaiveBayesCorrectnessTest.createTrainingStream());
++    NaiveBayesModel model1 =
++        (NaiveBayesModel) new NaiveBayesTrainer().trainModel(testDataIndexer);
++
++    NaiveBayesModel model2 = persistedModel(model1);
++
++    String label = "politics";
++    String[] context = {"bow=united"};
++    Event event = new Event(label, context);
++
++    testModelOutcome(model1, model2, event);
++
++  }
++
++  @Test
++  public void testNaiveBayes4() throws IOException {
++
++    testDataIndexer.index(NaiveBayesCorrectnessTest.createTrainingStream());
++    NaiveBayesModel model1 =
++        (NaiveBayesModel) new NaiveBayesTrainer().trainModel(testDataIndexer);
++
++    NaiveBayesModel model2 = persistedModel(model1);
++
++    String label = "politics";
++    String[] context = {};
++    Event event = new Event(label, context);
++
++    testModelOutcome(model1, model2, event);
++
++  }
++
++
++  @Test
++  public void testPlainTextModel() throws IOException {
++    testDataIndexer.index(NaiveBayesCorrectnessTest.createTrainingStream());
++    NaiveBayesModel model1 =
++        (NaiveBayesModel) new NaiveBayesTrainer().trainModel(testDataIndexer);
++
++
++    StringWriter sw1 = new StringWriter();
++
++    NaiveBayesModelWriter modelWriter =
++        new PlainTextNaiveBayesModelWriter(model1, new BufferedWriter(sw1));
++    modelWriter.persist();
++
++    NaiveBayesModelReader reader =
++        new PlainTextNaiveBayesModelReader(new BufferedReader(new StringReader(sw1.toString())));
++    reader.checkModelType();
++
++    NaiveBayesModel model2 = (NaiveBayesModel)reader.constructModel();
++
++    StringWriter sw2 = new StringWriter();
++    modelWriter = new PlainTextNaiveBayesModelWriter(model2, new BufferedWriter(sw2));
++    modelWriter.persist();
++
++    System.out.println(sw1.toString());
++    Assert.assertEquals(sw1.toString(), sw2.toString());
++
++  }
++
++  protected static NaiveBayesModel persistedModel(NaiveBayesModel model) throws IOException {
++    Path tempFilePath = Files.createTempFile("ptnb-", ".bin");
++    File file = tempFilePath.toFile();
++    NaiveBayesModelWriter modelWriter = new BinaryNaiveBayesModelWriter(model, tempFilePath.toFile());
++    modelWriter.persist();
++    NaiveBayesModelReader reader = new BinaryNaiveBayesModelReader(file);
++    reader.checkModelType();
++    return (NaiveBayesModel)reader.constructModel();
++  }
++
++  protected static void testModelOutcome(NaiveBayesModel model1, NaiveBayesModel model2, Event event) {
++    String[] labels1 = extractLabels(model1);
++    String[] labels2 = extractLabels(model2);
++
++    Assert.assertArrayEquals(labels1, labels2);
++
++    double[] outcomes1 = model1.eval(event.getContext());
++    double[] outcomes2 = model2.eval(event.getContext());
++
++    Assert.assertArrayEquals(outcomes1, outcomes2, 0.000000000001);
++
++  }
++
++  private static String[] extractLabels(NaiveBayesModel model) {
++    String[] labels = new String[model.getNumOutcomes()];
++    for (int i = 0; i < model.getNumOutcomes(); i++) {
++      labels[i] = model.getOutcome(i);
++    }
++    return labels;
++  }
++}

@@ -1,0 +1,154 @@
+From b171f483a03d13286107106982dfb4b5ab1a9979 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 19 Sep 2006 03:24:08 +0000
+Subject: [PATCH] FIX: m2compatible flag is ignored for display of failed
+ artifact searches (IVY-303)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484534 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                        |  5 +++++
+ src/java/fr/jayasoft/ivy/DefaultArtifact.java      |  8 ++++++--
+ .../ivy/resolver/AbstractResourceResolver.java     | 14 +++++++++++---
+ .../ivy/resolver/FileSystemResolverTest.java       |  5 +++++
+ .../repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar |  1 -
+ .../repositories/1/org1/mod1.2/jars/mod1.2-2.2.jar |  1 -
+ .../repositories/1/org6/mod6.1/jars/mod6.1-0.4.jar |  1 -
+ .../repositories/1/org6/mod6.1/jars/mod6.1-2.0.jar |  1 -
+ .../repositories/1/org6/mod6.2/jars/mod6.2-2.0.jar |  1 -
+ .../yourdep/yoursys/yourmod/jars/yourmod-1.0.jar   |  1 -
+ test/repositories/2/mod5.1/art51B-4.2.jar          |  1 -
+ 11 files changed, 27 insertions(+), 12 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index b815fbabe..f679e06a2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -5,6 +5,11 @@
+ 				
+ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ 
++   version 1.4-RC2 - not yet released
++=====================================
++- FIX: m2compatible flag is ignored for display of failed artifact searches (IVY-303)
++
++
+    version 1.4-RC1 - 2006-09-17
+ =================================
+ Incompatibility with previous versions:
+diff --git a/src/java/fr/jayasoft/ivy/DefaultArtifact.java b/src/java/fr/jayasoft/ivy/DefaultArtifact.java
+index 1ae8b7488..4cfe9d8a9 100644
+--- a/src/java/fr/jayasoft/ivy/DefaultArtifact.java
++++ b/src/java/fr/jayasoft/ivy/DefaultArtifact.java
+@@ -24,12 +24,16 @@ public static Artifact newPomArtifact(ModuleRevisionId mrid, Date pubDate) {
+     }
+     
+     public static Artifact cloneWithAnotherType(Artifact artifact, String newType) {
+-        return new DefaultArtifact(artifact.getModuleRevisionId(), artifact.getPublicationDate(), artifact.getName(), newType, artifact.getExt(), artifact.getExtraAttributes());
++        return new DefaultArtifact(artifact.getModuleRevisionId(), artifact.getPublicationDate(), artifact.getName(), newType, artifact.getExt(), artifact.getUrl(), artifact.getExtraAttributes());
+     }
+     
+     public static Artifact cloneWithAnotherTypeAndExt(Artifact artifact, String newType, String newExt) {
+-        return new DefaultArtifact(artifact.getModuleRevisionId(), artifact.getPublicationDate(), artifact.getName(), newType, newExt, artifact.getExtraAttributes());
++        return new DefaultArtifact(artifact.getModuleRevisionId(), artifact.getPublicationDate(), artifact.getName(), newType, newExt, artifact.getUrl(), artifact.getExtraAttributes());
+     }
++
++	public static Artifact cloneWithAnotherMrid(Artifact artifact, ModuleRevisionId mrid) {
++        return new DefaultArtifact(mrid, artifact.getPublicationDate(), artifact.getName(), artifact.getType(), artifact.getExt(), artifact.getUrl(), artifact.getExtraAttributes());
++	}
+     
+     Date _publicationDate;
+     ArtifactRevisionId _arid;
+diff --git a/src/java/fr/jayasoft/ivy/resolver/AbstractResourceResolver.java b/src/java/fr/jayasoft/ivy/resolver/AbstractResourceResolver.java
+index 2d1a983c1..06478ebb4 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/AbstractResourceResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/AbstractResourceResolver.java
+@@ -80,6 +80,9 @@ protected ResolvedResource findResourceUsingPatterns(ModuleRevisionId moduleRevi
+      * @param artifact the artifact which has not been found
+      */
+     protected void logIvyNotFound(ModuleRevisionId mrid) {
++        if (isM2compatible()) {
++            mrid = convertM2IdForResourceSearch(mrid);
++        }
+         Artifact artifact = DefaultArtifact.newIvyArtifact(mrid, null);
+         logMdNotFound(mrid, artifact);
+     }
+@@ -114,13 +117,18 @@ protected void logArtifactNotFound(Artifact artifact) {
+         		logArtifactAttempt(artifact, "no artifact pattern => no attempt to find artifact "+artifact);
+         	}
+         }
++        Artifact used = artifact;
++        if (isM2compatible()) {
++        	used = DefaultArtifact.cloneWithAnotherMrid(artifact, convertM2IdForResourceSearch(artifact.getModuleRevisionId()));
++        }
++
+         for (Iterator iter = _artifactPatterns.iterator(); iter.hasNext();) {
+             String pattern = (String)iter.next();
+-            String resolvedFileName = IvyPatternHelper.substitute(pattern, artifact);
++            String resolvedFileName = IvyPatternHelper.substitute(pattern, used);
+             logArtifactAttempt(artifact, resolvedFileName);
+         }
+-    	if (artifact.getUrl() != null) {
+-    		logArtifactAttempt(artifact, artifact.getUrl().toString());
++    	if (used.getUrl() != null) {
++    		logArtifactAttempt(artifact, used.getUrl().toString());
+     	}
+     }
+ 
+diff --git a/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java b/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java
+index fbfec6422..00cf45122 100644
+--- a/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java
++++ b/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java
+@@ -128,6 +128,11 @@ public void testMaven2() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("fr.jayasoft", "test", "1.0");
+         ResolvedModuleRevision rmr = resolver.getDependency(new DefaultDependencyDescriptor(mrid, false), _data);
+         assertNotNull(rmr);
++
++        mrid = ModuleRevisionId.newInstance("fr.jayasoft.unknown", "test", "1.0");
++        rmr = resolver.getDependency(new DefaultDependencyDescriptor(mrid, false), _data);
++        assertNull(rmr);
++        resolver.reportFailure();
+     }
+ 
+     public void testChecksum() throws Exception {
+diff --git a/test/repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar b/test/repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar
+index 56f3b36e2..e69de29bb 100644
+--- a/test/repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar
++++ b/test/repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar
+@@ -1 +0,0 @@
+- 
+diff --git a/test/repositories/1/org1/mod1.2/jars/mod1.2-2.2.jar b/test/repositories/1/org1/mod1.2/jars/mod1.2-2.2.jar
+index 56f3b36e2..e69de29bb 100644
+--- a/test/repositories/1/org1/mod1.2/jars/mod1.2-2.2.jar
++++ b/test/repositories/1/org1/mod1.2/jars/mod1.2-2.2.jar
+@@ -1 +0,0 @@
+- 
+diff --git a/test/repositories/1/org6/mod6.1/jars/mod6.1-0.4.jar b/test/repositories/1/org6/mod6.1/jars/mod6.1-0.4.jar
+index 56f3b36e2..e69de29bb 100644
+--- a/test/repositories/1/org6/mod6.1/jars/mod6.1-0.4.jar
++++ b/test/repositories/1/org6/mod6.1/jars/mod6.1-0.4.jar
+@@ -1 +0,0 @@
+- 
+diff --git a/test/repositories/1/org6/mod6.1/jars/mod6.1-2.0.jar b/test/repositories/1/org6/mod6.1/jars/mod6.1-2.0.jar
+index 56f3b36e2..e69de29bb 100644
+--- a/test/repositories/1/org6/mod6.1/jars/mod6.1-2.0.jar
++++ b/test/repositories/1/org6/mod6.1/jars/mod6.1-2.0.jar
+@@ -1 +0,0 @@
+- 
+diff --git a/test/repositories/1/org6/mod6.2/jars/mod6.2-2.0.jar b/test/repositories/1/org6/mod6.2/jars/mod6.2-2.0.jar
+index 56f3b36e2..e69de29bb 100644
+--- a/test/repositories/1/org6/mod6.2/jars/mod6.2-2.0.jar
++++ b/test/repositories/1/org6/mod6.2/jars/mod6.2-2.0.jar
+@@ -1 +0,0 @@
+- 
+diff --git a/test/repositories/1/yourorg/yourdep/yoursys/yourmod/jars/yourmod-1.0.jar b/test/repositories/1/yourorg/yourdep/yoursys/yourmod/jars/yourmod-1.0.jar
+index 56f3b36e2..e69de29bb 100644
+--- a/test/repositories/1/yourorg/yourdep/yoursys/yourmod/jars/yourmod-1.0.jar
++++ b/test/repositories/1/yourorg/yourdep/yoursys/yourmod/jars/yourmod-1.0.jar
+@@ -1 +0,0 @@
+- 
+diff --git a/test/repositories/2/mod5.1/art51B-4.2.jar b/test/repositories/2/mod5.1/art51B-4.2.jar
+index 56f3b36e2..e69de29bb 100644
+--- a/test/repositories/2/mod5.1/art51B-4.2.jar
++++ b/test/repositories/2/mod5.1/art51B-4.2.jar
+@@ -1 +0,0 @@
+- 

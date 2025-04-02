@@ -1,0 +1,122 @@
+From f21a3793d06495214fcc46c081ae0c663c272ae3 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Thu, 22 Dec 2016 21:03:57 +0000
+Subject: [PATCH] [CONFIGURATION-646] Changed handling of loads in layout.
+
+PropertiesConfigurationLayout used to remove its event listener
+registration when a load operation starts and add it again
+afterwards. This caused problems with the auto-save mechanism
+because update events were processed by the layout after the listener
+for auto-save was triggered, resulting in incomplete configuration
+files.
+
+Now the listener is not removed, but temporarily disabled.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1775739 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../PropertiesConfigurationLayout.java        | 18 +++++++----------
+ .../TestFileBasedConfigurationBuilder.java    | 20 +++++++++++++++++++
+ 2 files changed, 27 insertions(+), 11 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/configuration2/PropertiesConfigurationLayout.java b/src/main/java/org/apache/commons/configuration2/PropertiesConfigurationLayout.java
+index 61a41d5e27..d8f46230cf 100644
+--- a/src/main/java/org/apache/commons/configuration2/PropertiesConfigurationLayout.java
++++ b/src/main/java/org/apache/commons/configuration2/PropertiesConfigurationLayout.java
+@@ -23,6 +23,7 @@
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
++import java.util.concurrent.atomic.AtomicInteger;
+ 
+ import org.apache.commons.configuration2.event.ConfigurationEvent;
+ import org.apache.commons.configuration2.event.EventListener;
+@@ -133,7 +134,7 @@ public class PropertiesConfigurationLayout implements EventListener<Configuratio
+     private String lineSeparator;
+ 
+     /** A counter for determining nested load calls. */
+-    private int loadCounter;
++    private final AtomicInteger loadCounter;
+ 
+     /** Stores the force single line flag. */
+     private boolean forceSingleLine;
+@@ -154,6 +155,7 @@ public PropertiesConfigurationLayout()
+      */
+     public PropertiesConfigurationLayout(PropertiesConfigurationLayout c)
+     {
++        loadCounter = new AtomicInteger();
+         layoutData = new LinkedHashMap<String, PropertyLayoutData>();
+ 
+         if (c != null)
+@@ -476,10 +478,7 @@ public Set<String> getKeys()
+     public void load(PropertiesConfiguration config, Reader in)
+             throws ConfigurationException
+     {
+-        if (++loadCounter == 1)
+-        {
+-            config.removeEventListener(ConfigurationEvent.ANY, this);
+-        }
++        loadCounter.incrementAndGet();
+         PropertiesConfiguration.PropertiesReader reader =
+                 config.getIOFactory().createPropertiesReader(in);
+ 
+@@ -527,10 +526,7 @@ public void load(PropertiesConfiguration config, Reader in)
+         }
+         finally
+         {
+-            if (--loadCounter == 0)
+-            {
+-                config.addEventListener(ConfigurationEvent.ANY, this);
+-            }
++            loadCounter.decrementAndGet();
+         }
+     }
+ 
+@@ -601,7 +597,7 @@ public void save(PropertiesConfiguration config, Writer out) throws Configuratio
+     @Override
+     public void onEvent(ConfigurationEvent event)
+     {
+-        if (!event.isBeforeUpdate())
++        if (!event.isBeforeUpdate() && loadCounter.get() == 0)
+         {
+             if (ConfigurationEvent.ADD_PROPERTY.equals(event.getEventType()))
+             {
+@@ -796,7 +792,7 @@ private String extractComment(List<String> commentLines, int from, int to)
+      */
+     private int checkHeaderComment(List<String> commentLines)
+     {
+-        if (loadCounter == 1 && layoutData.isEmpty())
++        if (loadCounter.get() == 1 && layoutData.isEmpty())
+         {
+             // This is the first comment. Search for blanc lines.
+             int index = commentLines.size() - 1;
+diff --git a/src/test/java/org/apache/commons/configuration2/builder/TestFileBasedConfigurationBuilder.java b/src/test/java/org/apache/commons/configuration2/builder/TestFileBasedConfigurationBuilder.java
+index 0a69b22b8c..47e739db74 100644
+--- a/src/test/java/org/apache/commons/configuration2/builder/TestFileBasedConfigurationBuilder.java
++++ b/src/test/java/org/apache/commons/configuration2/builder/TestFileBasedConfigurationBuilder.java
+@@ -408,6 +408,26 @@ public void testDisableAutoSave() throws ConfigurationException
+         checkSavedConfig(file, 1);
+     }
+ 
++    /**
++     * Tests whether auto save mode works with a properties configuration.
++     * This is related to CONFIGURATION-646.
++     */
++    @Test
++    public void testAutoSaveWithPropertiesConfiguration() throws ConfigurationException,
++            IOException
++    {
++        File file = folder.newFile();
++        FileBasedConfigurationBuilder<PropertiesConfiguration> builder =
++                new FileBasedConfigurationBuilder<PropertiesConfiguration>(
++                        PropertiesConfiguration.class)
++                        .configure(new FileBasedBuilderParametersImpl()
++                                .setFile(file));
++        builder.setAutoSave(true);
++        PropertiesConfiguration config = builder.getConfiguration();
++        config.setProperty(PROP, 1);
++        checkSavedConfig(file, 1);
++    }
++
+     /**
+      * Tries to set a default encoding for a null class.
+      */

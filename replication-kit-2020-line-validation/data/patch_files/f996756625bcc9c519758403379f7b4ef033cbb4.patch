@@ -1,0 +1,385 @@
+From f996756625bcc9c519758403379f7b4ef033cbb4 Mon Sep 17 00:00:00 2001
+From: Niall Pemberton <niallp@apache.org>
+Date: Wed, 11 Jul 2007 05:18:17 +0000
+Subject: [PATCH] BEANUTILS-273 - Public methods overriden in anonymous or
+ private subclasses are not recognized by PropertyUtils - reported by Marcelo
+ Liberato
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/beanutils/trunk@555172 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../apache/commons/beanutils/MethodUtils.java |  41 +++-
+ .../beanutils/bugs/Jira273TestCase.java       | 181 ++++++++++++++++++
+ .../bugs/other/Jira273BeanFactory.java        | 114 +++++++++++
+ 3 files changed, 334 insertions(+), 2 deletions(-)
+ create mode 100644 src/test/org/apache/commons/beanutils/bugs/Jira273TestCase.java
+ create mode 100644 src/test/org/apache/commons/beanutils/bugs/other/Jira273BeanFactory.java
+
+diff --git a/src/java/org/apache/commons/beanutils/MethodUtils.java b/src/java/org/apache/commons/beanutils/MethodUtils.java
+index 3e867c969..3485fc2b1 100644
+--- a/src/java/org/apache/commons/beanutils/MethodUtils.java
++++ b/src/java/org/apache/commons/beanutils/MethodUtils.java
+@@ -709,11 +709,22 @@ public static Method getAccessibleMethod(Method method) {
+             return (method);
+         }
+ 
++        String methodName      = method.getName();
++        Class[] parameterTypes = method.getParameterTypes();
++
+         // Check the implemented interfaces and subinterfaces
+         method =
+                 getAccessibleMethodFromInterfaceNest(clazz,
+-                        method.getName(),
+-                        method.getParameterTypes());
++                        methodName,
++                        parameterTypes);
++
++        // Check the superclass chain
++        if (method == null) {
++            method = getAccessibleMethodFromSuperclass(clazz,
++                        methodName,
++                        parameterTypes);
++        }
++
+         return (method);
+ 
+     }
+@@ -721,6 +732,32 @@ public static Method getAccessibleMethod(Method method) {
+ 
+     // -------------------------------------------------------- Private Methods
+ 
++    /**
++     * <p>Return an accessible method (that is, one that can be invoked via
++     * reflection) by scanning through the superclasses. If no such method
++     * can be found, return <code>null</code>.</p>
++     *
++     * @param clazz Class to be checked
++     * @param methodName Method name of the method we wish to call
++     * @param parameterTypes The parameter type signatures
++     */
++    private static Method getAccessibleMethodFromSuperclass
++            (Class clazz, String methodName, Class parameterTypes[]) {
++
++        Class parentClazz = clazz.getSuperclass();
++        while (parentClazz != null) {
++            if (Modifier.isPublic(parentClazz.getModifiers())) {
++                try {
++                    return parentClazz.getMethod(methodName, parameterTypes);
++                } catch (NoSuchMethodException e) {
++                    return null;
++                }
++            }
++            parentClazz = parentClazz.getSuperclass();
++        }
++        return null;
++    }
++
+     /**
+      * <p>Return an accessible method (that is, one that can be invoked via
+      * reflection) that implements the specified method, by scanning through
+diff --git a/src/test/org/apache/commons/beanutils/bugs/Jira273TestCase.java b/src/test/org/apache/commons/beanutils/bugs/Jira273TestCase.java
+new file mode 100644
+index 000000000..0e47675bb
+--- /dev/null
++++ b/src/test/org/apache/commons/beanutils/bugs/Jira273TestCase.java
+@@ -0,0 +1,181 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.beanutils.bugs;
++
++import junit.framework.Test;
++import junit.framework.TestCase;
++import junit.framework.TestSuite;
++
++import org.apache.commons.beanutils.PropertyUtils;
++import org.apache.commons.beanutils.bugs.other.Jira273BeanFactory;
++import org.apache.commons.logging.Log;
++import org.apache.commons.logging.LogFactory;
++
++/**
++ * Public methods overriden in anonymous or private subclasses
++ * are not recognized by PropertyUtils - see issue# BEANUTILS-273.
++ * <p />
++ * See https://issues.apache.org/jira/browse/BEANUTILS-273
++ * <p />
++ *
++ * @version $Revision$ $Date$
++ */
++public class Jira273TestCase extends TestCase {
++
++    private Log log = LogFactory.getLog(Jira273TestCase.class);
++
++    /**
++     * Create a test case with the specified name.
++     *
++     * @param name The name of the test
++     */
++    public Jira273TestCase(String name) {
++        super(name);
++    }
++
++    /**
++     * Run the Test.
++     *
++     * @param args Arguments
++     */
++    public static void main(String[] args) {
++        junit.textui.TestRunner.run(suite());
++    }
++
++    /**
++     * Create a test suite for this test.
++     *
++     * @return a test suite
++     */
++    public static Test suite() {
++        return (new TestSuite(Jira273TestCase.class));
++    }
++
++    /**
++     * Set up.
++     *
++     * @throws java.lang.Exception
++     */
++    protected void setUp() throws Exception {
++        super.setUp();
++    }
++
++    /**
++     * Tear Down.
++     *
++     * @throws java.lang.Exception
++     */
++    protected void tearDown() throws Exception {
++        super.tearDown();
++    }
++
++    /**
++     * Test with an annonymous class that overrides a public method
++     * of a public class.
++     */
++    public void testIssue_BEANUTILS_273_AnnonymousOverriden() {
++        Object bean = Jira273BeanFactory.createAnnonymousOverriden();
++        Object result = null;
++        try {
++            result = PropertyUtils.getProperty(bean, "beanValue");
++        } catch (Throwable t) {
++            log.error("AnnonymousOverriden: " + t.getMessage(), t);
++            fail("AnnonymousOverriden Threw exception: " + t);
++        }
++        assertEquals("AnnonymousOverriden", result);
++    }
++
++    /**
++     * Test with an annonymous class that inherits a public method
++     * of a public class.
++     */
++    public void testIssue_BEANUTILS_273_AnnonymousNotOverriden() {
++        Object bean = Jira273BeanFactory.createAnnonymousNotOverriden();
++        Object result = null;
++        try {
++            result = PropertyUtils.getProperty(bean, "beanValue");
++        } catch (Throwable t) {
++            log.error("AnnonymousNotOverriden: " + t.getMessage(), t);
++            fail("AnnonymousNotOverriden Threw exception: " + t);
++        }
++        assertEquals("PublicBeanWithMethod", result);
++    }
++
++    /**
++     * Test with an private class that inherits a public method
++     * of a public class.
++     */
++    public void testIssue_BEANUTILS_273_PrivatePublicNotOverriden() {
++        Object bean = Jira273BeanFactory.createPrivatePublicNotOverriden();
++        Object result = null;
++        try {
++            result = PropertyUtils.getProperty(bean, "beanValue");
++        } catch (Throwable t) {
++            log.error("PrivatePublicNotOverriden: " + t.getMessage(), t);
++            fail("PrivatePublicNotOverriden Threw exception: " + t);
++        }
++        assertEquals("PublicBeanWithMethod", result);
++    }
++
++    /**
++     * Test with an private class that overrides a public method
++     * of a public class.
++     */
++    public void testIssue_BEANUTILS_273_PrivatePublicOverriden() {
++        Object bean = Jira273BeanFactory.createPrivatePublicOverriden();
++        Object result = null;
++        try {
++            result = PropertyUtils.getProperty(bean, "beanValue");
++        } catch (Throwable t) {
++            log.error("PrivatePublicOverriden: " + t.getMessage(), t);
++            fail("PrivatePublicOverriden Threw exception: " + t);
++        }
++        assertEquals("PrivatePublicOverriden", result);
++    }
++
++    /**
++     * Test with an private class that inherits a public method
++     * of a "grand parent" public class.
++     */
++    public void testIssue_BEANUTILS_273_PrivatePrivatePublicNotOverriden() {
++        Object bean = Jira273BeanFactory.createPrivatePrivatePublicNotOverriden();
++        Object result = null;
++        try {
++            result = PropertyUtils.getProperty(bean, "beanValue");
++        } catch (Throwable t) {
++            log.error("PrivatePrivatePublicNotOverriden: " + t.getMessage(), t);
++            fail("PrivatePrivatePublicNotOverriden Threw exception: " + t);
++        }
++        assertEquals("PublicBeanWithMethod", result);
++    }
++
++    /**
++     * Test with an private class that overrides a public method
++     * of a "grand parent" public class.
++     */
++    public void testIssue_BEANUTILS_273_PrivatePrivatePublicOverriden() {
++        Object bean = Jira273BeanFactory.createPrivatePrivatePublicOverriden();
++        Object result = null;
++        try {
++            result = PropertyUtils.getProperty(bean, "beanValue");
++        } catch (Throwable t) {
++            log.error("PrivatePrivatePublicOverriden: " + t.getMessage(), t);
++            fail("PrivatePrivatePublicOverriden Threw exception: " + t);
++        }
++        assertEquals("PrivatePrivatePublicOverriden", result);
++    }
++}
+diff --git a/src/test/org/apache/commons/beanutils/bugs/other/Jira273BeanFactory.java b/src/test/org/apache/commons/beanutils/bugs/other/Jira273BeanFactory.java
+new file mode 100644
+index 000000000..93f5da2e6
+--- /dev/null
++++ b/src/test/org/apache/commons/beanutils/bugs/other/Jira273BeanFactory.java
+@@ -0,0 +1,114 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.beanutils.bugs.other;
++
++import org.apache.commons.beanutils.bugs.Jira273TestCase;
++
++/**
++ * Factory which creates beans for {@link Jira273TestCase}.
++ *
++ * @version $Revision$ $Date$
++ */
++public class Jira273BeanFactory {
++
++    /**
++     * Factory method which creates annonymous
++     * {@link PublicBeanWithMethod} with method NOT overriden.
++     *
++     * @return a new annonymous {@link PublicBeanWithMethod}.
++     */
++    public static Object createAnnonymousOverriden() {
++        return new PublicBeanWithMethod() {
++            public String getBeanValue() {
++                return "AnnonymousOverriden";
++            }
++        };
++    }
++
++    /**
++     * Factory method which creates annonymous
++     * {@link PublicBeanWithMethod} with method overriden.
++     *
++     * @return a new annonymous {@link PublicBeanWithMethod}.
++     */
++    public static Object createAnnonymousNotOverriden() {
++        return new PublicBeanWithMethod() {
++        };
++    }
++
++    /**
++     * Factory method which creates {@link PrivatePublicOverriden}.
++     *
++     * @return a new {@link PrivatePublicOverriden}.
++     */
++    public static Object createPrivatePublicOverriden() {
++        return new PrivatePublicOverriden();
++    }
++
++    /**
++     * Factory method which creates {@link PrivatePrivatePublicOverriden}.
++     *
++     * @return a new {@link PrivatePrivatePublicOverriden}.
++     */
++    public static Object createPrivatePrivatePublicOverriden() {
++        return new PrivatePrivatePublicOverriden();
++    }
++
++    /**
++     * Factory method which creates {@link PrivatePrivatePublicNotOverriden}.
++     *
++     * @return a new {@link PrivatePrivatePublicNotOverriden}.
++     */
++    public static Object createPrivatePrivatePublicNotOverriden() {
++        return new PrivatePrivatePublicNotOverriden();
++    }
++
++    /**
++     * Factory method which creates {@link PrivatePublicNotOverriden}.
++     *
++     * @return a new {@link PrivatePublicNotOverriden}.
++     */
++    public static Object createPrivatePublicNotOverriden() {
++        return new PrivatePublicNotOverriden();
++    }
++
++    private static class PrivateBeanWithMethod {
++        public String getBeanValue() {
++            return "PrivateBeanWithMethod";
++        }
++    }
++
++    public static class PublicBeanWithMethod {
++        public String getBeanValue() {
++            return "PublicBeanWithMethod";
++        }
++    }
++    private static class PrivatePublicOverriden extends PublicBeanWithMethod {
++        public String getBeanValue() {
++            return "PrivatePublicOverriden";
++        }
++    }
++    private static class PrivatePublicNotOverriden extends PublicBeanWithMethod {
++    }
++    private static class PrivatePrivatePublicOverriden extends PrivatePublicNotOverriden {
++        public String getBeanValue() {
++            return "PrivatePrivatePublicOverriden";
++        }
++    }
++    private static class PrivatePrivatePublicNotOverriden extends PrivatePublicNotOverriden {
++    }
++}

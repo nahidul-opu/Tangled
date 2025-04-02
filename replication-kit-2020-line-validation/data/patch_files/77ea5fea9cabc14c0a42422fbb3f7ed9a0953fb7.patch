@@ -1,0 +1,348 @@
+From 77ea5fea9cabc14c0a42422fbb3f7ed9a0953fb7 Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Sat, 30 Jul 2011 10:17:52 +0000
+Subject: [PATCH] [CONFIGURATION-452] Ported changes to branch.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/branches/configuration2_experimental@1152443 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |   4 +
+ .../expr/xpath/XPathExpressionEngine.java     |  71 +++++++++--
+ src/site/xdoc/userguide/howto_xml.xml         |  43 +++++++
+ .../expr/xpath/TestXPathExpressionEngine.java |  17 ---
+ .../TestXPathExpressionEngineInConfig.java    | 112 ++++++++++++++++++
+ 5 files changed, 221 insertions(+), 26 deletions(-)
+ create mode 100644 src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngineInConfig.java
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 8d6bbd843e..67d544c600 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -79,6 +79,10 @@
+     </release>
+ 
+     <release version="1.7" date="in SVN" description="">
++      <action dev="oheger" type="add" issue="CONFIGURATION-452">
++        XPathExpressionEngine now provides better support for the setProperty()
++        method.
++      </action>
+       <action dev="oheger" type="add" issue="CONFIGURATION-448">
+         The parsing of ini files has been improved for property definitions
+         containing multiple separator characters.
+diff --git a/src/main/java/org/apache/commons/configuration2/expr/xpath/XPathExpressionEngine.java b/src/main/java/org/apache/commons/configuration2/expr/xpath/XPathExpressionEngine.java
+index de55731c4e..68fa9d9117 100644
+--- a/src/main/java/org/apache/commons/configuration2/expr/xpath/XPathExpressionEngine.java
++++ b/src/main/java/org/apache/commons/configuration2/expr/xpath/XPathExpressionEngine.java
+@@ -129,6 +129,12 @@ public class XPathExpressionEngine implements ExpressionEngine
+     /** Constant for the delimiters for splitting node paths. */
+     private static final String NODE_PATH_DELIMITERS = PATH_DELIMITER + ATTR_DELIMITER;
+ 
++    /**
++     * Constant for a space which is used as delimiter in keys for adding
++     * properties.
++     */
++    private static final String SPACE = " ";
++
+     /** Constant for the index start character.*/
+     private static final char INDEX_START = '[';
+ 
+@@ -290,17 +296,15 @@ public <T> NodeAddData<T> prepareAdd(T root, String key, NodeHandler<T> handler)
+                     "prepareAdd: key must not be null!");
+         }
+ 
+-        int index = key.length() - 1;
+-        while (index >= 0 && !Character.isWhitespace(key.charAt(index)))
+-        {
+-            index--;
+-        }
++        String addKey = key;
++        int index = findKeySeparator(addKey);
+         if (index < 0)
+         {
+-            throw new IllegalArgumentException("prepareAdd: Passed in key must contain a whitespace!");
++            addKey = generateKeyForAdd(root, addKey, handler);
++            index = findKeySeparator(addKey);
+         }
+ 
+-        NodeList<T> nodes = query(root, key.substring(0, index).trim(), handler);
++        NodeList<T> nodes = query(root, addKey.substring(0, index).trim(), handler);
+         if (nodes.size() != 1)
+         {
+             throw new IllegalArgumentException("prepareAdd: key must select exactly one target node!");
+@@ -308,7 +312,7 @@ public <T> NodeAddData<T> prepareAdd(T root, String key, NodeHandler<T> handler)
+ 
+         NodeAddData<T> data = new NodeAddData<T>();
+         data.setParent(nodes.getNode(0));
+-        initNodeAddData(data, key.substring(index).trim());
++        initNodeAddData(data, addKey.substring(index).trim());
+         return data;
+     }
+ 
+@@ -401,18 +405,67 @@ else if (ATTR_DELIMITER.equals(token))
+         data.setAttribute(attr);
+     }
+ 
++    /**
++     * Tries to generate a key for adding a property. This method is called if a
++     * key was used for adding properties which does not contain a space
++     * character. It splits the key at its single components and searches for
++     * the last existing component. Then a key compatible for adding properties
++     * is generated.
++     *
++     * @param root the root node of the configuration
++     * @param key the key in question
++     * @param handler the node handler
++     * @return the key to be used for adding the property
++     */
++    private <T> String generateKeyForAdd(T root, String key, NodeHandler<T> handler)
++    {
++        int pos = key.lastIndexOf(PATH_DELIMITER, key.length());
++
++        while (pos >= 0)
++        {
++            String keyExisting = key.substring(0, pos);
++            if (query(root, keyExisting, handler).size() > 0)
++            {
++                StringBuilder buf = new StringBuilder(key.length() + 1);
++                buf.append(keyExisting).append(SPACE);
++                buf.append(key.substring(pos + 1));
++                return buf.toString();
++            }
++            pos = key.lastIndexOf(PATH_DELIMITER, pos - 1);
++        }
++
++        return SPACE + key;
++    }
++
+     /**
+      * Helper method for throwing an exception about an invalid path.
+      *
+      * @param path the invalid path
+      * @param msg the exception message
+      */
+-    private void invalidPath(String path, String msg)
++    private static void invalidPath(String path, String msg)
+     {
+         throw new IllegalArgumentException("Invalid node path: \"" + path
+                 + "\" " + msg);
+     }
+ 
++    /**
++     * Determines the position of the separator in a key for adding new
++     * properties. If no delimiter is found, result is -1.
++     *
++     * @param key the key
++     * @return the position of the delimiter
++     */
++    private static int findKeySeparator(String key)
++    {
++        int index = key.length() - 1;
++        while (index >= 0 && !Character.isWhitespace(key.charAt(index)))
++        {
++            index--;
++        }
++        return index;
++    }
++
+     // static initializer: registers the configuration node pointer factory
+     static
+     {
+diff --git a/src/site/xdoc/userguide/howto_xml.xml b/src/site/xdoc/userguide/howto_xml.xml
+index 853f0bb8a5..b39e6f3f83 100644
+--- a/src/site/xdoc/userguide/howto_xml.xml
++++ b/src/site/xdoc/userguide/howto_xml.xml
+@@ -866,6 +866,49 @@ config.addProperty("tables/table[last()]/fields field/name", "startDate");
+                 (<code>fields/field/name</code>), then to the newly created
+                 elements further children are added.
+             </p>
++            <p>
++                There is one gotcha with these keys described so far: they do
++                not work with the <code>setProperty()</code> method! This is
++                because <code>setProperty()</code> has to check whether the
++                passed in key already exists; therefore it needs a key which can
++                be interpreted by query methods. If you want to use
++                <code>setProperty()</code>, you can pass in regular keys (i.e.
++                without a whitespace separator). The method then tries to figure
++                out which part of the key already exists in the configuration
++                and adds new nodes as necessary. In principle such regular keys
++                can also be used with <code>addProperty()</code>. However, they
++                do not contain sufficient information to decide where new nodes
++                should be added.
++            </p>
++            <p>
++                To make this clearer let's go back to the example with the
++                tables. Consider that there is a configuration which already
++                contains information about some database tables. In order to add
++                a new table element in the configuration
++                <code>addProperty()</code> could be used as follows:
++            </p>
++            <source><![CDATA[
++config.addProperty("tables/table/name", "documents");
++         ]]></source>
++            <p>
++                In the configuration a <code>&lt;tables&gt;</code> element
++                already exists, also <code>&lt;table&gt;</code> and
++                <code>&lt;name&gt;</code> elements. How should the expression
++                engine know where new node structures are to be added? The
++                solution to this problem is to provide this information in the
++                key by stating:
++            </p>
++            <source><![CDATA[
++config.addProperty("tables table/name", "documents");
++         ]]></source>
++            <p>
++                Now it is clear that new nodes should be added as children of
++                the  <code>&lt;tables&gt;</code> element. More information about
++                keys and how they play together with <code>addProperty()</code>
++                and <code>setProperty()</code> can be found in the Javadocs for
++                <a href="../apidocs/org/apache/commons/configuration2/tree/xpath/XPathExpressionEngine.html">
++                <code>XPathExpressionEngine</code></a>.
++            </p>
+             <p>
+                 <em>Note:</em> XPATH support is implemented through
+                 <a href="http://commons.apache.org/jxpath">Commons JXPath</a>.
+diff --git a/src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngine.java b/src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngine.java
+index b40249a704..2cdbcbed3d 100644
+--- a/src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngine.java
++++ b/src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngine.java
+@@ -343,23 +343,6 @@ public void testPrepareAddInvalidParent()
+         }
+     }
+ 
+-    /**
+-     * Tests an add operation where the passed in key has an invalid format: it
+-     * does not contain a whitespace. This will cause an error.
+-     */
+-    public void testPrepareAddInvalidFormat()
+-    {
+-        try
+-        {
+-            engine.prepareAdd(root, "anInvalidKey", handler);
+-            fail("Could add an invalid key!");
+-        }
+-        catch (IllegalArgumentException iex)
+-        {
+-            // ok
+-        }
+-    }
+-
+     /**
+      * Tests an add operation with an empty path for the new node.
+      */
+diff --git a/src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngineInConfig.java b/src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngineInConfig.java
+new file mode 100644
+index 0000000000..393f996507
+--- /dev/null
++++ b/src/test/java/org/apache/commons/configuration2/expr/xpath/TestXPathExpressionEngineInConfig.java
+@@ -0,0 +1,112 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.commons.configuration2.expr.xpath;
++
++import junit.framework.TestCase;
++
++import org.apache.commons.configuration2.XMLConfiguration;
++
++/**
++ * A test class for XPathExpressionEngine that tests the engine integrated into
++ * a hierarchical configuration.
++ *
++ * @author <a
++ *         href="http://commons.apache.org/configuration/team-list.html">Commons
++ *         Configuration team</a>
++ * @version $Id$
++ */
++public class TestXPathExpressionEngineInConfig extends TestCase
++{
++    /** Constant for a test key. */
++    private static final String KEY = "test/expression/xpath";
++
++    /** Constant for a value for test properties. */
++    private static final String VALUE = "success";
++
++    /** The test configuration. */
++    private XMLConfiguration config;
++
++    @Override
++    protected void setUp() throws Exception
++    {
++        super.setUp();
++        config = new XMLConfiguration();
++        config.setExpressionEngine(new XPathExpressionEngine());
++    }
++
++    /**
++     * Tests whether an already existing property can be changed using
++     * setProperty().
++     */
++    public void testSetPropertyExisting()
++    {
++        config.addProperty(" " + KEY, "failure");
++        config.setProperty(KEY, VALUE);
++        assertEquals("Value not changed", VALUE, config.getString(KEY));
++    }
++
++    /**
++     * Tests setProperty() if the specified path partly exists.
++     */
++    public void testSetPropertyPartlyExisting()
++    {
++        final String testKey = KEY + "/sub";
++        config.addProperty(" " + KEY, "test");
++        config.setProperty(testKey, VALUE);
++        assertEquals("Value not set", VALUE, config.getString(testKey));
++    }
++
++    /**
++     * Tests whether setProperty() can be used to add a new attribute.
++     */
++    public void testSetPropertyNewAttribute()
++    {
++        final String keyAttr = KEY + "/@attr";
++        config.addProperty(" " + KEY, "test");
++        config.setProperty(keyAttr, VALUE);
++        assertEquals("Value not set", VALUE, config.getString(keyAttr));
++    }
++
++    /**
++     * Tests whether setProperty() can be used to create a completely new key.
++     */
++    public void testSetPropertyNewKey()
++    {
++        config.setProperty(KEY, VALUE);
++        assertEquals("Value not set", VALUE, config.getString(KEY));
++    }
++
++    /**
++     * Tests whether addProperty() can be used to create more complex
++     * hierarchical structures.
++     */
++    public void testAddPropertyComplexStructures()
++    {
++        config.addProperty("tables/table/name", "tasks");
++        config.addProperty("tables/table[last()]/@type", "system");
++        config.addProperty("tables/table[last()]/fields/field/name", "taskid");
++        config.addProperty("tables/table[last()]/fields/field[last()]/@type",
++                "int");
++        config.addProperty("tables table/name", "documents");
++        assertEquals("Wrong table 1", "tasks",
++                config.getString("tables/table[1]/name"));
++        assertEquals("Wrong table 2", "documents",
++                config.getString("tables/table[2]/name"));
++        assertEquals("Wrong field type", "int",
++                config.getString("tables/table[1]/fields/field[1]/@type"));
++    }
++}

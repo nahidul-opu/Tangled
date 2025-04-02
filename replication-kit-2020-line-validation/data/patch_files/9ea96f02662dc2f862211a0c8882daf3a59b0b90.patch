@@ -1,0 +1,93 @@
+From 9ea96f02662dc2f862211a0c8882daf3a59b0b90 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 28 Sep 2010 22:01:22 +0000
+Subject: [PATCH] FIX: Couldn't authenticate against sites having the same
+ address as the proxy server (IVY-1234)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1002371 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../apache/ivy/util/url/IvyAuthenticator.java | 45 ++++++++++++++++++-
+ 2 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 9147c2881..51860b76b 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -129,6 +129,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: ivy:makepom now accepts a list of configurations to include (IVY-1005) (thanks to Jesper Pedersen)
+ - IMPROVEMENT: ivy:makepom can generate a <description> element in the pom (IVY-1215) (thanks to Jesper Pedersen)
+ 
++- FIX: Couldn't authenticate against sites having the same address as the proxy server (IVY-1234)
+ - FIX: ApacheURLLister doesn't handle some truncated linknames properly (IVY-1232) (thanks to John Tinetti)
+ - FIX: Ivy cannot handle Maven pom with parents depending back on theirselfs (IVY-1225)
+ - FIX: OutOfMemoryError when uploading large files using commons-httpclient (IVY-1197) (thanks to Torkild U. Resheim)
+diff --git a/src/java/org/apache/ivy/util/url/IvyAuthenticator.java b/src/java/org/apache/ivy/util/url/IvyAuthenticator.java
+index 8268c765c..ae6103450 100644
+--- a/src/java/org/apache/ivy/util/url/IvyAuthenticator.java
++++ b/src/java/org/apache/ivy/util/url/IvyAuthenticator.java
+@@ -18,6 +18,7 @@
+ package org.apache.ivy.util.url;
+ 
+ import java.lang.reflect.Field;
++import java.lang.reflect.Method;
+ import java.net.Authenticator;
+ import java.net.PasswordAuthentication;
+ 
+@@ -79,8 +80,7 @@ public static void install() {
+     protected PasswordAuthentication getPasswordAuthentication() {
+         PasswordAuthentication result = null;
+         
+-        String proxyHost = System.getProperty("http.proxyHost");
+-        if (getRequestingHost().equals(proxyHost)) {
++        if (isProxyAuthentication()) {
+             String proxyUser = System.getProperty("http.proxyUser");
+             if ((proxyUser != null) && (proxyUser.trim().length() > 0)) {
+                 String proxyPass = System.getProperty("http.proxyPassword", "");
+@@ -111,5 +111,46 @@ protected PasswordAuthentication getPasswordAuthentication() {
+         
+         return result;
+     }
++    
++    /**
++     * Checks if the current authentication request is for the proxy server.
++     * This functionality is not availaible in JDK1.4, so we check this in a
++     * very dirty way which is probably not very portable, but will work for
++     * the SUN 1.4 JDKs.
++     * 
++     * @return
++     */
++    private boolean isProxyAuthentication() {
++        try {
++            // we first try to invoke the getRequestorType() method which is a JDK1.5+ method
++            Method m = Authenticator.class.getDeclaredMethod("getRequestorType", null);
++            Object result = m.invoke(this, null);
++            return "PROXY".equals(String.valueOf(result));
++        } catch (NoSuchMethodException e) {
++            // do nothing, this is a JDK1.5+ method
++        } catch (Throwable t) {
++            Message.debug("Error occurred while checking if the authentication request is for the proxy server: " + t.getMessage());            
++        }
++        
++        // now we will do something very dirty and analyse the stack trace to see
++        // if this method is called from within the 'getHttpProxyAuthentication' method
++        // or the 'getServerAuthentication' method which are both part of the 
++        // sun.net.www.protocol.http.HttpURLConnection class.
++        // This might not work on other 1.4 JVM's!
++        // This code should be removed when Ivy requires JDK1.5+
++        StackTraceElement[] stackTrace = (new Exception()).getStackTrace();
++        for (int i = 0; i < stackTrace.length; i++) {
++            if ("getHttpProxyAuthentication".equals(stackTrace[i].getMethodName())) {
++                return true;
++            }
++            if ("getServerAuthentication".equals(stackTrace[i].getMethodName())) {
++                return false;
++            }
++        }
++        
++        // fallback to the Ivy 2.2.0 behavior
++        String proxyHost = System.getProperty("http.proxyHost");
++        return getRequestingHost().equals(proxyHost);
++    }
+ 
+ }

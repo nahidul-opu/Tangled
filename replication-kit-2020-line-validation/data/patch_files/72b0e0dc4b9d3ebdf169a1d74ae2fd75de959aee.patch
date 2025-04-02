@@ -1,0 +1,118 @@
+From 72b0e0dc4b9d3ebdf169a1d74ae2fd75de959aee Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 27 Oct 2005 07:20:46 +0000
+Subject: [PATCH] FIX: problem with dependencies resolution (IVY-97)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484064 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/java/fr/jayasoft/ivy/IvyNode.java         |  2 +-
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 21 +++++++++++++++++++
+ .../ivy/resolver/FileSystemResolverTest.java  |  2 +-
+ .../1/org9/mod9.1/ivys/ivy-1.0.xml            | 11 ++++++++++
+ .../1/org9/mod9.1/jars/mod9.1-1.0.jar         |  1 +
+ .../1/org9/mod9.2/ivys/ivy-1.0.xml            | 12 +++++++++++
+ 6 files changed, 47 insertions(+), 2 deletions(-)
+ create mode 100644 test/repositories/1/org9/mod9.1/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/org9/mod9.1/jars/mod9.1-1.0.jar
+ create mode 100644 test/repositories/1/org9/mod9.2/ivys/ivy-1.0.xml
+
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 70d6c438d..880d60df0 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -1019,7 +1019,7 @@ public String getRootModuleConf() {
+     
+ 
+     public void setRootModuleConf(String rootModuleConf) {
+-        if (_rootModuleConf != null) {
++        if (_rootModuleConf != null && !_rootModuleConf.equals(rootModuleConf)) {
+             _confsToFetch.clear(); // we change of root module conf => we discard all confs to fetch
+         }
+         if (rootModuleConf != null && rootModuleConf.equals(_rootModuleConf)) {
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 33bcd6178..777e7926e 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -996,6 +996,27 @@ public void testConfigurationMapping7() throws Exception {
+         assertDoesntContainArtifact("test", "c", "1.0.1", "c-bt", "txt", "txt", conf);        
+     }
+ 
++    public void testIVY97() throws Exception {
++        // mod9.2 depends on mod9.1 and mod1.2
++        //     mod9.1 depends on mod1.2
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org9/mod9.2/ivys/ivy-1.0.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org9", "mod9.2", "1.0");
++        assertEquals(mrid, md.getModuleRevisionId());
++        
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
++        
++        // dependencies
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org9", "mod9.1", "1.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org9", "mod9.1", "1.0", "mod9.1", "jar", "jar").exists());
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++    }
++    
+     ////////////////////////////////////////////////////////////
+     // helper methods to ease the tests
+     ////////////////////////////////////////////////////////////
+diff --git a/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java b/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java
+index 8ff3bfc63..06f1883b4 100644
+--- a/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java
++++ b/test/java/fr/jayasoft/ivy/resolver/FileSystemResolverTest.java
+@@ -427,7 +427,7 @@ public void testListing() throws Exception {
+         resolver.addArtifactPattern("test/repositories/1/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]");
+ 
+         OrganisationEntry[] orgs = resolver.listOrganisations();
+-        ResolverTestHelper.assertOrganisationEntries(resolver, new String[] {"org1", "org2", "org6"}, orgs);
++        ResolverTestHelper.assertOrganisationEntries(resolver, new String[] {"org1", "org2", "org6", "org9"}, orgs);
+         
+         OrganisationEntry org = ResolverTestHelper.getEntry(orgs, "org1");
+         ModuleEntry[] mods = resolver.listModules(org);
+diff --git a/test/repositories/1/org9/mod9.1/ivys/ivy-1.0.xml b/test/repositories/1/org9/mod9.1/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..692e98b2d
+--- /dev/null
++++ b/test/repositories/1/org9/mod9.1/ivys/ivy-1.0.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org9"
++	       module="mod9.1"
++	       revision="1.0"
++	       status="integration"
++	       publication="20051025110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.0"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org9/mod9.1/jars/mod9.1-1.0.jar b/test/repositories/1/org9/mod9.1/jars/mod9.1-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org9/mod9.1/jars/mod9.1-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org9/mod9.2/ivys/ivy-1.0.xml b/test/repositories/1/org9/mod9.2/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..02c43f106
+--- /dev/null
++++ b/test/repositories/1/org9/mod9.2/ivys/ivy-1.0.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org9"
++	       module="mod9.2"
++	       revision="1.0"
++	       status="integration"
++	       publication="20051026110000"
++	/>
++	<dependencies>
++		<dependency name="mod9.1" rev="latest.integration"/>
++		<dependency org="org1" name="mod1.2" rev="2.0"/>
++	</dependencies>
++</ivy-module>

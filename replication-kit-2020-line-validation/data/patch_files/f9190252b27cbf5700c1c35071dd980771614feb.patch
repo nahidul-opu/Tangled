@@ -1,0 +1,298 @@
+From f9190252b27cbf5700c1c35071dd980771614feb Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sun, 18 Mar 2007 23:38:23 +0000
+Subject: [PATCH] Dynamic revision not calculated properly when using multiple
+ directories (IVY-427)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@519738 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../resolver/AbstractResourceResolver.java    | 69 ++++++++++++++++++-
+ .../plugins/resolver/RepositoryResolver.java  | 36 +---------
+ .../apache/ivy/core/resolve/ResolveTest.java  | 22 +++++-
+ .../multi-ivypattern/ivy1/ivy-1.0.xml         |  9 +++
+ .../multi-ivypattern/ivy2/ivy-1.1.xml         | 11 +++
+ .../repositories/multi-ivypattern/ivyconf.xml | 10 +++
+ .../multi-ivypattern/jars/mod-1.0.jar         |  1 +
+ .../multi-ivypattern/jars/mod-1.1.jar         |  1 +
+ 9 files changed, 124 insertions(+), 36 deletions(-)
+ create mode 100644 test/repositories/multi-ivypattern/ivy1/ivy-1.0.xml
+ create mode 100644 test/repositories/multi-ivypattern/ivy2/ivy-1.1.xml
+ create mode 100644 test/repositories/multi-ivypattern/ivyconf.xml
+ create mode 100644 test/repositories/multi-ivypattern/jars/mod-1.0.jar
+ create mode 100644 test/repositories/multi-ivypattern/jars/mod-1.1.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 9b600c75f..9e2e532f1 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -17,6 +17,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVE: New "modules in use" section in console report at the end of resolve (IVY-373) (thanks to John Wiliams)
+ - IMPROVE: Generated XML reports now contains more information about the resolved module (IVY-408)
+ 
++- FIX: Dynamic revision not calculated properly when using multiple directories (IVY-427)
+ - FIX: LatestRevisionStrategy.sort() doesn't sort as specified (IVY-435)
+ - FIX: setting m2compatible on ibiblio resolver overwrite root and pattern settings (IVY-437)
+ - FIX: ivy.revision property not set correctly for second resolve (IVY-429)
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
+index dc439e600..a7f5b247a 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
+@@ -32,11 +32,15 @@
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
++import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.resolve.ResolveData;
+ import org.apache.ivy.core.settings.IvyPattern;
++import org.apache.ivy.plugins.latest.LatestStrategy;
++import org.apache.ivy.plugins.resolver.util.MDResolvedResource;
+ import org.apache.ivy.plugins.resolver.util.ResolvedResource;
+ import org.apache.ivy.plugins.resolver.util.ResourceMDParser;
++import org.apache.ivy.plugins.version.VersionMatcher;
+ import org.apache.ivy.util.Message;
+ 
+ 
+@@ -79,15 +83,78 @@ protected ResolvedResource findArtifactRef(Artifact artifact, Date date) {
+ 
+ 	protected ResolvedResource findResourceUsingPatterns(ModuleRevisionId moduleRevision, List patternList, Artifact artifact, ResourceMDParser rmdparser, Date date) {
+         ResolvedResource rres = null;
+-        for (Iterator iter = patternList.iterator(); iter.hasNext() && rres == null;) {
++        
++        List resolvedResources = new ArrayList();
++        boolean dynamic = getSettings().getVersionMatcher().isDynamic(moduleRevision);
++        boolean stop = false;
++        for (Iterator iter = patternList.iterator(); iter.hasNext() && !stop;) {
+             String pattern = (String)iter.next();
+             rres = findResourceUsingPattern(moduleRevision, pattern, artifact, rmdparser, date);
++            if (rres != null) {
++            	resolvedResources.add(rres);
++            	stop = !dynamic; // stop iterating if we are not searching a dynamic revision
++            }
++        }
++        
++        if (resolvedResources.size() > 1) {
++        	ResolvedResource[] rress = (ResolvedResource[]) resolvedResources.toArray(new ResolvedResource[resolvedResources.size()]);
++        	rres = findResource(rress, getName(), getLatestStrategy(), getSettings().getVersionMatcher(), rmdparser, moduleRevision, date);
+         }
++        
+         return rres;
+     }
+     
+     protected abstract ResolvedResource findResourceUsingPattern(ModuleRevisionId mrid, String pattern, Artifact artifact, ResourceMDParser rmdparser, Date date);
+ 
++    public static ResolvedResource findResource(
++    		ResolvedResource[] rress, 
++    		String name,
++    		LatestStrategy strategy, 
++    		VersionMatcher versionMatcher, 
++    		ResourceMDParser rmdparser,
++    		ModuleRevisionId mrid, 
++    		Date date) {
++    	ResolvedResource found = null;
++    	List sorted = strategy.sort(rress);
++    	for (ListIterator iter = sorted.listIterator(sorted.size()); iter.hasPrevious();) {
++			ResolvedResource rres = (ResolvedResource) iter.previous();
++			if ((date != null && rres.getLastModified() > date.getTime())) {
++                Message.debug("\t"+name+": too young: "+rres);
++				continue;
++			}
++			ModuleRevisionId foundMrid = ModuleRevisionId.newInstance(mrid, rres.getRevision());
++			if (!versionMatcher.accept(mrid, foundMrid)) {
++                Message.debug("\t"+name+": rejected by version matcher: "+rres);
++				continue;
++			}
++			if (versionMatcher.needModuleDescriptor(mrid, foundMrid)) {
++        		ResolvedResource r = rmdparser.parse(rres.getResource(), rres.getRevision());
++        		ModuleDescriptor md = ((MDResolvedResource)r).getResolvedModuleRevision().getDescriptor();
++        		if (md.isDefault()) {
++	                Message.debug("\t"+name+": default md rejected by version matcher requiring module descriptor: "+rres);
++        			continue;
++        		} else if (!versionMatcher.accept(mrid, md)) {
++	                Message.debug("\t"+name+": md rejected by version matcher: "+rres);
++        			continue;
++        		} else {
++        			found = r;
++        		}
++			} else {
++				found = rres;
++			}
++	    	
++	    	if (found != null) {
++	    		if (!found.getResource().exists()) {
++		    		Message.debug("\t"+name+": resource not reachable for "+mrid+": res="+found.getResource());
++		    		continue; 
++		    	}
++	    		break;
++	    	}
++		}
++    	
++    	return found;
++    }
++
+     /**
+      * Output message to log indicating what have been done to look for an artifact which
+      * has finally not been found
+diff --git a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+index 5e4d3537e..a744ac2a3 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+@@ -122,46 +122,14 @@ private static ResolvedResource findDynamicResourceUsingPattern(
+             Message.debug("\t"+name+": unable to list resources for "+mrid+": pattern="+pattern);
+             return null;
+         } else {
+-        	ResolvedResource found = null;
+-        	List sorted = strategy.sort(rress);
+-        	for (Iterator iter = sorted.iterator(); iter.hasNext();) {
+-				ResolvedResource rres = (ResolvedResource) iter.next();
+-				if ((date != null && rres.getLastModified() > date.getTime())) {
+-	                Message.debug("\t"+name+": too young: "+rres);
+-					continue;
+-				}
+-				ModuleRevisionId foundMrid = ModuleRevisionId.newInstance(mrid, rres.getRevision());
+-				if (!versionMatcher.accept(mrid, foundMrid)) {
+-	                Message.debug("\t"+name+": rejected by version matcher: "+rres);
+-					continue;
+-				}
+-				if (versionMatcher.needModuleDescriptor(mrid, foundMrid)) {
+-            		ResolvedResource r = rmdparser.parse(rres.getResource(), rres.getRevision());
+-            		ModuleDescriptor md = ((MDResolvedResource)r).getResolvedModuleRevision().getDescriptor();
+-            		if (md.isDefault()) {
+-    	                Message.debug("\t"+name+": default md rejected by version matcher requiring module descriptor: "+rres);
+-            			continue;
+-            		} else if (!versionMatcher.accept(mrid, md)) {
+-    	                Message.debug("\t"+name+": md rejected by version matcher: "+rres);
+-            			continue;
+-            		} else {
+-            			found = r;
+-            		}
+-					
+-				} else {
+-					found = rres;
+-				}
+-			}
++        	ResolvedResource found = findResource(rress, name, strategy, versionMatcher, rmdparser, mrid, date);
+         	if (found == null) {
+         		Message.debug("\t"+name+": no resource found for "+mrid+": pattern="+pattern);                    
+-        	} else if (!found.getResource().exists()) {
+-        		Message.debug("\t"+name+": resource not reachable for "+mrid+": res="+found.getResource());
+-        		return null; 
+         	}
+         	return found;
+         }
+     }
+-
++    
+     protected long get(Resource resource, File dest) throws IOException {
+         Message.verbose("\t"+getName()+": downloading "+resource.getName());
+         Message.debug("\t\tto "+dest);
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index aef344e8e..9f402d723 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -22,6 +22,7 @@
+ import java.util.Date;
+ import java.util.HashSet;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Set;
+ 
+ import javax.xml.parsers.SAXParser;
+@@ -47,7 +48,6 @@
+ import org.apache.ivy.plugins.circular.ErrorCircularDependencyStrategy;
+ import org.apache.ivy.plugins.circular.IgnoreCircularDependencyStrategy;
+ import org.apache.ivy.plugins.circular.WarnCircularDependencyStrategy;
+-import org.apache.ivy.plugins.report.XmlReportOutputter;
+ import org.apache.ivy.plugins.resolver.BasicResolver;
+ import org.apache.ivy.plugins.resolver.DependencyResolver;
+ import org.apache.ivy.plugins.resolver.DualResolver;
+@@ -2740,6 +2740,26 @@ public void testResolveWithSpecifiedCache() throws Exception {
+    			cache2.delete();
+     	}
+     }
++    
++    public void testResolveWithMultipleIvyPatterns() throws Exception {
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/multi-ivypattern/ivyconf.xml"));
++        
++    	ModuleRevisionId module = ModuleRevisionId.newInstance("org1", "mod1.1", "1.+");
++    	
++    	// use a non-default cache
++    	ResolveOptions options = getResolveOptions(ivy.getSettings(), new String[] {"*"});
++    	options.setTransitive(false);
++    	options.setUseOrigin(true);
++    	options.setDownload(false);
++    	ResolveReport report = ivy.getResolveEngine().resolve(module, options, false);
++    	
++    	List dependencies = report.getDependencies();
++    	assertNotNull(dependencies);
++    	assertEquals(1, dependencies.size());
++    	IvyNode dependency = (IvyNode) dependencies.get(0);
++    	assertEquals("1.1", dependency.getResolvedId().getRevision());
++    }
+ 
+     ////////////////////////////////////////////////////////////
+     // helper methods to ease the tests
+diff --git a/test/repositories/multi-ivypattern/ivy1/ivy-1.0.xml b/test/repositories/multi-ivypattern/ivy1/ivy-1.0.xml
+new file mode 100644
+index 000000000..0694339e0
+--- /dev/null
++++ b/test/repositories/multi-ivypattern/ivy1/ivy-1.0.xml
+@@ -0,0 +1,9 @@
++<ivy-module version="1.0">
++	<info organisation="org1"
++	       module="mod1.1"
++	       revision="1.0"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++	<dependencies />
++</ivy-module>
+diff --git a/test/repositories/multi-ivypattern/ivy2/ivy-1.1.xml b/test/repositories/multi-ivypattern/ivy2/ivy-1.1.xml
+new file mode 100644
+index 000000000..ec3e9abc9
+--- /dev/null
++++ b/test/repositories/multi-ivypattern/ivy2/ivy-1.1.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org1"
++	       module="mod1.1"
++	       revision="1.1"
++	       status="integration"
++	       publication="20050102110000"
++	/> 
++	<dependencies>
++		<dependency name="mod1.2" rev="2.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/multi-ivypattern/ivyconf.xml b/test/repositories/multi-ivypattern/ivyconf.xml
+new file mode 100644
+index 000000000..cde3af2fc
+--- /dev/null
++++ b/test/repositories/multi-ivypattern/ivyconf.xml
+@@ -0,0 +1,10 @@
++<ivyconf>
++  <conf defaultCache="build/cache" defaultResolver="multi-ivy"/>
++  <resolvers>
++	<filesystem name="multi-ivy">
++		<ivy pattern="test/repositories/multi-ivypattern/ivy1/ivy-[revision].xml" />
++		<ivy pattern="test/repositories/multi-ivypattern/ivy2/ivy-[revision].xml" />
++		<artifact pattern="test/repositories/multi-ivypattern/jars/mod-[revision].jar" />
++	</filesystem>
++  </resolvers>
++</ivyconf>
+diff --git a/test/repositories/multi-ivypattern/jars/mod-1.0.jar b/test/repositories/multi-ivypattern/jars/mod-1.0.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/multi-ivypattern/jars/mod-1.0.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/multi-ivypattern/jars/mod-1.1.jar b/test/repositories/multi-ivypattern/jars/mod-1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/multi-ivypattern/jars/mod-1.1.jar
+@@ -0,0 +1 @@
++ 

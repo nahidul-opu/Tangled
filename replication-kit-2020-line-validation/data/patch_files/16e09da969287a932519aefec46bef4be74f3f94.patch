@@ -1,0 +1,172 @@
+From 16e09da969287a932519aefec46bef4be74f3f94 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 11 Jun 2007 21:21:01 +0000
+Subject: [PATCH] FIX: pom parser doesn't necessarily processes all important
+ information (IVY-524)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@546291 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../parser/m2/PomModuleDescriptorParser.java  | 102 ++++++++++--------
+ 2 files changed, 60 insertions(+), 43 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e58bc7eb7..c35d19c14 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -57,6 +57,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Remove @author tags (thanks to Stephane Bailliez)
+ - IMPROVEMENT: Remove use of deprecated elements in ivysettings.xml (IVY-505) (with contribution from Jan Materne)
+ 
++- FIX: pom parser doesn't necessarily processes all important information (IVY-524)
+ - FIX: <info> element of Ivy file in cache is not updated when using namespaces (IVY-516)
+ - FIX: Retrieve Ant task ignores resolveId attribute (IVY-522) (thanks to Scott Goldstein)
+ - FIX: The deprecated "keep" attribute on post resolve tasks causes an error (IVY-517)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 9f9c33220..7596e6b3e 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -152,6 +152,8 @@ private static final class Parser extends AbstractParser {
+         private DefaultDependencyDescriptor dd;
+ 
+         private Map properties = new HashMap();
++        
++        private StringBuffer buffer = new StringBuffer();
+ 
+         public Parser(ModuleDescriptorParser parser, IvySettings settings, Resource res) {
+             super(parser);
+@@ -215,10 +217,13 @@ private void fillMrid() throws SAXException {
+         }
+ 
+         public void endElement(String uri, String localName, String qName) throws SAXException {
+-            if (md.getModuleRevisionId() == null && ("project".equals(getContext()))) {
++            processTextContent();
++            
++            String context = getContext();
++            if (md.getModuleRevisionId() == null && ("project".equals(context))) {
+                 fillMrid();
+             } else if (((organisation != null && module != null && revision != null) || dd != null)
+-                    && "project/dependencies/dependency".equals(getContext())) {
++                    && "project/dependencies/dependency".equals(context)) {
+                 if (dd == null) {
+                     dd = new DefaultDependencyDescriptor(md, ModuleRevisionId.newInstance(
+                         organisation, module, revision), true, false, true);
+@@ -273,12 +278,12 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+                 md.addDependency(dd);
+                 dd = null;
+             } else if ((organisation != null && module != null)
+-                   && "project/dependencies/dependency/exclusions/exclusion".equals(getContext())) {
++                   && "project/dependencies/dependency/exclusions/exclusion".equals(context)) {
+                 exclusions.add(new ModuleId(organisation, module));
+                 organisation = null;
+                 module = null;
+             }
+-            if ("project/dependencies/dependency".equals(getContext())) {
++            if ("project/dependencies/dependency".equals(context)) {
+                 organisation = null;
+                 module = null;
+                 revision = null;
+@@ -290,53 +295,64 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+             contextStack.pop();
+         }
+ 
+-        public void characters(char[] ch, int start, int length) throws SAXException {
+-            String txt = IvyPatternHelper.substituteVariables(new String(ch, start, length).trim(),
+-                properties);
+-            if (txt.trim().length() == 0) {
+-                return;
+-            }
+-            String context = getContext();
+-            if (context.equals("project/parent/groupId") && organisation == null) {
+-                organisation = txt;
+-                return;
+-            }
+-            if (context.equals("project/parent/version") && revision == null) {
+-                revision = txt;
+-                return;
+-            }
+-            if (context.equals("project/parent/packaging") && type == null) {
+-                type = txt;
+-                ext = txt;
+-                return;
+-            }
+-            if (context.startsWith("project/parent")) {
+-                return;
+-            }
+-            if (md.getModuleRevisionId() == null
+-                    || context.startsWith("project/dependencies/dependency")) {
+-                if (context.equals("project/groupId")) {
+-                    organisation = txt;
+-                } else if (organisation == null && context.endsWith("groupId")) {
++        private void processTextContent() {
++            if (buffer != null) {
++                String txt = IvyPatternHelper.substituteVariables(buffer.toString(), properties).trim();
++                buffer = null;
++                
++                if (txt.length() == 0) {
++                    return;
++                }
++                
++                String context = getContext();
++                if (context.equals("project/parent/groupId") && organisation == null) {
+                     organisation = txt;
+-                } else if (module == null && context.endsWith("artifactId")) {
+-                    module = txt;
+-                } else if (context.equals("project/version")
+-                        || (revision == null && context.endsWith("version"))) {
+-                    revision = txt;
+-                } else if (revision == null && context.endsWith("version")) {
++                    return;
++                }
++                if (context.equals("project/parent/version") && revision == null) {
+                     revision = txt;
+-                } else if (type == null && context.endsWith("packaging")) {
++                    return;
++                } 
++                if (context.equals("project/parent/packaging") && type == null) {
+                     type = txt;
+                     ext = txt;
+-                } else if (scope == null && context.endsWith("scope")) {
+-                    scope = txt;
+-                } else if (classifier == null && context.endsWith("dependency/classifier")) {
+-                    classifier = txt;
++                    return;
++                } 
++                if (context.startsWith("project/parent")) {
++                    return;
++                } 
++                if (md.getModuleRevisionId() == null
++                        || context.startsWith("project/dependencies/dependency")) {
++                    if (context.equals("project/groupId")) {
++                        organisation = txt;
++                    } else if (organisation == null && context.endsWith("groupId")) {
++                        organisation = txt;
++                    } else if (module == null && context.endsWith("artifactId")) {
++                        module = txt;
++                    } else if (context.equals("project/version")
++                            || (revision == null && context.endsWith("version"))) {
++                        revision = txt;
++                    } else if (revision == null && context.endsWith("version")) {
++                        revision = txt;
++                    } else if (type == null && context.endsWith("packaging")) {
++                        type = txt;
++                        ext = txt;
++                    } else if (scope == null && context.endsWith("scope")) {
++                        scope = txt;
++                    } else if (classifier == null && context.endsWith("dependency/classifier")) {
++                        classifier = txt;
++                    }
+                 }
+             }
+         }
+ 
++        public void characters(char[] ch, int start, int length) throws SAXException {
++            if (buffer == null) {
++                buffer = new StringBuffer();
++            }
++            buffer.append(ch, start, length);
++        }
++
+         private String getContext() {
+             StringBuffer buf = new StringBuffer();
+             for (Iterator iter = contextStack.iterator(); iter.hasNext();) {

@@ -1,0 +1,105 @@
+From 1a64e4b788cf514641b6d76d971313213b2a902b Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Mon, 8 Sep 2014 10:09:32 +0000
+Subject: [PATCH] [SANTUARIO-398] - SignedInfo.getCanonicalizedOctetStream() --
+ getInclusiveNamespaces()
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/trunk@1623348 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../xml/security/signature/SignedInfo.java    | 10 +++--
+ .../dom/signature/CreateSignatureTest.java    | 43 ++++++++++++++++++-
+ 2 files changed, 49 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/org/apache/xml/security/signature/SignedInfo.java b/src/main/java/org/apache/xml/security/signature/SignedInfo.java
+index ea2ee2acf5..7a9ef68658 100644
+--- a/src/main/java/org/apache/xml/security/signature/SignedInfo.java
++++ b/src/main/java/org/apache/xml/security/signature/SignedInfo.java
+@@ -271,8 +271,12 @@ public byte[] getCanonicalizedOctetStream()
+                 Canonicalizer.getInstance(this.getCanonicalizationMethodURI());
+             c14nizer.setSecureValidation(isSecureValidation());
+ 
+-            this.c14nizedBytes =
+-                c14nizer.canonicalizeSubtree(getElement());
++            String inclusiveNamespaces = this.getInclusiveNamespaces();
++            if (inclusiveNamespaces == null) {
++                this.c14nizedBytes = c14nizer.canonicalizeSubtree(getElement());
++            } else {
++                this.c14nizedBytes = c14nizer.canonicalizeSubtree(getElement(), inclusiveNamespaces);
++            }
+         }
+ 
+         // make defensive copy
+@@ -353,7 +357,7 @@ public SecretKey createSecretKey(byte[] secretKeyBytes) {
+         return new SecretKeySpec(secretKeyBytes, this.signatureAlgorithm.getJCEAlgorithmString());
+     }
+ 
+-    protected SignatureAlgorithm getSignatureAlgorithm() {
++    public SignatureAlgorithm getSignatureAlgorithm() {
+         return signatureAlgorithm;
+     }
+ 
+diff --git a/src/test/java/org/apache/xml/security/test/dom/signature/CreateSignatureTest.java b/src/test/java/org/apache/xml/security/test/dom/signature/CreateSignatureTest.java
+index c888002d2b..126279159f 100644
+--- a/src/test/java/org/apache/xml/security/test/dom/signature/CreateSignatureTest.java
++++ b/src/test/java/org/apache/xml/security/test/dom/signature/CreateSignatureTest.java
+@@ -36,11 +36,12 @@
+ import org.apache.xml.security.c14n.Canonicalizer;
+ import org.apache.xml.security.keys.KeyInfo;
+ import org.apache.xml.security.signature.ObjectContainer;
++import org.apache.xml.security.signature.SignedInfo;
++import org.apache.xml.security.signature.XMLSignature;
+ import org.apache.xml.security.test.dom.DSNamespaceContext;
+ import org.apache.xml.security.transforms.Transforms;
+ import org.apache.xml.security.transforms.params.XPath2FilterContainer;
+ import org.apache.xml.security.transforms.params.XPathContainer;
+-import org.apache.xml.security.signature.XMLSignature;
+ import org.apache.xml.security.utils.Constants;
+ import org.apache.xml.security.utils.ElementProxy;
+ import org.apache.xml.security.utils.XMLUtils;
+@@ -205,6 +206,46 @@ public void testXFilter2Signature() throws Exception {
+         XMLSignature signature = new XMLSignature(sigElement, "");
+         assertTrue(signature.checkSignatureValue(ks.getCertificate("test").getPublicKey()));
+     }
++    
++    @org.junit.Test
++    public void testCanonicalizedOctetStream() throws Exception {        
++        String signedXML = doSign();
++        
++        org.w3c.dom.Document doc = db.parse(new ByteArrayInputStream(signedXML.getBytes()));
++
++        XPathFactory xpf = XPathFactory.newInstance();
++        XPath xpath = xpf.newXPath();
++        xpath.setNamespaceContext(new DSNamespaceContext());
++
++        String expression = "//ds:Signature[1]";
++        Element sigElement = 
++            (Element) xpath.evaluate(expression, doc, XPathConstants.NODE);
++        
++        XMLSignature signature = new XMLSignature(sigElement, "");
++        KeyInfo ki = signature.getKeyInfo();
++
++        if (ki == null) {
++            throw new RuntimeException("No keyinfo");
++        }
++        PublicKey pk = signature.getKeyInfo().getPublicKey();
++
++        if (pk == null) {
++            throw new RuntimeException("No public key");
++        }
++        
++        SignedInfo si = signature.getSignedInfo();
++        SignatureAlgorithm sa = si.getSignatureAlgorithm();
++        sa.initVerify(pk);
++
++        byte[] sigBytes = signature.getSignatureValue();
++        
++        byte[] canonicalizedBytes = si.getCanonicalizedOctetStream();
++        sa.update(canonicalizedBytes, 0, canonicalizedBytes.length);
++        
++        assertTrue(sa.verify(sigBytes));
++        assertTrue(si.verify(false));
++    }
++
+ 
+     private String doSign() throws Exception {
+         PrivateKey privateKey = kp.getPrivate();

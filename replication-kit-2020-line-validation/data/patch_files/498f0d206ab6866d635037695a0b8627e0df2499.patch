@@ -1,0 +1,208 @@
+From 498f0d206ab6866d635037695a0b8627e0df2499 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 21 Jun 2006 12:12:00 +0000
+Subject: [PATCH] IMPROVE: incorrect value in status attribute causes silent
+ failure (IVY-259)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484365 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                      |  1 +
+ .../fr/jayasoft/ivy/resolver/BasicResolver.java  |  5 +++++
+ .../fr/jayasoft/ivy/status/StatusManager.java    | 16 +++++++++++++---
+ test/java/fr/jayasoft/ivy/ResolveTest.java       |  8 ++++++++
+ .../java/fr/jayasoft/ivy/ant/IvyResolveTest.java | 14 ++++++++++++--
+ test/java/fr/jayasoft/ivy/ant/ivy-failure3.xml   | 10 ++++++++++
+ test/repositories/1/org1/mod1.4/ivys/ivy-1.1.xml | 10 ++++++++++
+ .../1/orgfailure/modfailure/ivys/ivy-1.1.xml     |  7 +++++++
+ .../modfailure/jars/modfailure-1.1.jar           |  1 +
+ 9 files changed, 67 insertions(+), 5 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ant/ivy-failure3.xml
+ create mode 100644 test/repositories/1/org1/mod1.4/ivys/ivy-1.1.xml
+ create mode 100644 test/repositories/1/orgfailure/modfailure/ivys/ivy-1.1.xml
+ create mode 100644 test/repositories/1/orgfailure/modfailure/jars/modfailure-1.1.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 39de6adf6..5a4b813d3 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -34,6 +34,7 @@ Changes:
+   - IMPROVE: ivy standalone now return error status (IVY-152)
+   - IMPROVE: log messages do not display most specfic resolver name (IVY-170)
+   - IMPROVE: prints URL before downloading in verbose mode (IVY-257)
++  - IMPROVE: incorrect value in status attribute causes silent failure (IVY-259)
+ 
+   - FIX: Bad diagnostics message when no space left (IVY-250)
+   - FIX: Parent version is expected to be equal to the module version in POM (IVY-241)
+diff --git a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+index 80edf19f0..84cca842f 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/BasicResolver.java
+@@ -481,6 +481,11 @@ private void checkDescriptorConsistency(ModuleRevisionId mrid, ModuleDescriptor
+                 ok = false;
+             }
+         }
++        if (!getIvy().getStatusManager().isStatus(md.getStatus())) {
++            Message.error("\t"+getName()+": bad status found in "+ivyRef.getResource()+": '"+md.getStatus()+"'");
++            errors.append("bad status: '"+md.getStatus()+"'; ");
++            ok = false;
++        }
+         if (!ok) {
+             throw new ParseException("inconsistent module descriptor file found in '"+ivyRef.getResource()+"': "+errors, 0);
+         }
+diff --git a/src/java/fr/jayasoft/ivy/status/StatusManager.java b/src/java/fr/jayasoft/ivy/status/StatusManager.java
+index 0b37e261e..cddcd9c5f 100644
+--- a/src/java/fr/jayasoft/ivy/status/StatusManager.java
++++ b/src/java/fr/jayasoft/ivy/status/StatusManager.java
+@@ -14,6 +14,7 @@
+ import java.util.Map;
+ 
+ import fr.jayasoft.ivy.Ivy;
++import fr.jayasoft.ivy.util.Message;
+ 
+ /**
+  * Note: update methods (such as addStatus) should only be called BEFORE any call to accessor methods
+@@ -61,7 +62,7 @@ public void setDefaultStatus(String defaultStatus) {
+     public List getStatuses() {
+         return _status;
+     }
+-
++    
+     private void computeMaps() {
+         if (_status.isEmpty()) {
+             throw new IllegalStateException("badly configured statuses: no status found");
+@@ -78,13 +79,21 @@ private void computeMaps() {
+         }
+     }
+     
++    public boolean isStatus(String status) {
++        if (_statusPriorityMap == null) {
++            computeMaps();
++        }
++        return _statusPriorityMap.containsKey(status);
++    }
++
+     public int getPriority(String status) {
+         if (_statusPriorityMap == null) {
+             computeMaps();
+         }
+         Integer priority = (Integer)_statusPriorityMap.get(status);
+         if (priority == null) {
+-            throw new IllegalArgumentException("unknown status "+status);
++            Message.debug("unknown status "+status+": assuming lowest priority");
++            return Integer.MAX_VALUE;
+         }
+         return priority.intValue();
+     }
+@@ -95,7 +104,8 @@ public boolean isIntegration(String status) {
+         }
+         Boolean isIntegration = (Boolean)_statusIntegrationMap.get(status);
+         if (isIntegration == null) {
+-            throw new IllegalArgumentException("unknown status "+status);
++            Message.debug("unknown status "+status+": assuming integration");
++            return true;
+         }
+         return isIntegration.booleanValue();
+     }
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 3b9ffb3cd..4a5e98b38 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -125,6 +125,14 @@ public void testResolveSimple() throws Exception {
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testResolveBadStatus() throws Exception {
++        // mod1.4 depends on modfailure, modfailure has a bad status
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org1/mod1.4/ivys/ivy-1.1.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        assertTrue(report.hasError());
++    }
++
+     public void testResolveRequiresIvyFile() throws Exception {
+         // mod1.1 depends on mod1.2, mod1.2 has no ivy file
+         Ivy ivy = new Ivy();
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+index 12bb4a593..2f09799a6 100644
+--- a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+@@ -112,7 +112,7 @@ public void testFailure() throws Exception {
+             _resolve.execute();
+             fail("failure didn't raised an exception with default haltonfailure setting");
+         } catch (BuildException ex) {
+-            // ok => should raised an exception
++            // ok => should raise an exception
+         }
+     }
+ 
+@@ -122,7 +122,17 @@ public void testFailureOnBadDependencyIvyFile() throws Exception {
+             _resolve.execute();
+             fail("failure didn't raised an exception with default haltonfailure setting");
+         } catch (BuildException ex) {
+-            // ok => should raised an exception
++            // ok => should raise an exception
++        }
++    }
++
++    public void testFailureOnBadStatusInDependencyIvyFile() throws Exception {
++        try {
++            _resolve.setFile(new File("test/java/fr/jayasoft/ivy/ant/ivy-failure3.xml"));
++            _resolve.execute();
++            fail("failure didn't raised an exception with default haltonfailure setting");
++        } catch (BuildException ex) {
++            // ok => should raise an exception
+         }
+     }
+ 
+diff --git a/test/java/fr/jayasoft/ivy/ant/ivy-failure3.xml b/test/java/fr/jayasoft/ivy/ant/ivy-failure3.xml
+new file mode 100644
+index 000000000..58893b725
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ant/ivy-failure3.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0"> 
++	<info organisation="jayasoft"
++	       module="resolve-failure3"
++	       revision="1.0"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="orgfailure" name="modfailure" rev="1.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org1/mod1.4/ivys/ivy-1.1.xml b/test/repositories/1/org1/mod1.4/ivys/ivy-1.1.xml
+new file mode 100644
+index 000000000..22ff12058
+--- /dev/null
++++ b/test/repositories/1/org1/mod1.4/ivys/ivy-1.1.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0"> 
++	<info organisation="org1"
++	       module="mod1.4"
++	       revision="1.1"
++	       status="release"
++	/>
++	<dependencies>
++		<dependency org="orgfailure" name="modfailure" rev="1.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/orgfailure/modfailure/ivys/ivy-1.1.xml b/test/repositories/1/orgfailure/modfailure/ivys/ivy-1.1.xml
+new file mode 100644
+index 000000000..1bd236379
+--- /dev/null
++++ b/test/repositories/1/orgfailure/modfailure/ivys/ivy-1.1.xml
+@@ -0,0 +1,7 @@
++<ivy-module version="1.0"> 
++	<info organisation="orgfailure"
++	       module="modfailure"
++	       revision="1.1"
++	       status="badstatus"
++	/>
++</ivy-module>
+diff --git a/test/repositories/1/orgfailure/modfailure/jars/modfailure-1.1.jar b/test/repositories/1/orgfailure/modfailure/jars/modfailure-1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/orgfailure/modfailure/jars/modfailure-1.1.jar
+@@ -0,0 +1 @@
++ 

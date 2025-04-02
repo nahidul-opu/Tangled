@@ -1,0 +1,597 @@
+From e26114a8fb6e6c7302a072e78dc88ad43979c17e Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 3 Jan 2006 10:50:08 +0000
+Subject: [PATCH] IMPROVE: exclusion of artifacts now works on transitive
+ artifacts, and exclusion can specify organisation and/or module (IVY-116)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484084 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../DefaultDependencyArtifactDescriptor.java  |  9 ++
+ src/java/fr/jayasoft/ivy/IvyNode.java         | 96 +++++++++++++------
+ .../ivy/xml/XmlModuleDescriptorParser.java    | 12 ++-
+ src/java/fr/jayasoft/ivy/xml/ivy.xsd          | 19 ++--
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 68 +++++++++++++
+ .../1/org2/mod2.3/ivys/ivy-0.7.xml            | 10 ++
+ .../1/org2/mod2.3/jars/mod2.3-0.7.jar         |  1 +
+ .../1/org2/mod2.5/ivys/ivy-0.6.xml            | 12 +++
+ .../1/org2/mod2.5/ivys/ivy-0.7.xml            | 12 +++
+ .../1/org2/mod2.5/ivys/ivy-0.8.xml            | 12 +++
+ .../1/org2/mod2.5/jars/mod2.5-0.7.jar         |  1 +
+ .../1/org2/mod2.5/jars/mod2.5-0.8.jar         |  1 +
+ .../1/org2/mod2.6/ivys/ivy-0.6.xml            | 11 +++
+ .../1/org2/mod2.6/ivys/ivy-0.7.xml            | 11 +++
+ .../1/org2/mod2.6/ivys/ivy-0.8.xml            | 14 +++
+ .../1/org2/mod2.6/ivys/ivy-0.9.xml            | 12 +++
+ 17 files changed, 265 insertions(+), 37 deletions(-)
+ create mode 100644 test/repositories/1/org2/mod2.3/ivys/ivy-0.7.xml
+ create mode 100644 test/repositories/1/org2/mod2.3/jars/mod2.3-0.7.jar
+ create mode 100644 test/repositories/1/org2/mod2.5/ivys/ivy-0.6.xml
+ create mode 100644 test/repositories/1/org2/mod2.5/ivys/ivy-0.7.xml
+ create mode 100644 test/repositories/1/org2/mod2.5/ivys/ivy-0.8.xml
+ create mode 100644 test/repositories/1/org2/mod2.5/jars/mod2.5-0.7.jar
+ create mode 100644 test/repositories/1/org2/mod2.5/jars/mod2.5-0.8.jar
+ create mode 100644 test/repositories/1/org2/mod2.6/ivys/ivy-0.6.xml
+ create mode 100644 test/repositories/1/org2/mod2.6/ivys/ivy-0.7.xml
+ create mode 100644 test/repositories/1/org2/mod2.6/ivys/ivy-0.8.xml
+ create mode 100644 test/repositories/1/org2/mod2.6/ivys/ivy-0.9.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index a1592422c..d63896194 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -5,6 +5,7 @@
+ - NEW: it is now possible to reference existing resolver in resolver containers (IVY-35)
+ - NEW: overwrite attribute in the publish task now let force overwrite of read only files (IVY-83) 
+ - NEW: add a conflict manager ("strict") making build fail when a diamond conflict is found (thanks to Christer Jonsson) (IVY-118) 
++- IMPROVE: exclusion of artifacts now works on transitive artifacts, and exclusion can specify organisation and/or module (IVY-116)
+ - IMPROVE: now dynamic revisions replacement by deliver task can be turned off (IVY-120)
+ - IMPROVE: better performance with deep transitive dependencies
+ - IMPROVE: allow optional parts in the patterns (IVY-102) (thanks to Maarten Coene)
+diff --git a/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java b/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java
+index 293f808bc..e53a9cf94 100644
+--- a/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java
++++ b/src/java/fr/jayasoft/ivy/DefaultDependencyArtifactDescriptor.java
+@@ -40,6 +40,15 @@ public DefaultDependencyArtifactDescriptor(DefaultDependencyDescriptor dd,
+         _includes = includes;
+     }
+     
++    public DefaultDependencyArtifactDescriptor(DefaultDependencyDescriptor dd, ArtifactId aid, boolean includes) {
++        if (dd == null) {
++            throw new NullPointerException("dependency descriptor must not be null");
++        }
++        _dd = dd;
++        _id = aid;
++        _includes = includes;
++    }
++    
+     public boolean equals(Object obj) {
+         if (!(obj instanceof DependencyArtifactDescriptor)) {
+             return false;
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index cfb3cdd50..afedaa10b 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -66,11 +66,13 @@ public String getRootModuleConf() {
+     }
+ 
+     public static class Caller {
++        private ModuleDescriptor _md;
+         private ModuleRevisionId _mrid;
+         private Map _confs = new HashMap(); // Map (String callerConf -> String[] dependencyConfs)
+         private ModuleRevisionId _askedDependencyId;
+         
+-        public Caller(ModuleRevisionId mrid, ModuleRevisionId askedDependencyId) {
++        public Caller(ModuleDescriptor md, ModuleRevisionId mrid, ModuleRevisionId askedDependencyId) {
++            _md = md;
+             _mrid = mrid;
+             _askedDependencyId = askedDependencyId;
+         }
+@@ -110,6 +112,9 @@ public String toString() {
+         public ModuleRevisionId getAskedDependencyId() {
+             return _askedDependencyId;
+         }
++        public ModuleDescriptor getModuleDescriptor() {
++            return _md;
++        }
+     }
+     private static final class NodeConf {
+         private IvyNode _node;
+@@ -198,8 +203,6 @@ public int hashCode() {
+         
+     // Map (String rootModuleConf -> Set(DependencyArtifactDescriptor))
+     private Map _dependencyArtifactsIncludes = new HashMap();
+-    // Map (String rootModuleConf -> Set(DependencyArtifactDescriptor))
+-    private Map _dependencyArtifactsExcludes = new HashMap();
+ 
+ 
+     // shared data
+@@ -366,9 +369,6 @@ private void updateDataFrom(IvyNode node, String rootModuleConf) {
+         // update dependencyArtifactsIncludes
+         updateMapOfSetForKey(node._dependencyArtifactsIncludes, _dependencyArtifactsIncludes, rootModuleConf);
+         
+-        // update dependencyArtifactsExcludes
+-        updateMapOfSetForKey(node._dependencyArtifactsExcludes, _dependencyArtifactsExcludes, rootModuleConf);
+-        
+         // update confsToFetch
+         updateConfsToFetch(node._fetchedConfigurations);
+         updateConfsToFetch(node._confsToFetch);
+@@ -477,7 +477,6 @@ public boolean loadData(String conf) {
+                                 resolved.loadData(conf);
+                                 if (_dd != null) {
+                                     resolved.addDependencyArtifactsIncludes(_rootModuleConf, _dd.getDependencyArtifactsIncludes(getParentConf()));
+-                                    resolved.addDependencyArtifactsExcludes(_rootModuleConf, _dd.getDependencyArtifactsExcludes(getParentConf()));
+                                 }
+                                 _data.register(getId(), resolved); // this actually discards the node
+                                 return true;
+@@ -545,7 +544,6 @@ public boolean loadData(String conf) {
+         }
+         if (_dd != null) {
+             addDependencyArtifactsIncludes(_rootModuleConf, _dd.getDependencyArtifactsIncludes(getParentConf()));
+-            addDependencyArtifactsExcludes(_rootModuleConf, _dd.getDependencyArtifactsExcludes(getParentConf()));
+         }
+         return loaded;
+         
+@@ -600,7 +598,7 @@ public Collection getDependencies(String conf, boolean traverse) {
+             depNode.updateConfsToFetch(confs);
+             depNode.setRequiredConfs(this, conf, confs);
+             
+-            depNode.addCaller(_rootModuleConf, _md.getModuleRevisionId(), conf, dependencyConfigurations, dd.getDependencyRevisionId());
++            depNode.addCaller(_rootModuleConf, _md, _md.getModuleRevisionId(), conf, dependencyConfigurations, dd.getDependencyRevisionId());
+             dependencies.add(depNode);
+ 
+             if (traverse) {
+@@ -692,7 +690,7 @@ public ResolvedModuleRevision getModuleRevision() {
+      * @param dependencyConfs '*' must have been resolved
+      * @param askedDependencyId the dependency revision id asked by the caller
+      */
+-    public void addCaller(String rootModuleConf, ModuleRevisionId mrid, String callerConf, String[] dependencyConfs, ModuleRevisionId askedDependencyId) {
++    public void addCaller(String rootModuleConf, ModuleDescriptor md, ModuleRevisionId mrid, String callerConf, String[] dependencyConfs, ModuleRevisionId askedDependencyId) {
+         if (mrid.getModuleId().equals(getId().getModuleId())) {
+             throw new IllegalArgumentException("a module is not authorized to depend on itself: "+getId());
+         }
+@@ -703,7 +701,7 @@ public void addCaller(String rootModuleConf, ModuleRevisionId mrid, String calle
+         }
+         Caller caller = (Caller)callers.get(mrid);
+         if (caller == null) {
+-            caller = new Caller(mrid, askedDependencyId);
++            caller = new Caller(md, mrid, askedDependencyId);
+             callers.put(mrid, caller);
+         }
+         caller.addConfiguration(callerConf, dependencyConfs);
+@@ -920,23 +918,71 @@ public Artifact[] getArtifacts(String rootModuleConf) {
+             }
+         }
+         
+-        // now excludes artifacts in the exclude list
+-        Set excludes = (Set)_dependencyArtifactsExcludes.get(rootModuleConf);
+-        if (excludes != null) {
+-            for (Iterator it = excludes.iterator(); it.hasNext();) {
+-                DependencyArtifactDescriptor dad = (DependencyArtifactDescriptor)it.next();
+-                for (Iterator iter = artifacts.iterator(); iter.hasNext();) {
+-                    Artifact artifact = (Artifact)iter.next();
+-                    if (artifactIdMatch(dad.getId(), artifact.getId().getArtifactId())) {
+-                        Message.debug(this+" in "+rootModuleConf+": excluding "+artifact);
+-                        iter.remove();
+-                    }
+-                }
++        // now excludes artifacts that aren't accepted by any caller
++        for (Iterator iter = artifacts.iterator(); iter.hasNext();) {
++            Artifact artifact = (Artifact)iter.next();
++            boolean excluded = doesCallersExclude(rootModuleConf, artifact);
++            if (excluded) {
++                Message.debug(this+" in "+rootModuleConf+": excluding "+artifact);
++                iter.remove();
+             }
+         }
+         return (Artifact[]) artifacts.toArray(new Artifact[artifacts.size()]);
+     }
+ 
++    /**
++     * Returns true if ALL callers exclude the given artifact in the given root module conf
++     * @param rootModuleConf
++     * @param artifact
++     * @return
++     */
++    private boolean doesCallersExclude(String rootModuleConf, Artifact artifact) {
++        Caller[] callers = getCallers(rootModuleConf);
++        if (callers.length == 0) {
++            return false;
++        }
++        Collection callersNodes = new ArrayList();
++        for (int i = 0; i < callers.length; i++) {
++            ModuleDescriptor md = callers[i].getModuleDescriptor();
++            if (!doesExclude(md, rootModuleConf, callers[i].getCallerConfigurations(), this, artifact)) {
++                return false;
++            }
++        }
++        return true;
++    }
++
++    private boolean doesExclude(ModuleDescriptor md, String rootModuleConf, String[] moduleConfs, IvyNode dependency, Artifact artifact) {
++        // artifact is excluded if it match any of the exclude pattern for this dependency...
++        DependencyDescriptor dd = getDependencyDescriptor(md, dependency);
++        if (dd != null) {
++            DependencyArtifactDescriptor[] dads = dd.getDependencyArtifactsExcludes(moduleConfs);
++            for (int i = 0; i < dads.length; i++) {
++                if (artifactIdMatch(dads[i].getId(), artifact.getId().getArtifactId())) {
++                    return true;
++                }
++            }
++        }
++        // ... or if it is excluded by all its callers
++        IvyNode c = _data.getNode(md.getModuleRevisionId());
++        if (c != null) {
++            return c.doesCallersExclude(rootModuleConf, artifact);
++        } else {
++            return false;
++        }
++    }
++
++    private static DependencyDescriptor getDependencyDescriptor(ModuleDescriptor md, IvyNode dependency) {
++        if (md != null) {
++            DependencyDescriptor[] dds = md.getDependencies();
++            for (int i = 0; i < dds.length; i++) {
++                if (dds[i].getDependencyId().equals(dependency.getModuleId())) {
++                    return dds[i];
++                }
++            }
++        }
++        return null;
++    }
++
+     private Collection findArtifactsMatching(ArtifactId id, Map allArtifacts) {
+         Artifact art = (Artifact)allArtifacts.get(id);
+         if (art != null) {
+@@ -976,10 +1022,6 @@ private void addDependencyArtifactsIncludes(String rootModuleConf, DependencyArt
+         addDependencyArtifacts(rootModuleConf, dependencyArtifacts, _dependencyArtifactsIncludes);
+     }
+ 
+-    private void addDependencyArtifactsExcludes(String rootModuleConf, DependencyArtifactDescriptor[] dependencyArtifacts) {
+-        addDependencyArtifacts(rootModuleConf, dependencyArtifacts, _dependencyArtifactsExcludes);
+-    }
+-
+     private void addDependencyArtifacts(String rootModuleConf, DependencyArtifactDescriptor[] dependencyArtifacts, Map artifactsMap) {
+         Set depArtifacts = (Set) artifactsMap.get(rootModuleConf);
+         if (depArtifacts == null) {
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+index d617810af..9b61b6a9d 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+@@ -22,6 +22,7 @@
+ import org.xml.sax.SAXParseException;
+ import org.xml.sax.helpers.DefaultHandler;
+ 
++import fr.jayasoft.ivy.ArtifactId;
+ import fr.jayasoft.ivy.Configuration;
+ import fr.jayasoft.ivy.ConflictManager;
+ import fr.jayasoft.ivy.DefaultDependencyArtifactDescriptor;
+@@ -363,7 +364,16 @@ private void addDependencyArtifact(Attributes attributes, boolean includes) {
+         type = type == null ? ".*" : type;
+         String ext = attributes.getValue("ext");
+         ext = ext != null?ext:type;
+-        _dad = new DefaultDependencyArtifactDescriptor(_dd, name, type, ext, includes);
++        if (includes) {
++            _dad = new DefaultDependencyArtifactDescriptor(_dd, name, type, ext, includes);
++        } else {
++            String org = attributes.getValue("org");
++            org = org == null ? ".*" : org;
++            String module = attributes.getValue("module");
++            module = module == null ? ".*" : module;
++            ArtifactId aid = new ArtifactId(new ModuleId(org, module), name, type, ext);
++            _dad = new DefaultDependencyArtifactDescriptor(_dd, aid, includes);
++        }
+         String confs = attributes.getValue("conf");
+         // only add confs if they are specified. if they aren't, endElement will handle this
+         // only if there are no conf defined in sub elements
+diff --git a/src/java/fr/jayasoft/ivy/xml/ivy.xsd b/src/java/fr/jayasoft/ivy/xml/ivy.xsd
+index dae2f5c55..471d85167 100644
+--- a/src/java/fr/jayasoft/ivy/xml/ivy.xsd
++++ b/src/java/fr/jayasoft/ivy/xml/ivy.xsd
+@@ -1,6 +1,5 @@
+-<?xml version="1.0"?>
+-<xs:schema 	xmlns:xs="http://www.w3.org/2001/XMLSchema"
+-			elementFormDefault="qualified">
++<?xml version="1.0" encoding="UTF-8"?>
++<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema" elementFormDefault="qualified">
+ 
+   <xs:element name="ivy-module">
+       <xs:complexType>
+@@ -83,7 +82,7 @@
+ 							        </xs:sequence>
+ 						            <xs:attribute name="name" type="xs:string" use="required"/>
+ 						            <xs:attribute name="type" type="xs:string" use="required"/>
+-						            <xs:attribute name="ext"  type="xs:string"/>
++						            <xs:attribute name="ext" type="xs:string"/>
+ 						            <xs:attribute name="conf" type="xs:string"/>
+ 				            	</xs:complexType>
+ 				      		</xs:element>
+@@ -120,7 +119,7 @@
+ 										        </xs:sequence>
+ 									            <xs:attribute name="name" type="xs:string" use="required"/>
+ 									            <xs:attribute name="type" type="xs:string" use="required"/>
+-									            <xs:attribute name="ext"  type="xs:string"/>
++									            <xs:attribute name="ext" type="xs:string"/>
+ 									            <xs:attribute name="conf" type="xs:string"/>
+ 							            	</xs:complexType>
+ 							      		</xs:element>
+@@ -135,7 +134,7 @@
+ 										        </xs:sequence>
+ 									            <xs:attribute name="name" type="xs:string" use="required"/>
+ 									            <xs:attribute name="type" type="xs:string" use="required"/>
+-									            <xs:attribute name="ext"  type="xs:string"/>
++									            <xs:attribute name="ext" type="xs:string"/>
+ 									            <xs:attribute name="conf" type="xs:string"/>
+ 							            	</xs:complexType>
+ 							      		</xs:element>
+@@ -148,9 +147,11 @@
+ 										            	</xs:complexType>
+ 										      		</xs:element>
+ 										        </xs:sequence>
++									            <xs:attribute name="org" type="xs:string"/>
++									            <xs:attribute name="module" type="xs:string"/>
+ 									            <xs:attribute name="name" type="xs:string" use="required"/>
+ 									            <xs:attribute name="type" type="xs:string" use="required"/>
+-									            <xs:attribute name="ext"  type="xs:string"/>
++									            <xs:attribute name="ext" type="xs:string"/>
+ 									            <xs:attribute name="conf" type="xs:string"/>
+ 							            	</xs:complexType>
+ 							      		</xs:element>
+@@ -175,7 +176,7 @@
+ 				            	<xs:complexType>
+ 						            <xs:attribute name="org" type="xs:string"/>
+ 						            <xs:attribute name="module" type="xs:string"/>
+-						            <xs:attribute name="name"  type="xs:string"/>
++						            <xs:attribute name="name" type="xs:string"/>
+ 						            <xs:attribute name="rev" type="xs:string"/>
+ 				            	</xs:complexType>
+ 				      		</xs:element>
+@@ -187,4 +188,4 @@
+       </xs:complexType>
+   </xs:element>
+ 
+-</xs:schema>
+\ No newline at end of file
++</xs:schema>
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index ed9aa3abe..9354dbf50 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -1042,6 +1042,74 @@ public void testIVY97() throws Exception {
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+     
++    public void testResolveTransitiveExcludesSimple() throws Exception {
++        // mod2.5 depends on mod2.3 and excludes one artifact from mod2.1
++        //      mod2.3 depends on mod2.1
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.5/ivys/ivy-0.6.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        assertNotNull(report);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.5", "0.6");
++        assertEquals(mrid, md.getModuleRevisionId());
++        
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
++        
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org2", "mod2.3", "0.7")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.3", "0.7", "mod2.3", "jar", "jar").exists());
++        
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org2", "mod2.1", "0.3")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21B", "jar", "jar").exists());
++    }
++    
++    public void testResolveTransitiveExcludesDiamond1() throws Exception {
++        // mod2.6 depends on mod2.3 and mod2.5
++        //      mod2.3 depends on mod2.1 and excludes art21B
++        //      mod2.5 depends on mod2.1 and excludes art21A
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.6/ivys/ivy-0.6.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21B", "jar", "jar").exists());
++    }
++    
++    public void testResolveTransitiveExcludesDiamond2() throws Exception {
++        // mod2.6 depends on mod2.3 and mod2.5
++        //      mod2.3 depends on mod2.1 and excludes art21B
++        //      mod2.5 depends on mod2.1 and excludes art21B
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.6/ivys/ivy-0.7.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21B", "jar", "jar").exists());
++    }
++    
++    public void testResolveTransitiveExcludesDiamond3() throws Exception {
++        // mod2.6 depends on mod2.3 and mod2.5 and on mod2.1 for which it excludes art21A
++        //      mod2.3 depends on mod2.1 and excludes art21B
++        //      mod2.5 depends on mod2.1 and excludes art21B
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.6/ivys/ivy-0.8.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21B", "jar", "jar").exists());
++    }
++    
++    public void testResolveTransitiveExcludes2() throws Exception {
++        // mod2.6 depends on mod2.3 for which it excludes art21A
++        //      mod2.3 depends on mod2.1 and excludes art21B
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org2/mod2.6/ivys/ivy-0.9.xml").toURL(),
++                null, new String[] {"*"}, _cache, null, true);
++        ModuleDescriptor md = report.getModuleDescriptor();
++        
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21B", "jar", "jar").exists());
++    }
++    
+     ////////////////////////////////////////////////////////////
+     // helper methods to ease the tests
+     ////////////////////////////////////////////////////////////
+diff --git a/test/repositories/1/org2/mod2.3/ivys/ivy-0.7.xml b/test/repositories/1/org2/mod2.3/ivys/ivy-0.7.xml
+new file mode 100644
+index 000000000..f920045b0
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.3/ivys/ivy-0.7.xml
+@@ -0,0 +1,10 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.3"
++	       revision="0.7"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.1" rev="0.3"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.3/jars/mod2.3-0.7.jar b/test/repositories/1/org2/mod2.3/jars/mod2.3-0.7.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.3/jars/mod2.3-0.7.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org2/mod2.5/ivys/ivy-0.6.xml b/test/repositories/1/org2/mod2.5/ivys/ivy-0.6.xml
+new file mode 100644
+index 000000000..7d13e70f1
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.5/ivys/ivy-0.6.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.5"
++	       revision="0.6"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.3" rev="0.7">
++			<exclude name="art21B"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.5/ivys/ivy-0.7.xml b/test/repositories/1/org2/mod2.5/ivys/ivy-0.7.xml
+new file mode 100644
+index 000000000..3b0a517c1
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.5/ivys/ivy-0.7.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.5"
++	       revision="0.7"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.1" rev="0.3">
++			<exclude name="art21A"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.5/ivys/ivy-0.8.xml b/test/repositories/1/org2/mod2.5/ivys/ivy-0.8.xml
+new file mode 100644
+index 000000000..2384dd488
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.5/ivys/ivy-0.8.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.5"
++	       revision="0.8"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.1" rev="0.3">
++			<exclude name="art21B"/>
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.5/jars/mod2.5-0.7.jar b/test/repositories/1/org2/mod2.5/jars/mod2.5-0.7.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.5/jars/mod2.5-0.7.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org2/mod2.5/jars/mod2.5-0.8.jar b/test/repositories/1/org2/mod2.5/jars/mod2.5-0.8.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.5/jars/mod2.5-0.8.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.6.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.6.xml
+new file mode 100644
+index 000000000..293478f15
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.6.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.6"
++	       revision="0.6"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.3" rev="0.6"/>
++		<dependency name="mod2.5" rev="0.7"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.7.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.7.xml
+new file mode 100644
+index 000000000..211774078
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.7.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.6"
++	       revision="0.7"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.3" rev="0.6"/>
++		<dependency name="mod2.5" rev="0.8"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.8.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.8.xml
+new file mode 100644
+index 000000000..139f4048d
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.8.xml
+@@ -0,0 +1,14 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.6"
++	       revision="0.8"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.1" rev="0.3">
++			<exclude name="art21A"/>
++		</dependency>
++		<dependency name="mod2.3" rev="0.6"/>
++		<dependency name="mod2.5" rev="0.8"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.9.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.9.xml
+new file mode 100644
+index 000000000..4fb9cfd53
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.9.xml
+@@ -0,0 +1,12 @@
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.6"
++	       revision="0.9"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency name="mod2.3" rev="0.6">
++			<exclude name="art21A"/>
++		</dependency>
++	</dependencies>
++</ivy-module>

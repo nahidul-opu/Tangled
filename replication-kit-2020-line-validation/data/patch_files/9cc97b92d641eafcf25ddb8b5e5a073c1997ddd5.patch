@@ -1,0 +1,377 @@
+From 9cc97b92d641eafcf25ddb8b5e5a073c1997ddd5 Mon Sep 17 00:00:00 2001
+From: Nicolas Lalevee <hibou@apache.org>
+Date: Thu, 21 Oct 2010 16:45:31 +0000
+Subject: [PATCH] IVY-1240: a fix, and a unit test that doesn't test much
+ unfortunately...
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1026063 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/resolve/IvyNode.java  | 15 +++++----
+ .../apache/ivy/core/resolve/ResolveTest.java  | 18 ++++++++++
+ .../multiple-same-deps/mod1/ivys/ivy-1.0.xml  | 31 +++++++++++++++++
+ .../multiple-same-deps/mod1/jars/mod1-1.0.jar |  1 +
+ .../multiple-same-deps/mod2/ivys/ivy-1.0.xml  | 32 ++++++++++++++++++
+ .../multiple-same-deps/mod2/jars/mod2-1.0.jar |  1 +
+ .../multiple-same-deps/mod3/ivys/ivy-1.0.xml  | 33 +++++++++++++++++++
+ .../multiple-same-deps/mod3/jars/mod3-1.0.jar |  1 +
+ .../multiple-same-deps/mod31/ivys/ivy-1.0.xml | 26 +++++++++++++++
+ .../mod31/jars/mod31-1.0.jar                  |  1 +
+ .../multiple-same-deps/mod32/ivys/ivy-1.0.xml | 26 +++++++++++++++
+ .../mod32/jars/mod32-1.0.jar                  |  1 +
+ .../multiple-same-deps/mod33/ivys/ivy-1.0.xml | 26 +++++++++++++++
+ .../mod33/jars/mod33-1.0.jar                  |  1 +
+ 15 files changed, 208 insertions(+), 6 deletions(-)
+ create mode 100644 test/repositories/1/multiple-same-deps/mod1/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/multiple-same-deps/mod1/jars/mod1-1.0.jar
+ create mode 100644 test/repositories/1/multiple-same-deps/mod2/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/multiple-same-deps/mod2/jars/mod2-1.0.jar
+ create mode 100644 test/repositories/1/multiple-same-deps/mod3/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/multiple-same-deps/mod3/jars/mod3-1.0.jar
+ create mode 100644 test/repositories/1/multiple-same-deps/mod31/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/multiple-same-deps/mod31/jars/mod31-1.0.jar
+ create mode 100644 test/repositories/1/multiple-same-deps/mod32/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/multiple-same-deps/mod32/jars/mod32-1.0.jar
+ create mode 100644 test/repositories/1/multiple-same-deps/mod33/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/multiple-same-deps/mod33/jars/mod33-1.0.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e72153efa..c050b5082 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -117,6 +117,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Cached ivy.xml is invalid if the description contains the ampersand entity (&amp;) (IVY-1237)
+ - FIX: Couldn't authenticate against sites having the same address as the proxy server (IVY-1234)
+ - FIX: OutOfMemoryError when uploading large files using commons-httpclient (IVY-1197) (thanks to Torkild U. Resheim)
++- FIX: Only the last dependency descriptor is taken into account on the same module (IVY-1240)
+ 
+    2.2.0
+ =====================================
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 7ad9aadae..11a5d101e 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -312,7 +312,7 @@ public Collection getDependencies(String rootModuleConf, String conf, String req
+                     "impossible to get dependencies when data has not been loaded");
+         }
+         DependencyDescriptor[] dds = md.getDependencies();
+-        Collection dependencies = new LinkedHashSet(); // it's important to respect order
++        Map dependencies = new LinkedHashMap(); // it's important to respect order
+         for (int i = 0; i < dds.length; i++) {
+             DependencyDescriptor dd = data.mediate(dds[i]);
+             String[] dependencyConfigurations = dd.getDependencyConfigurations(conf, requestedConf);
+@@ -328,9 +328,12 @@ public Collection getDependencies(String rootModuleConf, String conf, String req
+                 Message.verbose("excluding " + dd + " in " + conf);
+                 continue;
+             }
+-            IvyNode depNode = data.getNode(
+-                requestedDependencyRevisionId);
+-            
++
++            IvyNode depNode = (IvyNode) dependencies.get(requestedDependencyRevisionId);
++            if (depNode == null) {
++                depNode = data.getNode(requestedDependencyRevisionId);
++            }
++
+             if (depNode == null) {
+                 depNode = new IvyNode(data, this, dd);
+             } else {
+@@ -349,9 +352,9 @@ public Collection getDependencies(String rootModuleConf, String conf, String req
+             depNode.usage.setRequiredConfs(this, conf, confs);
+ 
+             depNode.addCaller(rootModuleConf, this, conf, requestedConf, dependencyConfigurations, dd);
+-            dependencies.add(depNode);
++            dependencies.put(requestedDependencyRevisionId, depNode);
+         }
+-        return dependencies;
++        return dependencies.values();
+     }
+ 
+     private void addDependencyDescriptor(IvyNode parent, DependencyDescriptor dd) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 67cf9414f..328fa9cbf 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3629,6 +3629,24 @@ public void testIVY97() throws Exception {
+         assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testResolveMultipleSameDependency() throws Exception {
++        ResolveReport report = ivy.resolve(new File("test/repositories/1/multiple-same-deps/mod1/ivys/ivy-1.0.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++
++        assertTrue(getArchiveFileInCache("multiple-same-deps", "mod31", "1.0", "mod31", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache("multiple-same-deps", "mod32", "1.0", "mod32", "jar", "jar").exists());
++        assertTrue(getArchiveFileInCache("multiple-same-deps", "mod33", "1.0", "mod33", "jar", "jar").exists());
++
++        ConfigurationResolveReport runtimeReport = report.getConfigurationReport("runtime");
++        runtimeReport.getModuleRevisionIds().contains(ModuleRevisionId.parse("multiple-same-deps#mod31;1.0"));
++        runtimeReport.getModuleRevisionIds().contains(ModuleRevisionId.parse("multiple-same-deps#mod32;1.0"));
++        runtimeReport.getModuleRevisionIds().contains(ModuleRevisionId.parse("multiple-same-deps#mod33;1.0"));
++        ConfigurationResolveReport compileReport = report.getConfigurationReport("compile");
++        runtimeReport.getModuleRevisionIds().contains(ModuleRevisionId.parse("multiple-same-deps#mod31;1.0"));
++        runtimeReport.getModuleRevisionIds().contains(ModuleRevisionId.parse("multiple-same-deps#mod32;1.0"));
++        runtimeReport.getModuleRevisionIds().contains(ModuleRevisionId.parse("multiple-same-deps#mod33;1.0"));
++    }
++
+     public void testResolveTransitiveExcludesSimple() throws Exception {
+         // mod2.5 depends on mod2.3 and excludes one artifact from mod2.1
+         // mod2.3 depends on mod2.1
+diff --git a/test/repositories/1/multiple-same-deps/mod1/ivys/ivy-1.0.xml b/test/repositories/1/multiple-same-deps/mod1/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..bc18919c3
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod1/ivys/ivy-1.0.xml
+@@ -0,0 +1,31 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="multiple-same-deps" module="mod1" revision="1.0" />
++    <configurations>
++        <conf name="default" extends="war" />
++        <conf name="compile" />
++        <conf name="runtime" />
++        <conf name="test" extends="compile,runtime" />
++        <conf name="war" />
++    </configurations>
++    <dependencies>
++        <dependency org="multiple-same-deps" name="mod2" rev="1.0" conf="compile,runtime->default" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/multiple-same-deps/mod1/jars/mod1-1.0.jar b/test/repositories/1/multiple-same-deps/mod1/jars/mod1-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod1/jars/mod1-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/1/multiple-same-deps/mod2/ivys/ivy-1.0.xml b/test/repositories/1/multiple-same-deps/mod2/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..fd59130c9
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod2/ivys/ivy-1.0.xml
+@@ -0,0 +1,32 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="multiple-same-deps" module="mod2" revision="1.0" />
++    <configurations>
++        <conf name="default" extends="runtime" />
++        <conf name="compile" />
++        <conf name="runtime" />
++        <conf name="test" extends="compile,runtime" />
++    </configurations>
++    <dependencies>
++        <dependency org="multiple-same-deps" name="mod3" rev="1.0" conf="compile,runtime->conf1" />
++        <dependency org="multiple-same-deps" name="mod3" rev="1.0" conf="compile,runtime->conf2" />
++        <dependency org="multiple-same-deps" name="mod3" rev="1.0" conf="compile,runtime->conf3" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/multiple-same-deps/mod2/jars/mod2-1.0.jar b/test/repositories/1/multiple-same-deps/mod2/jars/mod2-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod2/jars/mod2-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/1/multiple-same-deps/mod3/ivys/ivy-1.0.xml b/test/repositories/1/multiple-same-deps/mod3/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..2fb4895ce
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod3/ivys/ivy-1.0.xml
+@@ -0,0 +1,33 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="multiple-same-deps" module="mod3" revision="1.0" />
++    <configurations>
++        <conf name="default" />
++        <conf name="common" />
++        <conf name="conf1" extends="common" />
++        <conf name="conf2" extends="common" />
++        <conf name="conf3" extends="common" />
++    </configurations>
++    <dependencies>
++        <dependency org="multiple-same-deps" name="mod31" rev="1.0" conf="conf1->default" />
++        <dependency org="multiple-same-deps" name="mod32" rev="1.0" conf="conf2->default" />
++        <dependency org="multiple-same-deps" name="mod33" rev="1.0" conf="conf3->default" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/multiple-same-deps/mod3/jars/mod3-1.0.jar b/test/repositories/1/multiple-same-deps/mod3/jars/mod3-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod3/jars/mod3-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/1/multiple-same-deps/mod31/ivys/ivy-1.0.xml b/test/repositories/1/multiple-same-deps/mod31/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..a4fa3b4a9
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod31/ivys/ivy-1.0.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="multiple-same-deps" module="mod31" revision="1.0" />
++    <configurations>
++        <conf name="default" />
++    </configurations>
++    <dependencies>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/multiple-same-deps/mod31/jars/mod31-1.0.jar b/test/repositories/1/multiple-same-deps/mod31/jars/mod31-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod31/jars/mod31-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/1/multiple-same-deps/mod32/ivys/ivy-1.0.xml b/test/repositories/1/multiple-same-deps/mod32/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..c76148a79
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod32/ivys/ivy-1.0.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="multiple-same-deps" module="mod32" revision="1.0" />
++    <configurations>
++        <conf name="default" />
++    </configurations>
++    <dependencies>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/multiple-same-deps/mod32/jars/mod32-1.0.jar b/test/repositories/1/multiple-same-deps/mod32/jars/mod32-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod32/jars/mod32-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file
+diff --git a/test/repositories/1/multiple-same-deps/mod33/ivys/ivy-1.0.xml b/test/repositories/1/multiple-same-deps/mod33/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..8f782d76f
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod33/ivys/ivy-1.0.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="multiple-same-deps" module="mod33" revision="1.0" />
++    <configurations>
++        <conf name="default" />
++    </configurations>
++    <dependencies>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/multiple-same-deps/mod33/jars/mod33-1.0.jar b/test/repositories/1/multiple-same-deps/mod33/jars/mod33-1.0.jar
+new file mode 100644
+index 000000000..945c9b46d
+--- /dev/null
++++ b/test/repositories/1/multiple-same-deps/mod33/jars/mod33-1.0.jar
+@@ -0,0 +1 @@
++.
+\ No newline at end of file

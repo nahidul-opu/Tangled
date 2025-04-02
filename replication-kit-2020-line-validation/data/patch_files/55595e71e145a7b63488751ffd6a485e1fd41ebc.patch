@@ -1,0 +1,111 @@
+From 55595e71e145a7b63488751ffd6a485e1fd41ebc Mon Sep 17 00:00:00 2001
+From: Oliver Heger <oheger@apache.org>
+Date: Tue, 9 Sep 2014 17:56:29 +0000
+Subject: [PATCH] [CONFIGURATION-570] Alternative implementation of
+ SystemConfiguration.getKeys().
+
+In order to avoid ConcurrentModificationExceptions when iterating over the
+keys of a SystemConfiguration, the iterator returned for the keys is now a
+snapshot.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/configuration/trunk@1623862 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../configuration/SystemConfiguration.java    | 10 ++++
+ .../TestSystemConfiguration.java              | 59 +++++++++++++++++++
+ 2 files changed, 69 insertions(+)
+
+diff --git a/src/main/java/org/apache/commons/configuration/SystemConfiguration.java b/src/main/java/org/apache/commons/configuration/SystemConfiguration.java
+index 7861475386..6a74d65689 100644
+--- a/src/main/java/org/apache/commons/configuration/SystemConfiguration.java
++++ b/src/main/java/org/apache/commons/configuration/SystemConfiguration.java
+@@ -104,4 +104,14 @@ public static void setSystemProperties(Configuration systemConfig)
+             System.setProperty(key, value);
+         }
+     }
++
++    /**
++     * {@inheritDoc} This implementation returns a snapshot of the keys in the
++     * system properties. If another thread modifies system properties concurrently,
++     * these changes are not reflected by the iterator returned by this method.
++     */
++    @Override
++    protected Iterator<String> getKeysInternal() {
++        return System.getProperties().stringPropertyNames().iterator();
++    }
+ }
+diff --git a/src/test/java/org/apache/commons/configuration/TestSystemConfiguration.java b/src/test/java/org/apache/commons/configuration/TestSystemConfiguration.java
+index 0500d89945..ca767e46a0 100644
+--- a/src/test/java/org/apache/commons/configuration/TestSystemConfiguration.java
++++ b/src/test/java/org/apache/commons/configuration/TestSystemConfiguration.java
+@@ -22,7 +22,9 @@
+ 
+ import java.io.File;
+ import java.io.IOException;
++import java.util.Iterator;
+ import java.util.Properties;
++import java.util.concurrent.atomic.AtomicBoolean;
+ 
+ import org.apache.commons.configuration.ex.ConfigurationException;
+ import org.apache.commons.configuration.io.FileHandler;
+@@ -92,4 +94,61 @@ public void testChangeSystemProperties()
+         assertEquals("System property not changed", "true",
+                 System.getProperty(testProperty));
+     }
++
++    /**
++     * Tests an append operation with a system configuration while system
++     * properties are modified from another thread. This is related to
++     * CONFIGURATION-570.
++     */
++    @Test
++    public void testAppendWhileConcurrentAccess() throws InterruptedException
++    {
++        final AtomicBoolean stop = new AtomicBoolean();
++        final String property =
++                SystemConfiguration.class.getName() + ".testProperty";
++        Thread t = new Thread()
++        {
++            @Override
++            public void run()
++            {
++                boolean setValue = true;
++                while (!stop.get())
++                {
++                    if (setValue)
++                    {
++                        System.setProperty(property, "true");
++                    }
++                    else
++                    {
++                        System.clearProperty(property);
++                    }
++                    setValue = !setValue;
++                }
++            }
++        };
++        try
++        {
++            t.start();
++
++            SystemConfiguration config = new SystemConfiguration();
++            PropertiesConfiguration props = new PropertiesConfiguration();
++            props.append(config);
++
++            stop.set(true);
++            t.join();
++            for (Iterator<String> keys = config.getKeys(); keys.hasNext();)
++            {
++                String key = keys.next();
++                if (!property.equals(key))
++                {
++                    assertEquals("Wrong value for " + key,
++                            config.getString(key), props.getString(key));
++                }
++            }
++        }
++        finally
++        {
++            System.clearProperty(property);
++        }
++    }
+ }

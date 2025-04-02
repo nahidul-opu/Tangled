@@ -1,0 +1,534 @@
+From 1ea1b1ea7b22a523750ead14aa0eacfe2978496d Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Thu, 6 Feb 2014 13:11:04 +0000
+Subject: [PATCH] OPENNLP-600 Updated stream factories to use
+ CmdLineUtil.createInputStreamFactory
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1565223 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../opennlp/tools/cmdline/CmdLineUtil.java    |  4 ++++
+ .../formats/ChunkerSampleStreamFactory.java   | 15 ++++++---------
+ .../formats/DocumentSampleStreamFactory.java  | 19 ++++++-------------
+ .../formats/NameSampleDataStreamFactory.java  | 12 ++++--------
+ .../formats/ParseSampleStreamFactory.java     | 15 ++++++---------
+ .../formats/SentenceSampleStreamFactory.java  | 15 ++++++---------
+ .../formats/TokenSampleStreamFactory.java     | 16 ++++++----------
+ .../formats/WordTagSampleStreamFactory.java   | 12 ++++--------
+ .../ad/ADChunkSampleStreamFactory.java        | 12 ++++--------
+ .../formats/ad/ADNameSampleStreamFactory.java | 13 +++++--------
+ .../formats/ad/ADPOSSampleStreamFactory.java  | 12 ++++--------
+ .../ad/ADSentenceSampleStreamFactory.java     | 13 ++++---------
+ 12 files changed, 59 insertions(+), 99 deletions(-)
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java b/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
+index 62c81416e..fe520931a 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/cmdline/CmdLineUtil.java
+@@ -307,6 +307,10 @@ public static void handleStdinIoError(IOException e) {
+     throw new TerminateToolException(-1, "IO Error while reading from stdin: " + e.getMessage(), e);
+   }
+ 
++  public static void handleCreateObjectStreamError(IOException e) {
++    throw new TerminateToolException(-1, "IO Error while creating an Input Stream: " + e.getMessage(), e);
++  }
++  
+   // its optional, passing null is allowed
+   public static TrainingParameters loadTrainingParameters(String paramFile,
+       boolean supportSequenceTraining) {
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ChunkerSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ChunkerSampleStreamFactory.java
+index 5ec42dd33..75dbbfa9e 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ChunkerSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ChunkerSampleStreamFactory.java
+@@ -16,21 +16,18 @@
+  */
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.chunker.ChunkSample;
+ import opennlp.tools.chunker.ChunkSampleStream;
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.cmdline.params.BasicFormatParams;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-import opennlp.tools.util.MockInputStreamFactory;
+-
+ /**
+  * Factory producing OpenNLP {@link ChunkSampleStream}s.
+  */
+@@ -52,13 +49,13 @@ public ObjectStream<ChunkSample> create(String[] args) {
+     Parameters params = ArgumentParser.parse(args, Parameters.class);
+ 
+     CmdLineUtil.checkInputFile("Data", params.getData());
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+     ObjectStream<String> lineStream = null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn), params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+ 
+     } catch (IOException ex) {
+-      Logger.getLogger(ChunkerSampleStreamFactory.class.getName()).log(Level.SEVERE, null, ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     return new ChunkSampleStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/DocumentSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/DocumentSampleStreamFactory.java
+index 2308e43c5..5c591b2f4 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/DocumentSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/DocumentSampleStreamFactory.java
+@@ -16,21 +16,18 @@
+  */
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.cmdline.params.BasicFormatParams;
+ import opennlp.tools.doccat.DocumentSample;
+ import opennlp.tools.doccat.DocumentSampleStream;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-import opennlp.tools.util.MockInputStreamFactory;
+-
+ /**
+  * Factory producing OpenNLP {@link DocumentSampleStream}s.
+  */
+@@ -52,16 +49,12 @@ public ObjectStream<DocumentSample> create(String[] args) {
+     Parameters params = ArgumentParser.parse(args, Parameters.class);
+ 
+     CmdLineUtil.checkInputFile("Data", params.getData());
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+     ObjectStream<String> lineStream=null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn),
+-              params.getEncoding());
+-      //        params.getEncoding());
+-      //    ObjectStream<String> lineStream = new PlainTextByLineStream(sampleDataIn.getChannel(),
+-      //        params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-        throw new RuntimeException(ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     return new DocumentSampleStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/NameSampleDataStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/NameSampleDataStreamFactory.java
+index e712e02d2..69a5adb2a 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/NameSampleDataStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/NameSampleDataStreamFactory.java
+@@ -16,10 +16,7 @@
+  */
+ package opennlp.tools.formats;
+ 
+-import java.io.FileInputStream;
+ import java.io.IOException;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+ 
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+@@ -27,7 +24,7 @@
+ import opennlp.tools.cmdline.params.BasicFormatParams;
+ import opennlp.tools.namefind.NameSample;
+ import opennlp.tools.namefind.NameSampleDataStream;
+-import opennlp.tools.util.MockInputStreamFactory;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -53,14 +50,13 @@ public ObjectStream<NameSample> create(String[] args) {
+ 
+     CmdLineUtil.checkInputFile("Data", params.getData());
+ 
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream = null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn),
+-              params.getEncoding());
++      lineStream = new PlainTextByLineStream((sampleDataIn), params.getEncoding());
+     } catch (IOException ex) {
+-      throw new RuntimeException(ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     return new NameSampleDataStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ParseSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ParseSampleStreamFactory.java
+index 52c55cadd..abcaf319c 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ParseSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ParseSampleStreamFactory.java
+@@ -16,21 +16,18 @@
+  */
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.cmdline.params.BasicFormatParams;
+ import opennlp.tools.parser.Parse;
+ import opennlp.tools.parser.ParseSampleStream;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-import opennlp.tools.util.MockInputStreamFactory;
+-
+ /**
+  * Factory producing OpenNLP {@link ParseSampleStream}s.
+  */
+@@ -52,13 +49,13 @@ public ObjectStream<Parse> create(String[] args) {
+     Parameters params = ArgumentParser.parse(args, Parameters.class);
+ 
+     CmdLineUtil.checkInputFile("Data", params.getData());
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream = null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn), params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-      throw new RuntimeException(ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     return new ParseSampleStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/SentenceSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/SentenceSampleStreamFactory.java
+index 1ed644242..6ed70512d 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/SentenceSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/SentenceSampleStreamFactory.java
+@@ -17,20 +17,18 @@
+ 
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.cmdline.params.BasicFormatParams;
+ import opennlp.tools.sentdetect.SentenceSample;
+ import opennlp.tools.sentdetect.SentenceSampleStream;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-import opennlp.tools.util.MockInputStreamFactory;
+ 
+ /**
+  * Factory producing OpenNLP {@link SentenceSampleStream}s.
+@@ -53,14 +51,13 @@ public ObjectStream<SentenceSample> create(String[] args) {
+     Parameters params = ArgumentParser.parse(args, Parameters.class);
+ 
+     CmdLineUtil.checkInputFile("Data", params.getData());
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream=null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn),
+-params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-      Logger.getLogger(SentenceSampleStreamFactory.class.getName()).log(Level.SEVERE, null, ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     return new SentenceSampleStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/TokenSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/TokenSampleStreamFactory.java
+index d0f80f8b2..10338b399 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/TokenSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/TokenSampleStreamFactory.java
+@@ -16,21 +16,18 @@
+  */
+ package opennlp.tools.formats;
+ 
++import java.io.IOException;
++
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.cmdline.params.BasicFormatParams;
+ import opennlp.tools.tokenize.TokenSample;
+ import opennlp.tools.tokenize.TokenSampleStream;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+-import opennlp.tools.util.MockInputStreamFactory;
+-
+ /**
+  * Factory producing OpenNLP {@link TokenSampleStream}s.
+  */
+@@ -52,14 +49,13 @@ public ObjectStream<TokenSample> create(String[] args) {
+     Parameters params = ArgumentParser.parse(args, Parameters.class);
+ 
+     CmdLineUtil.checkInputFile("Data", params.getData());
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream = null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn),
+-              params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-      throw new RuntimeException(ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     return new TokenSampleStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/WordTagSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/WordTagSampleStreamFactory.java
+index 544be626d..bfa152395 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/WordTagSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/WordTagSampleStreamFactory.java
+@@ -16,10 +16,7 @@
+  */
+ package opennlp.tools.formats;
+ 
+-import java.io.FileInputStream;
+ import java.io.IOException;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+ 
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.CmdLineUtil;
+@@ -27,7 +24,7 @@
+ import opennlp.tools.cmdline.params.BasicFormatParams;
+ import opennlp.tools.postag.POSSample;
+ import opennlp.tools.postag.WordTagSampleStream;
+-import opennlp.tools.util.MockInputStreamFactory;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -52,14 +49,13 @@ public ObjectStream<POSSample> create(String[] args) {
+     Parameters params = ArgumentParser.parse(args, Parameters.class);
+ 
+     CmdLineUtil.checkInputFile("Data", params.getData());
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream = null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn),
+-              params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-      throw new RuntimeException(ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     return new WordTagSampleStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStreamFactory.java
+index c4e3c2327..b0d8632ae 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADChunkSampleStreamFactory.java
+@@ -18,11 +18,8 @@
+ package opennlp.tools.formats.ad;
+ 
+ import java.io.File;
+-import java.io.FileInputStream;
+ import java.io.IOException;
+ import java.nio.charset.Charset;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+ 
+ import opennlp.tools.chunker.ChunkSample;
+ import opennlp.tools.cmdline.ArgumentParser;
+@@ -31,7 +28,7 @@
+ import opennlp.tools.cmdline.CmdLineUtil;
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.formats.LanguageSampleStreamFactory;
+-import opennlp.tools.util.MockInputStreamFactory;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -80,14 +77,13 @@ public ObjectStream<ChunkSample> create(String[] args) {
+ 
+     language = params.getLang();
+ 
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+     
+     ObjectStream<String> lineStream=null;
+     try {
+-      lineStream = new PlainTextByLineStream(new MockInputStreamFactory(sampleDataIn),
+-params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-      Logger.getLogger(ADChunkSampleStreamFactory.class.getName()).log(Level.SEVERE, null, ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     ADChunkSampleStream sampleStream = new ADChunkSampleStream(lineStream);
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStreamFactory.java
+index 61f52ecbc..9dc94c8a5 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADNameSampleStreamFactory.java
+@@ -18,11 +18,8 @@
+ package opennlp.tools.formats.ad;
+ 
+ import java.io.File;
+-import java.io.FileInputStream;
+ import java.io.IOException;
+ import java.nio.charset.Charset;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+ 
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.ArgumentParser.OptionalParameter;
+@@ -31,7 +28,7 @@
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.formats.LanguageSampleStreamFactory;
+ import opennlp.tools.namefind.NameSample;
+-import opennlp.tools.util.MockInputStreamFactory;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -76,14 +73,14 @@ public ObjectStream<NameSample> create(String[] args) {
+ 
+     language = params.getLang();
+ 
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream=null;
+     try {
+-      lineStream = new PlainTextByLineStream(
+-new MockInputStreamFactory(sampleDataIn), params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-throw new RuntimeException(ex)  ;  }
++      CmdLineUtil.handleCreateObjectStreamError(ex);
++    }
+ 
+     return new ADNameSampleStream(lineStream, params.getSplitHyphenatedTokens());
+   }
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStreamFactory.java
+index 44139e5a3..dcae4e5cb 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADPOSSampleStreamFactory.java
+@@ -18,11 +18,8 @@
+ package opennlp.tools.formats.ad;
+ 
+ import java.io.File;
+-import java.io.FileInputStream;
+ import java.io.IOException;
+ import java.nio.charset.Charset;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+ 
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.ArgumentParser.OptionalParameter;
+@@ -31,7 +28,7 @@
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.formats.LanguageSampleStreamFactory;
+ import opennlp.tools.postag.POSSample;
+-import opennlp.tools.util.MockInputStreamFactory;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -75,14 +72,13 @@ public ObjectStream<POSSample> create(String[] args) {
+ 
+     language = params.getLang();
+ 
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream=null;
+     try {
+-      lineStream = new PlainTextByLineStream(
+-new MockInputStreamFactory(sampleDataIn), params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-      Logger.getLogger(ADPOSSampleStreamFactory.class.getName()).log(Level.SEVERE, null, ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     ADPOSSampleStream sentenceStream = new ADPOSSampleStream(lineStream,
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStreamFactory.java b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStreamFactory.java
+index 5fa3b29e7..fa02a925b 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStreamFactory.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/formats/ad/ADSentenceSampleStreamFactory.java
+@@ -18,11 +18,8 @@
+ package opennlp.tools.formats.ad;
+ 
+ import java.io.File;
+-import java.io.FileInputStream;
+ import java.io.IOException;
+ import java.nio.charset.Charset;
+-import java.util.logging.Level;
+-import java.util.logging.Logger;
+ 
+ import opennlp.tools.cmdline.ArgumentParser;
+ import opennlp.tools.cmdline.ArgumentParser.OptionalParameter;
+@@ -31,7 +28,7 @@
+ import opennlp.tools.cmdline.StreamFactoryRegistry;
+ import opennlp.tools.formats.LanguageSampleStreamFactory;
+ import opennlp.tools.sentdetect.SentenceSample;
+-import opennlp.tools.util.MockInputStreamFactory;
++import opennlp.tools.util.InputStreamFactory;
+ import opennlp.tools.util.ObjectStream;
+ import opennlp.tools.util.PlainTextByLineStream;
+ 
+@@ -73,14 +70,13 @@ public ObjectStream<SentenceSample> create(String[] args) {
+ 
+     boolean includeTitle = params.getIncludeTitles();
+ 
+-    FileInputStream sampleDataIn = CmdLineUtil.openInFile(params.getData());
++    InputStreamFactory sampleDataIn = CmdLineUtil.createInputStreamFactory(params.getData());
+ 
+     ObjectStream<String> lineStream=null;
+     try {
+-      lineStream = new PlainTextByLineStream(
+-new MockInputStreamFactory(sampleDataIn), params.getEncoding());
++      lineStream = new PlainTextByLineStream(sampleDataIn, params.getEncoding());
+     } catch (IOException ex) {
+-      Logger.getLogger(ADSentenceSampleStreamFactory.class.getName()).log(Level.SEVERE, null, ex);
++      CmdLineUtil.handleCreateObjectStreamError(ex);
+     }
+ 
+     ADSentenceSampleStream sentenceStream = new ADSentenceSampleStream(
+@@ -88,5 +84,4 @@ public ObjectStream<SentenceSample> create(String[] args) {
+ 
+     return sentenceStream;
+   }
+-
+ }

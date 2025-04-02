@@ -1,0 +1,437 @@
+From 2e6870ab9ae5fa2e84dd8ea1167ad0e18c0c0196 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 23 Feb 2007 08:52:49 +0000
+Subject: [PATCH] FIX: LatestRevisionStrategy do not consider all dynamic
+ revisions properly (IVY-383) (thanks to John Williams for the unit test)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@510875 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../conflict/LatestConflictManager.java       |  2 +-
+ .../latest/LatestRevisionStrategy.java        | 73 ++++++++++++-------
+ .../version/AbstractVersionMatcher.java       | 10 +++
+ .../plugins/version/ChainVersionMatcher.java  | 11 +++
+ .../plugins/version/LatestVersionMatcher.java | 11 +++
+ .../version/PatternVersionMatcher.java        | 10 +--
+ .../plugins/version/SubVersionMatcher.java    |  9 +++
+ .../ivy/plugins/version/VersionMatcher.java   | 18 +++++
+ .../plugins/version/VersionRangeMatcher.java  | 26 +++++++
+ .../conflict/LatestConflictManagerTest.java   | 21 ++++++
+ .../apache/ivy/plugins/conflict/ivy-383.xml   | 13 ++++
+ 12 files changed, 174 insertions(+), 31 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivy-383.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index b664b33a7..63f4282e9 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -13,6 +13,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - IMPROVE: Refactoring / documentation / test of matcher package (IVY-375) (thanks to Stephane Baillez)
+ - IMPROVE: Add a unit test to verify that latest.integration accepts released modules (IVY-394) (thanks to Gilles Scokart)
+ 
++- FIX: LatestRevisionStrategy do not consider all dynamic revisions properly (IVY-383) (thanks to John Williams for the unit test)
+ - FIX: IOException during publish causes NullPointerException (IVY-371)
+ - FIX: Comments in ivy.xml duplicated (IVY-336) (thanks to Gilles Scokart)
+ - FIX: Ivy failure when the ivy.xml file contains non US-ASCII characters (IVY-346) (thanks to Gilles Scokart)
+diff --git a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+index 4e1dec2ea..8c23c3dbc 100644
+--- a/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
++++ b/src/java/org/apache/ivy/plugins/conflict/LatestConflictManager.java
+@@ -43,7 +43,7 @@ public long getLastModified() {
+         }
+ 
+         public String getRevision() {
+-            return _node.getId().getRevision();
++            return _node.getResolvedId().getRevision();
+         }
+         
+         public IvyNode getNode() {
+diff --git a/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java b/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java
+index 9ff2be240..2ee14966e 100644
+--- a/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java
++++ b/src/java/org/apache/ivy/plugins/latest/LatestRevisionStrategy.java
+@@ -21,6 +21,10 @@
+ import java.util.HashMap;
+ import java.util.Map;
+ 
++import org.apache.ivy.core.IvyContext;
++import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.plugins.version.VersionMatcher;
++
+ 
+ 
+ 
+@@ -58,33 +62,15 @@ public void validate() {
+         DEFAULT_SPECIAL_MEANINGS.put("final", new Integer(2));
+     }
+ 
+-    
+     /**
+-     * Compares two revisions.
++     * Compares two ModuleRevisionId by their revision.
+      * Revisions are compared using an algorithm inspired by PHP
+-     * version_compare one, unless
+-     * a 'latest' revision is found. If the latest revision found
+-     * is an absolute latest (latest. like), then it is assumed to be the greater.
+-     * If a partial latest is found, then it is assumed to be greater
+-     * than any matching fixed revision. 
++     * version_compare one. 
+      */ 
+-    public Comparator COMPARATOR = new Comparator() {
+-
+-        public int compare(Object o1, Object o2) {
+-            String rev1 = ((ArtifactInfo)o1).getRevision();
+-            String rev2 = ((ArtifactInfo)o2).getRevision();
+-            if (rev1.startsWith("latest")) {
+-                return 1;
+-            }
+-            if (rev1.endsWith("+") && rev2.startsWith(rev1.substring(0, rev1.length() - 1))) {
+-                return 1;
+-            }
+-            if (rev2.startsWith("latest")) {
+-                return -1;
+-            }
+-            if (rev2.endsWith("+") && rev1.startsWith(rev2.substring(0, rev2.length() - 1))) {
+-                return -1;
+-            }
++    public final Comparator STATIC_COMPARATOR = new Comparator() {
++    	public int compare(Object o1, Object o2) {
++            String rev1 = ((ModuleRevisionId)o1).getRevision();
++            String rev2 = ((ModuleRevisionId)o2).getRevision();
+             
+             rev1 = rev1.replaceAll("([a-zA-Z])(\\d)", "$1.$2");
+             rev1 = rev1.replaceAll("(\\d)([a-zA-Z])", "$1.$2");
+@@ -130,11 +116,48 @@ public int compare(Object o1, Object o2) {
+                 return isNumber(parts2[i])?-1:1;
+             }
+             return 0;
+-        }
++    	}
+ 
+         private boolean isNumber(String str) {
+             return str.matches("\\d+");
+         }
++    };
++
++    
++    /**
++     * Compares two ArtifactInfo by their revision.
++     * Revisions are compared using an algorithm inspired by PHP
++     * version_compare one, unless a dynamic revision is given,
++     * in which case the version matcher is used to perform the comparison. 
++     */ 
++    public Comparator COMPARATOR = new Comparator() {
++
++        public int compare(Object o1, Object o2) {
++            String rev1 = ((ArtifactInfo)o1).getRevision();
++            String rev2 = ((ArtifactInfo)o2).getRevision();
++
++            /* The revisions can still be not resolved, so we use the current 
++             * version matcher to know if one revision is dynamic, and in this 
++             * case if it should be considered greater or lower than the other one.
++             * 
++             * Note that if the version matcher compare method returns 0, it's because
++             * it's not possible to know which revision is greater. In this case we 
++             * consider the dynamic one to be greater, because most of the time
++             * it will then be actually resolved and a real comparison will occur.
++             */  
++            VersionMatcher vmatcher = IvyContext.getContext().getSettings().getVersionMatcher();
++            ModuleRevisionId mrid1 = ModuleRevisionId.newInstance("", "", rev1);
++            ModuleRevisionId mrid2 = ModuleRevisionId.newInstance("", "", rev2);
++            if (vmatcher.isDynamic(mrid1)) {
++            	int c = vmatcher.compare(mrid1, mrid2, STATIC_COMPARATOR);
++				return c >= 0? 1 : -1;
++            } else if (vmatcher.isDynamic(mrid2)) {
++            	int c = vmatcher.compare(mrid2, mrid1, STATIC_COMPARATOR);
++				return c >= 0? -1 : 1;
++            }
++            
++            return STATIC_COMPARATOR.compare(mrid1, mrid2);
++        }
+     
+     };
+     
+diff --git a/src/java/org/apache/ivy/plugins/version/AbstractVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/AbstractVersionMatcher.java
+index b2571b28b..18f156e33 100644
+--- a/src/java/org/apache/ivy/plugins/version/AbstractVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/AbstractVersionMatcher.java
+@@ -17,6 +17,8 @@
+  */
+ package org.apache.ivy.plugins.version;
+ 
++import java.util.Comparator;
++
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.settings.IvySettings;
+@@ -50,6 +52,14 @@ public boolean accept(ModuleRevisionId askedMrid, ModuleDescriptor foundMD) {
+         return accept(askedMrid, foundMD.getResolvedModuleRevisionId());
+     }
+     
++    /**
++     * This method should be overriden in most cases, because it uses the default contract
++     * to return 1 when it's not possible to know which revision is greater.
++     */
++    public int compare(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid, Comparator staticComparator) {
++    	return 0;
++    }
++    
+     public String toString() {
+     	return getName();
+     }
+diff --git a/src/java/org/apache/ivy/plugins/version/ChainVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/ChainVersionMatcher.java
+index 032b4c906..258e67a55 100644
+--- a/src/java/org/apache/ivy/plugins/version/ChainVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/ChainVersionMatcher.java
+@@ -18,6 +18,7 @@
+ package org.apache.ivy.plugins.version;
+ 
+ import java.util.Collections;
++import java.util.Comparator;
+ import java.util.Iterator;
+ import java.util.LinkedList;
+ import java.util.List;
+@@ -67,6 +68,16 @@ public boolean isDynamic(ModuleRevisionId askedMrid) {
+         return false;
+     }
+ 
++    public int compare(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid, Comparator staticComparator) {
++    	for (Iterator iter = _matchers.iterator(); iter.hasNext();) {
++    		VersionMatcher matcher = (VersionMatcher)iter.next();
++    		if (matcher.isDynamic(askedMrid)) {
++    			return matcher.compare(askedMrid, foundMrid, staticComparator);
++    		}
++    	}
++    	throw new IllegalArgumentException("impossible to compare revisions: askedMrid is not dynamic: "+askedMrid);
++    }
++
+     public boolean accept(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid) {
+         for (Iterator iter = _matchers.iterator(); iter.hasNext();) {
+             VersionMatcher matcher = (VersionMatcher)iter.next();
+diff --git a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+index 669c8dc6a..5e4c5f59d 100644
+--- a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+@@ -17,6 +17,8 @@
+  */
+ package org.apache.ivy.plugins.version;
+ 
++import java.util.Comparator;
++
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.module.status.StatusManager;
+@@ -42,4 +44,13 @@ public boolean accept(ModuleRevisionId askedMrid, ModuleDescriptor foundMD) {
+         String askedStatus = askedMrid.getRevision().substring("latest.".length());
+         return StatusManager.getCurrent().getPriority(askedStatus) >= StatusManager.getCurrent().getPriority(foundMD.getStatus());
+     }
++    
++    /**
++     * If we don't need a module descriptor we can consider the dynamic revision
++     * to be greater. If we need a module descriptor then we can't know which one
++     * is greater and return 0.
++     */
++    public int compare(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid, Comparator staticComparator) {
++    	return needModuleDescriptor(askedMrid, foundMrid)?0:1;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/plugins/version/PatternVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/PatternVersionMatcher.java
+index bd0a2dcfe..78f53912c 100644
+--- a/src/java/org/apache/ivy/plugins/version/PatternVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/PatternVersionMatcher.java
+@@ -34,7 +34,7 @@
+ public class PatternVersionMatcher extends AbstractVersionMatcher {
+ 
+ 	private List _matches = new ArrayList(); 
+-	private Map _RevisionMatches = new HashMap();  // revision -> list of Match instances
++	private Map _revisionMatches = new HashMap();  // revision -> list of Match instances
+ 	private boolean _init = false;
+ 
+ 	public void addMatch(Match match) {
+@@ -45,10 +45,10 @@ private void init() {
+ 		if (!_init) {
+ 			for (Iterator it = _matches.iterator(); it.hasNext(); ) {
+ 				Match match = (Match) it.next();
+-				List matches = (List) _RevisionMatches.get(match.getRevision());
++				List matches = (List) _revisionMatches.get(match.getRevision());
+ 				if (matches == null) {
+ 					matches = new ArrayList();
+-					_RevisionMatches.put(match.getRevision(), matches);
++					_revisionMatches.put(match.getRevision(), matches);
+ 				}
+ 				matches.add(match);
+ 			}
+@@ -69,7 +69,7 @@ public boolean accept(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid) {
+ 			revision = revision.substring(0, bracketIndex);
+ 		}
+ 		
+-		List matches = (List) _RevisionMatches.get(revision);
++		List matches = (List) _revisionMatches.get(revision);
+ 		
+ 		if (matches != null) {
+ 			Iterator it = matches.iterator();
+@@ -93,7 +93,7 @@ public boolean isDynamic(ModuleRevisionId askedMrid) {
+ 		if (bracketIndex > 0) {
+ 			revision = revision.substring(0, bracketIndex);
+ 		}
+-		return _RevisionMatches.containsKey(revision);
++		return _revisionMatches.containsKey(revision);
+ 	}
+ 
+ }
+diff --git a/src/java/org/apache/ivy/plugins/version/SubVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/SubVersionMatcher.java
+index 3d91d51ee..da8508e39 100644
+--- a/src/java/org/apache/ivy/plugins/version/SubVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/SubVersionMatcher.java
+@@ -17,6 +17,8 @@
+  */
+ package org.apache.ivy.plugins.version;
+ 
++import java.util.Comparator;
++
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ 
+ public class SubVersionMatcher  extends AbstractVersionMatcher {
+@@ -32,4 +34,11 @@ public boolean accept(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid) {
+         String prefix = askedMrid.getRevision().substring(0, askedMrid.getRevision().length() - 1);
+         return foundMrid.getRevision().startsWith(prefix);
+     }
++    
++    public int compare(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid, Comparator staticComparator) {
++    	if (foundMrid.getRevision().startsWith(askedMrid.getRevision().substring(0, askedMrid.getRevision().length() - 1))) {
++    		return 1;
++    	}
++    	return staticComparator.compare(askedMrid, foundMrid);
++    }
+ }
+diff --git a/src/java/org/apache/ivy/plugins/version/VersionMatcher.java b/src/java/org/apache/ivy/plugins/version/VersionMatcher.java
+index 0b7491213..93acd8b25 100644
+--- a/src/java/org/apache/ivy/plugins/version/VersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/VersionMatcher.java
+@@ -17,6 +17,8 @@
+  */
+ package org.apache.ivy.plugins.version;
+ 
++import java.util.Comparator;
++
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ 
+@@ -73,6 +75,22 @@ public interface VersionMatcher {
+      */
+     public boolean accept(ModuleRevisionId askedMrid, ModuleDescriptor foundMD);
+     
++    /**
++     * Compares a dynamic revision (askedMrid) with a static one (foundMrid)
++     * to indicate which one should be considered the greater.
++     * If there is not enough information to know which one is the greater,
++     * the dynamic one should be considered greater and this method should return 0.
++     * 
++     * This method should never be called with a askdeMrid for which isDynamic 
++     * returns false.
++     * 
++     * @param askedMrid the dynamic revision to compare
++     * @param foundMrid the static revision to compare
++     * @param staticComparator a comparator which can be used to compare static revisions
++     * @return 0 if it's not possible to know which one is greater, greater than 0 if askedMrid should be considered greater, lower than 0 if it can't be consider greater
++     */
++    public int compare(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid, Comparator staticComparator);
++
+     /**
+      * Returns the version matcher name identifying this version matcher
+      * @return the version matcher name identifying this version matcher
+diff --git a/src/java/org/apache/ivy/plugins/version/VersionRangeMatcher.java b/src/java/org/apache/ivy/plugins/version/VersionRangeMatcher.java
+index 1ddb3b75b..969a6824a 100644
+--- a/src/java/org/apache/ivy/plugins/version/VersionRangeMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/VersionRangeMatcher.java
+@@ -161,6 +161,32 @@ private boolean isLower(ModuleRevisionId askedMrid, String revision, ModuleRevis
+ 	private boolean isUpper(ModuleRevisionId askedMrid, String revision, ModuleRevisionId foundMrid, boolean inclusive) {
+ 		return COMPARATOR.compare(ModuleRevisionId.newInstance(askedMrid, revision), foundMrid) >= (inclusive ? 0 : 1);
+ 	}
++	
++	public int compare(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid, Comparator staticComparator) {
++		String revision = askedMrid.getRevision();
++		Matcher m;
++		m = UPPER_INFINITE_RANGE.matcher(revision);
++		if (m.matches()) {
++			// no upper limit, the dynamic revision can always be considered greater
++			return 1;
++		}
++		String upper;
++		m = FINITE_RANGE.matcher(revision);
++		if (m.matches()) {
++			upper = m.group(2);
++		} else {
++			m = LOWER_INFINITE_RANGE.matcher(revision);
++			if (m.matches()) {
++				upper = m.group(1);
++			} else {
++				throw new IllegalArgumentException("impossible to compare: askedMrid is not a dynamic revision: "+askedMrid);
++			}
++		}
++		int c = staticComparator.compare(ModuleRevisionId.newInstance(askedMrid, upper), foundMrid);
++		// if the comparison consider them equal, we must return -1, because we can't consider the 
++		// dynamic revision to be greater. Otherwise we can safeely return the result of the static comparison
++		return c == 0?-1:c;
++	}
+ 
+ 	public LatestStrategy getLatestStrategy() {
+ 		if (_latestStrategy == null) {
+diff --git a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+index 0f74f1c22..6c9329261 100644
+--- a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
++++ b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+@@ -24,6 +24,8 @@
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.cache.CacheManager;
++import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.report.ConfigurationResolveReport;
+ import org.apache.ivy.core.report.ResolveReport;
+ import org.apache.ivy.core.resolve.IvyNode;
+ import org.apache.ivy.core.resolve.ResolveOptions;
+@@ -61,6 +63,25 @@ public void testIvy388() throws Exception {
+ 			}
+ 		}
+ 	}
++	
++    // Test case for issue IVY-383
++    public void testIvy383() throws Exception {
++        ResolveReport report =
++            ivy.resolve( LatestConflictManagerTest.class.getResource( "ivy-383.xml" ), 
++            		getResolveOptions() );
++        ConfigurationResolveReport defaultReport =
++            report.getConfigurationReport("default");
++        Iterator iter = defaultReport.getModuleRevisionIds().iterator();
++        while (iter.hasNext()) {
++            ModuleRevisionId mrid = (ModuleRevisionId)iter.next();
++            if (mrid.getName().equals("mod1.1")) {
++                assertEquals("1.0", mrid.getRevision());
++            }
++            else if (mrid.getName().equals("mod1.2")) {
++                assertEquals("2.2", mrid.getRevision());
++            }
++        }
++    }
+     
+     private ResolveOptions getResolveOptions() {
+ 		return new ResolveOptions().setCache(CacheManager.getInstance(ivy.getSettings())).setValidate(false);
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivy-383.xml b/test/java/org/apache/ivy/plugins/conflict/ivy-383.xml
+new file mode 100644
+index 000000000..f5689646c
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivy-383.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="utf-8"?>
++<ivy-module version="1.0"> 
++        <info organisation="apache" module="resolve-latest-conflict" revision="1.0" status="release"/>
++        <dependencies>
++            <!-- mod1.1-1.0 depends on mod1.2-2.0 -->
++            <dependency org="org1" name="mod1.1" rev="1.0"/>
++
++            <!-- This should find revision 2.2, but it doesn't
++                 because LatestConflictManager compares "2.0" with
++                 "[2,)" instead of "2.2"! -->
++            <dependency org="org1" name="mod1.2" rev="[2,)"/>
++        </dependencies>
++</ivy-module>

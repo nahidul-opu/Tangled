@@ -1,0 +1,84 @@
+From ed768b4be6af4cc8fa18fa11bdb01c616101afbe Mon Sep 17 00:00:00 2001
+From: Lewis John McGibbney <lewis.j.mcgibbney@jpl.nasa.gov>
+Date: Wed, 26 Aug 2015 20:52:46 -0700
+Subject: [PATCH] GORA-419: AccumuloStore.put deletes entire row when updating
+ map/array field
+
+---
+ CHANGES.txt                                      |  2 ++
+ .../gora/accumulo/store/AccumuloStore.java       | 16 ++++++++--------
+ 2 files changed, 10 insertions(+), 8 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d87d74ede..ca79a6cdc 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -4,6 +4,8 @@
+ 
+ Current Development
+ 
++* GORA-419: AccumuloStore.put deletes entire row when updating map/array field (gerhardgossen via lewismc)
++
+ * GORA-420: AccumuloStore.createSchema fails when table already exists (gerhardgossen via lewismc)
+ 
+ * GORA-427 Configure MongoDB ReadPreference and WriteConcern (drazzib)
+diff --git a/gora-accumulo/src/main/java/org/apache/gora/accumulo/store/AccumuloStore.java b/gora-accumulo/src/main/java/org/apache/gora/accumulo/store/AccumuloStore.java
+index 38566f888..780178f15 100644
+--- a/gora-accumulo/src/main/java/org/apache/gora/accumulo/store/AccumuloStore.java
++++ b/gora-accumulo/src/main/java/org/apache/gora/accumulo/store/AccumuloStore.java
+@@ -673,21 +673,21 @@ public void put(K key, T val) {
+ 
+         switch (field.schema().getType()) {
+         case MAP:
+-          count = putMap(m, count, field.schema().getValueType(), o, col);
++          count = putMap(m, count, field.schema().getValueType(), o, col, field.name());
+           break;
+         case ARRAY:
+-          count = putArray(m, count, o, col);
++          count = putArray(m, count, o, col, field.name());
+           break;
+         case UNION: // default value of null acts like union with null
+           Schema effectiveSchema = field.schema().getTypes()
+           .get(firstNotNullSchemaTypeIndex(field.schema()));
+           // map and array need to compute qualifier
+           if (effectiveSchema.getType() == Type.ARRAY) {
+-            count = putArray(m, count, o, col);
++            count = putArray(m, count, o, col, field.name());
+             break;
+           }
+           else if (effectiveSchema.getType() == Type.MAP) {
+-            count = putMap(m, count, effectiveSchema.getValueType(), o, col);
++            count = putMap(m, count, effectiveSchema.getValueType(), o, col, field.name());
+             break;
+           }
+           // continue like a regular top-level union
+@@ -718,12 +718,12 @@ else if (effectiveSchema.getType() == Type.MAP) {
+     }
+   }
+ 
+-  private int putMap(Mutation m, int count, Schema valueType, Object o, Pair<Text, Text> col) throws GoraException {
++  private int putMap(Mutation m, int count, Schema valueType, Object o, Pair<Text, Text> col, String fieldName) throws GoraException {
+ 
+     // First of all we delete map field on accumulo store
+     Text rowKey = new Text(m.getRow());
+     Query<K, T> query = newQuery();
+-    query.setFields(col.getFirst().toString());
++    query.setFields(fieldName);
+     query.setStartKey((K)rowKey.toString());
+     query.setEndKey((K)rowKey.toString());
+     deleteByQuery(query);
+@@ -746,12 +746,12 @@ private int putMap(Mutation m, int count, Schema valueType, Object o, Pair<Text,
+     return count;
+   }
+ 
+-  private int putArray(Mutation m, int count, Object o, Pair<Text, Text> col) {
++  private int putArray(Mutation m, int count, Object o, Pair<Text, Text> col, String fieldName) {
+ 
+     // First of all we delete array field on accumulo store
+     Text rowKey = new Text(m.getRow());
+     Query<K, T> query = newQuery();
+-    query.setFields(col.getFirst().toString());
++    query.setFields(fieldName);
+     query.setStartKey((K)rowKey.toString());
+     query.setEndKey((K)rowKey.toString());
+     deleteByQuery(query);

@@ -1,0 +1,411 @@
+From 9e1b0acab5721a6805743e291f56d6d0ee8ba851 Mon Sep 17 00:00:00 2001
+From: Luc Maisonobe <luc@apache.org>
+Date: Thu, 7 May 2015 15:35:04 +0200
+Subject: [PATCH] Fixed wrong splitting of huge number in extended accuracy
+ algorithms.
+
+JIRA: MATH-1223
+---
+ src/changes/changes.xml                       |  3 +
+ .../apache/commons/math3/util/FastMath.java   | 30 +++---
+ .../apache/commons/math3/util/MathArrays.java | 93 +++++++------------
+ .../euclidean/threed/FieldVector3DTest.java   |  2 +-
+ .../euclidean/threed/Vector3DTest.java        |  2 +-
+ .../commons/math3/util/FastMathTest.java      | 21 +++++
+ .../commons/math3/util/MathArraysTest.java    | 33 +++++++
+ 7 files changed, 112 insertions(+), 72 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 274cb5057f..4501eee60c 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -51,6 +51,9 @@ If the output is not quite correct, check for invisible trailing spaces!
+   </properties>
+   <body>
+     <release version="3.6" date="XXXX-XX-XX" description="">
++      <action dev="luc" type="fix" issue="MATH-1223" >
++       Fixed wrong splitting of huge number in extended accuracy algorithms.
++      </action>
+       <action dev="tn" type="fix" issue="MATH-1220" due-to="Otmar Ertl">
+         Improve performance of "ZipfDistribution#sample()" by using a rejection algorithm.
+       </action>
+diff --git a/src/main/java/org/apache/commons/math3/util/FastMath.java b/src/main/java/org/apache/commons/math3/util/FastMath.java
+index b1e3c0ad62..f10da20d38 100644
+--- a/src/main/java/org/apache/commons/math3/util/FastMath.java
++++ b/src/main/java/org/apache/commons/math3/util/FastMath.java
+@@ -1635,12 +1635,10 @@ public static double pow(double d, int e) {
+             d = 1.0 / d;
+         }
+ 
+-        // split d as two 26 bits numbers
++        // split d as one 26 bits number and one 27 bits number
+         // beware the following expressions must NOT be simplified, they rely on floating point arithmetic properties
+-        final int splitFactor = 0x8000001;
+-        final double cd       = splitFactor * d;
+-        final double d1High   = cd - (cd - d);
+-        final double d1Low    = d - d1High;
++        final double d1High = Double.longBitsToDouble(Double.doubleToRawLongBits(d) & ((-1L) << 27));
++        final double d1Low  = d - d1High;
+ 
+         // prepare result
+         double resultHigh = 1;
+@@ -1657,8 +1655,7 @@ public static double pow(double d, int e) {
+                 // accurate multiplication result = result * d^(2p) using Veltkamp TwoProduct algorithm
+                 // beware the following expressions must NOT be simplified, they rely on floating point arithmetic properties
+                 final double tmpHigh = resultHigh * d2p;
+-                final double cRH     = splitFactor * resultHigh;
+-                final double rHH     = cRH - (cRH - resultHigh);
++                final double rHH     = Double.longBitsToDouble(Double.doubleToRawLongBits(resultHigh) & ((-1L) << 27));
+                 final double rHL     = resultHigh - rHH;
+                 final double tmpLow  = rHL * d2pLow - (((tmpHigh - rHH * d2pHigh) - rHL * d2pHigh) - rHH * d2pLow);
+                 resultHigh = tmpHigh;
+@@ -1668,12 +1665,11 @@ public static double pow(double d, int e) {
+             // accurate squaring d^(2(p+1)) = d^(2p) * d^(2p) using Veltkamp TwoProduct algorithm
+             // beware the following expressions must NOT be simplified, they rely on floating point arithmetic properties
+             final double tmpHigh = d2pHigh * d2p;
+-            final double cD2pH   = splitFactor * d2pHigh;
++            final double cD2pH   = Double.longBitsToDouble(Double.doubleToRawLongBits(d2pHigh) & ((-1L) << 27));
+             final double d2pHH   = cD2pH - (cD2pH - d2pHigh);
+             final double d2pHL   = d2pHigh - d2pHH;
+             final double tmpLow  = d2pHL * d2pLow - (((tmpHigh - d2pHH * d2pHigh) - d2pHL * d2pHigh) - d2pHH * d2pLow);
+-            final double cTmpH   = splitFactor * tmpHigh;
+-            d2pHigh = cTmpH - (cTmpH - tmpHigh);
++            d2pHigh = Double.longBitsToDouble(Double.doubleToRawLongBits(tmpHigh) & ((-1L) << 27));
+             d2pLow  = d2pLow * d2p + tmpLow + (tmpHigh - d2pHigh);
+             d2p     = d2pHigh + d2pLow;
+ 
+@@ -1681,7 +1677,19 @@ public static double pow(double d, int e) {
+ 
+         }
+ 
+-        return resultHigh + resultLow;
++        final double result = resultHigh + resultLow;
++
++        if (Double.isNaN(result)) {
++            if (Double.isNaN(d)) {
++                return Double.NaN;
++            } else {
++                // some intermediate numbers exceeded capacity,
++                // and the low order bits became NaN (because infinity - infinity = NaN)
++                return (d < 0 && (e & 0x1) == 1) ? Double.NEGATIVE_INFINITY : Double.POSITIVE_INFINITY;
++            }
++        } else {
++            return result;
++        }
+ 
+     }
+ 
+diff --git a/src/main/java/org/apache/commons/math3/util/MathArrays.java b/src/main/java/org/apache/commons/math3/util/MathArrays.java
+index a9e11b9d58..3305c771a8 100644
+--- a/src/main/java/org/apache/commons/math3/util/MathArrays.java
++++ b/src/main/java/org/apache/commons/math3/util/MathArrays.java
+@@ -47,8 +47,6 @@
+  * @since 3.0
+  */
+ public class MathArrays {
+-    /** Factor used for splitting double numbers: n = 2^27 + 1 (i.e. {@value}). */
+-    private static final int SPLIT_FACTOR = 0x8000001;
+ 
+     /**
+      * Private constructor.
+@@ -862,15 +860,13 @@ public static double linearCombination(final double[] a, final double[] b)
+         double prodLowSum = 0;
+ 
+         for (int i = 0; i < len; i++) {
+-            final double ai = a[i];
+-            final double ca = SPLIT_FACTOR * ai;
+-            final double aHigh = ca - (ca - ai);
+-            final double aLow = ai - aHigh;
+-
+-            final double bi = b[i];
+-            final double cb = SPLIT_FACTOR * bi;
+-            final double bHigh = cb - (cb - bi);
+-            final double bLow = bi - bHigh;
++            final double ai    = a[i];
++            final double aHigh = Double.longBitsToDouble(Double.doubleToRawLongBits(ai) & ((-1L) << 27));
++            final double aLow  = ai - aHigh;
++
++            final double bi    = b[i];
++            final double bHigh = Double.longBitsToDouble(Double.doubleToRawLongBits(bi) & ((-1L) << 27));
++            final double bLow  = bi - bHigh;
+             prodHigh[i] = ai * bi;
+             final double prodLow = aLow * bLow - (((prodHigh[i] -
+                                                     aHigh * bHigh) -
+@@ -936,7 +932,6 @@ public static double linearCombination(final double a1, final double b1,
+         // the code below is split in many additions/subtractions that may
+         // appear redundant. However, they should NOT be simplified, as they
+         // use IEEE754 floating point arithmetic rounding properties.
+-        // as an example, the expression "ca1 - (ca1 - a1)" is NOT the same as "a1"
+         // The variable naming conventions are that xyzHigh contains the most significant
+         // bits of xyz and xyzLow contains its least significant bits. So theoretically
+         // xyz is the sum xyzHigh + xyzLow, but in many cases below, this sum cannot
+@@ -944,24 +939,20 @@ public static double linearCombination(final double a1, final double b1,
+         // to hold it as long as we can, combining the high and low order bits together
+         // only at the end, after cancellation may have occurred on high order bits
+ 
+-        // split a1 and b1 as two 26 bits numbers
+-        final double ca1        = SPLIT_FACTOR * a1;
+-        final double a1High     = ca1 - (ca1 - a1);
++        // split a1 and b1 as one 26 bits number and one 27 bits number
++        final double a1High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a1) & ((-1L) << 27));
+         final double a1Low      = a1 - a1High;
+-        final double cb1        = SPLIT_FACTOR * b1;
+-        final double b1High     = cb1 - (cb1 - b1);
++        final double b1High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b1) & ((-1L) << 27));
+         final double b1Low      = b1 - b1High;
+ 
+         // accurate multiplication a1 * b1
+         final double prod1High  = a1 * b1;
+         final double prod1Low   = a1Low * b1Low - (((prod1High - a1High * b1High) - a1Low * b1High) - a1High * b1Low);
+ 
+-        // split a2 and b2 as two 26 bits numbers
+-        final double ca2        = SPLIT_FACTOR * a2;
+-        final double a2High     = ca2 - (ca2 - a2);
++        // split a2 and b2 as one 26 bits number and one 27 bits number
++        final double a2High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a2) & ((-1L) << 27));
+         final double a2Low      = a2 - a2High;
+-        final double cb2        = SPLIT_FACTOR * b2;
+-        final double b2High     = cb2 - (cb2 - b2);
++        final double b2High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b2) & ((-1L) << 27));
+         final double b2Low      = b2 - b2High;
+ 
+         // accurate multiplication a2 * b2
+@@ -1016,7 +1007,6 @@ public static double linearCombination(final double a1, final double b1,
+         // the code below is split in many additions/subtractions that may
+         // appear redundant. However, they should NOT be simplified, as they
+         // do use IEEE754 floating point arithmetic rounding properties.
+-        // as an example, the expression "ca1 - (ca1 - a1)" is NOT the same as "a1"
+         // The variables naming conventions are that xyzHigh contains the most significant
+         // bits of xyz and xyzLow contains its least significant bits. So theoretically
+         // xyz is the sum xyzHigh + xyzLow, but in many cases below, this sum cannot
+@@ -1024,36 +1014,30 @@ public static double linearCombination(final double a1, final double b1,
+         // to hold it as long as we can, combining the high and low order bits together
+         // only at the end, after cancellation may have occurred on high order bits
+ 
+-        // split a1 and b1 as two 26 bits numbers
+-        final double ca1        = SPLIT_FACTOR * a1;
+-        final double a1High     = ca1 - (ca1 - a1);
++        // split a1 and b1 as one 26 bits number and one 27 bits number
++        final double a1High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a1) & ((-1L) << 27));
+         final double a1Low      = a1 - a1High;
+-        final double cb1        = SPLIT_FACTOR * b1;
+-        final double b1High     = cb1 - (cb1 - b1);
++        final double b1High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b1) & ((-1L) << 27));
+         final double b1Low      = b1 - b1High;
+ 
+         // accurate multiplication a1 * b1
+         final double prod1High  = a1 * b1;
+         final double prod1Low   = a1Low * b1Low - (((prod1High - a1High * b1High) - a1Low * b1High) - a1High * b1Low);
+ 
+-        // split a2 and b2 as two 26 bits numbers
+-        final double ca2        = SPLIT_FACTOR * a2;
+-        final double a2High     = ca2 - (ca2 - a2);
++        // split a2 and b2 as one 26 bits number and one 27 bits number
++        final double a2High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a2) & ((-1L) << 27));
+         final double a2Low      = a2 - a2High;
+-        final double cb2        = SPLIT_FACTOR * b2;
+-        final double b2High     = cb2 - (cb2 - b2);
++        final double b2High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b2) & ((-1L) << 27));
+         final double b2Low      = b2 - b2High;
+ 
+         // accurate multiplication a2 * b2
+         final double prod2High  = a2 * b2;
+         final double prod2Low   = a2Low * b2Low - (((prod2High - a2High * b2High) - a2Low * b2High) - a2High * b2Low);
+ 
+-        // split a3 and b3 as two 26 bits numbers
+-        final double ca3        = SPLIT_FACTOR * a3;
+-        final double a3High     = ca3 - (ca3 - a3);
++        // split a3 and b3 as one 26 bits number and one 27 bits number
++        final double a3High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a3) & ((-1L) << 27));
+         final double a3Low      = a3 - a3High;
+-        final double cb3        = SPLIT_FACTOR * b3;
+-        final double b3High     = cb3 - (cb3 - b3);
++        final double b3High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b3) & ((-1L) << 27));
+         final double b3Low      = b3 - b3High;
+ 
+         // accurate multiplication a3 * b3
+@@ -1118,7 +1102,6 @@ public static double linearCombination(final double a1, final double b1,
+         // the code below is split in many additions/subtractions that may
+         // appear redundant. However, they should NOT be simplified, as they
+         // do use IEEE754 floating point arithmetic rounding properties.
+-        // as an example, the expression "ca1 - (ca1 - a1)" is NOT the same as "a1"
+         // The variables naming conventions are that xyzHigh contains the most significant
+         // bits of xyz and xyzLow contains its least significant bits. So theoretically
+         // xyz is the sum xyzHigh + xyzLow, but in many cases below, this sum cannot
+@@ -1126,48 +1109,40 @@ public static double linearCombination(final double a1, final double b1,
+         // to hold it as long as we can, combining the high and low order bits together
+         // only at the end, after cancellation may have occurred on high order bits
+ 
+-        // split a1 and b1 as two 26 bits numbers
+-        final double ca1        = SPLIT_FACTOR * a1;
+-        final double a1High     = ca1 - (ca1 - a1);
++        // split a1 and b1 as one 26 bits number and one 27 bits number
++        final double a1High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a1) & ((-1L) << 27));
+         final double a1Low      = a1 - a1High;
+-        final double cb1        = SPLIT_FACTOR * b1;
+-        final double b1High     = cb1 - (cb1 - b1);
++        final double b1High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b1) & ((-1L) << 27));
+         final double b1Low      = b1 - b1High;
+ 
+         // accurate multiplication a1 * b1
+         final double prod1High  = a1 * b1;
+         final double prod1Low   = a1Low * b1Low - (((prod1High - a1High * b1High) - a1Low * b1High) - a1High * b1Low);
+ 
+-        // split a2 and b2 as two 26 bits numbers
+-        final double ca2        = SPLIT_FACTOR * a2;
+-        final double a2High     = ca2 - (ca2 - a2);
++        // split a2 and b2 as one 26 bits number and one 27 bits number
++        final double a2High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a2) & ((-1L) << 27));
+         final double a2Low      = a2 - a2High;
+-        final double cb2        = SPLIT_FACTOR * b2;
+-        final double b2High     = cb2 - (cb2 - b2);
++        final double b2High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b2) & ((-1L) << 27));
+         final double b2Low      = b2 - b2High;
+ 
+         // accurate multiplication a2 * b2
+         final double prod2High  = a2 * b2;
+         final double prod2Low   = a2Low * b2Low - (((prod2High - a2High * b2High) - a2Low * b2High) - a2High * b2Low);
+ 
+-        // split a3 and b3 as two 26 bits numbers
+-        final double ca3        = SPLIT_FACTOR * a3;
+-        final double a3High     = ca3 - (ca3 - a3);
++        // split a3 and b3 as one 26 bits number and one 27 bits number
++        final double a3High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a3) & ((-1L) << 27));
+         final double a3Low      = a3 - a3High;
+-        final double cb3        = SPLIT_FACTOR * b3;
+-        final double b3High     = cb3 - (cb3 - b3);
++        final double b3High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b3) & ((-1L) << 27));
+         final double b3Low      = b3 - b3High;
+ 
+         // accurate multiplication a3 * b3
+         final double prod3High  = a3 * b3;
+         final double prod3Low   = a3Low * b3Low - (((prod3High - a3High * b3High) - a3Low * b3High) - a3High * b3Low);
+ 
+-        // split a4 and b4 as two 26 bits numbers
+-        final double ca4        = SPLIT_FACTOR * a4;
+-        final double a4High     = ca4 - (ca4 - a4);
++        // split a4 and b4 as one 26 bits number and one 27 bits number
++        final double a4High     = Double.longBitsToDouble(Double.doubleToRawLongBits(a4) & ((-1L) << 27));
+         final double a4Low      = a4 - a4High;
+-        final double cb4        = SPLIT_FACTOR * b4;
+-        final double b4High     = cb4 - (cb4 - b4);
++        final double b4High     = Double.longBitsToDouble(Double.doubleToRawLongBits(b4) & ((-1L) << 27));
+         final double b4Low      = b4 - b4High;
+ 
+         // accurate multiplication a4 * b4
+diff --git a/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/FieldVector3DTest.java b/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/FieldVector3DTest.java
+index 9b9fc3bee8..75e93e075a 100644
+--- a/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/FieldVector3DTest.java
++++ b/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/FieldVector3DTest.java
+@@ -583,7 +583,7 @@ public void testAccurateDotProduct() {
+         DerivativeStructure sNaive = u1.getX().multiply(u2.getX()).add(u1.getY().multiply(u2.getY())).add(u1.getZ().multiply(u2.getZ()));
+         DerivativeStructure sAccurate = FieldVector3D.dotProduct(u1, u2);
+         Assert.assertEquals(0.0, sNaive.getReal(), 1.0e-30);
+-        Assert.assertEquals(-2088690039198397.0 / 1125899906842624.0, sAccurate.getReal(), 1.0e-16);
++        Assert.assertEquals(-2088690039198397.0 / 1125899906842624.0, sAccurate.getReal(), 1.0e-15);
+     }
+ 
+     @Test
+diff --git a/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/Vector3DTest.java b/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/Vector3DTest.java
+index 7e2bf49149..654d9c2e0c 100644
+--- a/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/Vector3DTest.java
++++ b/src/test/java/org/apache/commons/math3/geometry/euclidean/threed/Vector3DTest.java
+@@ -341,7 +341,7 @@ public void testAccurateDotProduct() {
+         double sNaive = u1.getX() * u2.getX() + u1.getY() * u2.getY() + u1.getZ() * u2.getZ();
+         double sAccurate = u1.dotProduct(u2);
+         Assert.assertEquals(0.0, sNaive, 1.0e-30);
+-        Assert.assertEquals(-2088690039198397.0 / 1125899906842624.0, sAccurate, 1.0e-16);
++        Assert.assertEquals(-2088690039198397.0 / 1125899906842624.0, sAccurate, 1.0e-15);
+     }
+ 
+     @Test
+diff --git a/src/test/java/org/apache/commons/math3/util/FastMathTest.java b/src/test/java/org/apache/commons/math3/util/FastMathTest.java
+index f8607548cf..b1dce926f1 100644
+--- a/src/test/java/org/apache/commons/math3/util/FastMathTest.java
++++ b/src/test/java/org/apache/commons/math3/util/FastMathTest.java
+@@ -381,6 +381,12 @@ public void testPowSpecialCases() {
+ 
+         Assert.assertTrue("pow(-0.0, -3.0) should be -Inf", Double.isInfinite(FastMath.pow(-0.0, -3.0)));
+ 
++        Assert.assertEquals("pow(-0.0, Infinity) should be 0.0", 0.0, FastMath.pow(-0.0, Double.POSITIVE_INFINITY), Precision.EPSILON);
++
++        Assert.assertTrue("pow(-0.0, NaN) should be NaN", Double.isNaN(FastMath.pow(-0.0, Double.NaN)));
++
++        Assert.assertTrue("pow(-0.0, -tiny) should be Infinity", Double.isInfinite(FastMath.pow(-0.0, -Double.MIN_VALUE)));
++
+         Assert.assertTrue("pow(-Inf, -3.0) should be -Inf", Double.isInfinite(FastMath.pow(Double.NEGATIVE_INFINITY, 3.0)));
+ 
+         Assert.assertTrue("pow(-0.0, -3.5) should be Inf", Double.isInfinite(FastMath.pow(-0.0, -3.5)));
+@@ -391,6 +397,16 @@ public void testPowSpecialCases() {
+ 
+         Assert.assertTrue("pow(-2.0, 3.5) should be NaN", Double.isNaN(FastMath.pow(-2.0, 3.5)));
+ 
++        Assert.assertTrue("pow(NaN, -Infinity) should be NaN", Double.isNaN(FastMath.pow(Double.NaN, Double.NEGATIVE_INFINITY)));
++
++        Assert.assertEquals("pow(NaN, 0.0) should be 1.0", 1.0, FastMath.pow(Double.NaN, 0.0), Precision.EPSILON);
++
++        Assert.assertEquals("pow(-Infinity, -Infinity) should be 0.0", 0.0, FastMath.pow(Double.NEGATIVE_INFINITY, Double.NEGATIVE_INFINITY), Precision.EPSILON);
++
++        Assert.assertEquals("pow(-huge, -huge) should be 0.0", 0.0, FastMath.pow(-Double.MAX_VALUE, -Double.MAX_VALUE), Precision.EPSILON);
++
++        Assert.assertTrue("pow(-huge,  huge) should be +Inf", Double.isInfinite(FastMath.pow(-Double.MAX_VALUE, Double.MAX_VALUE)));
++
+         // Added tests for a 100% coverage
+ 
+         Assert.assertTrue("pow(+Inf, NaN) should be NaN", Double.isNaN(FastMath.pow(Double.POSITIVE_INFINITY, Double.NaN)));
+@@ -1185,6 +1201,11 @@ public void testIntPow() {
+         }
+     }
+ 
++    @Test
++    public void testIntPowHuge() {
++        Assert.assertTrue(Double.isInfinite(FastMath.pow(FastMath.scalb(1.0, 500), 4)));
++    }
++
+     @Test
+     public void testIncrementExactInt() {
+         int[] specialValues = new int[] {
+diff --git a/src/test/java/org/apache/commons/math3/util/MathArraysTest.java b/src/test/java/org/apache/commons/math3/util/MathArraysTest.java
+index e4918ce736..cf5e392371 100644
+--- a/src/test/java/org/apache/commons/math3/util/MathArraysTest.java
++++ b/src/test/java/org/apache/commons/math3/util/MathArraysTest.java
+@@ -708,6 +708,39 @@ public void testLinearCombination2() {
+         }
+     }
+ 
++    @Test
++    public void testLinearCombinationHuge() {
++        int scale = 971;
++        final double[] a = new double[] {
++                                         -1321008684645961.0 / 268435456.0,
++                                         -5774608829631843.0 / 268435456.0,
++                                         -7645843051051357.0 / 8589934592.0
++                                     };
++        final double[] b = new double[] {
++                                         -5712344449280879.0 / 2097152.0,
++                                         -4550117129121957.0 / 2097152.0,
++                                          8846951984510141.0 / 131072.0
++                                     };
++
++        double[] scaledA = new double[a.length];
++        double[] scaledB = new double[b.length];
++        for (int i = 0; i < scaledA.length; ++i) {
++            scaledA[i] = FastMath.scalb(a[i], -scale);
++            scaledB[i] = FastMath.scalb(b[i], +scale);
++        }
++        final double abSumInline = MathArrays.linearCombination(scaledA[0], scaledB[0],
++                                                                scaledA[1], scaledB[1],
++                                                                scaledA[2], scaledB[2]);
++        final double abSumArray = MathArrays.linearCombination(scaledA, scaledB);
++
++        Assert.assertEquals(abSumInline, abSumArray, 0);
++        Assert.assertEquals(-1.8551294182586248737720779899, abSumInline, 1.0e-15);
++
++        final double naive = scaledA[0] * scaledB[0] + scaledA[1] * scaledB[1] + scaledA[2] * scaledB[2];
++        Assert.assertTrue(FastMath.abs(naive - abSumInline) > 1.5);
++
++    }
++
+     @Test
+     public void testLinearCombinationInfinite() {
+         final double[][] a = new double[][] {

@@ -1,0 +1,177 @@
+From 96e36dfc52617180b650128a13c87a598f9c52e1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Wed, 25 Jul 2012 21:38:34 +0000
+Subject: [PATCH] OPENNLP-527 Added method to close FileEventStream and
+ refactored the code using it. Thanks to Steven Bethard  for providing a
+ patch.
+
+git-svn-id: https://svn.apache.org/repos/asf/opennlp/trunk@1365783 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../java/opennlp/model/FileEventStream.java    | 16 +++++++++++++---
+ .../model/RealValueFileEventStream.java        |  9 +++++++--
+ .../java/opennlp/model/TwoPassDataIndexer.java |  7 ++++++-
+ .../opennlp/maxent/RealValueModelTest.java     | 14 ++++++++++++--
+ .../io/RealValueFileEventStreamTest.java       | 18 ++++++++++++++----
+ 5 files changed, 52 insertions(+), 12 deletions(-)
+
+diff --git a/opennlp-maxent/src/main/java/opennlp/model/FileEventStream.java b/opennlp-maxent/src/main/java/opennlp/model/FileEventStream.java
+index 72b9093c3..ef53c5473 100644
+--- a/opennlp-maxent/src/main/java/opennlp/model/FileEventStream.java
++++ b/opennlp-maxent/src/main/java/opennlp/model/FileEventStream.java
+@@ -20,6 +20,7 @@
+ package opennlp.model;
+ 
+ import java.io.BufferedReader;
++import java.io.Closeable;
+ import java.io.File;
+ import java.io.FileInputStream;
+ import java.io.FileReader;
+@@ -34,7 +35,7 @@
+  * Class for using a file of events as an event stream.  The format of the file is one event perline with
+  * each line consisting of outcome followed by contexts (space delimited).
+  */
+-public class FileEventStream extends  AbstractEventStream {
++public class FileEventStream extends  AbstractEventStream implements Closeable {
+ 
+   BufferedReader reader;
+   String line;
+@@ -87,6 +88,10 @@ public Event next() {
+     return (new Event(outcome, context));
+   }
+   
++  public void close() throws IOException {
++    reader.close();
++  }
++
+   /**
+    * Generates a string representing the specified event.
+    * @param event The event for which a string representation is needed.
+@@ -116,14 +121,19 @@ public static void main(String[] args) throws IOException {
+     }
+     int ai=0;
+     String eventFile = args[ai++];
+-    EventStream es = new FileEventStream(eventFile);
+     int iterations = 100;
+     int cutoff = 5;
+     if (ai < args.length) {
+       iterations = Integer.parseInt(args[ai++]);
+       cutoff = Integer.parseInt(args[ai++]);
+     }
+-    AbstractModel model = GIS.trainModel(es,iterations,cutoff);
++    AbstractModel model;
++    FileEventStream es = new FileEventStream(eventFile);
++    try {
++      model = GIS.trainModel(es,iterations,cutoff);
++    } finally {
++      es.close();
++    }
+     new SuffixSensitiveGISModelWriter(model, new File(eventFile+".bin.gz")).persist();
+   }
+ }
+diff --git a/opennlp-maxent/src/main/java/opennlp/model/RealValueFileEventStream.java b/opennlp-maxent/src/main/java/opennlp/model/RealValueFileEventStream.java
+index 53e1d2c3c..d11bbc7f4 100644
+--- a/opennlp-maxent/src/main/java/opennlp/model/RealValueFileEventStream.java
++++ b/opennlp-maxent/src/main/java/opennlp/model/RealValueFileEventStream.java
+@@ -95,14 +95,19 @@ public static void main(String[] args) throws IOException {
+     }
+     int ai = 0;
+     String eventFile = args[ai++];
+-    EventStream es = new RealValueFileEventStream(eventFile);
+     int iterations = 100;
+     int cutoff = 5;
+     if (ai < args.length) {
+       iterations = Integer.parseInt(args[ai++]);
+       cutoff = Integer.parseInt(args[ai++]);
+     }
+-    AbstractModel model = GIS.trainModel(iterations, new OnePassRealValueDataIndexer(es, cutoff));
++    AbstractModel model;
++    RealValueFileEventStream es = new RealValueFileEventStream(eventFile);
++    try {
++      model = GIS.trainModel(iterations, new OnePassRealValueDataIndexer(es, cutoff));
++    } finally {
++      es.close();
++    }
+     new SuffixSensitiveGISModelWriter(model, new File(eventFile + ".bin.gz")).persist();
+   }
+ }
+diff --git a/opennlp-maxent/src/main/java/opennlp/model/TwoPassDataIndexer.java b/opennlp-maxent/src/main/java/opennlp/model/TwoPassDataIndexer.java
+index 47bad79a3..fe2b3c39b 100644
+--- a/opennlp-maxent/src/main/java/opennlp/model/TwoPassDataIndexer.java
++++ b/opennlp-maxent/src/main/java/opennlp/model/TwoPassDataIndexer.java
+@@ -83,7 +83,12 @@ public TwoPassDataIndexer(EventStream eventStream, int cutoff, boolean sort) thr
+ 
+       System.out.print("\tIndexing...  ");
+ 
+-      eventsToCompare = index(numEvents, new FileEventStream(tmp), predicateIndex);
++      FileEventStream fes = new FileEventStream(tmp);
++      try {
++        eventsToCompare = index(numEvents, fes, predicateIndex);
++      } finally {
++        fes.close();
++      }
+       // done with predicates
+       predicateIndex = null;
+       tmp.delete();
+diff --git a/opennlp-maxent/src/test/java/opennlp/maxent/RealValueModelTest.java b/opennlp-maxent/src/test/java/opennlp/maxent/RealValueModelTest.java
+index 52934acb5..d3bdfcefd 100644
+--- a/opennlp-maxent/src/test/java/opennlp/maxent/RealValueModelTest.java
++++ b/opennlp-maxent/src/test/java/opennlp/maxent/RealValueModelTest.java
+@@ -28,11 +28,21 @@
+ public class RealValueModelTest extends TestCase {
+ 
+   public void testRealValuedWeightsVsRepeatWeighting() throws IOException {
++    GISModel realModel;
+     RealValueFileEventStream rvfes1 = new RealValueFileEventStream("src/test/resources/data/opennlp/maxent/real-valued-weights-training-data.txt");
+-    GISModel realModel = GIS.trainModel(100,new OnePassRealValueDataIndexer(rvfes1,1));
++    try {
++      realModel = GIS.trainModel(100,new OnePassRealValueDataIndexer(rvfes1,1));
++    } finally {
++      rvfes1.close();
++    }
+ 
++    GISModel repeatModel;
+     FileEventStream rvfes2 = new FileEventStream("src/test/resources/data/opennlp/maxent/repeat-weighting-training-data.txt");
+-    GISModel repeatModel = GIS.trainModel(100,new OnePassRealValueDataIndexer(rvfes2,1));
++    try {
++      repeatModel = GIS.trainModel(100,new OnePassRealValueDataIndexer(rvfes2,1));
++    } finally {
++      rvfes2.close();
++    }
+ 
+     String[] features2Classify = new String[] {"feature2","feature5"};
+     double[] realResults = realModel.eval(features2Classify);
+diff --git a/opennlp-maxent/src/test/java/opennlp/maxent/io/RealValueFileEventStreamTest.java b/opennlp-maxent/src/test/java/opennlp/maxent/io/RealValueFileEventStreamTest.java
+index abcd9ed03..85288ef27 100644
+--- a/opennlp-maxent/src/test/java/opennlp/maxent/io/RealValueFileEventStreamTest.java
++++ b/opennlp-maxent/src/test/java/opennlp/maxent/io/RealValueFileEventStreamTest.java
+@@ -26,15 +26,25 @@
+ public class RealValueFileEventStreamTest extends TestCase {
+ 
+   public void testLastLineBug() throws IOException {
+-    RealValueFileEventStream rvfes = new RealValueFileEventStream(
++    OnePassRealValueDataIndexer indexer;
++    RealValueFileEventStream rvfes;
++    
++    rvfes = new RealValueFileEventStream(
+         "src/test/resources/data/opennlp/maxent/io/rvfes-bug-data-ok.txt");
+-    OnePassRealValueDataIndexer indexer = new OnePassRealValueDataIndexer(
+-        rvfes, 1);
++    try {
++      indexer = new OnePassRealValueDataIndexer(rvfes, 1);
++    } finally {
++      rvfes.close();
++    }
+     assertEquals(1, indexer.getOutcomeLabels().length);
+ 
+     rvfes = new RealValueFileEventStream(
+         "src/test/resources/data/opennlp/maxent/io/rvfes-bug-data-broken.txt");
+-    indexer = new OnePassRealValueDataIndexer(rvfes, 1);
++    try {
++      indexer = new OnePassRealValueDataIndexer(rvfes, 1);
++    } finally {
++      rvfes.close();
++    }
+     assertEquals(1, indexer.getOutcomeLabels().length);
+   }
+ }
+\ No newline at end of file

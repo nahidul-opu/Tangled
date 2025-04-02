@@ -1,0 +1,59 @@
+From 2185f5946edfddcca8a5bcb76160212bfe2ef797 Mon Sep 17 00:00:00 2001
+From: Sergey Edunov <edunov@fb.com>
+Date: Tue, 21 Jun 2016 10:14:34 -0700
+Subject: [PATCH] GIRAPH-1076 Race condition in FileTxnSnapLog
+
+Summary:
+org.apache.zookeeper.server.persistence.FileTxnSnapLog has a potential for race condition:
+
+    if (!this.dataDir.exists()) {
+        if (!this.dataDir.mkdirs()) {
+               throw new IOException("Unable to create data directory " + this.dataDir);
+        }
+    }
+
+If two threads try to create FileTxnSnapLog simultaneously it can trigger IOException.
+We saw this happening in Giraph where FileTxnSnapLog is being created by PurgeTask created by DatadirCleanupManager and by InProcessZooKeeperRunner#runFromConfig.
+Until and if ever, the zookeeper code is fixed, we need to make sure zookeeper starts first and only then starts PurgeTask.
+
+Test Plan: run a few jobs and mvn clean verify
+
+Reviewers: majakabiljo, dionysis.logothetis, heslami, maja.kabiljo
+
+Reviewed By: maja.kabiljo
+
+Differential Revision: https://reviews.facebook.net/D59883
+---
+ .../apache/giraph/zk/InProcessZooKeeperRunner.java   | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/giraph-core/src/main/java/org/apache/giraph/zk/InProcessZooKeeperRunner.java b/giraph-core/src/main/java/org/apache/giraph/zk/InProcessZooKeeperRunner.java
+index 9502c2430..4f15f3a22 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/zk/InProcessZooKeeperRunner.java
++++ b/giraph-core/src/main/java/org/apache/giraph/zk/InProcessZooKeeperRunner.java
+@@ -88,16 +88,22 @@ private static class QuorumRunner extends QuorumPeerMain {
+      * @throws IOException if can't start zookeeper
+      */
+     public int start(ZookeeperConfig config) throws IOException {
++      serverRunner = new ZooKeeperServerRunner();
++      //Make sure zookeeper starts first and purge manager last
++      //This is important because zookeeper creates a folder
++      //strucutre on the local disk. Purge manager also tries
++      //to create it but from a different thread and can run into
++      //race condition. See FileTxnSnapLog source code for details.
++      int port = serverRunner.start(config);
+       // Start and schedule the the purge task
+       DatadirCleanupManager purgeMgr = new DatadirCleanupManager(
+           config
+-          .getDataDir(), config.getDataLogDir(),
++              .getDataDir(), config.getDataLogDir(),
+           GiraphConstants.ZOOKEEPER_SNAP_RETAIN_COUNT,
+           GiraphConstants.ZOOKEEPER_PURGE_INTERVAL);
+       purgeMgr.start();
+ 
+-      serverRunner = new ZooKeeperServerRunner();
+-      return serverRunner.start(config);
++      return port;
+     }
+ 
+     /**

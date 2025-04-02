@@ -1,0 +1,96 @@
+From 9e4c6365feca8b658be0fd2053e77577771e6d95 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 26 Oct 2006 15:53:17 +0000
+Subject: [PATCH] FIX: latest.<status> does not work properly when no matching
+ revision exist (IVY-318)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484575 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                      |  1 +
+ .../ivy/resolver/RepositoryResolver.java         |  7 ++++++-
+ test/java/fr/jayasoft/ivy/ResolveTest.java       | 16 ++++++++++++++++
+ test/repositories/1/org9/mod9.2/ivys/ivy-1.2.xml | 11 +++++++++++
+ 4 files changed, 34 insertions(+), 1 deletion(-)
+ create mode 100644 test/repositories/1/org9/mod9.2/ivys/ivy-1.2.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 8ac705b40..c8196601b 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -14,6 +14,7 @@ for detailed view of each issue, please consult http://jira.jayasoft.org/
+ - FIX: Typo in failureproperty attribute of Ant resolve task (IVY-327) (thanks to Jean-Baptiste Quenot)
+ - FIX: ivy:resolve useOrigin fails to behave correctly (IVY-332)
+ - FIX: ChainVersionMatcher doesn't handle IvyAware children version matchers (IVY-331)
++- FIX: latest.<status> does not work properly when no matching revision exist (IVY-318)
+ 
+ 
+    version 1.4 - 2006-10-09
+diff --git a/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java b/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java
+index c3cc37648..828b447ec 100644
+--- a/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java
++++ b/src/java/fr/jayasoft/ivy/resolver/RepositoryResolver.java
+@@ -19,6 +19,7 @@
+ import fr.jayasoft.ivy.DefaultArtifact;
+ import fr.jayasoft.ivy.Ivy;
+ import fr.jayasoft.ivy.LatestStrategy;
++import fr.jayasoft.ivy.ModuleDescriptor;
+ import fr.jayasoft.ivy.ModuleRevisionId;
+ import fr.jayasoft.ivy.report.DownloadReport;
+ import fr.jayasoft.ivy.repository.AbstractRepository;
+@@ -117,7 +118,11 @@ private static ResolvedResource findDynamicResourceUsingPattern(
+ 				}
+ 				if (versionMatcher.needModuleDescriptor(mrid, foundMrid)) {
+             		ResolvedResource r = rmdparser.parse(rres.getResource(), rres.getRevision());
+-            		if (!versionMatcher.accept(mrid, ((MDResolvedResource)r).getResolvedModuleRevision().getDescriptor())) {
++            		ModuleDescriptor md = ((MDResolvedResource)r).getResolvedModuleRevision().getDescriptor();
++            		if (md.isDefault()) {
++    	                Message.debug("\t"+name+": default md rejected by version matcher requiring module descriptor: "+rres);
++            			continue;
++            		} else if (!versionMatcher.accept(mrid, md)) {
+     	                Message.debug("\t"+name+": md rejected by version matcher: "+rres);
+             			continue;
+             		} else {
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index dbb9066f1..eee5bd323 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -1892,6 +1892,22 @@ public void testLatestMilestone() throws Exception {
+         assertTrue(ivy.getIvyFileInCache(_cache, depId).exists());
+     }
+     
++    public void testLatestMilestone2() throws Exception {
++    	// mod9.2 depends on latest.milestone of mod6.2, but there is no milestone
++    	// test case for IVY-318
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/ivyconf.xml"));
++        ResolveReport report = ivy.resolve(new File("test/repositories/1/org9/mod9.2/ivys/ivy-1.2.xml").toURL(),
++                null, new String[] {"default"}, _cache, null, true);
++        // we should have an error since there is no milestone version, it should be considered as a non resolved dependency
++        assertTrue(report.hasError());
++        
++        // dependencies
++        ConfigurationResolveReport crr = report.getConfigurationReport("default");
++        assertNotNull(crr);
++        assertEquals(0, crr.getArtifactsNumber());
++    }
++    
+     public void testIVY56() throws Exception {
+         Ivy ivy = new Ivy();
+         ivy.configure(new File("test/repositories/bugIVY-56/ivyconf.xml"));
+diff --git a/test/repositories/1/org9/mod9.2/ivys/ivy-1.2.xml b/test/repositories/1/org9/mod9.2/ivys/ivy-1.2.xml
+new file mode 100644
+index 000000000..fa8662ff3
+--- /dev/null
++++ b/test/repositories/1/org9/mod9.2/ivys/ivy-1.2.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org9"
++	       module="mod9.2"
++	       revision="1.2"
++	       status="integration"
++	       publication="20061026110000"
++	/>
++	<dependencies>
++		<dependency org="org6" name="mod6.2" rev="latest.milestone"/>
++	</dependencies>
++</ivy-module>

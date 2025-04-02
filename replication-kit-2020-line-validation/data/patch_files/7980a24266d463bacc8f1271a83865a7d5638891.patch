@@ -1,0 +1,155 @@
+From 7980a24266d463bacc8f1271a83865a7d5638891 Mon Sep 17 00:00:00 2001
+From: Luc Maisonobe <luc@apache.org>
+Date: Wed, 26 Oct 2011 09:08:22 +0000
+Subject: [PATCH] Fixed an event resetting issue in ODE.
+
+When several discrete events occur during the same ODE integration step,
+they are handled chronologically or reverse chronologically depending on
+the integration direction. If one of the event truncates the step (for
+example because its eventOccurred method returns RESET or
+RESET_DERIVATIVES for example), the stepAccepted method of the pending
+events later in the step were not called. This implied that in the next
+step, these events were still referring to data from previous step, they
+had lost synchronization with the integrator.
+
+JIRA: MATH-695
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/math/trunk@1189086 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../commons/math/ode/AbstractIntegrator.java  |  8 ++-
+ src/site/xdoc/changes.xml                     |  3 +
+ .../math/ode/events/EventStateTest.java       | 62 +++++++++++++++++++
+ 3 files changed, 71 insertions(+), 2 deletions(-)
+
+diff --git a/src/main/java/org/apache/commons/math/ode/AbstractIntegrator.java b/src/main/java/org/apache/commons/math/ode/AbstractIntegrator.java
+index 2d878b15f4..8f315e3349 100644
+--- a/src/main/java/org/apache/commons/math/ode/AbstractIntegrator.java
++++ b/src/main/java/org/apache/commons/math/ode/AbstractIntegrator.java
+@@ -40,7 +40,6 @@
+ import org.apache.commons.math.ode.sampling.StepHandler;
+ import org.apache.commons.math.util.FastMath;
+ import org.apache.commons.math.util.Incrementor;
+-import org.apache.commons.math.util.MathUtils;
+ import org.apache.commons.math.util.Precision;
+ 
+ /**
+@@ -278,7 +277,6 @@ protected double acceptStep(final AbstractStepInterpolator interpolator,
+ 
+             double previousT = interpolator.getGlobalPreviousTime();
+             final double currentT = interpolator.getGlobalCurrentTime();
+-            resetOccurred = false;
+ 
+             // initialize the events states if needed
+             if (! statesInitialized) {
+@@ -332,6 +330,9 @@ public int compare(EventState es0, EventState es1) {
+                 if (isLastStep) {
+                     // the event asked to stop integration
+                     System.arraycopy(eventY, 0, y, 0, y.length);
++                    for (final EventState remaining : occuringEvents) {
++                        remaining.stepAccepted(eventT, eventY);
++                    }
+                     return eventT;
+                 }
+ 
+@@ -341,6 +342,9 @@ public int compare(EventState es0, EventState es1) {
+                     System.arraycopy(eventY, 0, y, 0, y.length);
+                     computeDerivatives(eventT, y, yDot);
+                     resetOccurred = true;
++                    for (final EventState remaining : occuringEvents) {
++                        remaining.stepAccepted(eventT, eventY);
++                    }
+                     return eventT;
+                 }
+ 
+diff --git a/src/site/xdoc/changes.xml b/src/site/xdoc/changes.xml
+index bf13163d43..1e770fe698 100644
+--- a/src/site/xdoc/changes.xml
++++ b/src/site/xdoc/changes.xml
+@@ -52,6 +52,9 @@ The <action> type attribute can be add,update,fix,remove.
+     If the output is not quite correct, check for invisible trailing spaces!
+      -->
+     <release version="3.0" date="TBD" description="TBD">
++      <action dev="luc" type="fix" issue="MATH-695">
++        Fixed an event resetting issue in ODE.
++      </action>
+       <action dev="erans" type="update" issue="MATH-696">
+         Default implementation for "addToEntry" and "multiplyEntry" in
+         "AbstractRealMatrix".
+diff --git a/src/test/java/org/apache/commons/math/ode/events/EventStateTest.java b/src/test/java/org/apache/commons/math/ode/events/EventStateTest.java
+index 07178e52b7..722584b8f8 100644
+--- a/src/test/java/org/apache/commons/math/ode/events/EventStateTest.java
++++ b/src/test/java/org/apache/commons/math/ode/events/EventStateTest.java
+@@ -19,6 +19,8 @@
+ 
+ 
+ import org.apache.commons.math.analysis.solvers.BrentSolver;
++import org.apache.commons.math.ode.FirstOrderDifferentialEquations;
++import org.apache.commons.math.ode.nonstiff.DormandPrince853Integrator;
+ import org.apache.commons.math.ode.sampling.AbstractStepInterpolator;
+ import org.apache.commons.math.ode.sampling.DummyStepInterpolator;
+ import org.junit.Assert;
+@@ -73,4 +75,64 @@ public Action eventOccurred(double t, double[] y, boolean increasing) {
+ 
+     }
+ 
++    // Jira: MATH-695
++    @Test
++    public void testIssue695() {
++
++        FirstOrderDifferentialEquations equation = new FirstOrderDifferentialEquations() {
++            
++            public int getDimension() {
++                return 1;
++            }
++            
++            public void computeDerivatives(double t, double[] y, double[] yDot) {
++                yDot[0] = 1.0;
++            }
++        };
++
++        DormandPrince853Integrator integrator = new DormandPrince853Integrator(0.001, 1000, 1.0e-14, 1.0e-14);
++        integrator.addEventHandler(new ResettingEvent(10.99), 0.1, 1.0e-9, 1000);
++        integrator.addEventHandler(new ResettingEvent(11.01), 0.1, 1.0e-9, 1000);
++        integrator.setInitialStepSize(3.0);
++
++        double target = 30.0;
++        double[] y = new double[1];
++        double tEnd = integrator.integrate(equation, 0.0, y, target, y);
++        Assert.assertEquals(target, tEnd, 1.0e-10);
++        Assert.assertEquals(32.0, y[0], 1.0e-10);
++
++    }
++
++    private static class ResettingEvent implements EventHandler {
++
++        private static double lastTriggerTime = Double.NEGATIVE_INFINITY;
++        private final double tEvent;
++
++        public ResettingEvent(final double tEvent) {
++            this.tEvent = tEvent;
++        }
++
++        public double g(double t, double[] y) {
++            // the bug corresponding to issue 695 causes the g function
++            // to be called at obsolete times t despite an event
++            // occurring later has already been triggered.
++            // When this occurs, the following assertion is violated
++            Assert.assertTrue("going backard in time! (" + t + " < " + lastTriggerTime + ")",
++                              t >= lastTriggerTime);
++            return t - tEvent;
++        }
++
++        public Action eventOccurred(double t, double[] y, boolean increasing) {
++            // remember in a class variable when the event was triggered
++            lastTriggerTime = t;
++            return Action.RESET_STATE;
++        }
++
++        public void resetState(double t, double[] y) {
++            y[0] += 1.0;
++        }
++
++    };
++
++
+ }

@@ -1,0 +1,149 @@
+From 7b724131fd7fd7f67119258a532a651789beec68 Mon Sep 17 00:00:00 2001
+From: Avery Ching <aching@fb.com>
+Date: Mon, 13 May 2013 12:41:20 -0700
+Subject: [PATCH] GIRAPH-666: Netty execs threads and metrics threads don't get
+ cleaned up properly (aching)
+
+---
+ CHANGELOG                                                | 3 +++
+ .../java/org/apache/giraph/comm/netty/NettyClient.java   | 7 ++++++-
+ .../java/org/apache/giraph/comm/netty/NettyServer.java   | 7 ++++++-
+ .../java/org/apache/giraph/graph/GraphTaskManager.java   | 4 ++++
+ .../java/org/apache/giraph/metrics/GiraphMetrics.java    | 9 +++++++++
+ .../org/apache/giraph/metrics/GiraphMetricsRegistry.java | 7 +++++++
+ 6 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 947f12d38..50547c0a3 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-666: Netty execs threads and metrics threads don't get 
++  cleaned up properly (aching)
++
+   GIRAPH-665: Reduce ZooKeeper output in tests by changing log level from 
+   INFO to ERROR (aching)
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+index 30c32fda8..83f1654f6 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyClient.java
+@@ -164,6 +164,8 @@ public class NettyClient {
+   private final int maxPoolSize;
+   /** Maximum number of attempts to resolve an address*/
+   private final int maxResolveAddressAttempts;
++  /** Use execution handler? */
++  private final boolean useExecutionHandler;
+   /** Execution handler (if used) */
+   private final ExecutionHandler executionHandler;
+   /** Name of the handler before the execution handler (if used) */
+@@ -218,7 +220,7 @@ public NettyClient(Mapper<?, ?, ?, ?>.Context context,
+ 
+     handlerBeforeExecutionHandler =
+         NETTY_CLIENT_EXECUTION_AFTER_HANDLER.get(conf);
+-    boolean useExecutionHandler = NETTY_CLIENT_USE_EXECUTION_HANDLER.get(conf);
++    useExecutionHandler = NETTY_CLIENT_USE_EXECUTION_HANDLER.get(conf);
+     if (useExecutionHandler) {
+       int executionThreads = NETTY_CLIENT_EXECUTION_THREADS.get(conf);
+       executionHandler = new ExecutionHandler(
+@@ -551,6 +553,9 @@ public void operationComplete(ChannelFuture cf) {
+             bossExecutorService.shutdownNow();
+             workerExecutorService.shutdownNow();
+             bootstrap.releaseExternalResources();
++            if (useExecutionHandler) {
++              executionHandler.releaseExternalResources();
++            }
+           }
+         }
+       });
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyServer.java b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
+index 0bfc2d659..9d4afa914 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyServer.java
+@@ -118,6 +118,8 @@ public class NettyServer {
+   private final ExecutorService workerExecutorService;
+   /** Request completed map per worker */
+   private final WorkerRequestReservedMap workerRequestReservedMap;
++  /** Use execution handler? */
++  private final boolean useExecutionHandler;
+   /** Execution handler (if used) */
+   private final ExecutionHandler executionHandler;
+   /** Name of the handler before the execution handler (if used) */
+@@ -172,7 +174,7 @@ public NettyServer(ImmutableClassesGiraphConfiguration conf,
+ 
+     handlerBeforeExecutionHandler =
+         GiraphConstants.NETTY_SERVER_EXECUTION_AFTER_HANDLER.get(conf);
+-    boolean useExecutionHandler =
++    useExecutionHandler =
+         GiraphConstants.NETTY_SERVER_USE_EXECUTION_HANDLER.get(conf);
+     if (useExecutionHandler) {
+       int executionThreads = conf.getNettyServerExecutionThreads();
+@@ -367,6 +369,9 @@ public void stop() {
+     }
+     bootstrap.releaseExternalResources();
+     channelFactory.releaseExternalResources();
++    if (useExecutionHandler) {
++      executionHandler.releaseExternalResources();
++    }
+     if (LOG.isInfoEnabled()) {
+       LOG.info("stop: Netty server halted");
+     }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+index 9caf1b9ee..82e1b1e74 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
++++ b/giraph-core/src/main/java/org/apache/giraph/graph/GraphTaskManager.java
+@@ -890,6 +890,8 @@ public void cleanup()
+     if (zkManager != null) {
+       zkManager.offlineZooKeeperServers(ZooKeeperManager.State.FINISHED);
+     }
++    // Stop tracking metrics
++    GiraphMetrics.get().shutdown();
+   }
+ 
+   /**
+@@ -914,6 +916,8 @@ public void workerFailureCleanup() {
+       if (graphFunctions.isWorker()) {
+         serviceWorker.failureCleanup();
+       }
++      // Stop tracking metrics
++      GiraphMetrics.get().shutdown();
+     // Checkstyle exception due to needing to get the original
+     // exception on failure
+     // CHECKSTYLE: stop IllegalCatch
+diff --git a/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetrics.java b/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetrics.java
+index 0454a5e3c..7d980ea69 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetrics.java
++++ b/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetrics.java
+@@ -146,4 +146,13 @@ public void dumpToStream(PrintStream out) {
+     perJobRequired.printToStream(out);
+     perSuperstep.printToStream(out);
+   }
++
++  /**
++   * Stop using metrics (for cleanup)
++   */
++  public void shutdown() {
++    perJobOptional.shutdown();
++    perJobRequired.shutdown();
++    perSuperstep.shutdown();
++  }
+ }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetricsRegistry.java b/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetricsRegistry.java
+index 3c6187282..149f35241 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetricsRegistry.java
++++ b/giraph-core/src/main/java/org/apache/giraph/metrics/GiraphMetricsRegistry.java
+@@ -303,4 +303,11 @@ public <T> Gauge<T> getExistingGauge(String name) {
+   protected MetricName makeMetricName(String name) {
+     return new MetricName(groupName, type, name);
+   }
++
++  /**
++   * Nothing will be captured after this is called.
++   */
++  public void shutdown() {
++    registry.shutdown();
++  }
+ }

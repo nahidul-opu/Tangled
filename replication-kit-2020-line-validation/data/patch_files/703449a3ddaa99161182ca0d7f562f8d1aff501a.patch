@@ -1,0 +1,79 @@
+From 703449a3ddaa99161182ca0d7f562f8d1aff501a Mon Sep 17 00:00:00 2001
+From: Roland von Herget <rherget@apache.org>
+Date: Wed, 13 Mar 2013 14:28:35 +0000
+Subject: [PATCH] GORA-211 thread safety: fix java.lang.NullPointerException -
+ synchronize on mutator
+
+git-svn-id: https://svn.apache.org/repos/asf/gora/trunk@1455955 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                          |  2 ++
+ .../apache/gora/cassandra/store/CassandraClient.java | 12 +++++++++---
+ .../org/apache/gora/cassandra/store/HectorUtils.java |  5 +++++
+ 3 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f8b137731..a98c586ec 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -6,6 +6,8 @@ Gora Change Log
+ 
+ trunk (current development)
+ 
++* GORA-211 thread safety: fix java.lang.NullPointerException - synchronize on mutator (rherget)
++
+ * GORA-210 thread safety: fix java.util.ConcurrentModificationException (rherget)
+ 
+ * GORA-190 Add "version" switch to bin/gora script (lewismc)
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+index f086da8dc..84acba999 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+@@ -193,7 +193,9 @@ public void addColumn(K key, String fieldName, Object value) {
+       return;
+     }
+     
+-    HectorUtils.insertColumn(mutator, key, columnFamily, columnName, byteBuffer);
++    synchronized(mutator) {
++      HectorUtils.insertColumn(mutator, key, columnFamily, columnName, byteBuffer);
++    }
+   }
+ 
+   /**
+@@ -214,7 +216,9 @@ public void addSubColumn(K key, String fieldName, ByteBuffer columnName, Object
+     String columnFamily = this.cassandraMapping.getFamily(fieldName);
+     String superColumnName = this.cassandraMapping.getColumn(fieldName);
+     
+-    HectorUtils.insertSubColumn(mutator, key, columnFamily, superColumnName, columnName, byteBuffer);
++    synchronized(mutator) {
++      HectorUtils.insertSubColumn(mutator, key, columnFamily, superColumnName, columnName, byteBuffer);
++    }
+   }
+ 
+   public void addSubColumn(K key, String fieldName, String columnName, Object value) {
+@@ -238,7 +242,9 @@ public void deleteSubColumn(K key, String fieldName, ByteBuffer columnName) {
+     String columnFamily = this.cassandraMapping.getFamily(fieldName);
+     String superColumnName = this.cassandraMapping.getColumn(fieldName);
+     
+-    HectorUtils.deleteSubColumn(mutator, key, columnFamily, superColumnName, columnName);
++    synchronized(mutator) {
++      HectorUtils.deleteSubColumn(mutator, key, columnFamily, superColumnName, columnName);
++    }
+   }
+ 
+   public void deleteSubColumn(K key, String fieldName, String columnName) {
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java
+index 1ebdd833c..7e690e3ca 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java
+@@ -35,6 +35,11 @@
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
++/**
++ * This class it not thread safe.
++ * According to Hector's JavaDoc a Mutator isn't thread safe, too.
++ * Take a look at {@CassandraClient} for safe usage.
++ */
+ public class HectorUtils<K,T extends Persistent> {
+ 
+   public static final Logger LOG = LoggerFactory.getLogger(HectorUtils.class);

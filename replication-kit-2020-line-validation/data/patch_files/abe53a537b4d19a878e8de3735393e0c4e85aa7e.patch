@@ -1,0 +1,103 @@
+From abe53a537b4d19a878e8de3735393e0c4e85aa7e Mon Sep 17 00:00:00 2001
+From: Gilles Sadowski <erans@apache.org>
+Date: Fri, 21 Sep 2012 14:17:37 +0000
+Subject: [PATCH] MATH-864 Fixed missing "repair" of a point that lies outside
+ the boundaries. Thanks to Frank Hessen for the report and for pinpointing the
+ cause of the problem.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/math/trunk@1388517 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 ++++
+ .../optimization/direct/CMAESOptimizer.java   | 14 ++++++++++++-
+ .../direct/CMAESOptimizerTest.java            | 21 +++++++++++++++++++
+ 3 files changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 4f23f92f1f..7bf77019ee 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -52,6 +52,10 @@ If the output is not quite correct, check for invisible trailing spaces!
+   <body>
+     <release version="3.1" date="TBD" description="
+ ">
++      <action dev="erans" type="fix" issue="MATH-864" due-to="Frank Hess">
++        "CMAESOptimizer": Solution was not constrained to lie within the
++        provided boundaries.
++      </action>
+       <action dev="erans" type="add" issue="MATH-863" due-to="Julien Anxionnat">
+         New "Quaternion" class (package "o.a.c.m.complex").
+       </action>
+diff --git a/src/main/java/org/apache/commons/math3/optimization/direct/CMAESOptimizer.java b/src/main/java/org/apache/commons/math3/optimization/direct/CMAESOptimizer.java
+index d01cd158c7..b54cb37445 100644
+--- a/src/main/java/org/apache/commons/math3/optimization/direct/CMAESOptimizer.java
++++ b/src/main/java/org/apache/commons/math3/optimization/direct/CMAESOptimizer.java
+@@ -24,9 +24,11 @@
+ import org.apache.commons.math3.analysis.MultivariateFunction;
+ import org.apache.commons.math3.exception.DimensionMismatchException;
+ import org.apache.commons.math3.exception.MathUnsupportedOperationException;
++import org.apache.commons.math3.exception.MathIllegalStateException;
+ import org.apache.commons.math3.exception.NotPositiveException;
+ import org.apache.commons.math3.exception.OutOfRangeException;
+ import org.apache.commons.math3.exception.TooManyEvaluationsException;
++import org.apache.commons.math3.exception.util.LocalizedFormats;
+ import org.apache.commons.math3.linear.Array2DRowRealMatrix;
+ import org.apache.commons.math3.linear.EigenDecomposition;
+ import org.apache.commons.math3.linear.MatrixUtils;
+@@ -414,7 +416,7 @@ protected PointValuePair doOptimize() {
+                     bestValue = bestFitness;
+                     lastResult = optimum;
+                     optimum = new PointValuePair(
+-                            fitfun.decode(bestArx.getColumn(0)),
++                            fitfun.repairAndDecode(bestArx.getColumn(0)),
+                             isMinimize ? bestFitness : -bestFitness);
+                     if (getConvergenceChecker() != null && lastResult != null) {
+                         if (getConvergenceChecker().converged(iterations, optimum, lastResult)) {
+@@ -911,6 +913,16 @@ public double[] encode(final double[] x) {
+             return res;
+         }
+ 
++        /**
++         * @param x Normalized objective variables.
++         * @return the original objective variables, possibly repaired.
++         */
++        public double[] repairAndDecode(final double[] x) {
++            return boundaries != null && isRepairMode ?
++                decode(repair(x)) :
++                decode(x);
++        }
++
+         /**
+          * @param x Normalized objective variables.
+          * @return the original objective variables.
+diff --git a/src/test/java/org/apache/commons/math3/optimization/direct/CMAESOptimizerTest.java b/src/test/java/org/apache/commons/math3/optimization/direct/CMAESOptimizerTest.java
+index 19a30bc6f0..38818798ca 100644
+--- a/src/test/java/org/apache/commons/math3/optimization/direct/CMAESOptimizerTest.java
++++ b/src/test/java/org/apache/commons/math3/optimization/direct/CMAESOptimizerTest.java
+@@ -372,6 +372,27 @@ public void testDiagonalRosen() {
+                 1e-10, 1e-4, 1000000, expected);
+      }
+ 
++    @Test
++    public void testMath864() {
++        final CMAESOptimizer optimizer = new CMAESOptimizer();
++        final MultivariateFunction fitnessFunction = new MultivariateFunction() {
++                @Override
++                public double value(double[] parameters) {
++                    final double target = 1;
++                    final double error = target - parameters[0];
++                    return error * error;
++                }
++            };
++
++        final double[] start = { 0 };
++        final double[] lower = { -1e6 };
++        final double[] upper = { 0.5 };
++        final double[] result = optimizer.optimize(10000, fitnessFunction, GoalType.MINIMIZE,
++                                                   start, lower, upper).getPoint();
++        Assert.assertTrue("Out of bounds (" + result[0] + " > " + upper[0] + ")",
++                          result[0] <= upper[0]);
++    }
++
+     /**
+      * @param func Function to optimize.
+      * @param startPoint Starting point.

@@ -1,0 +1,126 @@
+From d8a7bc325189e9115526712c01586a27de6440e0 Mon Sep 17 00:00:00 2001
+From: Scokart Gilles <gscokart@apache.org>
+Date: Sun, 20 Jul 2008 09:50:36 +0000
+Subject: [PATCH] (IVY-89) properties from referenced from settings file are
+ now relative to the location of the settings file, not relative to the
+ execution directory)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@678264 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/settings/XmlSettingsParser.java  | 51 +++++++++----------
+ .../ivy/core/settings/ivysettings-ref.xml     |  2 +-
+ .../ivy/core/settings/ivysettings-test.xml    |  2 +-
+ 4 files changed, 27 insertions(+), 29 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 6d48bde11..2c25a75f7 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -160,6 +160,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Relative include in a settings must be evaluated relatively to the settings file (IVY-372)
+ - FIX: The Bundle-Version is 0.0.0 in the build artifacts (IVY-802)
+ - FIX: Fix the encoding used in XML reports (IVY-816)
++- FIX: Properties tag in ivy conf do not support relative path (IVY-89)
+ 
+ - DOCUMENTATION: Fixed more than a hundred (100+) obsolete "configuration" references; replaced with "settings" (IVY-863) (thanks to Sakari Maaranen)
+ - DOCUMENTATION: Elaborated documentation of ivy files and deliver/publish tasks (IVY-847) (thanks to Sakari Maaranen)
+diff --git a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+index afe301d7b..ced2de761 100644
+--- a/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
++++ b/src/java/org/apache/ivy/core/settings/XmlSettingsParser.java
+@@ -380,14 +380,11 @@ private void includeStarted(Map attributes) throws IOException, ParseException {
+                     ivy.setSettingsVariables(settingsURL);
+                 }
+             } else {
+-                File incFile = new File(propFilePath);
+-                if (incFile.isAbsolute()) {
+-                    settingsURL = incFile.toURI().toURL();
+-                } else {
+-                    settingsURL = new URL(this.settings , propFilePath);
+-                }
++                settingsURL = urlFromFileAttribute(propFilePath);
+                 Message.verbose("including file: " + settingsURL);
+-                ivy.setSettingsVariables(incFile);
++                ivy.setSettingsVariables(new File(propFilePath));
++                //We can not use the setSettingsVariables(URL) because that would put different
++                //values for the properties.  I'm not sure what would be the regression...
+             }
+             new XmlSettingsParser(ivy).parse(configurator, settingsURL);
+         } finally {
+@@ -395,29 +392,29 @@ private void includeStarted(Map attributes) throws IOException, ParseException {
+         }
+     }
+ 
+-    private void propertiesStarted(Map attributes) {
++    /** Provide an URL referencing the given filepath.  If filePath is an absolute path, then
++     * the resulting URL point to a local file, otherwise, the filepath is evaluated relatively
++     * to the URL of the current settings file (can be local file or remote URL).
++     */
++    private URL urlFromFileAttribute(String filePath) throws MalformedURLException {
++        File incFile = new File(filePath);
++        if (incFile.isAbsolute()) {
++            return incFile.toURI().toURL();
++        } else {
++            return new URL(this.settings , filePath);
++        }      
++    }
++
++    private void propertiesStarted(Map attributes) throws IOException {
+         String propFilePath = (String) attributes.get("file");
+         String environmentPrefix = (String) attributes.get("environment");
+         if (propFilePath != null) {
+-            String override = (String) attributes.get("override");
+-            try {
+-                Message.verbose("loading properties: " + propFilePath);
+-                ivy.loadProperties(new File(propFilePath), override == null ? true : Boolean
+-                        .valueOf(override).booleanValue());
+-            } catch (Exception fileEx) {
+-                Message.verbose("failed to load properties as file: trying as url: "
+-                        + propFilePath);
+-                try {
+-                    ivy.loadProperties(
+-                        new URL(propFilePath), override == null ? true : Boolean
+-                            .valueOf(override).booleanValue());
+-                } catch (Exception urlEx) {
+-                    throw new IllegalArgumentException(
+-                        "unable to load properties from " + propFilePath
+-                        + ". Tried both as an url and a file, with no success. "
+-                        + "File exception: " + fileEx + ". URL exception: " + urlEx);
+-                }
+-            }
++            String overrideStr = (String) attributes.get("override");
++            boolean override = overrideStr == null ? true 
++                                                   : Boolean.valueOf(overrideStr).booleanValue();
++            Message.verbose("loading properties: " + propFilePath);
++            URL fileUrl = urlFromFileAttribute(propFilePath);
++            ivy.loadProperties(fileUrl, override);
+         } else if (environmentPrefix != null) {
+             ivy.getVariableContainer().setEnvironmentPrefix(environmentPrefix);
+         } else {
+diff --git a/test/java/org/apache/ivy/core/settings/ivysettings-ref.xml b/test/java/org/apache/ivy/core/settings/ivysettings-ref.xml
+index c98cb2e62..629e0eb06 100644
+--- a/test/java/org/apache/ivy/core/settings/ivysettings-ref.xml
++++ b/test/java/org/apache/ivy/core/settings/ivysettings-ref.xml
+@@ -17,7 +17,7 @@
+    under the License.    
+ -->
+ <ivysettings>
+-	<properties file="test/java/org/apache/ivy/core/settings/ivysettings.properties"/>
++	<properties file="ivysettings.properties"/>
+ 	<settings   defaultCache="mycache"/>
+ 	<resolvers>
+ 		<filesystem name="fs" latest="latest-time">
+diff --git a/test/java/org/apache/ivy/core/settings/ivysettings-test.xml b/test/java/org/apache/ivy/core/settings/ivysettings-test.xml
+index b1c0ac62b..c07444d04 100644
+--- a/test/java/org/apache/ivy/core/settings/ivysettings-test.xml
++++ b/test/java/org/apache/ivy/core/settings/ivysettings-test.xml
+@@ -18,7 +18,7 @@
+ -->
+ <ivysettings>
+ 	<property name="shared" value="sharedrep"/>
+-	<properties file="test/java/org/apache/ivy/core/settings/ivysettings.properties"/>
++	<properties file="ivysettings.properties"/>
+ 	<settings defaultResolver="libraries" validate="false" />
+ 	<caches defaultCacheDir="mycache" checkUpToDate="false"
+ 			ivyPattern="[module]/ivys/ivy-[revision].xml" 

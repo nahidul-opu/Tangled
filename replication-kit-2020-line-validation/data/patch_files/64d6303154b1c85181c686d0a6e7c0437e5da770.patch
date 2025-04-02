@@ -1,0 +1,338 @@
+From 64d6303154b1c85181c686d0a6e7c0437e5da770 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 12 May 2006 07:45:34 +0000
+Subject: [PATCH] FIX: value of confmappingoverride from imported
+ configurations is lost when writing Ivy file (IVY-239) (thanks to Maarten
+ Coene)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484329 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/fr/jayasoft/ivy/util/XMLHelper.java  | 19 +++---
+ .../ivy/xml/XmlModuleDescriptorParser.java    |  4 ++
+ .../ivy/xml/XmlModuleDescriptorUpdater.java   | 60 +++++++++++++------
+ src/java/fr/jayasoft/ivy/xml/ivy.xsd          |  1 +
+ .../xml/XmlModuleDescriptorParserTest.java    | 23 +++++++
+ .../ivy/xml/XmlModuleUpdaterTest.java         | 15 +++++
+ ...ed-configurations-with-mappingoverride.xml |  4 ++
+ .../ivy/xml/test-configurations-import4.xml   | 15 +++++
+ 9 files changed, 115 insertions(+), 27 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/xml/imported-configurations-with-mappingoverride.xml
+ create mode 100644 test/java/fr/jayasoft/ivy/xml/test-configurations-import4.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index c116c482a..ad8382ede 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -50,6 +50,7 @@ Changes:
+   - IMPROVE: comments now aren't lost when delivering ivy files (IVY-226)
+   - IMPROVE: add sort of 'fallback'-mapping to the defaultconfmapping attribute (IVY-215)
+ 
++  - FIX: value of confmappingoverride from imported configurations is lost when writing Ivy file (IVY-239)
+   - FIX: including configurations doesn't import the confmappingoverride setting (IVY-238)
+   - FIX: NullPointerException when the creation of Ivy file in cache fails (IVY-234)
+   - FIX: Ivy file containing 2 different versions of the same module is not deliverd correctly (IVY-229)
+diff --git a/src/java/fr/jayasoft/ivy/util/XMLHelper.java b/src/java/fr/jayasoft/ivy/util/XMLHelper.java
+index f0531a957..b56d2a1e6 100644
+--- a/src/java/fr/jayasoft/ivy/util/XMLHelper.java
++++ b/src/java/fr/jayasoft/ivy/util/XMLHelper.java
+@@ -63,13 +63,22 @@ public static void parse(URL xmlURL, URL schema, DefaultHandler handler) throws
+     }
+     
+     public static void parse(URL xmlURL, URL schema, DefaultHandler handler, LexicalHandler lHandler) throws SAXException, IOException, ParserConfigurationException {
+-        InputStream xmlStream = null;
++       InputStream xmlStream = URLHandlerRegistry.getDefault().openStream(xmlURL);
++       try {
++           parse(xmlStream, schema, handler, lHandler);
++       } finally {
++           try {
++               xmlStream.close();
++           } catch (IOException e) {}
++       }
++    } 
++    
++    public static void parse(InputStream xmlStream, URL schema, DefaultHandler handler, LexicalHandler lHandler) throws SAXException, IOException, ParserConfigurationException {
+         InputStream schemaStream = null;
+         try {
+             if (schema != null) {
+                 schemaStream = URLHandlerRegistry.getDefault().openStream(schema);
+             }
+-            xmlStream = URLHandlerRegistry.getDefault().openStream(xmlURL);
+             SAXParser parser = XMLHelper.newSAXParser(schema, schemaStream);
+             
+             if (lHandler != null) {
+@@ -83,12 +92,6 @@ public static void parse(URL xmlURL, URL schema, DefaultHandler handler, Lexical
+             
+             parser.parse(xmlStream, handler);
+         } finally {
+-            if (xmlStream != null) {
+-                try {
+-                    xmlStream.close();
+-                } catch (IOException ex) {
+-                }
+-            }
+             if (schemaStream != null) {
+                 try {
+                     schemaStream.close();
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+index c04741b7c..32a2632b8 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParser.java
+@@ -228,6 +228,10 @@ public void startElement(String uri, String localName, String qName, Attributes
+                 if (defaultConf != null) {
+                     setDefaultConfMapping(defaultConf);
+                 }
++                String confMappingOverride = _ivy.substitute(attributes.getValue("confmappingoverride"));
++                if (confMappingOverride != null) {
++                   _md.setMappingOverride(Boolean.valueOf(confMappingOverride).booleanValue());
++                }
+                 checkConfigurations();
+             } else if ("conflicts".equals(qName)) {
+                 _state = CONFLICT;
+diff --git a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
+index 67d3084fe..debfc7e90 100644
+--- a/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
++++ b/src/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorUpdater.java
+@@ -5,11 +5,14 @@
+  */
+ package fr.jayasoft.ivy.xml;
+ 
++import java.io.BufferedInputStream;
+ import java.io.BufferedReader;
+ import java.io.File;
+ import java.io.FileOutputStream;
+ import java.io.IOException;
++import java.io.InputStream;
+ import java.io.InputStreamReader;
++import java.io.OutputStream;
+ import java.io.PrintWriter;
+ import java.net.URL;
+ import java.util.Date;
+@@ -62,18 +65,38 @@ public static void update(final Ivy ivy, URL srcURL, File destFile, final Map re
+         if (destFile.getParentFile() != null) {
+             destFile.getParentFile().mkdirs();
+         }
+-        FileOutputStream fos = null;
++        OutputStream fos = new FileOutputStream(destFile);
++        InputStream in = srcURL.openStream();
+         try {
+-            fos = new FileOutputStream(destFile);
+-            final PrintWriter out = new PrintWriter(fos);
+-            copyHeader(srcURL, out);
++           update(ivy, in, fos, resolvedRevisions, status, revision, pubdate, ns, replaceInclude);
++        } finally {
++           try {
++               in.close();
++           } catch (IOException e) {}
++           try {
++               fos.close();
++           } catch (IOException e) {}
++        }
++    }
++    
++    public static void update(final Ivy ivy, InputStream inStream, OutputStream outStream, final Map resolvedRevisions, final String status, 
++            final String revision, final Date pubdate, final Namespace ns, final boolean replaceInclude) 
++                                throws IOException, SAXException {
++        final PrintWriter out = new PrintWriter(outStream);
++        final BufferedInputStream in = new BufferedInputStream(inStream);
++        
++        in.mark(10000); // assume the header is never larger than 10000 bytes.
++        copyHeader(in, out);
++        in.reset(); // reposition the stream at the beginning
+             
+-            XMLHelper.parse(srcURL, null, new DefaultHandler() {
++        try {
++            XMLHelper.parse(in, null, new DefaultHandler() {
+                 // never print *ln* cause \n is found in copied characters stream
+                 // nor do we need do handle indentation, original one is maintained except for attributes
+                 
+                 private String _organisation = null;
+                 private String _defaultConfMapping = null; // defaultConfMapping of imported configurations, if any
++                private Boolean _confMappingOverride = null; // confMappingOverride of imported configurations, if any
+                 private String _justOpen = null; // used to know if the last open tag was empty, to adjust termination with /> instead of ></qName>
+                 private Stack _context = new Stack();
+                 public void startElement(String uri, String localName,
+@@ -125,6 +148,10 @@ public void startElement(String uri, String localName,
+                                         if (defaultconf != null) {
+                                             _defaultConfMapping = defaultconf;
+                                         }
++                                        String mappingOverride = substitute(ivy, attributes.getValue("confmappingoverride"));
++                                        if (mappingOverride != null) {
++                                           _confMappingOverride = Boolean.valueOf(mappingOverride);
++                                        }
+                                     } else if ("conf".equals(qName)) {
+                                         // copy
+                                         if (!_first) {
+@@ -181,6 +208,10 @@ public void startElement(String uri, String localName,
+                         if (_defaultConfMapping != null && attributes.getValue("defaultconfmapping") == null) {
+                             out.print(" defaultconfmapping=\""+_defaultConfMapping+"\"");
+                         }
++                        // add confmappingoverride if needed
++                        if (_confMappingOverride != null && attributes.getValue("confmappingoverride") == null) {
++                           out.print(" confmappingoverride=\""+_confMappingOverride.toString()+"\"");
++                        }
+                     } else {
+                         // copy
+                         out.print("<"+qName);
+@@ -260,19 +291,10 @@ public void startEntity(String name) throws SAXException {
+ 				public void startDTD(String name, String publicId, String systemId) throws SAXException {
+ 				}
+             });
+-        } catch (IOException ex) {
+-            throw ex;
+         } catch (ParserConfigurationException e) {
+-            IllegalStateException ise = new IllegalStateException("impossible to update "+srcURL+": parser problem");
++            IllegalStateException ise = new IllegalStateException("impossible to update Ivy files: parser problem");
+             ise.initCause(e);
+             throw ise;
+-        } finally {
+-            if (fos != null) {
+-                try {
+-                    fos.close();
+-                } catch (IOException e) {
+-                }
+-            }
+         }
+     }
+     
+@@ -281,13 +303,13 @@ public void startDTD(String name, String publicId, String systemId) throws SAXEx
+      * In fact, copies everything before <ivy-module to out, except
+      * if <ivy-module is not found, in which case nothing is copied.
+      * 
+-     * @param srcURL
++     * @param in
+      * @param out
+      * @throws IOException
+      */
+-    private static void copyHeader(URL srcURL, PrintWriter out) throws IOException {
++    private static void copyHeader(InputStream in, PrintWriter out) throws IOException {
+         StringBuffer buf = new StringBuffer();
+-        BufferedReader r = new BufferedReader(new InputStreamReader(srcURL.openStream()));
++        BufferedReader r = new BufferedReader(new InputStreamReader(in));
+         for (String line = r.readLine(); line != null; line = r.readLine()) {
+             int index = line.indexOf("<ivy-module");
+             if (index == -1) {
+@@ -298,6 +320,6 @@ private static void copyHeader(URL srcURL, PrintWriter out) throws IOException {
+                 break;
+             }
+         }
+-        r.close();
++        //r.close();
+     }
+ }
+diff --git a/src/java/fr/jayasoft/ivy/xml/ivy.xsd b/src/java/fr/jayasoft/ivy/xml/ivy.xsd
+index 25fd41ef8..e1a1f8441 100644
+--- a/src/java/fr/jayasoft/ivy/xml/ivy.xsd
++++ b/src/java/fr/jayasoft/ivy/xml/ivy.xsd
+@@ -183,6 +183,7 @@
+ 				        </xs:sequence>
+ 						<xs:attribute name="defaultconf" type="xs:string"/>				        
+ 						<xs:attribute name="defaultconfmapping" type="xs:string"/>				        
++                        <xs:attribute name="confmappingoverride" type="xs:boolean" />
+ 			      </xs:complexType>
+       		</xs:element>
+       		<xs:element name="conflicts" minOccurs="0">
+diff --git a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+index beb4d9626..b098cae2a 100644
+--- a/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
++++ b/test/java/fr/jayasoft/ivy/xml/XmlModuleDescriptorParserTest.java
+@@ -15,6 +15,7 @@
+ import fr.jayasoft.ivy.Artifact;
+ import fr.jayasoft.ivy.Configuration;
+ import fr.jayasoft.ivy.ConflictManager;
++import fr.jayasoft.ivy.DefaultModuleDescriptor;
+ import fr.jayasoft.ivy.DependencyDescriptor;
+ import fr.jayasoft.ivy.Ivy;
+ import fr.jayasoft.ivy.License;
+@@ -561,4 +562,26 @@ public void testImportConfigurationsWithExtendOtherConfigs() throws Exception {
+         assertEquals(Arrays.asList(new String[] {"default", "test", "extra"}), Arrays.asList(allPublicExt));
+     }
+     
++    public void testImportConfigurationsWithMappingOverride() throws Exception {
++        // import configurations and default mapping
++        ModuleDescriptor md = XmlModuleDescriptorParser.getInstance().parseDescriptor(_ivy, getClass().getResource("test-configurations-import4.xml"), true);
++        assertNotNull(md);
++        
++        // has 2 dependencies
++        DependencyDescriptor[] dependencies = md.getDependencies();
++        assertNotNull(dependencies);
++        assertEquals(2, dependencies.length);
++        
++        // confs dep1: conf1->A;conf2->B (mappingoverride = true)
++        DependencyDescriptor dd = getDependency(dependencies, "mymodule1");
++        assertEquals(Arrays.asList(new String[] {"conf2", "conf1"}), Arrays.asList(dd.getModuleConfigurations()));
++        assertEquals(Arrays.asList(new String[] {"A"}), Arrays.asList(dd.getDependencyConfigurations("conf1"))); 
++        assertEquals(Arrays.asList(new String[] {"B"}), Arrays.asList(dd.getDependencyConfigurations("conf2")));  
++        
++        // confs dep2: conf2->B
++        dd = getDependency(dependencies, "mymodule2");
++        assertEquals(Arrays.asList(new String[] {"conf2"}), Arrays.asList(dd.getModuleConfigurations()));
++        assertEquals(Arrays.asList(new String[] {"B"}), Arrays.asList(dd.getDependencyConfigurations("conf2")));  
++    }
++    
+ }
+diff --git a/test/java/fr/jayasoft/ivy/xml/XmlModuleUpdaterTest.java b/test/java/fr/jayasoft/ivy/xml/XmlModuleUpdaterTest.java
+index 92a60846e..bce05722c 100644
+--- a/test/java/fr/jayasoft/ivy/xml/XmlModuleUpdaterTest.java
++++ b/test/java/fr/jayasoft/ivy/xml/XmlModuleUpdaterTest.java
+@@ -6,9 +6,11 @@
+ package fr.jayasoft.ivy.xml;
+ 
+ import java.io.BufferedReader;
++import java.io.ByteArrayOutputStream;
+ import java.io.File;
+ import java.io.FileReader;
+ import java.io.InputStreamReader;
++import java.util.Date;
+ import java.util.GregorianCalendar;
+ import java.util.HashMap;
+ import java.util.Map;
+@@ -49,4 +51,17 @@ public void testUpdate() throws Exception {
+         String updated = FileUtil.readEntirely(new BufferedReader(new FileReader(dest)));
+         assertEquals(expected, updated);
+     }
++    
++    public void testUpdateWithImportedMappingOverride() throws Exception {
++       ByteArrayOutputStream buffer = new ByteArrayOutputStream();
++        XmlModuleDescriptorUpdater.update(new Ivy(), 
++                XmlModuleUpdaterTest.class.getResourceAsStream("test-configurations-import4.xml"), 
++                buffer, new HashMap(), "release", "mynewrev", new Date(), null, true);
++       
++        String updatedXml = buffer.toString();
++        
++        // just make sure that 'confmappingoverride="true"' is declared somewhere in the XML.
++        assertTrue("Updated XML doesn't define the confmappingoverride attribute", updatedXml.indexOf("confmappingoverride=\"true\"") != -1);
++    }
++    
+ }
+diff --git a/test/java/fr/jayasoft/ivy/xml/imported-configurations-with-mappingoverride.xml b/test/java/fr/jayasoft/ivy/xml/imported-configurations-with-mappingoverride.xml
+new file mode 100644
+index 000000000..831726d85
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/xml/imported-configurations-with-mappingoverride.xml
+@@ -0,0 +1,4 @@
++<configurations confmappingoverride="true" defaultconfmapping="conf1->A;conf2->B">
++	<conf name="conf1" visibility="public"/>
++	<conf name="conf2" extends="conf1"/>
++</configurations>
+diff --git a/test/java/fr/jayasoft/ivy/xml/test-configurations-import4.xml b/test/java/fr/jayasoft/ivy/xml/test-configurations-import4.xml
+new file mode 100644
+index 000000000..eeef273a8
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/xml/test-configurations-import4.xml
+@@ -0,0 +1,15 @@
++<ivy-module version="1.0">
++	<info organisation="myorg"
++	       module="mymodule"
++	       revision="myrev"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++	<configurations>
++		<include file="test/java/fr/jayasoft/ivy/xml/imported-configurations-with-mappingoverride.xml"/>
++	</configurations>
++	<dependencies>
++		<dependency name="mymodule1" rev="1.0" conf="conf1"/>
++		<dependency name="mymodule2" rev="2.0" conf="conf2"/>
++	</dependencies>
++</ivy-module>

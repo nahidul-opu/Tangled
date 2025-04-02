@@ -1,0 +1,165 @@
+From f055009ddb930d7e1906780f6ba23546a2141bef Mon Sep 17 00:00:00 2001
+From: Aaron Smuts <asmuts@apache.org>
+Date: Wed, 12 Aug 2009 14:31:06 +0000
+Subject: [PATCH] Fixed JCS-67:  The partial key removal was adding dupes to
+ the recyule bin.  This lead to different keys pointing to the same spot on
+ disk.
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/jcs/trunk@803533 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../disk/indexed/IndexedDiskCache.java        | 16 ++++++++++----
+ .../disk/indexed/IndexDiskCacheUnitTest.java  | 21 +++++++++++--------
+ xdocs/changes.xml                             |  6 ++++++
+ 3 files changed, 30 insertions(+), 13 deletions(-)
+
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+index 6d2c11a19..6f5ae7058 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+@@ -714,6 +714,7 @@ private ICacheElement readElement( Serializable key )
+             try
+             {
+                 object = (ICacheElement) dataFile.readObject( ded );
++                // TODO consider checking key equality and throwing if there is a failure
+             }
+             catch ( IOException e )
+             {
+@@ -862,8 +863,8 @@ private boolean performPartialKeyRemoval( String key )
+         while ( itToRemove.hasNext() )
+         {
+             String fullKey = (String) itToRemove.next();
+-            IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.get( fullKey );
+-            addToRecycleBin( ded );
++            // Don't add to recycle bin here
++            // https://issues.apache.org/jira/browse/JCS-67
+             performSingleKeyRemoval( fullKey );
+             removed = true;
+             // TODO this needs to update the remove count separately
+@@ -906,8 +907,8 @@ private boolean performGroupRemoval( GroupId key )
+         while ( itToRemove.hasNext() )
+         {
+             GroupAttrName keyToRemove = (GroupAttrName) itToRemove.next();
+-            IndexedDiskElementDescriptor ded = (IndexedDiskElementDescriptor) keyHash.get( keyToRemove );
+-            addToRecycleBin( ded );
++            // Don't add to recycle bin here
++            // https://issues.apache.org/jira/browse/JCS-67            
+             performSingleKeyRemoval( keyToRemove );
+             removed = true;
+         }
+@@ -1146,6 +1147,13 @@ else if ( isShutdownOptimizationEnabled && this.getBytesFree() > 0 )
+      * Add descriptor to recycle bin if it is not null. Adds the length of the item to the bytes
+      * free.
+      * <p>
++     * This is called in three places: (1) When an item is removed. All item removals funnel down to
++     * the removeSingleItem method. (2) When an item on disk is updated with a value that will not
++     * fit in the previous slot. (3) When the max key size is reached, the freed slot will be added.
++     * <p>
++     * The recylebin is not a set. If a slot it added twice, it will result in the wrong data being
++     * returned.
++     * <p>
+      * @param ded
+      */
+     private void addToRecycleBin( IndexedDiskElementDescriptor ded )
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
+index ca6b7a3af..640686cc5 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
+@@ -462,6 +462,7 @@ public void testBytesFreeSize()
+ 
+     /**
+      * Add some items to the disk cache and then remove them one by one.
++     * <p>
+      * @throws IOException
+      */
+     public void testRemove_PartialKey()
+@@ -499,6 +500,9 @@ public void testRemove_PartialKey()
+             ICacheElement element = disk.processGet( i + ":key" );
+             assertNull( "Should not have recevied an element.", element );
+         }
++        // https://issues.apache.org/jira/browse/JCS-67
++        assertEquals( "Recylenbin should not have more elements than we removed. Check for JCS-67", cnt, disk
++            .getRecyleBinSize() );
+     }
+ 
+     /**
+@@ -918,12 +922,12 @@ public void testProcessUpdate_SameKeySameSize()
+         // DO WORK
+         diskCache.processUpdate( ce1 );
+         long fileSize1 = diskCache.getDataFileSize();
+-        
++
+         // DO WORK
+         ICacheElement ce2 = new CacheElement( cacheName, key, value );
+         diskCache.processUpdate( ce2 );
+         ICacheElement result = diskCache.processGet( key );
+-        
++
+         // VERIFY
+         assertNotNull( "Should have a result", result );
+         long fileSize2 = diskCache.getDataFileSize();
+@@ -931,7 +935,7 @@ public void testProcessUpdate_SameKeySameSize()
+         int binSize = diskCache.getRecyleBinSize();
+         assertEquals( "Should be nothing in the bin.", 0, binSize );
+     }
+-    
++
+     /**
+      * Verify the item makes it to disk.
+      * <p>
+@@ -956,12 +960,12 @@ public void testProcessUpdate_SameKeySmallerSize()
+         // DO WORK
+         diskCache.processUpdate( ce1 );
+         long fileSize1 = diskCache.getDataFileSize();
+-        
++
+         // DO WORK
+         ICacheElement ce2 = new CacheElement( cacheName, key, value2 );
+         diskCache.processUpdate( ce2 );
+         ICacheElement result = diskCache.processGet( key );
+-        
++
+         // VERIFY
+         assertNotNull( "Should have a result", result );
+         long fileSize2 = diskCache.getDataFileSize();
+@@ -969,8 +973,7 @@ public void testProcessUpdate_SameKeySmallerSize()
+         int binSize = diskCache.getRecyleBinSize();
+         assertEquals( "Should be nothing in the bin.", 0, binSize );
+     }
+-    
+-    
++
+     /**
+      * Verify that the old slot gets in the recycle bin.
+      * <p>
+@@ -995,12 +998,12 @@ public void testProcessUpdate_SameKeyBiggerSize()
+         // DO WORK
+         diskCache.processUpdate( ce1 );
+         long fileSize1 = diskCache.getDataFileSize();
+-        
++
+         // DO WORK
+         ICacheElement ce2 = new CacheElement( cacheName, key, value2 );
+         diskCache.processUpdate( ce2 );
+         ICacheElement result = diskCache.processGet( key );
+-        
++
+         // VERIFY
+         assertNotNull( "Should have a result", result );
+         long fileSize2 = diskCache.getDataFileSize();
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index ec01bfd1d..e41e3f8cd 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -19,6 +19,12 @@
+ 		<author email="asmuts@apache.org">Aaron Smuts</author>
+ 	</properties>
+ 	<body>
++		<release version="1.3.3.5" date="2009-08-12" description="tempbuild">
++			<action dev="asmuts" type="fix" issue="JCS-67">Fixed bug in
++				indexed disk cache. Partial key removal was adding duplicates in the
++				recycle bin. This lead to the multiple keys pointing to the same spot
++				on disk.</action>
++		</release>
+ 		<release version="1.3.3.4" date="2009-08-11" description="tempbuild">
+ 			<action dev="asmuts" type="fix" issue="JCS-66">Fixed bug in block
+ 				disk cache. It couldn't handle items with more than 127 blocks. Now

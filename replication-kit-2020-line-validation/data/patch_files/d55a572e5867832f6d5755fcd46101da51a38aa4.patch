@@ -1,0 +1,82 @@
+From d55a572e5867832f6d5755fcd46101da51a38aa4 Mon Sep 17 00:00:00 2001
+From: Addisu Feyissa <addisu.feyissa@C1159.local>
+Date: Tue, 10 Oct 2017 16:20:55 -0700
+Subject: [PATCH] PARQUET-1133 Add int96 support by returning bytearray, Skip
+ originalType comparison for map types when originalType is null
+
+- PigSchemaConverter: Added a null check before comparing a mapKeyValueType's original type with the static constant
+- PigSchemaConverter: Changed the handling of int96 types - return bytearray instead of rejecting input
+- PigSchemaConverterTest: Added unit tests for int96 conversion and handling map entries without original type specified
+
+Author: Addisu Feyissa <addisu.feyissa@C1159.local>
+
+Closes #422 from adisu-feyissa/hotfix/remove_originalType_check_for_maps_and_add_int96_support and squashes the following commits:
+
+e6fa3444 [Addisu Feyissa] - PigSchemaConverter: Added a null check before comparing a mapKeyValueType's original type with the static constant - PigSchemaConverter: Changed the handling of int96 types - return bytearray instead of rejecting input - PigSchemaConverTest: Added unit tests for int96 conversion and handling map entries without original type specified
+---
+ .../parquet/pig/PigSchemaConverter.java       |  5 ++--
+ .../parquet/pig/TestPigSchemaConverter.java   | 28 +++++++++++++++++++
+ 2 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/parquet-pig/src/main/java/org/apache/parquet/pig/PigSchemaConverter.java b/parquet-pig/src/main/java/org/apache/parquet/pig/PigSchemaConverter.java
+index e560e42585..cf995346e7 100644
+--- a/parquet-pig/src/main/java/org/apache/parquet/pig/PigSchemaConverter.java
++++ b/parquet-pig/src/main/java/org/apache/parquet/pig/PigSchemaConverter.java
+@@ -239,7 +239,8 @@ public FieldSchema convertINT64(PrimitiveTypeName primitiveTypeName)
+       @Override
+       public FieldSchema convertINT96(PrimitiveTypeName primitiveTypeName)
+           throws FrontendException {
+-        throw new FrontendException("NYI");
++        LOG.warn("Converting type " + primitiveTypeName + " to bytearray");
++        return new FieldSchema(fieldName, null, DataType.BYTEARRAY);
+       }
+ 
+       @Override
+@@ -283,7 +284,7 @@ private FieldSchema getComplexFieldSchema(String fieldName, Type parquetType)
+         }
+         GroupType mapKeyValType = parquetGroupType.getType(0).asGroupType();
+         if (!mapKeyValType.isRepetition(Repetition.REPEATED) ||
+-            !mapKeyValType.getOriginalType().equals(OriginalType.MAP_KEY_VALUE) ||
++            (mapKeyValType.getOriginalType() != null && !mapKeyValType.getOriginalType().equals(OriginalType.MAP_KEY_VALUE)) ||
+             mapKeyValType.getFieldCount()!=2) {
+           throw new SchemaConversionException("Invalid map type " + parquetGroupType);
+         }
+diff --git a/parquet-pig/src/test/java/org/apache/parquet/pig/TestPigSchemaConverter.java b/parquet-pig/src/test/java/org/apache/parquet/pig/TestPigSchemaConverter.java
+index 1fe0ccd818..646e117e8d 100644
+--- a/parquet-pig/src/test/java/org/apache/parquet/pig/TestPigSchemaConverter.java
++++ b/parquet-pig/src/test/java/org/apache/parquet/pig/TestPigSchemaConverter.java
+@@ -243,6 +243,34 @@ public void testMapWithFixed() throws Exception {
+         "a:bytearray, b:[(c:bytearray, d:bytearray)]");
+   }
+ 
++  @Test
++  public void testMapWithFixedWithoutOriginalType() throws Exception {
++    testFixedConversion(
++      "message spark_schema {\n" +
++      "  optional binary a;\n" +
++      "  optional group b (MAP) {\n" +
++      "    repeated group map {\n" +
++      "      required binary key;\n" +
++      "      optional group value {\n" +
++      "        optional fixed_len_byte_array(5) c;\n" +
++      "        optional fixed_len_byte_array(7) d;\n" +
++      "      }\n" +
++      "    }\n" +
++      "  }\n" +
++      "}\n",
++      "a:bytearray, b:[(c:bytearray, d:bytearray)]");
++  }
++
++  @Test
++  public void testInt96() throws Exception {
++    testFixedConversion(
++      "message spark_schema {\n" +
++        "  optional int96 datetime;\n" +
++        "}",
++      "datetime:bytearray"
++    );
++  }
++
+   @Test
+   public void testAnnonymousField() throws Exception {
+     testConversion(

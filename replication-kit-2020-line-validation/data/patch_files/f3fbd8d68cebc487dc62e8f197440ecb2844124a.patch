@@ -1,0 +1,150 @@
+From f3fbd8d68cebc487dc62e8f197440ecb2844124a Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 30 Mar 2006 10:48:29 +0000
+Subject: [PATCH] FIX: retrieval of mulitple artifacts in different
+ configurations does not work as expected (IVY-188)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484253 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ src/java/fr/jayasoft/ivy/IvyNode.java         | 14 ++++++++++-
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 24 +++++++++++++++++++
+ .../1/org6/mod6.1/ivys/ivy-0.6.xml            | 11 +++++++++
+ .../1/org6/mod6.1/jars/mod6.1-0.6.jar         |  1 +
+ .../1/org6/mod6.2/ivys/ivy-0.6.xml            | 17 +++++++++++++
+ 6 files changed, 67 insertions(+), 1 deletion(-)
+ create mode 100644 test/repositories/1/org6/mod6.1/ivys/ivy-0.6.xml
+ create mode 100644 test/repositories/1/org6/mod6.1/jars/mod6.1-0.6.jar
+ create mode 100644 test/repositories/1/org6/mod6.2/ivys/ivy-0.6.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index c342891de..cded2104f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,3 +1,4 @@
++- FIX: retrieval of mulitple artifacts in different configurations does not work as expected (IVY-188)
+ - FIX: configuration http url include doesn't work with commons http client (IVY-203)
+ - FIX: problem with conflict resolution in transitive dependencies (IVY-199)
+ - FIX: pb with force when it comes after a conflict has already been solved (IVY-193)
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 90de8e0cf..4cf8f54d5 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -607,6 +607,11 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+                             if (resolved != null) {
+                                 // exact revision has already been resolved
+                                 // => update it and discard this node
++                                _md = _module.getDescriptor(); // needed for handleConfiguration
++                                if (!handleConfiguration(loaded, conf, shouldBePublic)) {
++                                    return false;
++                                }
++                                
+                                 resolved._downloaded |= _module.isDownloaded();
+                                 resolved._searched |= _module.isSearched();
+                                 resolved.markSelected(_rootModuleConf);
+@@ -617,6 +622,13 @@ public boolean loadData(String conf, boolean shouldBePublic) {
+                                     resolved.addDependencyArtifactsIncludes(_rootModuleConf, dd.getDependencyArtifactsIncludes(getParentConf()));
+                                 }
+                                 _data.register(getId(), resolved); // this actually discards the node
++
++                                if (_data.getIvy().logResolvedRevision()) {
++                                    Message.info("\t["+_module.getId().getRevision()+"] "+getId());
++                                } else {
++                                    Message.verbose("\t["+_module.getId().getRevision()+"] "+getId());
++                                }
++                                
+                                 return true;
+                             }
+                         }
+@@ -681,8 +693,8 @@ private boolean isRootModuleConfLoaded() {
+     }
+ 
+     private boolean handleConfiguration(boolean loaded, String conf, boolean shouldBePublic) {
+-        String[] confs = getRealConfs(conf);
+         if (_md != null) {
++            String[] confs = getRealConfs(conf);
+             for (int i = 0; i < confs.length; i++) {
+                 Configuration c = _md.getConfiguration(confs[i]);
+                 if (c == null) {
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 6af8c26b8..05e755c6c 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -290,6 +290,30 @@ public void testResolveMultipleExtends() throws Exception {
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testResolveMultipleConfsWithLatest() throws Exception {
++        // Test case for IVY-188
++        //
++        // mod6.2  has two confs compile and run
++        //    depends on mod6.1     in conf (compile->default)
++        //    depends on mod1.2 latest (which is 2.2) in conf (run->default)
++        // mod6.1 
++        //    depends on mod1.2 2.2
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org6/mod6.2/ivys/ivy-0.6.xml").toURL(),
++                null, new String[] {"compile", "run"}, _cache, null, true);
++        assertNotNull(report);
++        assertFalse(report.hasError());
++
++        ConfigurationResolveReport crr = report.getConfigurationReport("compile");
++        assertNotNull(crr);
++        assertEquals(2, crr.getArtifactsNumber());
++        crr = report.getConfigurationReport("run");
++        assertNotNull(crr);
++        assertEquals(1, crr.getArtifactsNumber());
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.2")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.2", "mod1.2", "jar", "jar").exists());
++    }
++
+     public void testResolveMultipleConfsWithConflicts() throws Exception {
+         // Test case for IVY-173
+         //
+diff --git a/test/repositories/1/org6/mod6.1/ivys/ivy-0.6.xml b/test/repositories/1/org6/mod6.1/ivys/ivy-0.6.xml
+new file mode 100644
+index 000000000..c4c0722e2
+--- /dev/null
++++ b/test/repositories/1/org6/mod6.1/ivys/ivy-0.6.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org6"
++	       module="mod6.1"
++	       revision="0.6"
++	       status="integration"
++	       publication="20050312110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.2"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org6/mod6.1/jars/mod6.1-0.6.jar b/test/repositories/1/org6/mod6.1/jars/mod6.1-0.6.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org6/mod6.1/jars/mod6.1-0.6.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org6/mod6.2/ivys/ivy-0.6.xml b/test/repositories/1/org6/mod6.2/ivys/ivy-0.6.xml
+new file mode 100644
+index 000000000..b935449cd
+--- /dev/null
++++ b/test/repositories/1/org6/mod6.2/ivys/ivy-0.6.xml
+@@ -0,0 +1,17 @@
++<ivy-module version="1.0">
++	<info organisation="org6"
++	       module="mod6.2"
++	       revision="0.6"
++	       status="integration"
++	       publication="20050312110000"
++	/>
++	<configurations>
++    	<conf name="compile"/>
++    	<conf name="run"/>
++	</configurations>
++	<publications />
++	<dependencies>
++		<dependency org="org6" name="mod6.1" rev="0.6" conf="compile->default"/>
++		<dependency org="org1" name="mod1.2" rev="latest.integration" conf="run->default"/>
++	</dependencies>
++</ivy-module>

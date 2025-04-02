@@ -1,0 +1,340 @@
+From e322b36109170fea52f6128753d61638771d0705 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 29 Sep 2005 06:33:18 +0000
+Subject: [PATCH] IVY-85: change the way to store resolved master ivy files in
+ cache
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484041 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  6 +++
+ src/java/fr/jayasoft/ivy/Ivy.java             | 14 +++--
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 53 +++++++++----------
+ .../fr/jayasoft/ivy/ant/IvyResolveTest.java   |  2 +-
+ 4 files changed, 43 insertions(+), 32 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index db66ed0bf..3e6fc6371 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,3 +1,9 @@
++- FIX: changed the place where ivy stores master ivy files in cache to not overlap
++       with dependencies one (IVY-85)
++- FIX: bug in ResourceHelper didn't let override resource easily (IVY-80)
++- FIX: throws a circular dependency exception when a circular dependency is found 
++       instead of failing silently (IVY-79)
++
+    version 1.2a - 2005-09-14
+ ===============================
+ Note : version 1.2 previously published on ivy site was not the real 1.2 due to a bad release operation
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index 0e38109ee..ea5191838 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -87,6 +87,7 @@ public class Ivy implements TransferListener {
+ 
+     private static final String DEFAULT_CACHE_ARTIFACT_PATTERN = "[organisation]/[module]/[type]s/[artifact]-[revision].[ext]";
+     private static final String DEFAULT_CACHE_IVY_PATTERN = "[organisation]/[module]/ivy-[revision].xml";
++    private static final String DEFAULT_CACHE_RESOLVED_IVY_PATTERN = "resolved-[organisation]-[module]-[revision].xml";
+     
+     private Map _typeDefs = new HashMap();
+     private Map _resolversMap = new HashMap();
+@@ -106,6 +107,7 @@ public class Ivy implements TransferListener {
+     private ReportOutputter[] _reportOutputters = new ReportOutputter[] {new LogReportOutputter(), new XmlReportOutputter()};
+     
+     private String _cacheIvyPattern = DEFAULT_CACHE_IVY_PATTERN;
++    private String _cacheResolvedIvyPattern = DEFAULT_CACHE_RESOLVED_IVY_PATTERN;
+     private String _cacheArtifactPattern = DEFAULT_CACHE_ARTIFACT_PATTERN;
+ 
+     private boolean _validate = true;
+@@ -663,8 +665,8 @@ public ResolveReport resolve(URL ivySource, String revision, String[] confs, Fil
+                 }
+             }
+             
+-            // produce resolved ivy conf file in cache
+-            File ivyFileInCache = getIvyFileInCache(cache, md.getResolvedModuleRevisionId());
++            // produce resolved ivy file in cache
++            File ivyFileInCache = getResolvedIvyFileInCache(cache, md.getResolvedModuleRevisionId());
+             try {
+                 XmlModuleDescriptorUpdater.update(
+                         ivySource, 
+@@ -1164,7 +1166,7 @@ public void deliver(ModuleRevisionId mrid,
+         destIvyPattern = substitute(destIvyPattern);
+         
+ 	    // 1) find the resolved module descriptor in cache
+-	    File ivyFile = getIvyFileInCache(cache, mrid);
++	    File ivyFile = getResolvedIvyFileInCache(cache, mrid);
+ 	    if (!ivyFile.exists()) {
+ 	        throw new IllegalStateException("ivy file not found in cache for "+mrid+": please resolve dependencies before publishing ("+ivyFile+")");
+ 	    }
+@@ -1225,7 +1227,7 @@ public Collection publish(ModuleRevisionId mrid, String pubrevision, File cache,
+         srcArtifactPattern = substitute(srcArtifactPattern);
+         srcIvyPattern = substitute(srcIvyPattern);
+         // 1) find the resolved module descriptor in cache
+-        File ivyFile = getIvyFileInCache(cache, mrid);
++        File ivyFile = getResolvedIvyFileInCache(cache, mrid);
+         if (!ivyFile.exists()) {
+             throw new IllegalStateException("ivy file not found in cache for "+mrid+": please resolve dependencies before publishing ("+ivyFile+")");
+         }
+@@ -1310,6 +1312,10 @@ public static List sortModuleDescriptors(Collection moduleDescriptors) {
+     //                         CACHE
+     /////////////////////////////////////////////////////////////////////////
+     
++    public File getResolvedIvyFileInCache(File cache, ModuleRevisionId mrid) {
++        return new File(cache, IvyPatternHelper.substitute(_cacheResolvedIvyPattern, mrid.getOrganisation(), mrid.getName(), mrid.getRevision(), "ivy", "ivy", "xml"));
++    }
++
+     public File getIvyFileInCache(File cache, ModuleRevisionId mrid) {
+         return new File(cache, IvyPatternHelper.substitute(_cacheIvyPattern, mrid.getOrganisation(), mrid.getName(), mrid.getRevision(), "ivy", "ivy", "xml"));
+     }
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index bbbe58320..843310500 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -66,7 +66,7 @@ public void testResolveSimple() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org1", "mod1.1", "1.0");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
+@@ -88,8 +88,7 @@ public void testChangeCacheLayout() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org1", "mod1.1", "1.0");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(ivy.getIvyFileInCache(_cache, mrid).exists());
+-        assertTrue(new File(_cache, "mod1.1/ivy.xml").exists());
++        assertTrue(ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
+@@ -108,7 +107,7 @@ public void testResolveExtends() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org6", "mod6.1", "0.3");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies from default
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
+@@ -125,7 +124,7 @@ public void testResolveExtended() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org6", "mod6.1", "0.3");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies from default
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
+@@ -148,7 +147,7 @@ public void testResolveExtendedAndExtends() throws Exception {
+         assertNotNull(crr);
+         assertEquals(1, crr.getArtifactsNumber());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+@@ -164,7 +163,7 @@ public void testResolveDefaultWithArtifactsConf1() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.2", "0.5");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.3", "3.0")).exists());
+@@ -183,7 +182,7 @@ public void testResolveDefaultWithArtifactsConf2() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.2", "0.5");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.3", "3.0")).exists());
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.3", "3.0", "mod1.3-A", "jar", "jar").exists());
+@@ -201,7 +200,7 @@ public void testResolveWithDependencyArtifactsConf1() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.3", "0.4");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org2", "mod2.1", "0.3")).exists());
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
+@@ -219,7 +218,7 @@ public void testResolveWithDependencyArtifactsConf2() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.3", "0.4");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org2", "mod2.1", "0.3")).exists());
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
+@@ -237,7 +236,7 @@ public void testResolveWithDependencyArtifactsWithoutConf() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.3", "0.5");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org2", "mod2.1", "0.3")).exists());
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
+@@ -255,7 +254,7 @@ public void testResolveWithExcludesArtifacts() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.3", "0.6");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org2", "mod2.1", "0.3")).exists());
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org2", "mod2.1", "0.3", "art21A", "jar", "jar").exists());
+@@ -273,7 +272,7 @@ public void testResolveTransitiveDependencies() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.1", "0.3");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.1", "1.0")).exists());
+@@ -295,7 +294,7 @@ public void testResolveDiamond() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org4", "mod4.1", "4.0");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.1", "1.0")).exists());
+@@ -320,7 +319,7 @@ public void testResolveConflict() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org4", "mod4.1", "4.1");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         ConfigurationResolveReport crr = report.getConfigurationReport("default");
+@@ -366,7 +365,7 @@ public void testTransitiveEviction() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org7", "mod7.3", "1.0");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org7", "mod7.2", "1.0")).exists());
+@@ -393,7 +392,7 @@ public void testResolveConflictInConf() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.1", "0.4");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.1", "1.0")).exists());
+@@ -422,7 +421,7 @@ public void testEvictWithConf() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org6", "mod6.1", "1.0");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org5", "mod5.1", "4.2")).exists());
+@@ -459,7 +458,7 @@ public void testEvictWithConf2() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org6", "mod6.1", "1.1");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org5", "mod5.1", "4.2")).exists());
+@@ -490,7 +489,7 @@ public void testEvictWithConfInMultiConf() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org6", "mod6.1", "1.2");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org5", "mod5.1", "4.2")).exists());
+@@ -534,7 +533,7 @@ public void testEvictWithConfInMultiConf2() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org6", "mod6.1", "1.3");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org5", "mod5.1", "4.2")).exists());
+@@ -573,7 +572,7 @@ public void testResolveForce() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org4", "mod4.1", "4.2");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org3", "mod3.1", "1.1")).exists());
+@@ -599,7 +598,7 @@ public void testExtends() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org5", "mod5.2", "1.0");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org5", "mod5.1", "4.0")).exists());
+@@ -619,7 +618,7 @@ public void testMultiConfs() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org5", "mod5.2", "2.0");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         ModuleRevisionId depId = ModuleRevisionId.newInstance("org5", "mod5.1", "4.1");
+@@ -656,7 +655,7 @@ public void testLatest() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org1", "mod1.4", "1.0.1");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         ModuleRevisionId depId = ModuleRevisionId.newInstance("org1", "mod1.2", "2.2");
+@@ -790,7 +789,7 @@ public void testTransitiveSetting() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.4", "0.3");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(_ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.1", "1.0")).exists());
+@@ -814,7 +813,7 @@ public void testResolverDirectlyUsingCache() throws Exception {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance("org2", "mod2.4", "0.3");
+         assertEquals(mrid, md.getModuleRevisionId());
+         
+-        assertTrue(ivy.getIvyFileInCache(_cache, mrid).exists());
++        assertTrue(ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
+         
+         // dependencies
+         assertTrue(depIvyFileInCache.exists());
+diff --git a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+index 0312d9996..bde5c83be 100644
+--- a/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ant/IvyResolveTest.java
+@@ -50,7 +50,7 @@ public void testSimple() throws Exception {
+         _resolve.setFile(new File("test/java/fr/jayasoft/ivy/ant/ivy-simple.xml"));
+         _resolve.execute();
+         
+-        assertTrue(getIvy().getIvyFileInCache(_cache, ModuleRevisionId.newInstance("jayasoft", "resolve-simple", "1.0")).exists());
++        assertTrue(getIvy().getResolvedIvyFileInCache(_cache, ModuleRevisionId.newInstance("jayasoft", "resolve-simple", "1.0")).exists());
+         
+         // dependencies
+         assertTrue(getIvy().getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());

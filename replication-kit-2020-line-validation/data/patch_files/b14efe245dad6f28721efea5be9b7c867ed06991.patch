@@ -1,0 +1,170 @@
+From b14efe245dad6f28721efea5be9b7c867ed06991 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 30 May 2006 13:03:03 +0000
+Subject: [PATCH] IMPROVE: report Ant-task doesn't process the reports in batch
+ (IVY-247) FIX: report Ant-task doesn't use outputpattern for generating
+ graphml reports (IVY-246)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484347 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                 |  2 +
+ src/java/fr/jayasoft/ivy/ant/IvyReport.java | 87 +++++++++++++--------
+ 2 files changed, 56 insertions(+), 33 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e08eb0632..21786c013 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -49,6 +49,7 @@ Changes:
+   - NEW: add option to cachepath task to create a path with local artifact paths (IVY-221)
+   - NEW: allow extending configurations to override the mapping of their super configurations (IVY-218)
+ 
++  - IMPROVE: report Ant-task doesn't process the reports in batch (IVY-247)
+   - IMPROVE: make ReportOutputter pluggable and customizable (IVY-205)
+   - IMPROVE: add wildcard support for extending configurations (IVY-235)
+   - IMPROVE: add support for xslt parameters in the report task (IVY-227)
+@@ -56,6 +57,7 @@ Changes:
+   - IMPROVE: add sort of 'fallback'-mapping to the defaultconfmapping attribute (IVY-215)
+   - IMPROVE: artifact origin is not included in the default report (IVY-251)
+ 
++  - FIX: report Ant-task doesn't use outputpattern for generating graphml reports (IVY-246)
+   - FIX: report Ant-task doesn't call init() on the internal XSLTProcess (IVY-248)
+   - FIX: value of confmappingoverride from imported configurations is lost when writing Ivy file (IVY-239)
+   - FIX: including configurations doesn't import the confmappingoverride setting (IVY-238)
+diff --git a/src/java/fr/jayasoft/ivy/ant/IvyReport.java b/src/java/fr/jayasoft/ivy/ant/IvyReport.java
+index 41a58e66d..dbe56a2e8 100644
+--- a/src/java/fr/jayasoft/ivy/ant/IvyReport.java
++++ b/src/java/fr/jayasoft/ivy/ant/IvyReport.java
+@@ -13,6 +13,9 @@
+ 
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.taskdefs.XSLTProcess;
++import org.apache.tools.ant.types.Mapper;
++import org.apache.tools.ant.util.FileNameMapper;
++import org.apache.tools.ant.util.GlobPatternMapper;
+ 
+ import fr.jayasoft.ivy.Ivy;
+ import fr.jayasoft.ivy.ModuleId;
+@@ -129,54 +132,61 @@ public void execute() throws BuildException {
+         }
+         try {
+             String[] confs = splitConfs(_conf);
+-            for (int i = 0; i < confs.length; i++) {
+-                if (_xsl) {
+-                    genreport(ivy, _cache, _organisation, _module, confs[i]);
+-                }
+-                if (_xml) {
+-                    genxml(ivy, _cache, _organisation, _module, confs[i]);
+-                }
+-                if (_graph) {
+-                    gengraph(ivy, _cache, _organisation, _module, confs[i]);
+-                }
++            if (_xsl) {
++                genreport(_cache, _organisation, _module, confs);
++            }
++            if (_xml) {
++                genxml(_cache, _organisation, _module, confs);
++            }
++            if (_graph) {
++                gengraph(_cache, _organisation, _module, confs);
+             }
+         } catch (IOException e) {
+             throw new BuildException("impossible to generate report", e);
+         }
+     }
+     
+-    private void genxml(Ivy ivy, File cache, String organisation, String module, String conf) throws IOException {
+-        File xml = new File(cache, XmlReportOutputter.getReportFileName(new ModuleId(organisation, module), conf));
++    private void genxml(File cache, String organisation, String module, String[] confs) throws IOException {
++    	for (int i = 0; i < confs.length; i++) {
++	        File xml = new File(cache, XmlReportOutputter.getReportFileName(new ModuleId(organisation, module), confs[i]));
+ 
+-        File out;
+-        if (_todir != null) {
+-            out = new File(_todir, IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", "xml", conf));
+-        } else {
+-            out = new File(IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", "xml", conf));
+-        }
++            File out;
++            if (_todir != null) {
++	            out = new File(_todir, IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", "xml", confs[i]));
++            } else {
++	            out = new File(IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", "xml", confs[i]));
++            }
+         
+-        FileUtil.copy(xml, out, null);
++            FileUtil.copy(xml, out, null);
++        }
+     }
+-    private void genreport(Ivy ivy, File cache, String organisation, String module, String conf) throws IOException {        
++    private void genreport(File cache, String organisation, String module, String[] confs) throws IOException {        
+         // first process the report with xslt
+         XSLTProcess xslt = new XSLTProcess();
+         xslt.setTaskName(getTaskName());
+         xslt.setProject(getProject());
+         xslt.init();
+         
+-        xslt.setIn(new File(cache, XmlReportOutputter.getReportFileName(new ModuleId(organisation, module), conf)));
+-        File out;
++    	Mapper mapper = new Mapper(getProject());
++    	xslt.addMapper(mapper);
++        
++        for (int i = 0; i < confs.length; i++) {
++        	String reportFileName = XmlReportOutputter.getReportFileName(new ModuleId(organisation, module), confs[i]);
++        	xslt.setIncludes(reportFileName);
++        	
++        	FileNameMapper reportMapper = new GlobPatternMapper();
++			reportMapper.setFrom(reportFileName);
++        	reportMapper.setTo(IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", _xslext, confs[i]));
++        	mapper.add(reportMapper);
++        }
++        
++    	xslt.setBasedir(cache);
+         if (_todir != null) {
+-            out = new File(_todir, IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", _xslext, conf));
++        	xslt.setDestdir(_todir);
+         } else {
+-            out = new File(IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", _xslext, conf));
+-        }
+-        if (out.getParentFile() != null && !out.getParentFile().exists()) {
+-            out.getParentFile().mkdirs();
+-        } else if(out.getParentFile() == null) {
+-            out = new File("./"+out.getPath());
++        	xslt.setDestdir(new File("."));
+         }
+-        xslt.setOut(out);
++        
+         xslt.setStyle(getReportStylePath(cache));
+         XSLTProcess.Param param = xslt.createParam();
+         param.setName("confs");
+@@ -218,7 +228,7 @@ private String getReportStylePath(File cache) throws IOException {
+     }
+     
+     
+-    private void gengraph(Ivy ivy, File cache, String organisation, String module, String conf) throws IOException {        
++    private void gengraph(File cache, String organisation, String module, String[] confs) throws IOException {        
+         // process the report with xslt to generate graphml
+         File out;
+         if (_todir != null) {
+@@ -234,8 +244,19 @@ private void gengraph(Ivy ivy, File cache, String organisation, String module, S
+         
+         xslt.setDestdir(out);
+         xslt.setBasedir(cache);
+-        xslt.setExtension(".graphml");
+-        xslt.setIncludes(XmlReportOutputter.getReportFileName(new ModuleId(organisation, module), conf));
++
++        Mapper mapper = new Mapper(getProject());
++    	xslt.addMapper(mapper);
++        
++        for (int i = 0; i < confs.length; i++) {
++        	String reportFileName = XmlReportOutputter.getReportFileName(new ModuleId(organisation, module), confs[i]);
++        	xslt.setIncludes(reportFileName);
++        	
++        	FileNameMapper reportMapper = new GlobPatternMapper();
++			reportMapper.setFrom(reportFileName);
++        	reportMapper.setTo(IvyPatternHelper.substitute(_outputpattern, organisation, module, "", "", "", "graphml", confs[i]));
++        	mapper.add(reportMapper);
++        }
+         xslt.setStyle(getGraphStylePath(cache));
+         xslt.execute();
+     }

@@ -1,0 +1,877 @@
+From 66310f553103e515ab41aa573aaf2e4101efa635 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 18 Mar 2008 22:13:04 +0000
+Subject: [PATCH] FIX: repreport task not working against a repository
+ structured by branches (IVY-716)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@638606 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../apache/ivy/ant/IvyRepositoryReport.java   |  29 ++-
+ .../org/apache/ivy/core/IvyPatternHelper.java |  15 ++
+ .../ivy/core/install/InstallEngine.java       |   9 +-
+ .../apache/ivy/core/search/SearchEngine.java  | 235 +++++++++++-------
+ .../plugins/resolver/AbstractResolver.java    |   4 +
+ .../resolver/AbstractResourceResolver.java    |  96 +++++++
+ .../plugins/resolver/DependencyResolver.java  |   4 +-
+ .../plugins/resolver/RepositoryResolver.java  |  13 +
+ .../ivy/ant/IvyRepositoryReportTest.java      |  83 ++++---
+ test/repositories/IVY-716/ivysettings.xml     |  27 ++
+ .../org1/branch1/mod1.1/1.0/ivy.xml.txt       |  30 +++
+ .../org1/branch1/mod1.1/1.0/mod1.1.jar        |   1 +
+ .../org1/branch2/mod1.1/1.0/ivy.xml.txt       |  30 +++
+ .../org1/branch2/mod1.1/1.0/mod1.1.jar        |   1 +
+ 15 files changed, 440 insertions(+), 138 deletions(-)
+ create mode 100644 test/repositories/IVY-716/ivysettings.xml
+ create mode 100644 test/repositories/IVY-716/org1/branch1/mod1.1/1.0/ivy.xml.txt
+ create mode 100644 test/repositories/IVY-716/org1/branch1/mod1.1/1.0/mod1.1.jar
+ create mode 100644 test/repositories/IVY-716/org1/branch2/mod1.1/1.0/ivy.xml.txt
+ create mode 100644 test/repositories/IVY-716/org1/branch2/mod1.1/1.0/mod1.1.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 2875ffddb..851a16dbd 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -73,6 +73,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Parse description and home page from poms (IVY-767)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: repreport task not working against a repository structured by branches (IVY-716)
+ - FIX: Ivy reports a conflict when the same file is supposed to be retrieved at the same location twice (or more) (IVY-743)
+ - FIX: StackOverflowError when configuration extends itself (IVY-696)
+ - FIX: XML schema ambiguity (IVY-750)
+diff --git a/src/java/org/apache/ivy/ant/IvyRepositoryReport.java b/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
+index 7a367efc0..1607c79a8 100644
+--- a/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
++++ b/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
+@@ -20,12 +20,15 @@
+ import java.io.File;
+ import java.io.IOException;
+ import java.util.ArrayList;
++import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.List;
++import java.util.Set;
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.cache.ResolutionCacheManager;
+ import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
++import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.report.ResolveReport;
+@@ -87,18 +90,24 @@ public void doExecute() throws BuildException {
+         ModuleRevisionId mrid = ModuleRevisionId.newInstance(organisation, module, revision);
+ 
+         try {
+-            ModuleId[] mids = ivy.listModules(new ModuleId(organisation, module), settings
+-                    .getMatcher(matcher));
+-            ModuleRevisionId[] mrids = new ModuleRevisionId[mids.length];
++            ModuleRevisionId criteria = null;
++            
++            if ((revision == null) || settings.getVersionMatcher().isDynamic(mrid)) {
++                criteria = new ModuleRevisionId(new ModuleId(organisation, module), branch, "*");
++            } else {
++                criteria = new ModuleRevisionId(new ModuleId(organisation, module), branch, revision);
++            }
++            
++            ModuleRevisionId[] mrids = ivy.listModules(criteria, settings.getMatcher(matcher));
++            
++            // replace all found revisions with the original requested revision
++            Set modules = new HashSet();
+             for (int i = 0; i < mrids.length; i++) {
+-                if (branch != null) {
+-                    mrids[i] = new ModuleRevisionId(mids[i], branch, revision);
+-                } else {
+-                    mrids[i] = new ModuleRevisionId(mids[i], revision);
+-                }
++                modules.add(ModuleRevisionId.newInstance(mrids[i], revision));
+             }
+-            DefaultModuleDescriptor md = DefaultModuleDescriptor.newCallerInstance(mrids, true,
+-                false);
++            
++            mrids = (ModuleRevisionId[]) modules.toArray(new ModuleRevisionId[modules.size()]);
++            ModuleDescriptor md = DefaultModuleDescriptor.newCallerInstance(mrids, true, false);
+             String resolveId = ResolveOptions.getDefaultResolveId(md);
+             ResolveReport report = ivy.resolve(md, 
+                 new ResolveOptions()
+diff --git a/src/java/org/apache/ivy/core/IvyPatternHelper.java b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+index 0a5f1a4ed..b96f42afb 100644
+--- a/src/java/org/apache/ivy/core/IvyPatternHelper.java
++++ b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+@@ -457,4 +457,19 @@ public static String getTokenRoot(String pattern) {
+             return pattern.substring(0, index);
+         }
+     }
++    
++    public static String getFirstToken(String pattern) {
++        if (pattern == null) {
++            return null;
++        }
++        int startIndex = pattern.indexOf('[');
++        if (startIndex == -1) {
++            return null;
++        }
++        int endIndex = pattern.indexOf(']', startIndex);
++        if (endIndex == -1) {
++            return null;
++        }
++        return pattern.substring(startIndex + 1, endIndex);
++    }
+ }
+diff --git a/src/java/org/apache/ivy/core/install/InstallEngine.java b/src/java/org/apache/ivy/core/install/InstallEngine.java
+index a9268b68b..988c1a4e4 100644
+--- a/src/java/org/apache/ivy/core/install/InstallEngine.java
++++ b/src/java/org/apache/ivy/core/install/InstallEngine.java
+@@ -103,12 +103,11 @@ public ResolveReport install(ModuleRevisionId mrid, String from, String to,
+                 dd.addDependencyConfiguration("default", "*");
+                 md.addDependency(dd);
+             } else {
+-                Collection mrids = searchEngine.findModuleRevisionIds(fromResolver, mrid, matcher);
++                ModuleRevisionId[] mrids = searchEngine.listModules(fromResolver, mrid, matcher);
+ 
+-                for (Iterator iter = mrids.iterator(); iter.hasNext();) {
+-                    ModuleRevisionId foundMrid = (ModuleRevisionId) iter.next();
+-                    Message.info("\tfound " + foundMrid + " to install: adding to the list");
+-                    DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(md, foundMrid,
++                for (int i = 0; i < mrids.length; i++) {
++                    Message.info("\tfound " + mrids[i] + " to install: adding to the list");
++                    DefaultDependencyDescriptor dd = new DefaultDependencyDescriptor(md, mrids[i],
+                             false, false, options.isTransitive());
+                     dd.addDependencyConfiguration("default", "*");
+                     md.addDependency(dd);
+diff --git a/src/java/org/apache/ivy/core/search/SearchEngine.java b/src/java/org/apache/ivy/core/search/SearchEngine.java
+index 7f430ed17..0a92d0532 100644
+--- a/src/java/org/apache/ivy/core/search/SearchEngine.java
++++ b/src/java/org/apache/ivy/core/search/SearchEngine.java
+@@ -23,9 +23,9 @@
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.Iterator;
+-import java.util.LinkedHashSet;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import org.apache.ivy.core.IvyPatternHelper;
+ import org.apache.ivy.core.module.id.ModuleId;
+@@ -55,90 +55,120 @@ public SearchEngine(IvySettings settings) {
+      * @return
+      */
+     public String[] listTokenValues(String token, Map otherTokenValues) {
+-        Collection r = new LinkedHashSet();
++        Set entries = new HashSet();
++        
+         for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            r.addAll(Arrays.asList(resolver.listTokenValues(token, otherTokenValues)));
++            Map[] values = resolver.listTokenValues(new String[] {token}, new HashMap());
++            for (int i = 0; i < values.length; i++) {
++                entries.add(values[i].get(token));
++            }
+         }
+-        return (String[]) r.toArray(new String[r.size()]);
++        
++        return (String[]) entries.toArray(new String[entries.size()]);
+     }
+ 
+     public OrganisationEntry[] listOrganisationEntries() {
+-        List entries = new ArrayList();
++        Set entries = new HashSet();
++
+         for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            entries.addAll(Arrays.asList(resolver.listOrganisations()));
++            Map[] orgs = resolver.listTokenValues(new String[] {IvyPatternHelper.ORGANISATION_KEY}, new HashMap());
++            for (int i = 0; i < orgs.length; i++) {
++                String org = (String) orgs[i].get(IvyPatternHelper.ORGANISATION_KEY);
++                entries.add(new OrganisationEntry(resolver, org));
++            }
+         }
++
+         return (OrganisationEntry[]) entries.toArray(new OrganisationEntry[entries.size()]);
+     }
+ 
+     public String[] listOrganisations() {
+-        Collection orgs = new HashSet();
++        Set entries = new HashSet();
++
+         for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            OrganisationEntry[] entries = resolver.listOrganisations();
+-            if (entries != null) {
+-                for (int i = 0; i < entries.length; i++) {
+-                    if (entries[i] != null) {
+-                        orgs.add(entries[i].getOrganisation());
+-                    }
+-                }
++            Map[] orgs = resolver.listTokenValues(new String[] {IvyPatternHelper.ORGANISATION_KEY}, new HashMap());
++            for (int i = 0; i < orgs.length; i++) {
++                entries.add(orgs[i].get(IvyPatternHelper.ORGANISATION_KEY));
+             }
+         }
+-        return (String[]) orgs.toArray(new String[orgs.size()]);
++
++        return (String[]) entries.toArray(new String[entries.size()]);
+     }
+ 
+     public ModuleEntry[] listModuleEntries(OrganisationEntry org) {
+-        List entries = new ArrayList();
++        Set entries = new HashSet();
++
++        Map tokenValues = new HashMap();
++        tokenValues.put(IvyPatternHelper.ORGANISATION_KEY, org.getOrganisation());
++        
+         for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            entries.addAll(Arrays.asList(resolver.listModules(org)));
++            Map[] modules = resolver.listTokenValues(new String[] {IvyPatternHelper.MODULE_KEY}, tokenValues);
++            for (int i = 0; i < modules.length; i++) {
++                String module = (String) modules[i].get(IvyPatternHelper.MODULE_KEY);
++                entries.add(new ModuleEntry(org, module));
++            }
+         }
++
+         return (ModuleEntry[]) entries.toArray(new ModuleEntry[entries.size()]);
+     }
+ 
+     public String[] listModules(String org) {
+-        List mods = new ArrayList();
++        Set entries = new HashSet();
++
++        Map tokenValues = new HashMap();
++        tokenValues.put(IvyPatternHelper.ORGANISATION_KEY, org);
++        
+         for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            ModuleEntry[] entries = resolver.listModules(new OrganisationEntry(resolver, org));
+-            if (entries != null) {
+-                for (int i = 0; i < entries.length; i++) {
+-                    if (entries[i] != null) {
+-                        mods.add(entries[i].getModule());
+-                    }
+-                }
++            Map[] modules = resolver.listTokenValues(new String[] {IvyPatternHelper.MODULE_KEY}, tokenValues);
++            for (int i = 0; i < modules.length; i++) {
++                entries.add(modules[i].get(IvyPatternHelper.MODULE_KEY));
+             }
+         }
+-        return (String[]) mods.toArray(new String[mods.size()]);
+-    }
+ 
++        return (String[]) entries.toArray(new String[entries.size()]);
++    }
++    
+     public RevisionEntry[] listRevisionEntries(ModuleEntry module) {
+-        List entries = new ArrayList();
++        Set entries = new HashSet();
++
++        Map tokenValues = new HashMap();
++        tokenValues.put(IvyPatternHelper.ORGANISATION_KEY, module.getOrganisation());
++        tokenValues.put(IvyPatternHelper.MODULE_KEY, module.getModule());
++        
+         for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            entries.addAll(Arrays.asList(resolver.listRevisions(module)));
++            Map[] revisions = resolver.listTokenValues(new String[] {IvyPatternHelper.REVISION_KEY}, tokenValues);
++            for (int i = 0; i < revisions.length; i++) {
++                String revision = (String) revisions[i].get(IvyPatternHelper.REVISION_KEY);
++                entries.add(new RevisionEntry(module, revision));
++            }
+         }
++
+         return (RevisionEntry[]) entries.toArray(new RevisionEntry[entries.size()]);
+     }
+ 
+     public String[] listRevisions(String org, String module) {
+-        List revs = new ArrayList();
++        Set entries = new HashSet();
++
++        Map tokenValues = new HashMap();
++        tokenValues.put(IvyPatternHelper.ORGANISATION_KEY, org);
++        tokenValues.put(IvyPatternHelper.MODULE_KEY, module);
++        
+         for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
+             DependencyResolver resolver = (DependencyResolver) iter.next();
+-            RevisionEntry[] entries = resolver.listRevisions(new ModuleEntry(new OrganisationEntry(
+-                    resolver, org), module));
+-            if (entries != null) {
+-                for (int i = 0; i < entries.length; i++) {
+-                    if (entries[i] != null) {
+-                        revs.add(entries[i].getRevision());
+-                    }
+-                }
++            Map[] revisions = resolver.listTokenValues(new String[] {IvyPatternHelper.REVISION_KEY}, tokenValues);
++            for (int i = 0; i < revisions.length; i++) {
++                entries.add(revisions[i].get(IvyPatternHelper.REVISION_KEY));
+             }
+         }
+-        return (String[]) revs.toArray(new String[revs.size()]);
+-    }
+ 
++        return (String[]) entries.toArray(new String[entries.size()]);
++    }
++    
+     /**
+      * List module ids of the module accessible through the current resolvers matching the given mid
+      * criteria according to the given matcher.
+@@ -147,23 +177,26 @@ public String[] listRevisions(String org, String module) {
+      * @param matcher
+      * @return
+      */
+-    public ModuleId[] listModules(ModuleId criteria, PatternMatcher matcher) {
++    public ModuleId[] listModules(ModuleId moduleCrit, PatternMatcher matcher) {
+         List ret = new ArrayList();
+-        Matcher orgMatcher = matcher.getMatcher(criteria.getOrganisation());
+-        Matcher modMatcher = matcher.getMatcher(criteria.getName());
+-        Map tokenValues = new HashMap();
+-        String[] orgs = listTokenValues(IvyPatternHelper.ORGANISATION_KEY, tokenValues);
+-        for (int i = 0; i < orgs.length; i++) {
+-            if (orgMatcher.matches(orgs[i])) {
+-                tokenValues.put(IvyPatternHelper.ORGANISATION_KEY, orgs[i]);
+-                String[] mods = listTokenValues(IvyPatternHelper.MODULE_KEY, tokenValues);
+-                for (int j = 0; j < mods.length; j++) {
+-                    if (modMatcher.matches(mods[j])) {
+-                        ret.add(new ModuleId(orgs[i], mods[j]));
+-                    }
+-                }
++
++        Map criteria = new HashMap();
++        addMatcher(matcher, moduleCrit.getOrganisation(), criteria, IvyPatternHelper.ORGANISATION_KEY);
++        addMatcher(matcher, moduleCrit.getName(), criteria, IvyPatternHelper.MODULE_KEY);
++        
++        String[] tokensToList = new String[] {IvyPatternHelper.ORGANISATION_KEY, IvyPatternHelper.MODULE_KEY};
++
++        for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
++            DependencyResolver resolver = (DependencyResolver) iter.next();
++            Map[] moduleIdAsMap = resolver.listTokenValues(tokensToList, criteria);
++            for (int i = 0; i < moduleIdAsMap.length; i++) {
++                String org = (String) moduleIdAsMap[i].get(IvyPatternHelper.ORGANISATION_KEY);
++                String name = (String) moduleIdAsMap[i].get(IvyPatternHelper.MODULE_KEY);
++                ModuleId modId = ModuleId.newInstance(org, name);
++                ret.add(modId);
+             }
+         }
++
+         return (ModuleId[]) ret.toArray(new ModuleId[ret.size()]);
+     }
+ 
+@@ -175,50 +208,68 @@ public ModuleId[] listModules(ModuleId criteria, PatternMatcher matcher) {
+      * @param matcher
+      * @return
+      */
+-    public ModuleRevisionId[] listModules(ModuleRevisionId criteria, PatternMatcher matcher) {
++    public ModuleRevisionId[] listModules(ModuleRevisionId moduleCrit, PatternMatcher matcher) {
+         List ret = new ArrayList();
+-        Matcher orgMatcher = matcher.getMatcher(criteria.getOrganisation());
+-        Matcher modMatcher = matcher.getMatcher(criteria.getName());
+-        Matcher branchMatcher = matcher.getMatcher(criteria.getBranch());
+-        Matcher revMatcher = matcher.getMatcher(criteria.getRevision());
+-        Map tokenValues = new HashMap();
+-        String[] orgs = listTokenValues(IvyPatternHelper.ORGANISATION_KEY, tokenValues);
+-        for (int i = 0; i < orgs.length; i++) {
+-            if (orgMatcher.matches(orgs[i])) {
+-                tokenValues.put(IvyPatternHelper.ORGANISATION_KEY, orgs[i]);
+-                String[] mods = listTokenValues(IvyPatternHelper.MODULE_KEY, tokenValues);
+-                for (int j = 0; j < mods.length; j++) {
+-                    if (modMatcher.matches(mods[j])) {
+-                        tokenValues.put(IvyPatternHelper.MODULE_KEY, mods[j]);
+-                        String[] branches = listTokenValues(IvyPatternHelper.BRANCH_KEY,
+-                            tokenValues);
+-                        if (branches == null || branches.length == 0) {
+-                            branches = new String[] {settings.getDefaultBranch(new ModuleId(
+-                                    orgs[i], mods[j]))};
+-                        }
+-                        for (int k = 0; k < branches.length; k++) {
+-                            if (branches[k] == null || branchMatcher.matches(branches[k])) {
+-                                tokenValues.put(IvyPatternHelper.BRANCH_KEY, tokenValues);
+-                                String[] revs = listTokenValues(IvyPatternHelper.REVISION_KEY,
+-                                    tokenValues);
+-                                for (int l = 0; l < revs.length; l++) {
+-                                    if (revMatcher.matches(revs[l])) {
+-                                        ret.add(ModuleRevisionId.newInstance(orgs[i], mods[j],
+-                                            branches[k], revs[l]));
+-                                    }
+-                                }
+-                                tokenValues.remove(IvyPatternHelper.REVISION_KEY);
+-                            }
+-                        }
+-                        tokenValues.remove(IvyPatternHelper.BRANCH_KEY);
+-                    }
+-                }
+-                tokenValues.remove(IvyPatternHelper.MODULE_KEY);
++
++        Map criteria = new HashMap();
++        addMatcher(matcher, moduleCrit.getOrganisation(), criteria, IvyPatternHelper.ORGANISATION_KEY);
++        addMatcher(matcher, moduleCrit.getName(), criteria, IvyPatternHelper.MODULE_KEY);
++        addMatcher(matcher, moduleCrit.getBranch(), criteria, IvyPatternHelper.BRANCH_KEY);
++        addMatcher(matcher, moduleCrit.getRevision(), criteria, IvyPatternHelper.REVISION_KEY);
++        
++        String[] tokensToList = new String[] {IvyPatternHelper.ORGANISATION_KEY, IvyPatternHelper.MODULE_KEY, IvyPatternHelper.BRANCH_KEY, IvyPatternHelper.REVISION_KEY};
++
++        for (Iterator iter = settings.getResolvers().iterator(); iter.hasNext();) {
++            DependencyResolver resolver = (DependencyResolver) iter.next();
++            Map[] moduleIdAsMap = resolver.listTokenValues(tokensToList, criteria);
++            for (int i = 0; i < moduleIdAsMap.length; i++) {
++                String org = (String) moduleIdAsMap[i].get(IvyPatternHelper.ORGANISATION_KEY);
++                String name = (String) moduleIdAsMap[i].get(IvyPatternHelper.MODULE_KEY);
++                String branch = (String) moduleIdAsMap[i].get(IvyPatternHelper.BRANCH_KEY);
++                String rev = (String) moduleIdAsMap[i].get(IvyPatternHelper.REVISION_KEY);
++                ModuleRevisionId modRevId = ModuleRevisionId.newInstance(org, name, branch, rev);
++                ret.add(modRevId);
+             }
+         }
++
+         return (ModuleRevisionId[]) ret.toArray(new ModuleRevisionId[ret.size()]);
+     }
+ 
++    public ModuleRevisionId[] listModules(DependencyResolver resolver, ModuleRevisionId moduleCrit, PatternMatcher matcher) {
++        Map criteria = new HashMap();
++        addMatcher(matcher, moduleCrit.getOrganisation(), criteria, IvyPatternHelper.ORGANISATION_KEY);
++        addMatcher(matcher, moduleCrit.getName(), criteria, IvyPatternHelper.MODULE_KEY);
++        addMatcher(matcher, moduleCrit.getBranch(), criteria, IvyPatternHelper.BRANCH_KEY);
++        addMatcher(matcher, moduleCrit.getRevision(), criteria, IvyPatternHelper.REVISION_KEY);
++        
++        String[] tokensToList = new String[] {IvyPatternHelper.ORGANISATION_KEY, IvyPatternHelper.MODULE_KEY, IvyPatternHelper.BRANCH_KEY, IvyPatternHelper.REVISION_KEY};
++
++        Map[] moduleIdAsMap = resolver.listTokenValues(tokensToList, criteria);
++        ModuleRevisionId[] result = new ModuleRevisionId[moduleIdAsMap.length];
++        for (int i = 0; i < moduleIdAsMap.length; i++) {
++            String org = (String) moduleIdAsMap[i].get(IvyPatternHelper.ORGANISATION_KEY);
++            String name = (String) moduleIdAsMap[i].get(IvyPatternHelper.MODULE_KEY);
++            String branch = (String) moduleIdAsMap[i].get(IvyPatternHelper.BRANCH_KEY);
++            String rev = (String) moduleIdAsMap[i].get(IvyPatternHelper.REVISION_KEY);
++            result[i] = ModuleRevisionId.newInstance(org, name, branch, rev);
++        }
++        
++        return result;
++    }
++    
++    private void addMatcher(PatternMatcher patternMatcher, String expression, Map criteria, String key) {
++        if (expression == null) {
++            return;
++        }
++        
++        Matcher matcher = patternMatcher.getMatcher(expression);
++        if (matcher.isExact()) {
++            criteria.put(key, expression);
++        } else {
++            criteria.put(key, matcher);
++        }
++    }
++    
+     public Collection findModuleRevisionIds(DependencyResolver resolver, ModuleRevisionId pattern,
+             PatternMatcher matcher) {
+         Collection mrids = new ArrayList();
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+index 7858f51f5..685702a37 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+@@ -155,6 +155,10 @@ public String[] listTokenValues(String token, Map otherTokenValues) {
+         return new String[0];
+     }
+ 
++    public Map[] listTokenValues(String[] tokens, Map criteria) {
++        return new Map[0];
++    }
++    
+     public OrganisationEntry[] listOrganisations() {
+         return new OrganisationEntry[0];
+     }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
+index 8f3230116..8780cd950 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
+@@ -18,6 +18,7 @@
+ package org.apache.ivy.plugins.resolver;
+ 
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.Collections;
+ import java.util.Date;
+@@ -28,6 +29,7 @@
+ import java.util.ListIterator;
+ import java.util.Map;
+ import java.util.Set;
++import java.util.Map.Entry;
+ 
+ import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.IvyPatternHelper;
+@@ -40,6 +42,7 @@
+ import org.apache.ivy.core.resolve.ResolveData;
+ import org.apache.ivy.core.settings.IvyPattern;
+ import org.apache.ivy.plugins.conflict.ConflictManager;
++import org.apache.ivy.plugins.matcher.Matcher;
+ import org.apache.ivy.plugins.resolver.util.MDResolvedResource;
+ import org.apache.ivy.plugins.resolver.util.ResolvedResource;
+ import org.apache.ivy.plugins.resolver.util.ResourceMDParser;
+@@ -239,6 +242,99 @@ protected Collection findArtifactNames(Map tokenValues, String token) {
+         return names;
+     }
+ 
++    public Map[] listTokenValues(String[] tokens, Map criteria) {
++        Set result = new HashSet();
++        
++        // use ivy patterns
++        List ivyPatterns = getIvyPatterns();
++        Map tokenValues = new HashMap(criteria);
++        tokenValues.put(IvyPatternHelper.TYPE_KEY, "ivy");
++        tokenValues.put(IvyPatternHelper.EXT_KEY, "xml");
++        for (Iterator it = ivyPatterns.iterator(); it.hasNext(); ) {
++            String ivyPattern = (String) it.next();
++            result.addAll(resolveTokenValues(tokens, ivyPattern, tokenValues, false));
++        }
++        
++        if (isAllownomd()) {
++            List artifactPatterns = getArtifactPatterns();
++            tokenValues = new HashMap(criteria);
++            tokenValues.put(IvyPatternHelper.TYPE_KEY, "jar");
++            tokenValues.put(IvyPatternHelper.EXT_KEY, "jar");
++            for (Iterator it = artifactPatterns.iterator(); it.hasNext(); ) {
++                String artifactPattern = (String) it.next();
++                result.addAll(resolveTokenValues(tokens, artifactPattern, tokenValues, true));
++            }
++        }
++        
++        return (Map[]) result.toArray(new Map[result.size()]);
++    }
++    
++    private Set resolveTokenValues(String[] tokens, String pattern, Map criteria, boolean noMd) {
++        Set result = new HashSet();
++        Set tokenSet = new HashSet(Arrays.asList(tokens));
++        
++        Map tokenValues = new HashMap();
++        for (Iterator it = criteria.entrySet().iterator(); it.hasNext(); ) {
++            Map.Entry entry = (Entry) it.next();
++            Object key = entry.getKey();
++            Object value = entry.getValue();
++            if (value instanceof String) {
++                tokenValues.put(key, value);
++            }
++        }
++        
++        if (tokenSet.isEmpty()) {
++            // no more tokens to resolve
++            result.add(tokenValues);
++            return result;
++        }
++        
++        String partiallyResolvedPattern = IvyPatternHelper.substituteTokens(pattern, tokenValues);
++        String token = IvyPatternHelper.getFirstToken(partiallyResolvedPattern);
++        if ((token == null) && exist(partiallyResolvedPattern)) {
++            // no more tokens to resolve
++            result.add(tokenValues);
++            return result;
++        }
++        
++        tokenSet.remove(token);
++
++        Matcher matcher = null;
++        Object criteriaForToken = criteria.get(token);
++        if (criteriaForToken instanceof Matcher) {
++            matcher = (Matcher) criteriaForToken;
++        }
++
++        String[] values = listTokenValues(partiallyResolvedPattern, token);
++        if (values == null) {
++            return result;
++        }
++
++        for (int i = 0; i < values.length; i++) {
++            if ((matcher != null) && !matcher.matches(values[i])) {
++                continue;
++            }
++            
++            tokenValues.put(token, values[i]);
++            String moreResolvedPattern = IvyPatternHelper.substituteTokens(partiallyResolvedPattern, tokenValues);
++
++            Map newCriteria = new HashMap(criteria);
++            newCriteria.put(token, values[i]);
++            if (noMd && "artifact".equals(token)) {
++                newCriteria.put("module", values[i]);
++            } else if (noMd && "module".equals(token)) {
++                newCriteria.put("artifact", values[i]);
++            }
++            result.addAll(resolveTokenValues((String[]) tokenSet.toArray(new String[tokenSet.size()]), moreResolvedPattern, newCriteria, noMd));
++        }
++
++        return result;
++    }
++    
++    protected abstract String[] listTokenValues(String pattern, String token);
++    
++    protected abstract boolean exist(String path);
++
+     /**
+      * Filters names before returning them in the findXXXNames or findTokenValues method.
+      * <p>
+diff --git a/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java b/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
+index fa61f27ff..ba15fc936 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/DependencyResolver.java
+@@ -104,13 +104,15 @@ ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData data)
+      * bar from the org foo.
+      */
+     String[] listTokenValues(String token, Map otherTokenValues);
++    
++    Map[] listTokenValues(String[] tokens, Map criteria);
+ 
+     OrganisationEntry[] listOrganisations();
+ 
+     ModuleEntry[] listModules(OrganisationEntry org);
+ 
+     RevisionEntry[] listRevisions(ModuleEntry module);
+-
++    
+     void dumpSettings();
+     
+     void setSettings(ResolverSettings settings);
+diff --git a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+index 29735f005..f1bcecc2c 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/RepositoryResolver.java
+@@ -230,6 +230,19 @@ protected void findTokenValues(Collection names, List patterns, Map tokenValues,
+             }
+         }
+     }
++
++    protected String[] listTokenValues(String pattern, String token) {
++        return ResolverHelper.listTokenValues(repository, pattern, token);
++    }
++    
++    protected boolean exist(String path) {
++        try {
++            Resource resource = repository.getResource(path);
++            return resource.exists();
++        } catch (IOException e) {
++            return false;
++        }
++    }
+     
+     public String getTypeName() {
+         return "repository";
+diff --git a/test/java/org/apache/ivy/ant/IvyRepositoryReportTest.java b/test/java/org/apache/ivy/ant/IvyRepositoryReportTest.java
+index 22211342e..121370e0e 100644
+--- a/test/java/org/apache/ivy/ant/IvyRepositoryReportTest.java
++++ b/test/java/org/apache/ivy/ant/IvyRepositoryReportTest.java
+@@ -17,10 +17,13 @@
+  */
+ package org.apache.ivy.ant;
+ 
++import java.io.BufferedReader;
+ import java.io.File;
++import java.io.FileReader;
+ 
+ import junit.framework.TestCase;
+ 
++import org.apache.ivy.util.FileUtil;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Delete;
+ 
+@@ -55,36 +58,56 @@ private void cleanCache() {
+         del.execute();
+     }
+ 
+-    public void test() {
++    public void testSimple() throws Exception {
++        report.setOrganisation("org1");
++        report.setOutputname("testsimple");
++        report.setTodir(cache);
++        report.execute();
++
++        File reportFile = new File(cache, "testsimple.xml");
++        assertTrue(reportFile.exists());
++        String g = FileUtil.readEntirely(new BufferedReader(new FileReader(reportFile)));
++        
++        // check presence of the modules
++        assertTrue(g.indexOf("<module organisation=\"org1\" name=\"mod1.1\"") != -1);
++        assertTrue(g.indexOf("<module organisation=\"org1\" name=\"mod1.2\"") != -1);
++        assertTrue(g.indexOf("<module organisation=\"org1\" name=\"mod1.3\"") != -1);
++        assertTrue(g.indexOf("<module organisation=\"org1\" name=\"mod1.4\"") != -1);
++        assertTrue(g.indexOf("<module organisation=\"org1\" name=\"mod1.5\"") != -1);
++        assertTrue(g.indexOf("<module organisation=\"org1\" name=\"mod1.6\"") != -1);
++    }
++    
++    public void testBranchBeforeModule() throws Exception {
++        report.getProject().setProperty("ivy.settings.file", "test/repositories/IVY-716/ivysettings.xml");
++        report.setOutputname("testbranch");
++        report.setTodir(cache);
++        report.execute();
++
++        File reportFile = new File(cache, "testbranch.xml");
++        assertTrue(reportFile.exists());
++        String g = FileUtil.readEntirely(new BufferedReader(new FileReader(reportFile)));
++        
++        // check presence of the modules
++        assertTrue(g.indexOf("<module organisation=\"org1\" name=\"mod1.1\"") != -1);
++        
++        // check presence of the branches
++        assertTrue(g.indexOf("<revision name=\"1.0\" branch=\"branch1\"") != -1);
++        assertTrue(g.indexOf("<revision name=\"1.0\" branch=\"branch2\"") != -1);
+     }
++    
++    public void testPatternWithoutOrganisation() throws Exception {
++        report.getProject().setProperty("ivy.settings.file", "test/repositories/IVY-729/ivysettings.xml");
++        report.setOutputname("test-no-org");
++        report.setTodir(cache);
++        report.execute();
+ 
+-    // no xslt transformation is possible in the junit test on our continuous integration server for
+-    // the moment...
+-    // public void testGraph() throws Exception {
+-    // _report.setOrganisation("org1");
+-    // _report.setXml(false);
+-    // _report.setGraph(true);
+-    // _report.setTodir(_cache);
+-    // _report.setOutputname("test-graph");
+-    // _report.execute();
+-    // File graphml = new File(_cache, "test-graph.graphml");
+-    // assertTrue(graphml.exists());
+-    // String g = FileUtil.readEntirely(new BufferedReader(new FileReader(graphml)));
+-    // assertFalse(g.indexOf("caller") != -1);
+-    // assertTrue(g.indexOf("mod1.1") != -1);
+-    // }
+-    //
+-    // public void testDot() throws Exception {
+-    // _report.setOrganisation("org1");
+-    // _report.setXml(false);
+-    // _report.setDot(true);
+-    // _report.setTodir(_cache);
+-    // _report.setOutputname("test-graph");
+-    // _report.execute();
+-    // File dot = new File(_cache, "test-graph.dot");
+-    // assertTrue(dot.exists());
+-    // String g = FileUtil.readEntirely(new BufferedReader(new FileReader(dot)));
+-    // assertFalse(g.indexOf("caller") != -1);
+-    // assertTrue(g.indexOf("mod1.1") != -1);
+-    // }
++        File reportFile = new File(cache, "test-no-org.xml");
++        assertTrue(reportFile.exists());
++        String g = FileUtil.readEntirely(new BufferedReader(new FileReader(reportFile)));
++        
++        // check presence of the modules
++        assertTrue(g.indexOf("<module organisation=\"null\" name=\"a\"") != -1);
++        assertTrue(g.indexOf("<module organisation=\"null\" name=\"b\"") != -1);
++        assertTrue(g.indexOf("<module organisation=\"null\" name=\"c\"") != -1);
++    }
+ }
+diff --git a/test/repositories/IVY-716/ivysettings.xml b/test/repositories/IVY-716/ivysettings.xml
+new file mode 100644
+index 000000000..2d055eb6d
+--- /dev/null
++++ b/test/repositories/IVY-716/ivysettings.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++    <settings defaultResolver="myresolver"/>
++    <resolvers>
++			<filesystem name="myresolver">
++				<ivy pattern="${ivy.settings.dir}/[organisation]/[branch]/[module]/[revision]/ivy.xml" />
++				<artifact pattern="${ivy.settings.dir}/[organisation]/[branch]/[module]/[revision]/[artifact].[ext]" />
++			</filesystem>
++    </resolvers>
++</ivysettings>
+diff --git a/test/repositories/IVY-716/org1/branch1/mod1.1/1.0/ivy.xml.txt b/test/repositories/IVY-716/org1/branch1/mod1.1/1.0/ivy.xml.txt
+new file mode 100644
+index 000000000..ab990267e
+--- /dev/null
++++ b/test/repositories/IVY-716/org1/branch1/mod1.1/1.0/ivy.xml.txt
+@@ -0,0 +1,30 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org1"
++	       module="mod1.1"
++	       revision="1.0"
++               branch="branch1"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++	<dependencies>
++		<dependency name="mod1.2" rev="2.0"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-716/org1/branch1/mod1.1/1.0/mod1.1.jar b/test/repositories/IVY-716/org1/branch1/mod1.1/1.0/mod1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/IVY-716/org1/branch1/mod1.1/1.0/mod1.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/IVY-716/org1/branch2/mod1.1/1.0/ivy.xml.txt b/test/repositories/IVY-716/org1/branch2/mod1.1/1.0/ivy.xml.txt
+new file mode 100644
+index 000000000..5c7f69907
+--- /dev/null
++++ b/test/repositories/IVY-716/org1/branch2/mod1.1/1.0/ivy.xml.txt
+@@ -0,0 +1,30 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org1"
++	       module="mod1.1"
++	       revision="1.0"
++               branch="branch2"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++	<dependencies>
++		<dependency name="mod1.2" rev="2.0"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-716/org1/branch2/mod1.1/1.0/mod1.1.jar b/test/repositories/IVY-716/org1/branch2/mod1.1/1.0/mod1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/IVY-716/org1/branch2/mod1.1/1.0/mod1.1.jar
+@@ -0,0 +1 @@
++ 

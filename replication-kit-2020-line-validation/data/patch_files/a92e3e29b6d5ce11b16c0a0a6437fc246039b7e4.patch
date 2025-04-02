@@ -1,0 +1,103 @@
+From a92e3e29b6d5ce11b16c0a0a6437fc246039b7e4 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Fri, 26 Sep 2008 20:16:10 +0000
+Subject: [PATCH] FIX: Maven packaging of "pom" should add a "jar" artifact if
+ present (IVY-920)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@699482 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../parser/m2/PomModuleDescriptorBuilder.java | 22 +++++++++++++++++--
+ .../parser/m2/PomModuleDescriptorParser.java  |  2 +-
+ 3 files changed, 22 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 0765e55a6..0903759d2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -88,6 +88,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Ivy can't handle bare POM ${groupId} property (IVY-913) (thanks to Tom Widmer)
+ - FIX: Properties needed to parse version in POM (IVY-914) (thanks to Tom Widmer)
+ - FIX: build.xml: checkstyle + checkstyle-report dont work together (IVY-919)
++- FIX: Maven packaging of "pom" should add a "jar" artifact if present (IVY-920)
+ 
+    2.0.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index af0bf2b48..d64abfb7d 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -31,6 +31,7 @@
+ import java.util.Map.Entry;
+ 
+ import org.apache.ivy.Ivy;
++import org.apache.ivy.core.cache.ArtifactOrigin;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.Configuration;
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+@@ -50,8 +51,10 @@
+ import org.apache.ivy.plugins.matcher.ExactPatternMatcher;
+ import org.apache.ivy.plugins.matcher.PatternMatcher;
+ import org.apache.ivy.plugins.parser.ModuleDescriptorParser;
++import org.apache.ivy.plugins.parser.ParserSettings;
+ import org.apache.ivy.plugins.parser.m2.PomReader.PomDependencyData;
+ import org.apache.ivy.plugins.repository.Resource;
++import org.apache.ivy.plugins.resolver.DependencyResolver;
+ import org.apache.ivy.util.Message;
+ 
+ 
+@@ -187,9 +190,11 @@ public void addMappingConfs(DefaultDependencyDescriptor dd, boolean isOptional)
+     private ModuleRevisionId mrid;
+ 
+     private DefaultArtifact mainArtifact;
++    
++    private ParserSettings parserSettings;
+ 
+     
+-    public PomModuleDescriptorBuilder(ModuleDescriptorParser parser, Resource res) {
++    public PomModuleDescriptorBuilder(ModuleDescriptorParser parser, Resource res, ParserSettings ivySettings) {
+         ivyModuleDescriptor = new DefaultModuleDescriptor(parser, res);
+         ivyModuleDescriptor.setResolvedPublicationDate(new Date(res.getLastModified()));
+         for (int i = 0; i < MAVEN2_CONFIGURATIONS.length; i++) {
+@@ -197,6 +202,7 @@ public PomModuleDescriptorBuilder(ModuleDescriptorParser parser, Resource res) {
+         }
+         ivyModuleDescriptor.setMappingOverride(true);
+         ivyModuleDescriptor.addExtraAttributeNamespace("m", Ivy.getIvyHomeURL() + "maven");
++        parserSettings = ivySettings;
+     }
+ 
+ 
+@@ -232,7 +238,19 @@ public void addMainArtifact(String artifactId, String packaging) {
+          * cover all cases.
+          */
+         if ("pom".equals(packaging)) {
+-            // no artifact defined!
++            // no artifact defined! Add the default artifact if it exist.
++            DependencyResolver resolver = parserSettings.getResolver(mrid);
++            
++            if (resolver != null) {
++                DefaultArtifact artifact = new DefaultArtifact(mrid, new Date(), artifactId, "jar", "jar");
++                ArtifactOrigin artifactOrigin = resolver.locate(artifact);
++                
++                if (!ArtifactOrigin.isUnknown(artifactOrigin)) {
++                    mainArtifact = artifact;
++                    ivyModuleDescriptor.addArtifact("master", mainArtifact);
++                }
++            }
++
+             return;
+         } else if (JAR_PACKAGINGS.contains(packaging)) {
+             ext = "jar";
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index d421b24d0..7aa1d4e0e 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -108,7 +108,7 @@ public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descript
+     public ModuleDescriptor parseDescriptor(ParserSettings ivySettings, URL descriptorURL, 
+             Resource res, boolean validate) throws ParseException, IOException {
+         
+-        PomModuleDescriptorBuilder mdBuilder = new PomModuleDescriptorBuilder(this, res);
++        PomModuleDescriptorBuilder mdBuilder = new PomModuleDescriptorBuilder(this, res, ivySettings);
+         
+         try {           
+             PomReader domReader = new PomReader(descriptorURL, res);            

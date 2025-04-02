@@ -1,0 +1,294 @@
+From 850a888c546bab897542a2d89ff76ca9debce0ee Mon Sep 17 00:00:00 2001
+From: Jaikiran Pai <jaikiran.pai@gmail.com>
+Date: Thu, 18 May 2017 11:25:24 +0530
+Subject: [PATCH] IVY-1478 Fix RetrieveEngine to take into account the correct
+ extension while dealing with unpacked artifacts
+
+---
+ .../cache/DefaultRepositoryCacheManager.java  |   6 ++--
+ .../ivy/core/pack/PackagingManager.java       |  14 +++++++--
+ .../core/report/ArtifactDownloadReport.java   |  10 +++++++
+ .../ivy/core/retrieve/RetrieveEngine.java     |  28 ++++++++++++++----
+ .../ivy/core/retrieve/RetrieveTest.java       |  28 ++++++++++++++++++
+ .../1/packaging/module10/ivys/ivy-1.0.xml     |  27 +++++++++++++++++
+ .../1/packaging/module9/ivys/ivy-1.0.xml      |  27 +++++++++++++++++
+ .../module9/jars/module9-1.0.jar.pack.gz      | Bin 0 -> 274 bytes
+ 8 files changed, 130 insertions(+), 10 deletions(-)
+ create mode 100644 test/repositories/1/packaging/module10/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/packaging/module9/ivys/ivy-1.0.xml
+ create mode 100644 test/repositories/1/packaging/module9/jars/module9-1.0.jar.pack.gz
+
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index 6fe13c7b2..86b4a8b1a 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -409,7 +409,7 @@ private void saveResolver(ModuleDescriptor md, String name) {
+      * 
+      * @param md
+      *            the module descriptor resolved
+-     * @param name
++     * @param artifactResolverName
+      *            artifact resolver name
+      */
+     public void saveResolvers(ModuleDescriptor md, String metadataResolverName,
+@@ -1043,11 +1043,13 @@ private void unpackArtifact(Artifact artifact, ArtifactDownloadReport adr,
+         File archiveFile = getArchiveFileInCache(unpacked, null, false);
+         if (archiveFile.exists() && !options.isForce()) {
+             adr.setUnpackedLocalFile(archiveFile);
++            adr.setUnpackedArtifact(unpacked);
+         } else {
+             Message.info("\tUnpacking " + artifact.getId());
+             try {
+-                packagingManager.unpackArtifact(artifact, adr.getLocalFile(), archiveFile);
++                final Artifact unpackedArtifact = packagingManager.unpackArtifact(artifact, adr.getLocalFile(), archiveFile);
+                 adr.setUnpackedLocalFile(archiveFile);
++                adr.setUnpackedArtifact(unpackedArtifact);
+             } catch (Exception e) {
+                 Message.debug(e);
+                 adr.setDownloadStatus(DownloadStatus.FAILED);
+diff --git a/src/java/org/apache/ivy/core/pack/PackagingManager.java b/src/java/org/apache/ivy/core/pack/PackagingManager.java
+index 6b3caf04c..2eba45234 100644
+--- a/src/java/org/apache/ivy/core/pack/PackagingManager.java
++++ b/src/java/org/apache/ivy/core/pack/PackagingManager.java
+@@ -71,14 +71,14 @@ public Artifact getUnpackedArtifact(Artifact artifact) {
+         return unpacked;
+     }
+ 
+-    public void unpackArtifact(Artifact artifact, File localFile, File archiveFile)
++    public Artifact unpackArtifact(Artifact artifact, File localFile, File archiveFile)
+             throws IOException {
+         String packaging = artifact.getExtraAttribute("packaging");
+         if (packaging == null) {
+             // not declared as packed, nothing to do
+-            return;
++            return null;
+         }
+-
++        String ext = artifact.getExt();
+         String[] packings = packaging.split(",");
+         InputStream in = null;
+         try {
+@@ -94,6 +94,7 @@ public void unpackArtifact(Artifact artifact, File localFile, File archiveFile)
+                             + packings[i] + "' in the streamed chain: " + packaging);
+                 }
+                 in = ((StreamPacking) packing).unpack(in);
++                ext = packing.getUnpackedExtension(ext);
+             }
+             ArchivePacking packing = settings.getPackingRegistry().get(packings[0]);
+             if (packing == null) {
+@@ -101,6 +102,7 @@ public void unpackArtifact(Artifact artifact, File localFile, File archiveFile)
+                         + "' in the packing chain: " + packaging);
+             }
+             packing.unpack(in, archiveFile);
++            ext = packing.getUnpackedExtension(ext);
+         } finally {
+             if (in != null) {
+                 try {
+@@ -110,6 +112,12 @@ public void unpackArtifact(Artifact artifact, File localFile, File archiveFile)
+                 }
+             }
+         }
++        final DefaultArtifact unpacked = new DefaultArtifact(artifact.getModuleRevisionId(),
++                artifact.getPublicationDate(), artifact.getName(),
++                artifact.getType() + "_unpacked", ext);
++
++        return unpacked;
++
+     }
+ 
+ }
+diff --git a/src/java/org/apache/ivy/core/report/ArtifactDownloadReport.java b/src/java/org/apache/ivy/core/report/ArtifactDownloadReport.java
+index 76547f797..f4a75536c 100644
+--- a/src/java/org/apache/ivy/core/report/ArtifactDownloadReport.java
++++ b/src/java/org/apache/ivy/core/report/ArtifactDownloadReport.java
+@@ -57,6 +57,8 @@ public class ArtifactDownloadReport {
+ 
+     private File unpackedLocalFile;
+ 
++    private Artifact unpackedArtifact;
++
+     public ArtifactDownloadReport(Artifact artifact) {
+         this.artifact = artifact;
+     }
+@@ -164,6 +166,14 @@ public File getUnpackedLocalFile() {
+         return unpackedLocalFile;
+     }
+ 
++    public void setUnpackedArtifact(final Artifact unpackedArtifact) {
++        this.unpackedArtifact = unpackedArtifact;
++    }
++
++    public Artifact getUnpackedArtifact() {
++        return this.unpackedArtifact;
++    }
++
+     public int hashCode() {
+         final int prime = 31;
+         int result = 1;
+diff --git a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+index 7cfa6a862..57481dea9 100644
+--- a/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
++++ b/src/java/org/apache/ivy/core/retrieve/RetrieveEngine.java
+@@ -46,6 +46,7 @@
+ import org.apache.ivy.core.module.id.ArtifactRevisionId;
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.pack.PackagingManager;
+ import org.apache.ivy.core.report.ArtifactDownloadReport;
+ import org.apache.ivy.core.resolve.ResolveOptions;
+ import org.apache.ivy.plugins.report.XmlReportParser;
+@@ -331,12 +332,29 @@ public Map<ArtifactDownloadReport, Set<String>> determineArtifactsToCopy(ModuleR
+                     artifacts.add(parser.getMetadataArtifactReport(mrids[j]));
+                 }
+             }
+-            for (ArtifactDownloadReport adr : artifacts) {
++            final PackagingManager packagingManager = new PackagingManager();
++            packagingManager.setSettings(IvyContext.getContext().getSettings());
+ 
+-                Artifact artifact = adr.getArtifact();
+-                String ext = artifact.getExt();
+-                if (adr.getUnpackedLocalFile() != null) {
+-                    ext = "";
++            for (final ArtifactDownloadReport adr : artifacts) {
++
++                final Artifact artifact = adr.getArtifact();
++                final String ext;
++                if (adr.getUnpackedLocalFile() == null) {
++                    ext = artifact.getExt();
++                } else {
++                    final Artifact unpackedArtifact;
++                    // check if the download report is aware of the unpacked artifact
++                    if (adr.getUnpackedArtifact() != null) {
++                        unpackedArtifact = adr.getUnpackedArtifact();
++                    } else {
++                        // use the packaging manager to get hold of the unpacked artifact
++                        unpackedArtifact = packagingManager.getUnpackedArtifact(artifact);
++                    }
++                    if (unpackedArtifact == null) {
++                        throw new RuntimeException("Could not determine unpacked artifact for " + artifact +
++                                " while determining artifacts to copy for module " + mrid);
++                    }
++                    ext = unpackedArtifact.getExt();
+                 }
+ 
+                 String destPattern = "ivy".equals(adr.getType()) ? destIvyPattern : destFilePattern;
+diff --git a/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java b/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
+index b0482c6d9..941b744d0 100644
+--- a/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
++++ b/test/java/org/apache/ivy/core/retrieve/RetrieveTest.java
+@@ -352,6 +352,34 @@ public void testUnpackSync() throws Exception {
+         assertEquals(new File(dest, "META-INF/MANIFEST.MF"), jarContents[0].listFiles()[0]);
+     }
+ 
++    /**
++     * Tests that the {@link RetrieveEngine} retrieves artifacts with the correct extension if the artifact is unpacked
++     *
++     * @throws Exception
++     * @see <a href="https://issues.apache.org/jira/browse/IVY-1478">IVY-1478</a>
++     */
++    public void testUnpackExt() throws Exception {
++        final ResolveOptions roptions = getResolveOptions(new String[] {"*"});
++
++        final URL url = new File("test/repositories/1/packaging/module10/ivys/ivy-1.0.xml").toURI()
++                .toURL();
++
++        // normal resolve, the file goes in the cache
++        final ResolveReport report = ivy.resolve(url, roptions);
++        assertFalse("Resolution report has errors", report.hasError());
++        final ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull("Module descriptor from report was null", md);
++
++        final String pattern = "build/test/retrieve/[organization]/[module]/[conf]/[type]s/[artifact]-[revision](.[ext])";
++
++        final RetrieveOptions options = getRetrieveOptions();
++        ivy.retrieve(md.getModuleRevisionId(), pattern, options);
++
++        final File dest = new File("build/test/retrieve/packaging/module9/default/jars/module9-1.0.jar");
++        assertTrue("Retrieved artifact is missing at " + dest.getAbsolutePath(), dest.exists());
++        assertTrue("Retrieved artifact at " + dest.getAbsolutePath() + " is not a file", dest.isFile());
++    }
++
+     private RetrieveOptions getRetrieveOptions() {
+         return new RetrieveOptions();
+     }
+diff --git a/test/repositories/1/packaging/module10/ivys/ivy-1.0.xml b/test/repositories/1/packaging/module10/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..403e8ac84
+--- /dev/null
++++ b/test/repositories/1/packaging/module10/ivys/ivy-1.0.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="packaging" module="module10" revision="1.0" />
++    <configurations>
++        <conf name="default" />
++    </configurations>
++    <dependencies>
++        <dependency org="packaging" name="module9" rev="1.0" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/packaging/module9/ivys/ivy-1.0.xml b/test/repositories/1/packaging/module9/ivys/ivy-1.0.xml
+new file mode 100644
+index 000000000..88219aa6b
+--- /dev/null
++++ b/test/repositories/1/packaging/module9/ivys/ivy-1.0.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="packaging" module="module9" revision="1.0" />
++    <configurations>
++        <conf name="default" />
++    </configurations>
++    <publications>
++        <artifact name="module9" type="jar" ext="jar.pack.gz" packaging="pack200" />
++    </publications>
++</ivy-module>
+diff --git a/test/repositories/1/packaging/module9/jars/module9-1.0.jar.pack.gz b/test/repositories/1/packaging/module9/jars/module9-1.0.jar.pack.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..6345656bc59bb38b2b309635c81deacf7bc2160c
+GIT binary patch
+literal 274
+zcmV+t0qy=DiwFP!0000006X>X0x$ct3k(d$nHk=^`Fhfqor3`ZgakRb_!v34S$O%_
+zIDK719CbbY-1L1N{XE@VgG2Ou-EuOM^b_++bb&ahNG~g~s30*pBULvkIW-5wD^3HE
+zIr-@(Ss(@@6Eh1d8#}`ZMzHBV4BjA$5yJCL%*#wmEiTawOD!tS%+Iq@Fw`^P<#H;`
+zOUX&qb<RmFE)Ga6$*@wuuu}&vf@(XGI4_q1L<-^}bRBRP!tFzL1jrfAMX8A;sVTZn
+zl^`KAJ%e~-V+9Szf`Xh>1<$->Jx#bym_Ohq7{R52D|3_bb25|t5_40n6!MGG^&s}^
+YWtLUyl>qhda`AEj0QM82Ig$YY0P1ygq5uE@
+
+literal 0
+HcmV?d00001
+

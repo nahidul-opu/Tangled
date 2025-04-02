@@ -1,0 +1,103 @@
+From d9b559615109e94e6e7cad91e4f6dfa891f51e82 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Wed, 20 Feb 2013 19:22:39 +0000
+Subject: [PATCH] COMPRESS-219 reading stored entries could try to read past
+ the end of the internal buffer
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@1448357 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 +++
+ .../archivers/zip/ZipArchiveInputStream.java  |  5 ++-
+ .../zip/ZipArchiveInputStreamTest.java        | 34 +++++++++++++++++++
+ 3 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index ff281f9dca9..7d66d0477fe 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -160,6 +160,10 @@ The <action> type attribute can be add,update,fix,remove.
+           Updated XZ for Java dependency to 1.2 as this version
+           provides proper OSGi manifest attributes.
+         </action>
++        <action type="fix" date="2013-02-20" issue="COMPRESS-219">
++          Fixed a potential ArrayIndexOutOfBoundsException when
++          reading STORED entries from ZipArchiveInputStream.
++        </action>
+     </release>
+     <release version="1.4.1" date="2012-05-23"
+              description="Release 1.4.1">
+diff --git a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java
+index 5ab0931489d..b2d14f510d7 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java
++++ b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStream.java
+@@ -426,9 +426,8 @@ private int readStored(byte[] buffer, int start, int length)
+             current.bytesReadFromStream += buf.lengthOfLastRead;
+         }
+ 
+-        int toRead = length > buf.lengthOfLastRead
+-            ? buf.lengthOfLastRead - buf.offsetInBuffer
+-            : length;
++        int availableBytesInBuffer = buf.lengthOfLastRead - buf.offsetInBuffer;
++        int toRead = Math.min(availableBytesInBuffer, length);
+         if ((csize - current.bytesRead) < toRead) {
+             // if it is smaller than toRead then it fits into an int
+             toRead = (int) (csize - current.bytesRead);
+diff --git a/src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java b/src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java
+index 7bd10e32a4b..c1651d54d7d 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java
+@@ -19,15 +19,22 @@
+ package org.apache.commons.compress.archivers.zip;
+ 
+ import static org.apache.commons.compress.AbstractTestCase.getFile;
++import static org.apache.commons.compress.AbstractTestCase.mkdir;
++import static org.apache.commons.compress.AbstractTestCase.rmdir;
+ import static org.junit.Assert.assertArrayEquals;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertTrue;
+ 
+ import java.io.BufferedInputStream;
++import java.io.File;
+ import java.io.FileInputStream;
++import java.io.FileOutputStream;
+ import java.io.InputStream;
++import java.io.IOException;
++import java.io.OutputStream;
+ 
+ import org.junit.Test;
++import org.apache.commons.compress.utils.IOUtils;
+ 
+ public class ZipArchiveInputStreamTest {
+ 
+@@ -93,4 +100,31 @@ public void shouldConsumeArchiveCompletely() throws Exception {
+         assertArrayEquals(expected, actual);
+         zip.close();
+     }
++
++    /**
++     * @see "https://issues.apache.org/jira/browse/COMPRESS-219"
++     */
++    @Test
++    public void shouldReadNestedZip() throws IOException {
++        ZipArchiveInputStream in = null;
++        try {
++            in = new ZipArchiveInputStream(new FileInputStream(getFile("COMPRESS-219.zip")));
++            extractZipInputStream(in);
++        } finally {
++            if (in != null) {
++                in.close();
++            }
++        }
++    }
++
++    private void extractZipInputStream(final ZipArchiveInputStream in)
++        throws IOException {
++        ZipArchiveEntry zae = in.getNextZipEntry();
++        while (zae != null) {
++            if (zae.getName().endsWith(".zip")) {
++                extractZipInputStream(new ZipArchiveInputStream(in));
++            }
++            zae = in.getNextZipEntry();
++        }
++    }
+ }

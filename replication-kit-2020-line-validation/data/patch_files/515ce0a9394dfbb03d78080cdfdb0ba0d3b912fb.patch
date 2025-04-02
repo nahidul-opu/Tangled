@@ -1,0 +1,118 @@
+From 515ce0a9394dfbb03d78080cdfdb0ba0d3b912fb Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Wed, 1 Mar 2006 11:41:18 +0000
+Subject: [PATCH] FIX: force attribute is not treated as it should in some
+ cases (IVY-182)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484233 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                    |  1 +
+ .../ivy/DefaultDependencyDescriptor.java       |  7 ++++---
+ test/java/fr/jayasoft/ivy/ResolveTest.java     | 17 +++++++++--------
+ test/java/fr/jayasoft/ivy/ivy-182.xml          | 18 ++++++++++++++++++
+ 4 files changed, 32 insertions(+), 11 deletions(-)
+ create mode 100644 test/java/fr/jayasoft/ivy/ivy-182.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index ce39d7f5b..59d0d08a8 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,6 +1,7 @@
+ - IMPROVE: performances with complex dependency graphs
+ - IMPROVE: Retrieve task now also optionally do ivy file downloads (IVY-167) (with the contribution of Costin Leau)
+ 
++- FIX: force attribute is not treated as it should in some cases (IVY-182)
+ - FIX: problem reading 'invalid' POMs (IVY-153)
+ - FIX: cryptic NPE due to spelling error in ivy.xml (IVY-177)
+ - FIX: conflicts with dynamic revisions not resolved properly (IVY-181)
+diff --git a/src/java/fr/jayasoft/ivy/DefaultDependencyDescriptor.java b/src/java/fr/jayasoft/ivy/DefaultDependencyDescriptor.java
+index a99728f86..8d32f083a 100644
+--- a/src/java/fr/jayasoft/ivy/DefaultDependencyDescriptor.java
++++ b/src/java/fr/jayasoft/ivy/DefaultDependencyDescriptor.java
+@@ -116,7 +116,8 @@ public static DefaultDependencyDescriptor transformInstance(DependencyDescriptor
+     /**
+      * This namespace should be used to check 
+      */
+-    private Namespace _namespace = null; 
++    private Namespace _namespace = null;
++    private ModuleDescriptor _md; 
+ 
+     public DefaultDependencyDescriptor(DependencyDescriptor dd, String revision) {
+         _parentId = dd.getParentRevisionId();
+@@ -133,7 +134,7 @@ public DefaultDependencyDescriptor(DependencyDescriptor dd, String revision) {
+     }
+     
+     public DefaultDependencyDescriptor(ModuleDescriptor md, ModuleRevisionId mrid, boolean force, boolean changing, boolean transitive) {
+-        _parentId = md.getModuleRevisionId();
++        _md = md;
+         _revId = mrid;
+         _force = force;
+         _changing = changing;
+@@ -327,7 +328,7 @@ public boolean isForce() {
+     }
+ 
+     public ModuleRevisionId getParentRevisionId() {
+-        return _parentId;
++        return _md != null ? _md.getResolvedModuleRevisionId() : _parentId;
+     }
+ 
+     public boolean isChanging() {
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index 995dcc48c..a1f7ea096 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -952,21 +952,22 @@ public void testResolveForceWithDynamicRevisionsAndSeveralConfs2() throws Except
+     }
+     
+     public void testResolveForceWithDynamicRevisionsAndCyclicDependencies() throws Exception {
+-        // mod4.1 v 4.8 (conf compile, test extends compile) depends on 
+-        //   - mod1.2 v 1+ and forces it in conf compile
+-        //   - mod3.1 v 1+ in conf test->runtime excluding mod4.1 (to avoid cyclic dep failure)
++        // IVY-182
++        //   * has no revision 
++        //   * declares conf compile, test extends compile, 
++        //   * depends on 
++        //     - mod1.2 v 1+ and forces it in conf compile
++        //     - mod3.1 v 1+ in conf test->runtime excluding mod4.1 (to avoid cyclic dep failure)
+         //           which defines confs compile, runtime extends compile
+         //           which depends on mod1.2 v 2+ in conf compile->default
+         //           which depends on mod4.1 v 4+ in conf compile->compile
+-        ResolveReport report = _ivy.resolve(new File("test/repositories/2/mod4.1/ivy-4.8.xml").toURL(),
++        ResolveReport report = _ivy.resolve(ResolveTest.class.getResource("ivy-182.xml"),
+                 null, new String[] {"*"}, _cache, null, true);
+         assertNotNull(report);
+         ModuleDescriptor md = report.getModuleDescriptor();
+         assertNotNull(md);
+-        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org4", "mod4.1", "4.8");
+-        assertEquals(mrid, md.getModuleRevisionId());
+-        
+-        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
++        ModuleId mid = new ModuleId("test", "IVY-182");
++        assertEquals(mid, md.getModuleRevisionId().getModuleId());
+         
+         // dependencies
+         assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org3", "mod3.1", "1.4")).exists());
+diff --git a/test/java/fr/jayasoft/ivy/ivy-182.xml b/test/java/fr/jayasoft/ivy/ivy-182.xml
+new file mode 100644
+index 000000000..2d3e48cd8
+--- /dev/null
++++ b/test/java/fr/jayasoft/ivy/ivy-182.xml
+@@ -0,0 +1,18 @@
++<ivy-module version="1.0">
++	<info organisation="test"
++	       module="IVY-182"
++	       status="integration"
++	       publication="20050202110000"
++	/>
++	<configurations defaultconfmapping="compile->compile(*);runtime,test->runtime(*)">
++		<conf name="compile"/>
++		<conf name="runtime" extends="compile"/>
++		<conf name="test" extends="runtime"/>
++	</configurations>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="1+" force="true" conf="compile"/>
++		<dependency org="org3" name="mod3.1" rev="1+" conf="test">
++			<exclude module="mod4.1"/>
++		</dependency>
++	</dependencies>
++</ivy-module>

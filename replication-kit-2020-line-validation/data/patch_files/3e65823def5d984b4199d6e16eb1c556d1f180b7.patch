@@ -1,0 +1,142 @@
+From 3e65823def5d984b4199d6e16eb1c556d1f180b7 Mon Sep 17 00:00:00 2001
+From: Avery Ching <aching@apache.org>
+Date: Tue, 15 Nov 2011 22:52:54 +0000
+Subject: [PATCH] GIRAPH-88: Message count not updated properly after
+ GIRAPH-11. (aching)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/giraph/trunk@1202455 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG                                              |  2 ++
+ .../apache/giraph/bsp/CentralizedServiceWorker.java    |  4 +---
+ .../java/org/apache/giraph/graph/BspServiceWorker.java | 10 +++++-----
+ src/main/java/org/apache/giraph/graph/GraphMapper.java |  5 +----
+ .../giraph/graph/partition/RangeWorkerPartitioner.java |  6 +++---
+ 5 files changed, 12 insertions(+), 15 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 5e4c1c29c..2b7bf486f 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -2,6 +2,8 @@ Giraph Change Log
+ 
+ Release 0.70.0 - unreleased
+ 
++  GIRAPH-88: Message count not updated properly after GIRAPH-11. (aching)
++
+   GIRAPH-70: Misspellings in PseudoRandomVertexInputFormat configuration
+   parameters. (attilacsordas via jghoman)
+ 
+diff --git a/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java b/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+index c6e2ee116..1db26e8be 100644
+--- a/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
++++ b/src/main/java/org/apache/giraph/bsp/CentralizedServiceWorker.java
+@@ -106,11 +106,9 @@ public interface CentralizedServiceWorker<
+      * worker level statistics after the computation.
+      *
+      * @param partitionStatsList All the partition stats for this worker
+-     * @param workersSentMessages Number of messages sent on this worker
+      * @return true if this is the last superstep, false otherwise
+      */
+-    boolean finishSuperstep(List<PartitionStats> partitionStatsList,
+-                            long workersSentMessages);
++    boolean finishSuperstep(List<PartitionStats> partitionStatsList);
+     /**
+      * Get the partition that a vertex index would belong to
+      *
+diff --git a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+index 044f15a36..33b1080ab 100644
+--- a/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
++++ b/src/main/java/org/apache/giraph/graph/BspServiceWorker.java
+@@ -548,7 +548,7 @@ public void setup() {
+         workerGraphPartitioner.finalizePartitionStats(
+             partitionStatsList, workerPartitionMap);
+ 
+-        finishSuperstep(partitionStatsList, 0);
++        finishSuperstep(partitionStatsList);
+     }
+ 
+     /**
+@@ -773,8 +773,7 @@ public Collection<? extends PartitionOwner> startSuperstep() {
+     }
+ 
+     @Override
+-    public boolean finishSuperstep(List<PartitionStats> partitionStatsList,
+-                                   long workersSentMessages) {
++    public boolean finishSuperstep(List<PartitionStats> partitionStatsList) {
+         // This barrier blocks until success (or the master signals it to
+         // restart).
+         //
+@@ -785,8 +784,9 @@ public boolean finishSuperstep(List<PartitionStats> partitionStatsList,
+         // of this worker
+         // 3. Let the master know it is finished.
+         // 4. Then it waits for the master to say whether to stop or not.
++        long workerSentMessages = 0;
+         try {
+-            commService.flush(getContext());
++            workerSentMessages = commService.flush(getContext());
+         } catch (IOException e) {
+             throw new IllegalStateException(
+                 "finishSuperstep: flush failed", e);
+@@ -807,7 +807,7 @@ public boolean finishSuperstep(List<PartitionStats> partitionStatsList,
+             workerFinishedInfoObj.put(JSONOBJ_PARTITION_STATS_KEY,
+                                       Base64.encodeBytes(partitionStatsBytes));
+             workerFinishedInfoObj.put(JSONOBJ_NUM_MESSAGES_KEY,
+-                                      workersSentMessages);
++                                      workerSentMessages);
+         } catch (JSONException e) {
+             throw new RuntimeException(e);
+         }
+diff --git a/src/main/java/org/apache/giraph/graph/GraphMapper.java b/src/main/java/org/apache/giraph/graph/GraphMapper.java
+index 776307033..bfc1ccca8 100644
+--- a/src/main/java/org/apache/giraph/graph/GraphMapper.java
++++ b/src/main/java/org/apache/giraph/graph/GraphMapper.java
+@@ -512,7 +512,6 @@ public void map(Object key, Object value, Context context)
+ 
+         List<PartitionStats> partitionStatsList =
+             new ArrayList<PartitionStats>();
+-        long workerSentMessages = 0;
+         do {
+             long superstep = serviceWorker.getSuperstep();
+ 
+@@ -556,7 +555,6 @@ public void map(Object key, Object value, Context context)
+             context.progress();
+ 
+             partitionStatsList.clear();
+-            workerSentMessages = 0;
+             for (Partition<I, V, E, M> partition :
+                     serviceWorker.getPartitionMap().values()) {
+                 PartitionStats partitionStats =
+@@ -593,8 +591,7 @@ public void map(Object key, Object value, Context context)
+                          " maxMem=" + Runtime.getRuntime().maxMemory() +
+                          " freeMem=" + Runtime.getRuntime().freeMemory());
+             }
+-        } while (!serviceWorker.finishSuperstep(partitionStatsList,
+-                                                workerSentMessages));
++        } while (!serviceWorker.finishSuperstep(partitionStatsList));
+         if (LOG.isInfoEnabled()) {
+             LOG.info("map: BSP application done " +
+                      "(global vertices marked done)");
+diff --git a/src/main/java/org/apache/giraph/graph/partition/RangeWorkerPartitioner.java b/src/main/java/org/apache/giraph/graph/partition/RangeWorkerPartitioner.java
+index 3b4909b71..6e3f3e09d 100644
+--- a/src/main/java/org/apache/giraph/graph/partition/RangeWorkerPartitioner.java
++++ b/src/main/java/org/apache/giraph/graph/partition/RangeWorkerPartitioner.java
+@@ -32,8 +32,8 @@
+  * range partitioning is more susceptible to hot spots if the keys
+  * are not randomly distributed.  Another negative is the user must implement
+  * some of the functionality around how to split the key range.
+- * 
+- * Note:  This implementation is incomplete, the developer must implement the 
++ *
++ * Note:  This implementation is incomplete, the developer must implement the
+  * various methods based on their index type.
+  *
+  * @param <I> Vertex index value
+@@ -46,7 +46,7 @@ public abstract class RangeWorkerPartitioner<I extends WritableComparable,
+         V extends Writable, E extends Writable, M extends Writable> implements
+         WorkerGraphPartitioner<I, V, E, M> {
+     /** Mapping of the vertex ids to the {@link PartitionOwner} */
+-    private NavigableMap<I, RangePartitionOwner<I>> vertexRangeMap =
++    protected NavigableMap<I, RangePartitionOwner<I>> vertexRangeMap =
+         new TreeMap<I, RangePartitionOwner<I>>();
+ 
+     @Override

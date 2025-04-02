@@ -1,0 +1,170 @@
+From bfb314505469afcd5ea7b5bd15121acd50425318 Mon Sep 17 00:00:00 2001
+From: Konstantin Shaposhnikov <Konstantin.Shaposhnikov@sc.com>
+Date: Mon, 6 Apr 2015 14:39:53 -0700
+Subject: [PATCH] PARQUET-220: Remove unnecessary warnings initializing
+ ParquetRecordReader
+
+Refactored to replace TaskInputOutputContext with TaskAttemptContext.
+
+ParquetRecordReader used to check that the passed context is instance of
+TaskInputOutputContext however the functionality it uses doesn't rely on this
+fact.
+
+This closes #152 when committed. It fixes the review feedback on that issue to include it in 1.6.0.
+
+Author: Konstantin Shaposhnikov <Konstantin.Shaposhnikov@sc.com>
+
+Closes #162 from rdblue/PARQUET-152-remove-counter-warning and squashes the following commits:
+
+0a7780f [Konstantin Shaposhnikov] PARQUET-220: do not log unnecessary warnings on initializing ParquetRecordReader
+---
+ .../java/parquet/hadoop/ParquetRecordReader.java  | 10 +---------
+ .../java/parquet/hadoop/util/ContextUtil.java     |  3 +--
+ .../hadoop/util/counters/BenchmarkCounter.java    | 15 ++++++++++++++-
+ .../mapreduce/MapReduceCounterLoader.java         | 15 ++++++++++++++-
+ pom.xml                                           |  1 +
+ 5 files changed, 31 insertions(+), 13 deletions(-)
+
+diff --git a/parquet-hadoop/src/main/java/parquet/hadoop/ParquetRecordReader.java b/parquet-hadoop/src/main/java/parquet/hadoop/ParquetRecordReader.java
+index abf65c1d38..12318f33fd 100644
+--- a/parquet-hadoop/src/main/java/parquet/hadoop/ParquetRecordReader.java
++++ b/parquet-hadoop/src/main/java/parquet/hadoop/ParquetRecordReader.java
+@@ -38,10 +38,8 @@
+ import org.apache.hadoop.mapreduce.InputSplit;
+ import org.apache.hadoop.mapreduce.RecordReader;
+ import org.apache.hadoop.mapreduce.TaskAttemptContext;
+-import org.apache.hadoop.mapreduce.TaskInputOutputContext;
+ 
+ import org.apache.hadoop.mapreduce.lib.input.FileSplit;
+-import parquet.Log;
+ import parquet.filter.UnboundRecordFilter;
+ import parquet.filter2.compat.FilterCompat;
+ import parquet.filter2.compat.FilterCompat.Filter;
+@@ -63,7 +61,6 @@
+  */
+ public class ParquetRecordReader<T> extends RecordReader<Void, T> {
+ 
+-  private static final Log LOG = Log.getLog(ParquetRecordReader.class);
+   private final InternalParquetRecordReader<T> internalReader;
+ 
+   /**
+@@ -130,12 +127,7 @@ public float getProgress() throws IOException, InterruptedException {
+   @Override
+   public void initialize(InputSplit inputSplit, TaskAttemptContext context)
+       throws IOException, InterruptedException {
+-    if (context instanceof TaskInputOutputContext<?, ?, ?, ?>) {
+-      BenchmarkCounter.initCounterFromContext((TaskInputOutputContext<?, ?, ?, ?>) context);
+-    } else {
+-      LOG.error("Can not initialize counter due to context is not a instance of TaskInputOutputContext, but is "
+-              + context.getClass().getCanonicalName());
+-    }
++    BenchmarkCounter.initCounterFromContext(context);
+ 
+     initializeInternalReader(toParquetSplit(inputSplit), ContextUtil.getConfiguration(context));
+   }
+diff --git a/parquet-hadoop/src/main/java/parquet/hadoop/util/ContextUtil.java b/parquet-hadoop/src/main/java/parquet/hadoop/util/ContextUtil.java
+index bb344ade8d..2e250939e6 100644
+--- a/parquet-hadoop/src/main/java/parquet/hadoop/util/ContextUtil.java
++++ b/parquet-hadoop/src/main/java/parquet/hadoop/util/ContextUtil.java
+@@ -35,7 +35,6 @@
+ import org.apache.hadoop.mapreduce.StatusReporter;
+ import org.apache.hadoop.mapreduce.TaskAttemptContext;
+ import org.apache.hadoop.mapreduce.TaskAttemptID;
+-import org.apache.hadoop.mapreduce.TaskInputOutputContext;
+ 
+ /*
+  * This is based on ContextFactory.java from hadoop-2.0.x sources.
+@@ -251,7 +250,7 @@ public static Configuration getConfiguration(JobContext context) {
+     }
+   }
+ 
+-  public static Counter getCounter(TaskInputOutputContext context,
++  public static Counter getCounter(TaskAttemptContext context,
+                                    String groupName, String counterName) {
+     return (Counter) invoke(GET_COUNTER_METHOD, context, groupName, counterName);
+   }
+diff --git a/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/BenchmarkCounter.java b/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/BenchmarkCounter.java
+index c388d5b9bf..250c5c09aa 100644
+--- a/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/BenchmarkCounter.java
++++ b/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/BenchmarkCounter.java
+@@ -20,6 +20,7 @@
+ 
+ import org.apache.hadoop.conf.Configuration;
+ import org.apache.hadoop.mapred.Reporter;
++import org.apache.hadoop.mapreduce.TaskAttemptContext;
+ import org.apache.hadoop.mapreduce.TaskInputOutputContext;
+ import parquet.hadoop.util.counters.mapred.MapRedCounterLoader;
+ import parquet.hadoop.util.counters.mapreduce.MapReduceCounterLoader;
+@@ -43,12 +44,24 @@ public class BenchmarkCounter {
+   private static ICounter timeCounter = new NullCounter();
+   private static CounterLoader counterLoader;
+ 
++  /**
++   * This method is for backward compatibility.
++   *
++   * @deprecated
++   *          will be removed in 2.0.0; use
++   *          {@link #initCounterFromContext(TaskAttemptContext)} instead.
++   */
++  @Deprecated
++  public static void initCounterFromContext(TaskInputOutputContext<?, ?, ?, ?> context) {
++    initCounterFromContext((TaskAttemptContext) context);
++  }
++
+   /**
+    * Init counters in hadoop's mapreduce API, support both 1.x and 2.x
+    *
+    * @param context
+    */
+-  public static void initCounterFromContext(TaskInputOutputContext<?, ?, ?, ?> context) {
++  public static void initCounterFromContext(TaskAttemptContext context) {
+     counterLoader = new MapReduceCounterLoader(context);
+     loadCounters();
+   }
+diff --git a/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/mapreduce/MapReduceCounterLoader.java b/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/mapreduce/MapReduceCounterLoader.java
+index 75ec1a2aad..c446c0d309 100644
+--- a/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/mapreduce/MapReduceCounterLoader.java
++++ b/parquet-hadoop/src/main/java/parquet/hadoop/util/counters/mapreduce/MapReduceCounterLoader.java
+@@ -18,6 +18,7 @@
+  */
+ package parquet.hadoop.util.counters.mapreduce;
+ 
++import org.apache.hadoop.mapreduce.TaskAttemptContext;
+ import org.apache.hadoop.mapreduce.TaskInputOutputContext;
+ import parquet.hadoop.util.ContextUtil;
+ import parquet.hadoop.util.counters.BenchmarkCounter;
+@@ -30,9 +31,21 @@
+  * @author Tianshuo Deng
+  */
+ public class MapReduceCounterLoader implements CounterLoader {
+-  private TaskInputOutputContext<?, ?, ?, ?> context;
++  private TaskAttemptContext context;
+ 
++  /**
++   * This is for backward-compatibility.
++   *
++   * @deprecated
++   *          will be removed in 2.0.0; use
++   *          {@link MapReduceCounterLoader(TaskAttemptContext)} instead.
++   */
++  @Deprecated
+   public MapReduceCounterLoader(TaskInputOutputContext<?, ?, ?, ?> context) {
++    this((TaskAttemptContext) context);
++  }
++
++  public MapReduceCounterLoader(TaskAttemptContext context) {
+     this.context = context;
+   }
+ 
+diff --git a/pom.xml b/pom.xml
+index 13549838aa..26ca916f83 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -237,6 +237,7 @@
+                      <exclude>parquet/org/**</exclude>
+                      <exclude>parquet/column/**</exclude>
+                      <exclude>parquet/hadoop/ParquetInputSplit</exclude>
++                     <exclude>parquet/hadoop/util/ContextUtil</exclude>
+                    </excludes>
+                  </requireBackwardCompatibility>
+                </rules>

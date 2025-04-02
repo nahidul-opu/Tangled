@@ -1,0 +1,103 @@
+From d4c9c2c7bf40044db837f1bdf55d87d27c047221 Mon Sep 17 00:00:00 2001
+From: Sebastian Bazley <sebb@apache.org>
+Date: Mon, 18 Oct 2010 18:54:29 +0000
+Subject: [PATCH] COLLECTIONS-364 DualTreeBidiMap.readObject() uses wrong
+ comparator to create reverseMap
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/collections/trunk@1023949 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../collections/bidimap/DualTreeBidiMap.java  |  2 +-
+ .../bidimap/TestDualTreeBidiMap2.java         | 40 ++++++++++++++++++-
+ 2 files changed, 40 insertions(+), 2 deletions(-)
+
+diff --git a/src/java/org/apache/commons/collections/bidimap/DualTreeBidiMap.java b/src/java/org/apache/commons/collections/bidimap/DualTreeBidiMap.java
+index dcba0eda30..93ba66f3ae 100644
+--- a/src/java/org/apache/commons/collections/bidimap/DualTreeBidiMap.java
++++ b/src/java/org/apache/commons/collections/bidimap/DualTreeBidiMap.java
+@@ -387,7 +387,7 @@ private void writeObject(ObjectOutputStream out) throws IOException {
+     private void readObject(ObjectInputStream in) throws IOException, ClassNotFoundException {
+         in.defaultReadObject();
+         normalMap = new TreeMap(comparator);
+-        reverseMap = new TreeMap(comparator);
++        reverseMap = new TreeMap(valueComparator);
+         Map map = (Map) in.readObject();
+         putAll(map);
+     }
+diff --git a/src/test/org/apache/commons/collections/bidimap/TestDualTreeBidiMap2.java b/src/test/org/apache/commons/collections/bidimap/TestDualTreeBidiMap2.java
+index f99677914f..cad8794fe2 100644
+--- a/src/test/org/apache/commons/collections/bidimap/TestDualTreeBidiMap2.java
++++ b/src/test/org/apache/commons/collections/bidimap/TestDualTreeBidiMap2.java
+@@ -22,6 +22,7 @@
+ import java.io.ObjectOutputStream;
+ import java.io.Serializable;
+ import java.util.Collections;
++import java.util.Comparator;
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.TreeMap;
+@@ -41,6 +42,7 @@
+  * @author Stephen Colebourne
+  * @author Jonas Van Poucke
+  */
++@SuppressWarnings("boxing")
+ public class TestDualTreeBidiMap2<K extends Comparable<K>, V extends Comparable<V>> extends AbstractTestSortedBidiMap<K, V> {
+ 
+     public static Test suite() {
+@@ -70,6 +72,16 @@ public void testComparator() {
+         assertTrue(bidi.comparator() instanceof ReverseComparator);
+     }
+ 
++    public void testComparator2() {
++        DualTreeBidiMap<String, Integer> dtbm = new DualTreeBidiMap<String, Integer>(
++                String.CASE_INSENSITIVE_ORDER, null);
++        dtbm.put("two", 0);
++        dtbm.put("one", 1);
++        assertEquals("one", dtbm.firstKey());
++        assertEquals("two", dtbm.lastKey());
++        
++    }
++
+     public void testSerializeDeserializeCheckComparator() throws Exception {
+         SortedBidiMap<?, ?> obj = makeObject();
+         if (obj instanceof Serializable && isTestSerialization()) {
+@@ -82,13 +94,39 @@ public void testSerializeDeserializeCheckComparator() throws Exception {
+             Object dest = in.readObject();
+             in.close();
+ 
+-            SortedBidiMap bidi = (SortedBidiMap) dest;
++            SortedBidiMap<?,?> bidi = (SortedBidiMap<?,?>) dest;
+             assertNotNull(obj.comparator());
+             assertNotNull(bidi.comparator());
+             assertTrue(bidi.comparator() instanceof ReverseComparator);
+         }
+     }
+ 
++    private static class IntegerComparator implements Comparator<Integer>, java.io.Serializable{
++        private static final long serialVersionUID = 1L;
++        public int compare(Integer o1, Integer o2) {
++            return o1.compareTo(o2);
++        }
++    }
++
++    public void testCollections364() throws Exception {
++        DualTreeBidiMap<String, Integer> original = new DualTreeBidiMap<String, Integer>(
++                String.CASE_INSENSITIVE_ORDER, new IntegerComparator());
++        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
++        ObjectOutputStream out = new ObjectOutputStream(buffer);
++        out.writeObject(original);
++        out.close();
++
++        ObjectInputStream in = new ObjectInputStream(new ByteArrayInputStream(buffer.toByteArray()));
++        @SuppressWarnings("unchecked")
++        DualTreeBidiMap<String, Integer> deserialised = (DualTreeBidiMap<String, Integer>) in.readObject();
++        in.close();
++
++        assertNotNull(original.comparator());
++        assertNotNull(deserialised.comparator());
++        assertEquals(original.comparator().getClass(), deserialised.comparator().getClass());
++        assertEquals(original.valueComparator().getClass(), deserialised.valueComparator().getClass());
++    }
++
+     public void testSortOrder() throws Exception {
+         SortedBidiMap<K, V> sm = makeFullMap();
+ 

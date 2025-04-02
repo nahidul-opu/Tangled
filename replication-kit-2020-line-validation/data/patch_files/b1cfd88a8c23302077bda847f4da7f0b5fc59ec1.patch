@@ -1,0 +1,492 @@
+From b1cfd88a8c23302077bda847f4da7f0b5fc59ec1 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 2 Sep 2008 16:33:16 +0000
+Subject: [PATCH] FIX: can't use gotoNode with a node which has not been
+ visited yet (IVY-874)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@691310 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../apache/ivy/core/resolve/IvyNodeUsage.java |  4 +-
+ .../ivy/core/resolve/ResolveEngine.java       | 55 +++++++++++++++----
+ .../apache/ivy/core/resolve/VisitNode.java    | 26 ++++-----
+ .../apache/ivy/core/resolve/ResolveTest.java  | 43 +++++++++++++++
+ .../org/apache/ivy/core/resolve/ivy-874.xml   | 36 ++++++++++++
+ .../m2/org/apache/test/1.1/test-1.1.jar       |  1 +
+ .../m2/org/apache/test/1.1/test-1.1.pom       | 31 +++++++++++
+ .../m2/org/apache/test/1.2/test-1.2.jar       |  1 +
+ .../m2/org/apache/test/1.2/test-1.2.pom       | 31 +++++++++++
+ .../m2/org/apache/test2/1.1/test2-1.1.jar     |  1 +
+ .../m2/org/apache/test2/1.1/test2-1.1.pom     | 39 +++++++++++++
+ .../m2/org/apache/test3/1.1/test3-1.1.jar     |  1 +
+ .../m2/org/apache/test3/1.1/test3-1.1.pom     | 43 +++++++++++++++
+ 14 files changed, 285 insertions(+), 28 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/resolve/ivy-874.xml
+ create mode 100644 test/repositories/m2/org/apache/test/1.1/test-1.1.jar
+ create mode 100644 test/repositories/m2/org/apache/test/1.1/test-1.1.pom
+ create mode 100644 test/repositories/m2/org/apache/test/1.2/test-1.2.jar
+ create mode 100644 test/repositories/m2/org/apache/test/1.2/test-1.2.pom
+ create mode 100644 test/repositories/m2/org/apache/test2/1.1/test2-1.1.jar
+ create mode 100644 test/repositories/m2/org/apache/test2/1.1/test2-1.1.pom
+ create mode 100644 test/repositories/m2/org/apache/test3/1.1/test3-1.1.jar
+ create mode 100644 test/repositories/m2/org/apache/test3/1.1/test3-1.1.pom
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index ed99630e3..ea1a9c8fa 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -110,6 +110,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Add a memory cache for the module descriptor that are parsed from the cache (IVY-883)
+ - IMPROVEMENT: Improve performance (IVY-872)
+ 
++- FIX: can't use gotoNode with a node which has not been visited yet (IVY-874)
+ - FIX: Ivy Publish Task Fails When XML Comments Exist Next to Dependency Declarations (IVY-888)
+ - FIX: Incorrect directory path resolve when running from a different directory (IVY-232)
+ - FIX: Ivy#listTokenValues(String, Map) does not filter returned values, and does not use maven-metadata.xml files with IBiblio resolver (IVY-886)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+index bbe183247..aff5843cd 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+@@ -261,9 +261,7 @@ protected Set getDependencyIncludesSet(String rootModuleConf) {
+     }
+ 
+     protected void removeRootModuleConf(String rootModuleConf) {
+-        if (!rootModuleConfs.keySet().contains(rootModuleConf)) {
+-            rootModuleConfs.put(rootModuleConf, null);
+-        }
++        rootModuleConfs.remove(rootModuleConf);
+     }
+ 
+     protected void blacklist(IvyNodeBlacklist bdata) {
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index d719e7d95..cf2d37e06 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -996,25 +996,58 @@ private Collection resolveConflicts(VisitNode node, VisitNode ancestor, Collecti
+         }
+     }
+ 
++    /**
++     * Compute possible conflicts for a node, in the context of an ancestor (a node which has a
++     * dependency - direct or indirect - on the node for which conflicts should be computed.
++     * 
++     * @param node
++     *            the node for which conflicts should be computed
++     * @param ancestor
++     *            the ancestor in which conflicts should be computed
++     * @param conf
++     *            the configuration of the node in which conflicts should be computed
++     * @param toevict
++     *            a collection of nodes which have been evicted during conflict resolution at lower
++     *            level. It may be empty if no conflict resolution has occured for this node yet, or
++     *            if no node has been evicted.
++     * @param selectedNodes
++     *            a collection of nodes selected during previous conflict resolution for the given
++     *            node and ancestor. This collection is updated by this call, removing nodes which
++     *            should be evicted.
++     * @return a collection of IvyNode which may be in conflict with the given node in the given
++     *         ancestor. This collection always contain at least the given node.
++     */
+     private Collection computeConflicts(VisitNode node, VisitNode ancestor, String conf,
+-            Collection toevict, Collection resolvedNodes) {
++            Collection toevict, Collection selectedNodes) {
+         Collection conflicts = new LinkedHashSet();
+         conflicts.add(node.getNode());
+-        if (resolvedNodes.removeAll(toevict)) {
+-            // parent.resolved(node.mid) is not up to date:
+-            // recompute resolved from all sub nodes
+-            Collection deps = ancestor.getNode().getDependencies(node.getRootModuleConf(),
+-                ancestor.getRequiredConfigurations());
++        /*
++         * We first try to remove all evicted nodes from the collection of selected nodes to update
++         * this collection. If the collection changes, it means that it contained evicted nodes, and
++         * thus is not up to date. In this case we need to compute selected nodes again. Another
++         * case where we need to deeply compute selected nodes is when selectedNodes is empty (not
++         * computed yet) and we aren't in the context of the direct parent of the node.
++         */
++        if (selectedNodes.removeAll(toevict) 
++                || (selectedNodes.isEmpty() 
++                        && !node.getParent().getNode().equals(ancestor.getNode()))) {
++            Collection deps = ancestor.getNode().getDependencies(
++                node.getRootModuleConf(), 
++                ancestor.getNode().getConfigurations(node.getRootModuleConf()));
+             for (Iterator iter = deps.iterator(); iter.hasNext();) {
+                 IvyNode dep = (IvyNode) iter.next();
+                 if (dep.getModuleId().equals(node.getModuleId())) {
+                     conflicts.add(dep);
+                 }
+-                conflicts
+-                        .addAll(dep.getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
++                conflicts.addAll(
++                    dep.getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
+             }
+-        } else if (resolvedNodes.isEmpty()) {
+-            //Conflict must only be computed per root configuration at this step.
++        } else if (selectedNodes.isEmpty()) {
++            /*
++             * No selected nodes at all yet, and we are in the context of the direct parent
++             * (otherwise previous block would have been reached). We can compute conflicts based on
++             * the parent direct dependencies in current root module conf.
++             */
+             Collection parentDepIvyNodes = node.getParent().getNode()
+                         .getDependencies(node.getRootModuleConf(), 
+                             new String[] {node.getParentConf()});
+@@ -1025,7 +1058,7 @@ private Collection computeConflicts(VisitNode node, VisitNode ancestor, String c
+                 }
+             }
+         } else {
+-            conflicts.addAll(resolvedNodes);
++            conflicts.addAll(selectedNodes);
+         }
+         return conflicts;
+     }
+diff --git a/src/java/org/apache/ivy/core/resolve/VisitNode.java b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+index 32bb72dfd..421972f14 100644
+--- a/src/java/org/apache/ivy/core/resolve/VisitNode.java
++++ b/src/java/org/apache/ivy/core/resolve/VisitNode.java
+@@ -23,6 +23,7 @@
+ import java.util.HashSet;
+ import java.util.Iterator;
+ import java.util.LinkedHashSet;
++import java.util.List;
+ 
+ import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.module.descriptor.Configuration;
+@@ -299,8 +300,7 @@ public Collection getDependencies(String conf) {
+ 
+     /**
+      * Returns a VisitNode for the given node. The given node must be a representation of the same
+-     * module (usually in another revision) as the one visited by this node. The given node must
+-     * also have been already visited.
++     * module (usually in another revision) as the one visited by this node. 
+      * 
+      * @param node
+      *            the node to visit
+@@ -314,18 +314,16 @@ VisitNode gotoNode(IvyNode node) {
+                             + getModuleId() + " Given node module id=" + node.getModuleId());
+         }
+         VisitData visitData = data.getVisitData(node.getId());
+-        if (visitData == null) {
+-            throw new IllegalArgumentException(
+-                    "You can't use gotoNode with a node which has not been visited yet.\n"
+-                    + "Given node id=" + node.getId());
+-        }
+-        for (Iterator iter = visitData.getVisitNodes(rootModuleConf).iterator(); iter.hasNext();) {
+-            VisitNode vnode = (VisitNode) iter.next();
+-            if ((parent == null && vnode.getParent() == null)
+-                    || (parent != null && parent.getId().equals(vnode.getParent().getId()))) {
+-                vnode.parentConf = parentConf;
+-                vnode.usage = getUsage();
+-                return vnode;
++        if (visitData != null) {
++            List visitNodes = visitData.getVisitNodes(rootModuleConf);
++            for (Iterator iter = visitNodes.iterator(); iter.hasNext();) {
++                VisitNode vnode = (VisitNode) iter.next();
++                if ((parent == null && vnode.getParent() == null)
++                        || (parent != null && parent.getId().equals(vnode.getParent().getId()))) {
++                    vnode.parentConf = parentConf;
++                    vnode.usage = getUsage();
++                    return vnode;
++                }
+             }
+         }
+         // the node has not yet been visited from the current parent, we create a new visit node
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 093a536b9..87b5d9668 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -3535,6 +3535,45 @@ public void testResolveMaven2() throws Exception {
+             "test", "jar", "jar").exists());        
+     }
+ 
++    public void testResolveMaven2WithConflict() throws Exception {
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml").toURL());
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/m2/org/apache/test3/1.1/test3-1.1.pom").toURL(),
++            getResolveOptions(new String[] {"default"}));
++        assertFalse(report.hasError());
++
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org.apache", "test2", "1.1")).exists());
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test2", "1.1",
++            "test2", "jar", "jar").exists());
++
++        assertTrue(getIvyFileInCache(
++            ModuleRevisionId.newInstance("org.apache", "test", "1.1")).exists());
++        assertTrue(getArchiveFileInCache(ivy, "org.apache", "test", "1.1",
++            "test", "jar", "jar").exists());   
++        
++        assertContainsArtifact(report.getConfigurationReport("default"), 
++            getArtifact("org.apache", "test2", "1.1", "test2", "jar", "jar"));
++        assertContainsArtifact(report.getConfigurationReport("default"), 
++            getArtifact("org.apache", "test", "1.1", "test", "jar", "jar"));
++    }
++
++    public void testResolveMaven2WithConflict2() throws Exception {
++        Ivy ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml").toURL());
++        ResolveReport report = ivy.resolve(ResolveTest.class.getResource("ivy-874.xml"),
++            getResolveOptions(new String[] {"default"}));
++        assertFalse(report.hasError());
++        
++        assertContainsArtifact(report.getConfigurationReport("default"), 
++            getArtifact("org.apache", "test3", "1.1", "test3", "jar", "jar"));
++        assertContainsArtifact(report.getConfigurationReport("default"), 
++            getArtifact("org.apache", "test2", "1.1", "test2", "jar", "jar"));
++        assertContainsArtifact(report.getConfigurationReport("default"), 
++            getArtifact("org.apache", "test", "1.2", "test", "jar", "jar"));
++    }
++
+     public void testResolveMaven2RelocationOfGroupId() throws Exception {
+         //Same as testResolveMaven2 but with a relocated module pointing to the module
+         //used in testResolveMaven2.
+@@ -4331,6 +4370,10 @@ public void testPrivateConfigurationTransferWhenConflict() throws Exception {
+     private void assertContainsArtifact(String org, String module, String rev, String artName,
+             String type, String ext, ConfigurationResolveReport conf) {
+         Artifact art = getArtifact(org, module, rev, artName, type, ext);
++        assertContainsArtifact(conf, art);
++    }
++
++    private void assertContainsArtifact(ConfigurationResolveReport conf, Artifact art) {
+         if (!containsArtifact(art, conf.getDownloadedArtifactsReports())) {
+             fail("artifact " + art + " should be part of " + conf.getConfiguration() + " from "
+                     + conf.getModuleDescriptor().getModuleRevisionId());
+diff --git a/test/java/org/apache/ivy/core/resolve/ivy-874.xml b/test/java/org/apache/ivy/core/resolve/ivy-874.xml
+new file mode 100644
+index 000000000..3e9f97561
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/resolve/ivy-874.xml
+@@ -0,0 +1,36 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="apache" module="IVY-874" revision="1.0"/>
++    <configurations>
++		<conf name="default" visibility="public" description="runtime dependencies and master artifact can be used with this conf" extends="runtime,master"/>
++		<conf name="master" visibility="public" description="contains only the artifact published by this module itself, with no transitive dependencies"/>
++		<conf name="compile" visibility="public" description="this is the default scope, used if none is specified. Compile dependencies are available in all classpaths."/>
++		<conf name="provided" visibility="public" description="this is much like compile, but indicates you expect the JDK or a container to provide it. It is only available on the compilation classpath, and is not transitive."/>
++		<conf name="runtime" visibility="public" description="this scope indicates that the dependency is not required for compilation, but is for execution. It is in the runtime and test classpaths, but not the compile classpath." extends="compile"/>
++		<conf name="test" visibility="private" description="this scope indicates that the dependency is not required for normal use of the application, and is only available for the test compilation and execution phases."/>
++		<conf name="system" visibility="public" description="this scope is similar to provided except that you have to provide the JAR which contains it explicitly. The artifact is always available and is not looked up in a repository."/>
++		<conf name="optional" visibility="public" description="contains all optional dependencies" />
++	</configurations>
++	
++	<dependencies>
++		<dependency org="org.apache" name="test" rev="1.2" conf="default" />
++		<dependency org="org.apache" name="test3" rev="1.1" conf="runtime->runtime,master" />
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/m2/org/apache/test/1.1/test-1.1.jar b/test/repositories/m2/org/apache/test/1.1/test-1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test/1.1/test-1.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test/1.1/test-1.1.pom b/test/repositories/m2/org/apache/test/1.1/test-1.1.pom
+new file mode 100644
+index 000000000..7dbac88ca
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test/1.1/test-1.1.pom
+@@ -0,0 +1,31 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.1</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++</project>
+diff --git a/test/repositories/m2/org/apache/test/1.2/test-1.2.jar b/test/repositories/m2/org/apache/test/1.2/test-1.2.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test/1.2/test-1.2.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test/1.2/test-1.2.pom b/test/repositories/m2/org/apache/test/1.2/test-1.2.pom
+new file mode 100644
+index 000000000..c165ddae1
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test/1.2/test-1.2.pom
+@@ -0,0 +1,31 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.2</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++</project>
+diff --git a/test/repositories/m2/org/apache/test2/1.1/test2-1.1.jar b/test/repositories/m2/org/apache/test2/1.1/test2-1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test2/1.1/test2-1.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test2/1.1/test2-1.1.pom b/test/repositories/m2/org/apache/test2/1.1/test2-1.1.pom
+new file mode 100644
+index 000000000..97a94db47
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test2/1.1/test2-1.1.pom
+@@ -0,0 +1,39 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test2</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.1</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test</artifactId>
++      <version>1.0</version>
++      <scope>compile</scope>
++    </dependency>
++  </dependencies>
++</project>
+diff --git a/test/repositories/m2/org/apache/test3/1.1/test3-1.1.jar b/test/repositories/m2/org/apache/test3/1.1/test3-1.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test3/1.1/test3-1.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/m2/org/apache/test3/1.1/test3-1.1.pom b/test/repositories/m2/org/apache/test3/1.1/test3-1.1.pom
+new file mode 100644
+index 000000000..b17603c68
+--- /dev/null
++++ b/test/repositories/m2/org/apache/test3/1.1/test3-1.1.pom
+@@ -0,0 +1,43 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.apache</groupId>
++  <artifactId>test3</artifactId>
++  <name>Test Module for Ivy M2 parsing</name>
++  <version>1.1</version>
++  <url>http://ivy.jayasoft.org/</url>
++  <organization>
++    <name>Jayasoft</name>
++    <url>http://www.jayasoft.org/</url>
++  </organization>
++  <dependencies>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test2</artifactId>
++      <version>1.1</version>
++    </dependency>
++    <dependency>
++      <groupId>org.apache</groupId>
++      <artifactId>test</artifactId>
++      <version>1.1</version>
++    </dependency>
++  </dependencies>
++</project>

@@ -1,0 +1,202 @@
+From c1b925f1fae99f9fda7e09449b9726fbac99aaa3 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 28 Feb 2006 11:06:15 +0000
+Subject: [PATCH] FIX: eviction problem with different conflicts in multiple
+ confs (IVY-173)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/trunk@484224 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ src/java/fr/jayasoft/ivy/Ivy.java             | 15 +++++--
+ src/java/fr/jayasoft/ivy/IvyNode.java         |  7 +---
+ src/java/fr/jayasoft/ivy/ResolveData.java     |  4 ++
+ test/java/fr/jayasoft/ivy/ResolveTest.java    | 41 +++++++++++++++++++
+ .../1/org6/mod6.1/ivys/ivy-0.5.xml            | 11 +++++
+ .../1/org6/mod6.1/jars/mod6.1-0.5.jar         |  1 +
+ .../1/org6/mod6.2/ivys/ivy-0.5.xml            | 18 ++++++++
+ 8 files changed, 89 insertions(+), 10 deletions(-)
+ create mode 100644 test/repositories/1/org6/mod6.1/ivys/ivy-0.5.xml
+ create mode 100644 test/repositories/1/org6/mod6.1/jars/mod6.1-0.5.jar
+ create mode 100644 test/repositories/1/org6/mod6.2/ivys/ivy-0.5.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index ce88f6ad4..fdf6b29bb 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -1,5 +1,7 @@
+ - IMPROVE: Retrieve task now also optionally do ivy file downloads (IVY-167) (with the contribution of Costin Leau)
+ 
++- FIX: eviction problem with different conflicts in multiple confs (IVY-173)
++
+    version 1.3-RC2 - 2006-02-15
+ ===============================
+ - IMPROVE: ivy now supports ${pom.version} in poms (IVY-174)
+diff --git a/src/java/fr/jayasoft/ivy/Ivy.java b/src/java/fr/jayasoft/ivy/Ivy.java
+index b0dd734da..0309cfedd 100644
+--- a/src/java/fr/jayasoft/ivy/Ivy.java
++++ b/src/java/fr/jayasoft/ivy/Ivy.java
+@@ -922,6 +922,9 @@ public IvyNode[] getDependencies(ModuleDescriptor md, String[] confs, File cache
+         
+         Map dependenciesMap = new HashMap();
+         Date reportDate = new Date();
++        ResolveData data = new ResolveData(this, cache, date, null, validate, dependenciesMap);
++        IvyNode rootNode = new IvyNode(data, md);
++        
+         for (int i = 0; i < confs.length; i++) {
+             Configuration configuration = md.getConfiguration(confs[i]);
+             if (configuration == null) {
+@@ -935,11 +938,15 @@ public IvyNode[] getDependencies(ModuleDescriptor md, String[] confs, File cache
+                         report.addReport(confs[i], confReport);
+                     }
+                 }
++                // we reuse the same resolve data with a new report for each conf
++                data.setReport(confReport); 
++                
++                // update the root module conf we are about to fetch
++                rootNode.setRootModuleConf(confs[i]); 
++                rootNode.updateConfsToFetch(Collections.singleton(confs[i]));
+                 
+-                ResolveData data = new ResolveData(this, cache, date, confReport, validate, dependenciesMap);
+-                IvyNode node = new IvyNode(data, md, confs[i], true);
+-                node.setRootModuleConf(confs[i]);
+-                fetchDependencies(node, confs[i], false);
++                // go fetch !
++                fetchDependencies(rootNode, confs[i], false);
+             }
+         }
+         
+diff --git a/src/java/fr/jayasoft/ivy/IvyNode.java b/src/java/fr/jayasoft/ivy/IvyNode.java
+index 9ce0e9c2a..236c04dff 100644
+--- a/src/java/fr/jayasoft/ivy/IvyNode.java
++++ b/src/java/fr/jayasoft/ivy/IvyNode.java
+@@ -250,14 +250,9 @@ public IvyNode(ResolveData data, DependencyDescriptor dd) {
+         init(data, true);
+     }
+ 
+-    public IvyNode(ResolveData data, ModuleDescriptor md, String conf) {
+-        this(data, md, conf, false);
+-    }
+-
+-    public IvyNode(ResolveData data, ModuleDescriptor md, String conf, boolean isRoot) {
++    public IvyNode(ResolveData data, ModuleDescriptor md) {
+         _id = md.getModuleRevisionId();
+         _md = md;
+-        _confsToFetch.add(conf);
+         _isRoot = true;
+         
+         // we do not register nodes created from ModuleDescriptor, cause they are
+diff --git a/src/java/fr/jayasoft/ivy/ResolveData.java b/src/java/fr/jayasoft/ivy/ResolveData.java
+index 829b8ab31..3c8b45109 100644
+--- a/src/java/fr/jayasoft/ivy/ResolveData.java
++++ b/src/java/fr/jayasoft/ivy/ResolveData.java
+@@ -77,6 +77,10 @@ public void register(IvyNode node) {
+     public void register(ModuleRevisionId id, IvyNode node) {
+         _nodes.put(id, node);
+     }
++
++    public void setReport(ConfigurationResolveReport report) {
++        _report = report;
++    }
+     
+ 
+     
+diff --git a/test/java/fr/jayasoft/ivy/ResolveTest.java b/test/java/fr/jayasoft/ivy/ResolveTest.java
+index ca697f302..653a30160 100644
+--- a/test/java/fr/jayasoft/ivy/ResolveTest.java
++++ b/test/java/fr/jayasoft/ivy/ResolveTest.java
+@@ -285,6 +285,47 @@ public void testResolveMultipleExtends() throws Exception {
+         assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testResolveMultipleConfsWithConflicts() throws Exception {
++        // Test case for IVY-173
++        //
++        // mod6.2  has two confs compile and run
++        //    depends on mod1.2 2.1 in conf (compile->default)
++        //    depends on mod1.1 1.0 in conf (*->default)
++        //    depends on mod6.1     in conf (*->default)
++        // mod6.1 
++        //    depends on mod1.2 2.1
++        // mod1.1 
++        //    depends on mod1.2 2.0
++        ResolveReport report = _ivy.resolve(new File("test/repositories/1/org6/mod6.2/ivys/ivy-0.5.xml").toURL(),
++                null, new String[] {"compile", "run"}, _cache, null, true);
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        ModuleDescriptor md = report.getModuleDescriptor();
++        assertNotNull(md);
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org6", "mod6.2", "0.5");
++        assertEquals(mrid, md.getModuleRevisionId());
++        ConfigurationResolveReport crr = report.getConfigurationReport("compile");
++        assertNotNull(crr);
++        assertEquals(3, crr.getArtifactsNumber());
++        crr = report.getConfigurationReport("run");
++        assertNotNull(crr);
++        assertEquals(3, crr.getArtifactsNumber());
++        
++        assertTrue(_ivy.getResolvedIvyFileInCache(_cache, mrid).exists());
++        
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org6", "mod6.1", "0.5")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org6", "mod6.1", "0.5", "mod6.1", "jar", "jar").exists());
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.1", "1.0")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.1", "1.0", "mod1.1", "jar", "jar").exists());
++
++        assertTrue(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.1")).exists());
++        assertTrue(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.1", "mod1.2", "jar", "jar").exists());
++
++        assertFalse(_ivy.getIvyFileInCache(_cache, ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertFalse(_ivy.getArchiveFileInCache(_cache, "org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++    }
++
+     public void testResolveMultipleExtends2() throws Exception {
+         // same as before, except that mod6.2 depends on mod1.2 2.1 extension->default
+         // so mod1.2 2.0 should be evicted in conf extension
+diff --git a/test/repositories/1/org6/mod6.1/ivys/ivy-0.5.xml b/test/repositories/1/org6/mod6.1/ivys/ivy-0.5.xml
+new file mode 100644
+index 000000000..c837160f2
+--- /dev/null
++++ b/test/repositories/1/org6/mod6.1/ivys/ivy-0.5.xml
+@@ -0,0 +1,11 @@
++<ivy-module version="1.0">
++	<info organisation="org6"
++	       module="mod6.1"
++	       revision="0.5"
++	       status="integration"
++	       publication="20050312110000"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.1"/>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org6/mod6.1/jars/mod6.1-0.5.jar b/test/repositories/1/org6/mod6.1/jars/mod6.1-0.5.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org6/mod6.1/jars/mod6.1-0.5.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org6/mod6.2/ivys/ivy-0.5.xml b/test/repositories/1/org6/mod6.2/ivys/ivy-0.5.xml
+new file mode 100644
+index 000000000..1b0cab8b8
+--- /dev/null
++++ b/test/repositories/1/org6/mod6.2/ivys/ivy-0.5.xml
+@@ -0,0 +1,18 @@
++<ivy-module version="1.0">
++	<info organisation="org6"
++	       module="mod6.2"
++	       revision="0.5"
++	       status="integration"
++	       publication="20050312110000"
++	/>
++	<configurations>
++    	<conf name="compile"/>
++    	<conf name="run"/>
++	</configurations>
++	<publications />
++	<dependencies>
++		<dependency org="org1" name="mod1.2" rev="2.1" conf="compile->default"/>
++		<dependency org="org1" name="mod1.1" rev="1.0" conf="*->default"/>
++		<dependency org="org6" name="mod6.1" rev="0.5" conf="*->default"/>
++	</dependencies>
++</ivy-module>

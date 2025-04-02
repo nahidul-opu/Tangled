@@ -1,0 +1,204 @@
+From 9bf25f5b4c33634393fedc8f97d6ffd53480f548 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Thu, 30 Aug 2007 20:20:17 +0000
+Subject: [PATCH] FIX: NullPointerException whilst resolving transitive
+ dependencies (IVY-590)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@571295 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/core/resolve/IvyNodeEviction.java     | 38 ++++++++++++-------
+ .../apache/ivy/core/resolve/ResolveTest.java  | 25 ++++++++++++
+ .../org/apache/ivy/core/resolve/ivy-590.xml   | 29 ++++++++++++++
+ test/repositories/2/mod16.1/ivy-1.0.xml       | 30 +++++++++++++++
+ 5 files changed, 110 insertions(+), 13 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/resolve/ivy-590.xml
+ create mode 100644 test/repositories/2/mod16.1/ivy-1.0.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 12436cda4..6beee3ba4 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -51,6 +51,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+    version in SVN
+ =====================================
++- FIX: NullPointerException whilst resolving transitive dependencies (IVY-590)
+ - FIX: cachepath based on a resolve done in a previous build broken (IVY-583)
+ 
+ - IMPROVEMENT: artifactproperty should not overwrite the existing properties (IVY-587)
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+index f363af727..9249abb41 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+@@ -28,31 +28,43 @@
+ import org.apache.ivy.plugins.conflict.ConflictManager;
+ 
+ public class IvyNodeEviction {
++    /**
++     * This class contains data about the eviction of an {@link IvyNode}.
++     */
+     public static class EvictionData {
+-        private IvyNode parent; // can be null in case of transitive eviction
+-
+-        private ConflictManager conflictManager; // can be null in case of transitive eviction
++        /**
++         * Can be null in case of transitive eviction.
++         */
++        private IvyNode parent;
+ 
+-        private Collection selected; // Collection(IvyNode); can be null in case of transitive
++        /**
++         * Can be null in case of transitive eviction.
++         */
++        private ConflictManager conflictManager;
+ 
+-        // eviction
++        /**
++         * Can be null in case of transitive eviction.
++         */
++        private Collection selected; // Collection(IvyNode)
+ 
+         private String rootModuleConf;
+ 
++        /**
++         * Creates a new object containing the eviction data of an {@link IvyNode}.
++         * 
++         * @param rootModuleConf the rootmodule configuration
++         * @param parent the parent node (or <tt>null</tt> in case of transitive eviction)
++         * @param conflictManager the conflictmanager which evicted the node (or <tt>null</tt> in
++         *                        case of transitive eviction)
++         * @param selected a collection of {@link IvyNode}s which evict the evicted node (or 
++         *                 <tt>null</tt> in case of transitive eviction)
++         */
+         public EvictionData(String rootModuleConf, IvyNode parent, ConflictManager conflictManager,
+                 Collection selected) {
+             this.rootModuleConf = rootModuleConf;
+             this.parent = parent;
+             this.conflictManager = conflictManager;
+             this.selected = selected;
+-            for (Iterator iter = selected.iterator(); iter.hasNext();) {
+-                Object o = (Object) iter.next();
+-                if (!(o instanceof IvyNode)) {
+-                    throw new IllegalArgumentException(
+-                            "selected nodes must be instance of IvyNode. Found: "
+-                                    + o.getClass().getName());
+-                }
+-            }
+         }
+ 
+         public String toString() {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index ed3a31770..c947f397f 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -20,6 +20,7 @@
+ import java.io.File;
+ import java.util.ArrayList;
+ import java.util.Arrays;
++import java.util.Collection;
+ import java.util.Date;
+ import java.util.HashSet;
+ import java.util.List;
+@@ -1499,6 +1500,30 @@ public void testTransitiveEviction2() throws Exception {
+         assertFalse(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
+ 
++    public void testTransitiveEvictionWithExtendingConf() throws Exception {
++        // IVY-590
++        ResolveReport report = ivy.resolve(ResolveTest.class.getResource("ivy-590.xml"),
++            getResolveOptions(new String[] {"*"}));
++        assertNotNull(report);
++        
++        // dependencies
++        assertTrue(cacheManager.getIvyFileInCache(
++            ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")).exists());
++        assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
++        
++        // test eviction
++        ConfigurationResolveReport compileReport = report.getConfigurationReport("compile");
++        IvyNode[] evicted = compileReport.getEvictedNodes();
++        assertNotNull(evicted);
++        
++        Collection evictedModules = new ArrayList();
++        for (int i = 0; i < evicted.length; i++) {
++            evictedModules.add(evicted[i].getId());
++        }
++        
++        assertTrue(evictedModules.contains(ModuleRevisionId.newInstance("org1", "mod1.2", "2.0")));
++    }
++    
+     public void testResolveConflictInConf() throws Exception {
+         // conflicts in separate confs are not conflicts
+ 
+diff --git a/test/java/org/apache/ivy/core/resolve/ivy-590.xml b/test/java/org/apache/ivy/core/resolve/ivy-590.xml
+new file mode 100644
+index 000000000..b9efe6868
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/resolve/ivy-590.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++    <info organisation="apache" module="IVY-590" revision="1.0"/>
++    <configurations>
++	    <conf name="default" transitive="true"/>
++		<conf name="compile" extends="default" />
++	</configurations>
++    <dependencies>
++		<dependency org="org1" name="mod1.1" rev="1.0" conf="default->default"/>
++		<dependency org="org16" name="mod16.1" rev="1.0" conf="compile->default"/>
++    </dependencies>
++</ivy-module>
+diff --git a/test/repositories/2/mod16.1/ivy-1.0.xml b/test/repositories/2/mod16.1/ivy-1.0.xml
+new file mode 100644
+index 000000000..af4a99811
+--- /dev/null
++++ b/test/repositories/2/mod16.1/ivy-1.0.xml
+@@ -0,0 +1,30 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org16"
++	       module="mod16.1"
++	       revision="1.0"
++	       status="integration"
++	       publication="20050930110000"
++	/>
++	<publications />
++    <dependencies>
++		<dependency org="org1" name="mod1.1" rev="2.0" />
++    </dependencies>
++</ivy-module>

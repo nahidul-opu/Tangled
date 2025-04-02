@@ -1,0 +1,733 @@
+From 56c3991ddafc2ec189b159cdaebabede72040ba4 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Sat, 5 Apr 2008 08:08:21 +0000
+Subject: [PATCH] FIX: Eviction fails for libs not providing their ivy
+ configuration and providing artifacts named different between lib versions
+ (IVY-537)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@645041 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../DefaultDependencyArtifactDescriptor.java  |  25 +--
+ .../DependencyArtifactDescriptor.java         |   6 +
+ .../report/ConfigurationResolveReport.java    |  17 +-
+ .../apache/ivy/core/report/ResolveReport.java |   3 +-
+ .../org/apache/ivy/core/resolve/IvyNode.java  | 151 +++++++++++++-----
+ .../apache/ivy/core/resolve/IvyNodeUsage.java |  38 ++---
+ .../ivy/core/resolve/ResolveEngine.java       |  10 +-
+ .../parser/m2/PomModuleDescriptorBuilder.java |   2 +-
+ .../parser/xml/XmlModuleDescriptorParser.java |   2 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  |  21 ++-
+ .../1/org1/mod1.3/jars/mod1.3-A-3.1.jar       |   1 +
+ .../1/org1/mod1.3/jars/mod1.3-C-3.1.jar       |   1 +
+ .../1/org1/mod1.6/ivys/ivy-1.0.4.xml          |  31 ++++
+ .../1/org2/mod2.5/ivys/ivy-0.6.2.xml          |  31 ++++
+ .../1/org2/mod2.6/ivys/ivy-0.12.xml           |  29 ++++
+ 16 files changed, 290 insertions(+), 79 deletions(-)
+ create mode 100644 test/repositories/1/org1/mod1.3/jars/mod1.3-A-3.1.jar
+ create mode 100644 test/repositories/1/org1/mod1.3/jars/mod1.3-C-3.1.jar
+ create mode 100644 test/repositories/1/org1/mod1.6/ivys/ivy-1.0.4.xml
+ create mode 100644 test/repositories/1/org2/mod2.5/ivys/ivy-0.6.2.xml
+ create mode 100644 test/repositories/1/org2/mod2.6/ivys/ivy-0.12.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e9d881b53..e9b6d12b5 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -78,6 +78,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: Eviction fails for libs not providing their ivy configuration and providing artifacts named different between lib versions (IVY-537)
+ - FIX: Memory leak in ModuleRevisionId.java (IVY-791)
+ - FIX: conflict manager scoping does not work as expected (IVY-465)
+ - FIX: ivy.original.xml file using artifact pattern in cache and causing problems (IVY-787)
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyArtifactDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyArtifactDescriptor.java
+index 3e985791c..24641cb8c 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyArtifactDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultDependencyArtifactDescriptor.java
+@@ -23,6 +23,7 @@
+ import java.util.Map;
+ 
+ import org.apache.ivy.core.IvyPatternHelper;
++import org.apache.ivy.util.Checks;
+ import org.apache.ivy.util.extendable.UnmodifiableExtendableItem;
+ 
+ public class DefaultDependencyArtifactDescriptor extends UnmodifiableExtendableItem implements
+@@ -38,24 +39,22 @@ public class DefaultDependencyArtifactDescriptor extends UnmodifiableExtendableI
+ 
+     private String ext;
+ 
++    private DependencyDescriptor dd;
++
+     /**
+      * @param dd
+      * @param name
+      * @param type
+      * @param url
+      */
+-    public DefaultDependencyArtifactDescriptor(String name, String type, String ext, URL url,
+-            Map extraAttributes) {
++    public DefaultDependencyArtifactDescriptor(DependencyDescriptor dd, 
++            String name, String type, String ext, URL url, Map extraAttributes) {
+         super(null, extraAttributes);
+-        if (name == null) {
+-            throw new NullPointerException("name must not be null");
+-        }
+-        if (type == null) {
+-            throw new NullPointerException("type must not be null");
+-        }
+-        if (ext == null) {
+-            throw new NullPointerException("ext must not be null");
+-        }
++        Checks.checkNotNull(dd, "dd");
++        Checks.checkNotNull(name, "name");
++        Checks.checkNotNull(type, "type");
++        Checks.checkNotNull(ext, "ext");
++        this.dd = dd;
+         this.name = name;
+         this.type = type;
+         this.ext = ext;
+@@ -90,6 +89,10 @@ public int hashCode() {
+     public void addConfiguration(String conf) {
+         confs.add(conf);
+     }
++    
++    public DependencyDescriptor getDependencyDescriptor() {
++        return dd;
++    }
+ 
+     public String getName() {
+         return name;
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DependencyArtifactDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DependencyArtifactDescriptor.java
+index e5ce7b503..345edb3da 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DependencyArtifactDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DependencyArtifactDescriptor.java
+@@ -26,6 +26,12 @@
+  * artifact not declared by a dependency module descriptor.
+  */
+ public interface DependencyArtifactDescriptor extends ExtendableItem {
++    /**
++     * Returns the dependency descriptor in which this dependency artifact descriptor is declared.
++     * 
++     * @return the dependency descriptor in which this dependency artifact descriptor is declared.
++     */
++    public DependencyDescriptor getDependencyDescriptor();
+     /**
+      * Returns the name of the artifact asked
+      * 
+diff --git a/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java b/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java
+index 5ce5d2fcb..fd4e30d0b 100644
+--- a/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java
++++ b/src/java/org/apache/ivy/core/report/ConfigurationResolveReport.java
+@@ -323,7 +323,9 @@ public ArtifactDownloadReport[] getDownloadedArtifactsReports() {
+      * @return the list of reports, never <code>null</code>
+      */
+     public ArtifactDownloadReport[] getFailedArtifactsReports() {
+-        return getArtifactsReports(DownloadStatus.FAILED, true);
++        ArtifactDownloadReport[] allFailedReports 
++            = getArtifactsReports(DownloadStatus.FAILED, true);
++        return filterOutMergedArtifacts(allFailedReports);
+     }
+ 
+     public boolean hasError() {
+@@ -334,4 +336,17 @@ public int getNodesNumber() {
+         return getDependencies().size();
+     }
+ 
++    public static ArtifactDownloadReport[] filterOutMergedArtifacts(
++            ArtifactDownloadReport[] allFailedReports) {
++        Collection adrs = new ArrayList(Arrays.asList(allFailedReports));
++        for (Iterator iterator = adrs.iterator(); iterator.hasNext();) {
++            ArtifactDownloadReport adr = (ArtifactDownloadReport) iterator.next();
++            
++            if (adr.getArtifact().getExtraAttribute("ivy:merged") != null) {
++                iterator.remove();
++            }
++        }
++        return (ArtifactDownloadReport[]) adrs.toArray(new ArtifactDownloadReport[adrs.size()]);
++    }
++
+ }
+diff --git a/src/java/org/apache/ivy/core/report/ResolveReport.java b/src/java/org/apache/ivy/core/report/ResolveReport.java
+index a1decc2bf..2ce8e9acd 100644
+--- a/src/java/org/apache/ivy/core/report/ResolveReport.java
++++ b/src/java/org/apache/ivy/core/report/ResolveReport.java
+@@ -128,7 +128,8 @@ public IvyNode[] getUnresolvedDependencies() {
+      * @return the list of reports, never <code>null</code>
+      */
+     public ArtifactDownloadReport[] getFailedArtifactsReports() {
+-        return getArtifactsReports(DownloadStatus.FAILED, true);
++        return ConfigurationResolveReport.filterOutMergedArtifacts(
++            getArtifactsReports(DownloadStatus.FAILED, true));
+     }
+ 
+     /**
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index c13c0b6de..2bf01ec98 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -23,6 +23,7 @@
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.Iterator;
++import java.util.LinkedHashMap;
+ import java.util.LinkedHashSet;
+ import java.util.LinkedList;
+ import java.util.List;
+@@ -101,7 +102,10 @@ public class IvyNode implements Comparable {
+ 
+     // //////// USAGE DATA
+ 
+-    private IvyNodeUsage usage = new IvyNodeUsage();
++    private IvyNodeUsage usage = new IvyNodeUsage(this);
++    
++    // usage information merged from evicted nodes this node is "replacing"
++    private Map/*<ModuleRevisionId, IvyNodeUsage>*/ mergedUsages = new LinkedHashMap();
+ 
+     public IvyNode(ResolveData data, IvyNode parent, DependencyDescriptor dd) {
+         id = dd.getDependencyRevisionId();
+@@ -124,10 +128,6 @@ private void init(ResolveData data) {
+         callers = new IvyNodeCallers(this);
+     }
+     
+-    protected IvyNodeUsage getUsage() {
+-        return usage;
+-    }
+-
+     /**
+      * After the call node may be discarded. To avoid using discarded node, make sure to get the
+      * real node after the call IvyNode node = ... node.loadData(); node = node.getRealNode(); ...
+@@ -466,7 +466,19 @@ private String[] resolveSpecialConfigurations(String[] dependencyConfigurations,
+      * @return
+      */
+     public String[] getRequiredConfigurations(IvyNode in, String inConf) {
+-        return usage.getRequiredConfigurations(in, inConf);
++        Collection req = new LinkedHashSet();
++        addAllIfNotNull(req, usage.getRequiredConfigurations(in, inConf));
++        for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
++            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++            addAllIfNotNull(req, usage.getRequiredConfigurations(in, inConf));
++        }
++        return req == null ? new String[0] : (String[]) req.toArray(new String[req.size()]);
++    }
++
++    private void addAllIfNotNull(Collection into, Collection col) {
++        if (col != null) {
++            into.addAll(col);
++        }
+     }
+ 
+     /**
+@@ -502,12 +514,18 @@ public Configuration getConfiguration(String conf) {
+      * @return
+      */
+     public String[] getConfigurations(String rootModuleConf) {
+-        return usage.getConfigurations(rootModuleConf);
++        Set depConfs = new LinkedHashSet();
++        addAllIfNotNull(depConfs, usage.getConfigurations(rootModuleConf));
++        for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
++            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++            addAllIfNotNull(depConfs, usage.getConfigurations(rootModuleConf));
++        }
++        return (String[]) depConfs.toArray(new String[depConfs.size()]);
+     }
+ 
+     //This is never called.  Could we remove it?
+     public void discardConf(String rootModuleConf, String conf) {
+-        Set depConfs = usage.getConfigurationsSet(rootModuleConf);
++        Set depConfs = usage.addAndGetConfigurations(rootModuleConf);
+         if (md != null) {
+             // remove all given dependency configurations to the set + extended ones
+             Configuration c = md.getConfiguration(conf);
+@@ -527,7 +545,7 @@ public void discardConf(String rootModuleConf, String conf) {
+     }
+ 
+     private void addRootModuleConfigurations(String rootModuleConf, String[] dependencyConfs) {
+-        Set depConfs = usage.getConfigurationsSet(rootModuleConf);
++        Set depConfs = usage.addAndGetConfigurations(rootModuleConf);
+         if (md != null) {
+             // add all given dependency configurations to the set + extended ones
+             for (int i = 0; i < dependencyConfs.length; i++) {
+@@ -554,7 +572,23 @@ private void addRootModuleConfigurations(String rootModuleConf, String[] depende
+      * @return
+      */
+     public String[] getRootModuleConfigurations() {
+-        return usage.getRootModuleConfigurations();
++        Set confs = getRootModuleConfigurationsSet();
++        return (String[]) confs.toArray(new String[confs.size()]);
++    }
++
++    /**
++     * Returns the root module configurations in which this dependency is required
++     * 
++     * @return
++     */
++    public Set getRootModuleConfigurationsSet() {
++        Set confs = new LinkedHashSet();
++        addAllIfNotNull(confs, usage.getRootModuleConfigurations());
++        for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
++            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++            addAllIfNotNull(confs, usage.getRootModuleConfigurations());
++        }
++        return confs;
+     }
+ 
+     public String[] getConfsToFetch() {
+@@ -634,7 +668,18 @@ private void updateDataFrom(IvyNode node, String rootModuleConf, boolean real) {
+         // update callers
+         callers.updateFrom(node.callers, rootModuleConf, real);
+ 
+-        usage.updateDataFrom(node.usage, rootModuleConf, real);
++        if (real) {
++            usage.updateDataFrom(node.usage, rootModuleConf);
++        } else {
++            // let's copy usage information for the given rootModuleConf, into a separate usage
++            // object to keep detailed data about where usage comes from
++            IvyNodeUsage mergedUsage = (IvyNodeUsage) mergedUsages.get(node.getId());
++            if (mergedUsage == null) {
++                mergedUsage = new IvyNodeUsage(node);
++                mergedUsages.put(node.getId(), mergedUsage);
++            }
++            mergedUsage.updateDataFrom(node.usage, rootModuleConf);
++        }
+ 
+         // update confsToFetch
+         updateConfsToFetch(node.fetchedConfigurations);
+@@ -648,7 +693,8 @@ private void updateDataFrom(IvyNode node, String rootModuleConf, boolean real) {
+      */
+     public Artifact[] getAllArtifacts() {
+         Set ret = new HashSet();
+-        for (Iterator it = usage.getRootModuleConfigurationsSet().iterator(); it.hasNext();) {
++        
++        for (Iterator it = getRootModuleConfigurationsSet().iterator(); it.hasNext();) {
+             String rootModuleConf = (String) it.next();
+             ret.addAll(Arrays.asList(getArtifacts(rootModuleConf)));
+         }
+@@ -664,7 +710,7 @@ public Artifact[] getAllArtifacts() {
+      */
+     public Artifact[] getSelectedArtifacts(Filter artifactFilter) {
+         Collection ret = new HashSet();
+-        for (Iterator it = usage.getRootModuleConfigurationsSet().iterator(); it.hasNext();) {
++        for (Iterator it = getRootModuleConfigurationsSet().iterator(); it.hasNext();) {
+             String rootModuleConf = (String) it.next();
+             if (!isEvicted(rootModuleConf) && !isBlacklisted(rootModuleConf)) {
+                 ret.addAll(Arrays.asList(getArtifacts(rootModuleConf)));
+@@ -684,14 +730,14 @@ public Artifact[] getSelectedArtifacts(Filter artifactFilter) {
+     public Artifact[] getArtifacts(String rootModuleConf) {
+         // first we look for the dependency configurations required
+         // in the given root module configuration
+-        Set confs = usage.getConfigurationsSet(rootModuleConf);
+-        if (confs == null || confs.isEmpty()) {
++        String[] confs = getConfigurations(rootModuleConf);
++        if (confs == null || confs.length == 0) {
+             // no configuration required => no artifact required
+             return new Artifact[0];
+         }
+         if (md == null) {
+             throw new IllegalStateException(
+-                    "impossible to get artefacts when data has not been loaded. IvyNode = "
++                    "impossible to get artifacts when data has not been loaded. IvyNode = "
+                     + this.toString());
+         }
+ 
+@@ -702,25 +748,21 @@ public Artifact[] getArtifacts(String rootModuleConf) {
+         Set dependencyArtifacts = usage.getDependencyArtifactsSet(rootModuleConf);
+ 
+         if (md.isDefault() && dependencyArtifacts != null && !dependencyArtifacts.isEmpty()) {
+-            // the descriptor is a default one: it has been generated from nothing
+-            // moreover, we have dependency artifacts description
+-            // these descritions are thus used as if they were declared in the module
+-            // descriptor. If one is not really present, the error will be raised
+-            // at download time
+-            for (Iterator it = dependencyArtifacts.iterator(); it.hasNext();) {
+-                DependencyArtifactDescriptor dad = (DependencyArtifactDescriptor) it.next();
+-                artifacts.add(new MDArtifact(md, dad.getName(), dad.getType(), dad.getExt(), dad
+-                        .getUrl(), dad.getExtraAttributes()));
+-            }
++            addArtifactsFromOwnUsage(artifacts, dependencyArtifacts);
++            addArtifactsFromMergedUsage(rootModuleConf, artifacts);
+         } else {
+-            Set includes = usage.getDependencyIncludesSet(rootModuleConf);
++            Set includes = new LinkedHashSet();
++            addAllIfNotNull(includes, usage.getDependencyIncludesSet(rootModuleConf));
++            for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
++                IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++                addAllIfNotNull(includes, usage.getDependencyIncludesSet(rootModuleConf));
++            }
+ 
+             if ((dependencyArtifacts == null || dependencyArtifacts.isEmpty())
+-                    && (includes == null || includes.isEmpty())) {
++                    && (includes.isEmpty())) {
+                 // no artifacts / includes: we get all artifacts as defined by the descriptor
+-                for (Iterator iter = confs.iterator(); iter.hasNext();) {
+-                    String conf = (String) iter.next();
+-                    artifacts.addAll(Arrays.asList(md.getArtifacts(conf)));
++                for (int i = 0; i < confs.length; i++) {
++                    artifacts.addAll(Arrays.asList(md.getArtifacts(confs[i])));
+                 }
+             } else {
+                 // we have to get only artifacts listed as "includes"
+@@ -728,20 +770,18 @@ public Artifact[] getArtifacts(String rootModuleConf) {
+                 // first we get all artifacts as defined by the module descriptor
+                 // and classify them by artifact id
+                 Map allArtifacts = new HashMap();
+-                for (Iterator iter = confs.iterator(); iter.hasNext();) {
+-                    String conf = (String) iter.next();
+-                    Artifact[] arts = md.getArtifacts(conf);
+-                    for (int i = 0; i < arts.length; i++) {
+-                        allArtifacts.put(arts[i].getId().getArtifactId(), arts[i]);
++                for (int i = 0; i < confs.length; i++) {
++                    Artifact[] arts = md.getArtifacts(confs[i]);
++                    for (int j = 0; j < arts.length; j++) {
++                        allArtifacts.put(arts[j].getId().getArtifactId(), arts[j]);
+                     }
+                 }
+ 
+                 // now we add caller defined ones
+-                for (Iterator it = dependencyArtifacts.iterator(); it.hasNext();) {
+-                    DependencyArtifactDescriptor dad = (DependencyArtifactDescriptor) it.next();
+-                    artifacts.add(new MDArtifact(md, dad.getName(), dad.getType(), dad.getExt(),
+-                            dad.getUrl(), dad.getExtraAttributes()));
++                if (dependencyArtifacts != null) {
++                    addArtifactsFromOwnUsage(artifacts, dependencyArtifacts);
+                 }
++                addArtifactsFromMergedUsage(rootModuleConf, artifacts);
+ 
+                 // and now we filter according to include rules
+                 for (Iterator it = includes.iterator(); it.hasNext();) {
+@@ -773,6 +813,33 @@ public Artifact[] getArtifacts(String rootModuleConf) {
+         return (Artifact[]) artifacts.toArray(new Artifact[artifacts.size()]);
+     }
+ 
++    private void addArtifactsFromOwnUsage(Set artifacts, Set dependencyArtifacts) {
++        for (Iterator it = dependencyArtifacts.iterator(); it.hasNext();) {
++            DependencyArtifactDescriptor dad = (DependencyArtifactDescriptor) it.next();
++            artifacts.add(new MDArtifact(md, dad.getName(), dad.getType(), dad.getExt(),
++                    dad.getUrl(), dad.getExtraAttributes()));
++        }
++    }
++
++    private void addArtifactsFromMergedUsage(String rootModuleConf, Set artifacts) {
++        for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
++            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++            Set mergedDependencyArtifacts = usage.getDependencyArtifactsSet(rootModuleConf);
++            if (mergedDependencyArtifacts != null) {
++                for (Iterator it = mergedDependencyArtifacts.iterator(); it.hasNext();) {
++                    DependencyArtifactDescriptor dad = (DependencyArtifactDescriptor) it.next();
++                    Map extraAttributes = new HashMap(dad.getExtraAttributes());
++                    // this is later used to know that this is a merged artifact
++                    extraAttributes.put("ivy:merged", 
++                        dad.getDependencyDescriptor().getParentRevisionId() 
++                        + " -> " + usage.getNode().getId()); 
++                    artifacts.add(new MDArtifact(md, dad.getName(), dad.getType(), dad.getExt(),
++                        dad.getUrl(), extraAttributes));
++                }
++            }
++        }
++    }
++
+     private static Collection findArtifactsMatching(IncludeRule rule, Map allArtifacts) {
+         Collection ret = new ArrayList();
+         for (Iterator iter = allArtifacts.keySet().iterator(); iter.hasNext();) {
+@@ -972,6 +1039,10 @@ public void markEvicted(EvictionData evictionData) {
+         eviction.markEvicted(evictionData);
+         String rootModuleConf = evictionData.getRootModuleConf();
+         usage.removeRootModuleConf(rootModuleConf);
++        for (Iterator iterator = mergedUsages.values().iterator(); iterator.hasNext();) {
++            IvyNodeUsage usage = (IvyNodeUsage) iterator.next();
++            usage.removeRootModuleConf(rootModuleConf);
++        }
+ 
+         // bug 105: update selected data with evicted one
+         if (evictionData.getSelected() != null) {
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+index b742e3d8b..5bcab3e97 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeUsage.java
+@@ -84,6 +84,8 @@ public String toString() {
+             return "NodeConf(" + conf + ")";
+         }
+     }
++    
++    private IvyNode node;
+ 
+     // Map (String rootConfName -> Set(String confName))
+     // used to know which configurations of the dependency are required
+@@ -102,9 +104,12 @@ public String toString() {
+     // Map (String rootModuleConf -> IvyNodeBlacklist)
+     private Map blacklisted = new HashMap();
+     
+-    protected String[] getRequiredConfigurations(IvyNode in, String inConf) {
+-        Collection req = (Collection) requiredConfs.get(new NodeConf(in, inConf));
+-        return req == null ? new String[0] : (String[]) req.toArray(new String[req.size()]);
++    public IvyNodeUsage(IvyNode node) {
++        this.node = node;
++    }
++
++    protected Collection getRequiredConfigurations(IvyNode in, String inConf) {
++        return (Collection) requiredConfs.get(new NodeConf(in, inConf));
+     }
+ 
+     protected void setRequiredConfs(IvyNode parent, String parentConf, Collection confs) {
+@@ -117,15 +122,11 @@ protected void setRequiredConfs(IvyNode parent, String parentConf, Collection co
+      * @param rootModuleConf
+      * @return
+      */
+-    protected String[] getConfigurations(String rootModuleConf) {
+-        Set depConfs = (Set) rootModuleConfs.get(rootModuleConf);
+-        if (depConfs == null) {
+-            return new String[0];
+-        }
+-        return (String[]) depConfs.toArray(new String[depConfs.size()]);
++    protected Set getConfigurations(String rootModuleConf) {
++        return (Set) rootModuleConfs.get(rootModuleConf);
+     }
+     
+-    protected Set getConfigurationsSet(String rootModuleConf) {
++    protected Set addAndGetConfigurations(String rootModuleConf) {
+         Set depConfs = (Set) rootModuleConfs.get(rootModuleConf);
+         if (depConfs == null) {
+             depConfs = new HashSet();
+@@ -134,20 +135,11 @@ protected Set getConfigurationsSet(String rootModuleConf) {
+         return depConfs;
+     }
+     
+-    /**
+-     * Returns the root module configurations in which this dependency is required
+-     * 
+-     * @return
+-     */
+-    protected String[] getRootModuleConfigurations() {
+-        return (String[]) rootModuleConfs.keySet().toArray(new String[rootModuleConfs.size()]);
+-    }
+-    
+-    protected Set /*<String>*/ getRootModuleConfigurationsSet() {
++    protected Set /*<String>*/ getRootModuleConfigurations() {
+         return rootModuleConfs.keySet();
+     }
+ 
+-    public void updateDataFrom(IvyNodeUsage usage, String rootModuleConf, boolean real) {
++    public void updateDataFrom(IvyNodeUsage usage, String rootModuleConf) {
+         // update requiredConfs
+         updateMapOfSet(usage.requiredConfs, requiredConfs);
+ 
+@@ -241,5 +233,9 @@ protected boolean isBlacklisted(String rootModuleConf) {
+     protected IvyNodeBlacklist getBlacklistData(String rootModuleConf) {
+         return (IvyNodeBlacklist) blacklisted.get(rootModuleConf);
+     }
++
++    protected IvyNode getNode() {
++        return node;
++    }
+     
+ }
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 4978fe770..6a83a02c4 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -343,8 +343,14 @@ public void downloadArtifacts(
+                 ArtifactDownloadReport[] adrs = dReport.getArtifactsReports();
+                 for (int j = 0; j < adrs.length; j++) {
+                     if (adrs[j].getDownloadStatus() == DownloadStatus.FAILED) {
+-                        Message.warn("\t" + adrs[j]);
+-                        resolver.reportFailure(adrs[j].getArtifact());
++                        if (adrs[j].getArtifact().getExtraAttribute("ivy:merged") != null) {
++                            Message.warn("\tmerged artifact not found: " + adrs[j].getArtifact()
++                                + ". It was required in " 
++                                + adrs[j].getArtifact().getExtraAttribute("ivy:merged"));
++                        } else {
++                            Message.warn("\t" + adrs[j]);
++                            resolver.reportFailure(adrs[j].getArtifact());
++                        }
+                     } else if (adrs[j].getDownloadStatus() == DownloadStatus.SUCCESSFUL) {
+                         totalSize += adrs[j].getSize();
+                     }
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index a0692a51e..09e801fd0 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -229,7 +229,7 @@ public void addDependency(Resource res, PomDependencyData dep) throws ParseExcep
+             // dependency to assume such an artifact is published
+             extraAtt.put("m:classifier", dep.getClassifier());
+             DefaultDependencyArtifactDescriptor depArtifact = 
+-                    new DefaultDependencyArtifactDescriptor(dd.getDependencyId().getName(),
++                    new DefaultDependencyArtifactDescriptor(dd, dd.getDependencyId().getName(),
+                         "jar", "jar", null, extraAtt);
+             // here we have to assume a type and ext for the artifact, so this is a limitation
+             // compared to how m2 behave with classifiers
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index 42156f7e5..d1a5b8d9f 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -691,7 +691,7 @@ private void parseRule(String tag, Attributes attributes) throws MalformedURLExc
+                 String url = ivy.substitute(attributes.getValue("url"));
+                 Map extraAtt = ExtendableItemHelper.getExtraAttributes(attributes, new String[] {
+                         "name", "type", "ext", "url", "conf"});
+-                confAware = new DefaultDependencyArtifactDescriptor(name, type, ext,
++                confAware = new DefaultDependencyArtifactDescriptor(dd, name, type, ext,
+                         url == null ? null : new URL(url), extraAtt);
+             } else if (state == ARTIFACT_INCLUDE) {
+                 PatternMatcher matcher = getPatternMatcher(attributes.getValue("matcher"));
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 1ec92456b..fe979b975 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -1029,6 +1029,25 @@ public void testResolveSeveralDefaultWithArtifacts() throws Exception {
+                 .exists());
+     }
+ 
++    public void testResolveConflictsWithArtifacts() throws Exception {
++        // test case for IVY-537
++        // #mod2.6;0.12 -> {#mod1.6;1.0.4 #mod2.5;0.6.2 }
++        // #mod1.6;1.0.4 -> #mod1.3;3.0 artifacts A and B
++        // #mod2.5;0.6.2 -> #mod1.3;3.1 artifact C
++        // #mod1.3;3.1 has only A and C artifacts, not B. 
++        // Both A and C should be downloaded, and a message should tell that B was not available.
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/1/org2/mod2.6/ivys/ivy-0.12.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++
++        // dependencies
++        assertTrue(getArchiveFileInCache("org1", "mod1.3", "3.1", "mod1.3-A", "jar", "jar")
++                .exists());
++        assertTrue(getArchiveFileInCache("org1", "mod1.3", "3.1", "mod1.3-C", "jar", "jar")
++                .exists());
++    }
++
+     public void testResolveSeveralDefaultWithArtifactsAndConfs() throws Exception {
+         // test case for IVY-283
+         Ivy ivy = new Ivy();
+@@ -2192,7 +2211,7 @@ public void testResolveForceWithDynamicRevisions() throws Exception {
+     }
+ 
+     public void testResolveForceWithDynamicRevisionsAndSeveralConfs() throws Exception {
+-        // mod4.1 v 4.6 (conf compile, test extends compile) depends on
++        // mod4.1 v 4.6 (conf compile, runtime extends compile, test extends runtime) depends on
+         // - mod1.2 v 1+ and forces it in conf compile
+         // - mod3.1 v 1.2 in conf test which depends on mod1.2 v 2+
+         ResolveReport report = ivy.resolve(new File("test/repositories/2/mod4.1/ivy-4.6.xml")
+diff --git a/test/repositories/1/org1/mod1.3/jars/mod1.3-A-3.1.jar b/test/repositories/1/org1/mod1.3/jars/mod1.3-A-3.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org1/mod1.3/jars/mod1.3-A-3.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org1/mod1.3/jars/mod1.3-C-3.1.jar b/test/repositories/1/org1/mod1.3/jars/mod1.3-C-3.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/1/org1/mod1.3/jars/mod1.3-C-3.1.jar
+@@ -0,0 +1 @@
++ 
+diff --git a/test/repositories/1/org1/mod1.6/ivys/ivy-1.0.4.xml b/test/repositories/1/org1/mod1.6/ivys/ivy-1.0.4.xml
+new file mode 100644
+index 000000000..4742daafb
+--- /dev/null
++++ b/test/repositories/1/org1/mod1.6/ivys/ivy-1.0.4.xml
+@@ -0,0 +1,31 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org1"
++	       module="mod1.6"
++	       revision="1.0.4"
++	/> 
++	<publications />
++	<dependencies>
++		<dependency name="mod1.3" rev="3.0">
++			<artifact name="mod1.3-A" type="jar" />
++			<artifact name="mod1.3-B" type="jar" />
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.5/ivys/ivy-0.6.2.xml b/test/repositories/1/org2/mod2.5/ivys/ivy-0.6.2.xml
+new file mode 100644
+index 000000000..d41c4a6d5
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.5/ivys/ivy-0.6.2.xml
+@@ -0,0 +1,31 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.5"
++	       revision="0.6.2"
++	       status="integration"
++	/>
++	<publications />
++	<dependencies>
++		<dependency org="org1" name="mod1.3" rev="3.1">
++			<artifact name="mod1.3-C" type="jar" />
++		</dependency>
++	</dependencies>
++</ivy-module>
+diff --git a/test/repositories/1/org2/mod2.6/ivys/ivy-0.12.xml b/test/repositories/1/org2/mod2.6/ivys/ivy-0.12.xml
+new file mode 100644
+index 000000000..931f148dd
+--- /dev/null
++++ b/test/repositories/1/org2/mod2.6/ivys/ivy-0.12.xml
+@@ -0,0 +1,29 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org2"
++	       module="mod2.6"
++	       revision="0.12"
++	       status="integration"
++	/>
++	<dependencies>
++		<dependency org="org1" name="mod1.6" rev="1.0.4" />
++		<dependency name="mod2.5" rev="0.6.2" />
++	</dependencies>
++</ivy-module>

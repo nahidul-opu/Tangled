@@ -1,0 +1,284 @@
+From f979d9db1051b2ff055f3bb2df4567663575e04e Mon Sep 17 00:00:00 2001
+From: Kazuomi Kashii <kazk@apache.org>
+Date: Fri, 13 Jul 2012 16:52:15 +0000
+Subject: [PATCH] Fixes GORA-148 with CassandraMappingManager
+
+git-svn-id: https://svn.apache.org/repos/asf/gora/trunk@1361296 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   2 +
+ .../gora/cassandra/store/CassandraClient.java |  11 +-
+ .../cassandra/store/CassandraMapping.java     |  27 +---
+ .../store/CassandraMappingManager.java        | 136 ++++++++++++++++++
+ .../gora/cassandra/store/CassandraStore.java  |   2 +-
+ 5 files changed, 154 insertions(+), 24 deletions(-)
+ create mode 100644 gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index ce885dfcb..4d211d6f1 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -6,6 +6,8 @@ Gora Change Log
+ 
+ 0.3 (trunk) Current Development:
+ 
++* GORA-148 CassandraMapping supports only (first) keyspace and class in gora-cassandra-mapping.xml (kazk)
++
+ * GORA-143 GoraCompiler needs to add "import FixedSize" statement for FIXED type (kazk)
+ 
+ * GORA-147 fix threading issue caused by multiple threads trying to flush (ferdy)
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+index 89fa9b860..e10d5c78d 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+@@ -65,14 +65,19 @@ public class CassandraClient<K, T extends Persistent> {
+   private Keyspace keyspace;
+   private Mutator<K> mutator;
+   private Class<K> keyClass;
++  private Class<T> persistentClass;
+   
+-  private CassandraMapping cassandraMapping = new CassandraMapping();
++  private CassandraMapping cassandraMapping = null;
+ 
+   private Serializer<K> keySerializer;
+   
+-  public void initialize(Class<K> keyClass) throws Exception {
++  public void initialize(Class<K> keyClass, Class<T> persistentClass) throws Exception {
+     this.keyClass = keyClass;
+-    this.cassandraMapping.loadConfiguration();
++
++    // get cassandra mapping with persistent class
++    this.persistentClass = persistentClass;
++    this.cassandraMapping = CassandraMappingManager.getManager().get(persistentClass);
++
+     this.cluster = HFactory.getOrCreateCluster(this.cassandraMapping.getClusterName(), new CassandraHostConfigurator(this.cassandraMapping.getHostName()));
+     
+     // add keyspace to cluster
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java
+index b06a0c9ec..3488447e4 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMapping.java
+@@ -107,42 +107,30 @@ public String getKeyspaceName() {
+ 
+   /**
+    * Primary class for loading Cassandra configuration from the 'MAPPING_FILE'.
+-   * 
+-   * @throws JDOMException
+-   * @throws IOException
+    */
+-  @SuppressWarnings("unchecked")
+-  public void loadConfiguration() throws JDOMException, IOException {
+-    SAXBuilder saxBuilder = new SAXBuilder();
+-    Document document = saxBuilder.build(getClass().getClassLoader().getResourceAsStream(MAPPING_FILE));
+-    if (document == null) {
+-      LOG.warn("Mapping file '" + MAPPING_FILE + "' could not be found!");
+-    }
+-    Element root = document.getRootElement();
+-    
+-    Element keyspace = root.getChild(KEYSPACE_ELEMENT);
++  public CassandraMapping(Element keyspace, Element mapping) {
+     if (keyspace == null) {
+     	LOG.warn("Error locating Cassandra Keyspace element!");
+     } else {
+-    	LOG.info("Located Cassandra Keyspace: '" + KEYSPACE_ELEMENT + "'");
++    	// LOG.info("Located Cassandra Keyspace: '" + KEYSPACE_ELEMENT + "'");
+     }
+     this.keyspaceName = keyspace.getAttributeValue(NAME_ATTRIBUTE);
+     if (this.keyspaceName == null) {
+     	LOG.warn("Error locating Cassandra Keyspace name attribute!");
+     } else {
+-    	LOG.info("Located Cassandra Keyspace name: '" + NAME_ATTRIBUTE + "'");
++    	// LOG.info("Located Cassandra Keyspace name: '" + NAME_ATTRIBUTE + "'");
+     }
+     this.clusterName = keyspace.getAttributeValue(CLUSTER_ATTRIBUTE);
+     if (this.clusterName == null) {
+     	LOG.warn("Error locating Cassandra Keyspace cluster attribute!");
+     } else {
+-    	LOG.info("Located Cassandra Keyspace cluster: '" + CLUSTER_ATTRIBUTE + "'");
++    	// LOG.info("Located Cassandra Keyspace cluster: '" + CLUSTER_ATTRIBUTE + "'");
+     }
+     this.hostName = keyspace.getAttributeValue(HOST_ATTRIBUTE);
+     if (this.hostName == null) {
+     	LOG.warn("Error locating Cassandra Keyspace host attribute!");
+     } else {
+-    	LOG.info("Located Cassandra Keyspace host: '" + HOST_ATTRIBUTE + "'");
++    	// LOG.info("Located Cassandra Keyspace host: '" + HOST_ATTRIBUTE + "'");
+     }
+     
+     // load column family definitions
+@@ -154,11 +142,11 @@ public void loadConfiguration() throws JDOMException, IOException {
+       if (familyName == null) {
+       	LOG.warn("Error locating column family name attribute!");
+       } else {
+-      	LOG.info("Located column family name: '" + NAME_ATTRIBUTE + "'");
++      	// LOG.info("Located column family name: '" + NAME_ATTRIBUTE + "'");
+       }
+       String superAttribute = element.getAttributeValue(SUPER_ATTRIBUTE);
+       if (superAttribute != null) {
+-    	LOG.info("Located super column family");
++    	// LOG.info("Located super column family");
+         this.superFamilies.add(familyName);
+         LOG.info("Added super column family: '" + familyName + "'");
+         cfDef.setColumnType(ColumnType.SUPER);
+@@ -175,7 +163,6 @@ public void loadConfiguration() throws JDOMException, IOException {
+     }
+     
+     // load column definitions    
+-    Element mapping = root.getChild(MAPPING_ELEMENT);
+     elements = mapping.getChildren();
+     for (Element element: elements) {
+       String fieldName = element.getAttributeValue(NAME_ATTRIBUTE);
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java
+new file mode 100644
+index 000000000..ee85a6637
+--- /dev/null
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraMappingManager.java
+@@ -0,0 +1,136 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.apache.gora.cassandra.store;
++
++import java.io.IOException;
++import java.util.ArrayList;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++
++import me.prettyprint.cassandra.model.BasicColumnFamilyDefinition;
++import me.prettyprint.cassandra.service.ThriftCfDef;
++import me.prettyprint.hector.api.ddl.ColumnFamilyDefinition;
++import me.prettyprint.hector.api.ddl.ColumnType;
++import me.prettyprint.hector.api.ddl.ComparatorType;
++
++import org.jdom.Document;
++import org.jdom.Element;
++import org.jdom.JDOMException;
++import org.jdom.input.SAXBuilder;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++
++public class CassandraMappingManager {
++  
++  public static final Logger LOG = LoggerFactory.getLogger(CassandraMappingManager.class);
++  
++  private static final String MAPPING_FILE = "gora-cassandra-mapping.xml";
++  private static final String KEYSPACE_ELEMENT = "keyspace";
++  private static final String NAME_ATTRIBUTE = "name";
++  private static final String MAPPING_ELEMENT = "class";
++  private static final String COLUMN_ATTRIBUTE = "qualifier";
++  private static final String FAMILY_ATTRIBUTE = "family";
++  private static final String SUPER_ATTRIBUTE = "type";
++  private static final String CLUSTER_ATTRIBUTE = "cluster";
++  private static final String HOST_ATTRIBUTE = "host";
++
++  // singleton
++  private static CassandraMappingManager manager = new CassandraMappingManager();
++
++  public static CassandraMappingManager getManager() {
++    return manager;
++  }
++
++  //
++  private Map<String, Element> keyspaceMap = null;
++  private Map<String, Element>  mappingMap = null;
++
++  private CassandraMappingManager() {
++    keyspaceMap = new HashMap<String, Element>();
++    mappingMap  = new HashMap<String, Element>();
++    try {
++      loadConfiguration();
++    }
++    catch (JDOMException e) {
++      LOG.error(e.toString());
++    }
++    catch (IOException e) {
++      LOG.error(e.toString());
++    }
++  }
++
++  public CassandraMapping get(Class persistentClass) {
++    String className = persistentClass.getName();
++    Element mappingElement = mappingMap.get(className);
++    String keyspaceName = mappingElement.getAttributeValue(KEYSPACE_ELEMENT);
++    Element keyspaceElement = keyspaceMap.get(keyspaceName);
++    return new CassandraMapping(keyspaceElement, mappingElement);
++  }
++
++  /**
++   * Primary class for loading Cassandra configuration from the 'MAPPING_FILE'.
++   * 
++   * @throws JDOMException
++   * @throws IOException
++   */
++  @SuppressWarnings("unchecked")
++  public void loadConfiguration() throws JDOMException, IOException {
++    SAXBuilder saxBuilder = new SAXBuilder();
++    Document document = saxBuilder.build(getClass().getClassLoader().getResourceAsStream(MAPPING_FILE));
++    if (document == null) {
++      LOG.warn("Mapping file '" + MAPPING_FILE + "' could not be found!");
++    }
++    Element root = document.getRootElement();
++    
++    List<Element> keyspaces = root.getChildren(KEYSPACE_ELEMENT);
++    if (keyspaces == null || keyspaces.size() == 0) {
++      LOG.warn("Error locating Cassandra Keyspace element!");
++    }
++    else {
++      LOG.info("Located Cassandra Keyspace: '" + KEYSPACE_ELEMENT + "'");
++      for (Element keyspace : keyspaces) {
++        String keyspaceName = keyspace.getAttributeValue(NAME_ATTRIBUTE);
++        if (keyspaceName == null) {
++    	    LOG.warn("Error locating Cassandra Keyspace name attribute!");
++        }
++    	LOG.info("Located Cassandra Keyspace name: '" + NAME_ATTRIBUTE + "'");
++        keyspaceMap.put(keyspaceName, keyspace);
++      }
++    }
++      
++    // load column definitions    
++    List<Element> mappings = root.getChildren(MAPPING_ELEMENT);
++    if (mappings == null || mappings.size() == 0) {
++      LOG.warn("Error locating Cassandra Mapping element!");
++    }
++    else {
++      LOG.info("Located Cassandra Mapping: '" + MAPPING_ELEMENT + "'");
++      for (Element mapping : mappings) {
++        String className = mapping.getAttributeValue(NAME_ATTRIBUTE);
++        if (className == null) {
++    	    LOG.warn("Error locating Cassandra Mapping class name attribute!");
++    	    continue;
++        }
++    	LOG.info("Located Cassandra Mapping class name: '" + NAME_ATTRIBUTE + "'");
++        mappingMap.put(className, mapping);
++      }
++    }
++  }
++}
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+index be9d6cbec..775a88fef 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+@@ -81,7 +81,7 @@ public CassandraStore() throws Exception {
+   public void initialize(Class<K> keyClass, Class<T> persistent, Properties properties) throws IOException {
+     super.initialize(keyClass, persistent, properties);
+     try {
+-      this.cassandraClient.initialize(keyClass);
++      this.cassandraClient.initialize(keyClass, persistent);
+     }
+     catch (Exception e) {
+       throw new IOException(e.getMessage(), e);

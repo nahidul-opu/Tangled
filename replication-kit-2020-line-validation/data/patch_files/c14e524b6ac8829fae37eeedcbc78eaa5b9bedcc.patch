@@ -1,0 +1,345 @@
+From c14e524b6ac8829fae37eeedcbc78eaa5b9bedcc Mon Sep 17 00:00:00 2001
+From: Alessandro Presta <alessandro@fb.com>
+Date: Thu, 7 Mar 2013 22:51:35 -0800
+Subject: [PATCH] GIRAPH-556: Race condition in EdgeStore (apresta)
+
+---
+ CHANGELOG                                     |  2 ++
+ .../comm/WorkerClientRequestProcessor.java    |  8 -------
+ .../NettyWorkerClientRequestProcessor.java    |  5 ----
+ .../ImmutableClassesGiraphConfiguration.java  | 12 ++++++++++
+ .../apache/giraph/edge/ArrayListEdges.java    | 16 ++++++-------
+ .../apache/giraph/edge/ByteArrayEdges.java    | 16 ++++++-------
+ .../org/apache/giraph/edge/EdgeStore.java     |  6 ++---
+ .../org/apache/giraph/edge/HashMapEdges.java  | 20 +++++++---------
+ .../giraph/edge/LongDoubleArrayEdges.java     | 24 +++++++++----------
+ .../giraph/edge/LongDoubleHashMapEdges.java   | 22 ++++++++---------
+ .../giraph/edge/LongNullArrayEdges.java       | 24 +++++++++----------
+ .../giraph/edge/LongNullHashSetEdges.java     | 22 ++++++++---------
+ .../java/org/apache/giraph/graph/Vertex.java  |  2 +-
+ 13 files changed, 82 insertions(+), 97 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 7f5a1139d..3fdfb6387 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 0.2.0 - unreleased
++  GIRAPH-556: Race condition in EdgeStore (apresta)
++
+   GIRAPH-528: Decouple vertex implementation from edge storage (apresta)
+ 
+   GIRAPH-553: Cleanup HCatalogVertexOutputFormat (majakabiljo)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/WorkerClientRequestProcessor.java b/giraph-core/src/main/java/org/apache/giraph/comm/WorkerClientRequestProcessor.java
+index 5b82d824e..bc0637faa 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/WorkerClientRequestProcessor.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/WorkerClientRequestProcessor.java
+@@ -127,12 +127,4 @@ void removeEdgesRequest(I vertexIndex, I destinationVertexIndex)
+    * @return Number of messages sent before the reset.
+    */
+   long resetMessageCount();
+-
+-  /**
+-   * Lookup PartitionOwner for a vertex.
+-   *
+-   * @param vertexId id to look up.
+-   * @return PartitionOwner holding the vertex.
+-   */
+-  PartitionOwner getVertexPartitionOwner(I vertexId);
+ }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java
+index d1e99cf64..e58030e4b 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java
+@@ -460,11 +460,6 @@ public long resetMessageCount() {
+     return messagesSentInSuperstep;
+   }
+ 
+-  @Override
+-  public PartitionOwner getVertexPartitionOwner(I vertexId) {
+-    return workerClient.getVertexPartitionOwner(vertexId);
+-  }
+-
+   /**
+    * When doing the request, short circuit if it is local
+    *
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/ImmutableClassesGiraphConfiguration.java b/giraph-core/src/main/java/org/apache/giraph/conf/ImmutableClassesGiraphConfiguration.java
+index 8457b8b71..707599982 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/ImmutableClassesGiraphConfiguration.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/ImmutableClassesGiraphConfiguration.java
+@@ -570,6 +570,18 @@ public VertexEdges<I, E> createVertexEdges() {
+     return ReflectionUtils.newInstance(getVertexEdgesClass(), this);
+   }
+ 
++  /**
++   * Create a {@link VertexEdges} instance and initialize it with the default
++   * capacity.
++   *
++   * @return Instantiated VertexEdges
++   */
++  public VertexEdges<I, E> createAndInitializeVertexEdges() {
++    VertexEdges<I, E> vertexEdges = createVertexEdges();
++    vertexEdges.initialize();
++    return vertexEdges;
++  }
++
+   /**
+    * Create a {@link VertexEdges} instance and initialize it with the given
+    * capacity (the number of edges that will be added).
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/ArrayListEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/ArrayListEdges.java
+index 68d4ec0a0..98b1aefc7 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/ArrayListEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/ArrayListEdges.java
+@@ -43,15 +43,13 @@ public class ArrayListEdges<I extends WritableComparable, E extends Writable>
+ 
+   @Override
+   public void initialize(Iterable<Edge<I, E>> edges) {
+-    if (edges != null) {
+-      // If the iterable is actually an instance of ArrayList,
+-      // we simply copy the reference.
+-      // Otherwise we have to add every edge.
+-      if (edges instanceof ArrayList) {
+-        edgeList = (ArrayList<Edge<I, E>>) edges;
+-      } else {
+-        edgeList = Lists.newArrayList(edges);
+-      }
++    // If the iterable is actually an instance of ArrayList,
++    // we simply copy the reference.
++    // Otherwise we have to add every edge.
++    if (edges instanceof ArrayList) {
++      edgeList = (ArrayList<Edge<I, E>>) edges;
++    } else {
++      edgeList = Lists.newArrayList(edges);
+     }
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java
+index be74ad1b0..6201d257f 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/ByteArrayEdges.java
+@@ -55,16 +55,14 @@ public class ByteArrayEdges<I extends WritableComparable, E extends Writable>
+   public void initialize(Iterable<Edge<I, E>> edges) {
+     ExtendedDataOutput extendedOutputStream =
+         getConf().createExtendedDataOutput();
+-    if (edges != null) {
+-      for (Edge<I, E> edge : edges) {
+-        try {
+-          WritableUtils.writeEdge(extendedOutputStream, edge);
+-        } catch (IOException e) {
+-          throw new IllegalStateException("initialize: Failed to serialize " +
+-              edge);
+-        }
+-        ++edgeCount;
++    for (Edge<I, E> edge : edges) {
++      try {
++        WritableUtils.writeEdge(extendedOutputStream, edge);
++      } catch (IOException e) {
++        throw new IllegalStateException("initialize: Failed to serialize " +
++            edge);
+       }
++      ++edgeCount;
+     }
+     serializedEdges = extendedOutputStream.getByteArray();
+     serializedEdgesBytesUsed = extendedOutputStream.getPos();
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/EdgeStore.java b/giraph-core/src/main/java/org/apache/giraph/edge/EdgeStore.java
+index 64569bb46..1f6e9bb4d 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/EdgeStore.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/EdgeStore.java
+@@ -110,13 +110,11 @@ public void addPartitionEdges(
+           vertexIdEdgeIterator.releaseCurrentEdge();
+       VertexEdges<I, E> vertexEdges = partitionEdges.get(vertexId);
+       if (vertexEdges == null) {
+-        VertexEdges<I, E> newVertexEdges = configuration.createVertexEdges();
++        VertexEdges<I, E> newVertexEdges =
++            configuration.createAndInitializeVertexEdges();
+         vertexEdges = partitionEdges.putIfAbsent(vertexId, newVertexEdges);
+         if (vertexEdges == null) {
+           vertexEdges = newVertexEdges;
+-          // Only initialize the new vertex once we are sure it's going to be
+-          // used.
+-          vertexEdges.initialize();
+           // Since we had to use the vertex id as a new key in the map,
+           // we need to release the object.
+           vertexIdEdgeIterator.releaseCurrentVertexId();
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/HashMapEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/HashMapEdges.java
+index 1aa9a46e6..2600992b3 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/HashMapEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/HashMapEdges.java
+@@ -48,17 +48,15 @@ public class HashMapEdges<I extends WritableComparable, E extends Writable>
+ 
+   @Override
+   public void initialize(Iterable<Edge<I, E>> edges) {
+-    if (edges != null) {
+-      // If the iterable is actually a collection, we can cheaply get the
+-      // size and initialize the hash-map with the expected capacity.
+-      if (edges instanceof Collection) {
+-        initialize(((Collection<Edge<I, E>>) edges).size());
+-      } else {
+-        initialize();
+-      }
+-      for (Edge<I, E> edge : edges) {
+-        add(edge);
+-      }
++    // If the iterable is actually a collection, we can cheaply get the
++    // size and initialize the hash-map with the expected capacity.
++    if (edges instanceof Collection) {
++      initialize(((Collection<Edge<I, E>>) edges).size());
++    } else {
++      initialize();
++    }
++    for (Edge<I, E> edge : edges) {
++      add(edge);
+     }
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleArrayEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleArrayEdges.java
+index 9df58a9c3..f164484bc 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleArrayEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleArrayEdges.java
+@@ -49,19 +49,17 @@ public class LongDoubleArrayEdges
+ 
+   @Override
+   public void initialize(Iterable<Edge<LongWritable, DoubleWritable>> edges) {
+-    if (edges != null) {
+-      // If the iterable is actually a collection, we can cheaply get the
+-      // size and initialize the arrays with the expected capacity.
+-      if (edges instanceof Collection) {
+-        int numEdges =
+-            ((Collection<Edge<LongWritable, DoubleWritable>>) edges).size();
+-        initialize(numEdges);
+-      } else {
+-        initialize();
+-      }
+-      for (Edge<LongWritable, DoubleWritable> edge : edges) {
+-        add(edge);
+-      }
++    // If the iterable is actually a collection, we can cheaply get the
++    // size and initialize the arrays with the expected capacity.
++    if (edges instanceof Collection) {
++      int numEdges =
++          ((Collection<Edge<LongWritable, DoubleWritable>>) edges).size();
++      initialize(numEdges);
++    } else {
++      initialize();
++    }
++    for (Edge<LongWritable, DoubleWritable> edge : edges) {
++      add(edge);
+     }
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleHashMapEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleHashMapEdges.java
+index 6d17b4bd6..68bd85f94 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleHashMapEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/LongDoubleHashMapEdges.java
+@@ -50,18 +50,16 @@ public class LongDoubleHashMapEdges
+ 
+   @Override
+   public void initialize(Iterable<Edge<LongWritable, DoubleWritable>> edges) {
+-    if (edges != null) {
+-      // If the iterable is actually a collection, we can cheaply get the
+-      // size and initialize the hash-map with the expected capacity.
+-      if (edges instanceof Collection) {
+-        initialize(
+-            ((Collection<Edge<LongWritable, DoubleWritable>>) edges).size());
+-      } else {
+-        initialize();
+-      }
+-      for (Edge<LongWritable, DoubleWritable> edge : edges) {
+-        add(edge);
+-      }
++    // If the iterable is actually a collection, we can cheaply get the
++    // size and initialize the hash-map with the expected capacity.
++    if (edges instanceof Collection) {
++      initialize(
++          ((Collection<Edge<LongWritable, DoubleWritable>>) edges).size());
++    } else {
++      initialize();
++    }
++    for (Edge<LongWritable, DoubleWritable> edge : edges) {
++      add(edge);
+     }
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/LongNullArrayEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/LongNullArrayEdges.java
+index a3b869a1e..528acb278 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/LongNullArrayEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/LongNullArrayEdges.java
+@@ -45,19 +45,17 @@ public class LongNullArrayEdges
+ 
+   @Override
+   public void initialize(Iterable<Edge<LongWritable, NullWritable>> edges) {
+-    if (edges != null) {
+-      // If the iterable is actually a collection, we can cheaply get the
+-      // size and initialize the arrays with the expected capacity.
+-      if (edges instanceof Collection) {
+-        int numEdges =
+-            ((Collection<Edge<LongWritable, NullWritable>>) edges).size();
+-        initialize(numEdges);
+-      } else {
+-        initialize();
+-      }
+-      for (Edge<LongWritable, NullWritable> edge : edges) {
+-        add(edge);
+-      }
++    // If the iterable is actually a collection, we can cheaply get the
++    // size and initialize the arrays with the expected capacity.
++    if (edges instanceof Collection) {
++      int numEdges =
++          ((Collection<Edge<LongWritable, NullWritable>>) edges).size();
++      initialize(numEdges);
++    } else {
++      initialize();
++    }
++    for (Edge<LongWritable, NullWritable> edge : edges) {
++      add(edge);
+     }
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/LongNullHashSetEdges.java b/giraph-core/src/main/java/org/apache/giraph/edge/LongNullHashSetEdges.java
+index 70e69c4ec..26c57aef6 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/LongNullHashSetEdges.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/LongNullHashSetEdges.java
+@@ -47,18 +47,16 @@ public class LongNullHashSetEdges
+ 
+   @Override
+   public void initialize(Iterable<Edge<LongWritable, NullWritable>> edges) {
+-    if (edges != null) {
+-      // If the iterable is actually a collection, we can cheaply get the
+-      // size and initialize the hash-map with the expected capacity.
+-      if (edges instanceof Collection) {
+-        initialize(
+-            ((Collection<Edge<LongWritable, NullWritable>>) edges).size());
+-      } else {
+-        initialize();
+-      }
+-      for (Edge<LongWritable, NullWritable> edge : edges) {
+-        add(edge);
+-      }
++    // If the iterable is actually a collection, we can cheaply get the
++    // size and initialize the hash-map with the expected capacity.
++    if (edges instanceof Collection) {
++      initialize(
++          ((Collection<Edge<LongWritable, NullWritable>>) edges).size());
++    } else {
++      initialize();
++    }
++    for (Edge<LongWritable, NullWritable> edge : edges) {
++      add(edge);
+     }
+   }
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java b/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java
+index 6fe9041ad..66f081a37 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java
++++ b/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java
+@@ -357,7 +357,7 @@ public void addVertexRequest(I id, V value, VertexEdges<I, E> edges)
+    * @param value Vertex value
+    */
+   public void addVertexRequest(I id, V value) throws IOException {
+-    addVertexRequest(id, value, conf.createVertexEdges());
++    addVertexRequest(id, value, conf.createAndInitializeVertexEdges());
+   }
+ 
+   /**

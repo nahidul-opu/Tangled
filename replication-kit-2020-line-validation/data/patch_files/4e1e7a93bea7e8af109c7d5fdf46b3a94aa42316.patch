@@ -1,0 +1,91 @@
+From 4e1e7a93bea7e8af109c7d5fdf46b3a94aa42316 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 18 Dec 2007 22:20:56 +0000
+Subject: [PATCH] FIX: Ivy doesn't respect the order of the ivy patterns as
+ defined in the settings (IVY-676)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@605343 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                    |  1 +
+ .../resolver/AbstractResourceResolver.java     |  6 +++++-
+ .../resolver/FileSystemResolverTest.java       | 18 ++++++++++++++++++
+ 3 files changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 883edd7e4..b01822c23 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -61,6 +61,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+ - IMPROVEMENT: Decrease memory footprint (IVY-662)
+ 
++- FIX: Ivy doesn't respect the order of the ivy patterns as defined in the settings (IVY-676)
+ - FIX: XmlModuleDescriptorWriter doesn't write the deprecated attribute of the "ivy-module/configurations/conf" element (IVY-664)
+ - FIX: XMLModuleDescriptorWriter does not write extra attributes (IVY-471) (with contribution from Mikkel Bjerg)
+ - FIX: latest compatible conflict manager fails with circular dependencies and dynamic revision (IVY-663)
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
+index b2d3393f8..1166cec4a 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResourceResolver.java
+@@ -27,6 +27,7 @@
+ import java.util.List;
+ import java.util.ListIterator;
+ import java.util.Map;
++import java.util.Set;
+ 
+ import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.IvyPatternHelper;
+@@ -88,13 +89,16 @@ protected ResolvedResource findArtifactRef(Artifact artifact, Date date) {
+     protected ResolvedResource findResourceUsingPatterns(ModuleRevisionId moduleRevision,
+             List patternList, Artifact artifact, ResourceMDParser rmdparser, Date date) {
+         List resolvedResources = new ArrayList();
++        Set foundRevisions = new HashSet();
+         boolean dynamic = getSettings().getVersionMatcher().isDynamic(moduleRevision);
+         boolean stop = false;
+         for (Iterator iter = patternList.iterator(); iter.hasNext() && !stop;) {
+             String pattern = (String) iter.next();
+             ResolvedResource rres = findResourceUsingPattern(
+                 moduleRevision, pattern, artifact, rmdparser, date);
+-            if (rres != null) {
++            if ((rres != null) && !foundRevisions.contains(rres.getRevision())) {
++                // only add the first found ResolvedResource for each revision
++                foundRevisions.add(rres.getRevision());
+                 resolvedResources.add(rres);
+                 stop = !dynamic; // stop iterating if we are not searching a dynamic revision
+             }
+diff --git a/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
+index ab6dda8b5..4814669be 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
+@@ -46,6 +46,7 @@
+ import org.apache.ivy.core.sort.SortEngine;
+ import org.apache.ivy.plugins.latest.LatestRevisionStrategy;
+ import org.apache.ivy.plugins.latest.LatestTimeStrategy;
++import org.apache.ivy.plugins.resolver.util.ResolvedResource;
+ import org.apache.ivy.util.CacheCleaner;
+ import org.apache.ivy.util.FileUtil;
+ 
+@@ -148,6 +149,23 @@ public void testFixedRevision() throws Exception {
+         assertEquals(artifact, ar.getArtifact());
+         assertEquals(DownloadStatus.NO, ar.getDownloadStatus());
+     }
++    
++    public void testFindIvyFileRefWithMultipleIvyPatterns() throws Exception {
++        // cfr IVY-676
++        FileSystemResolver resolver = new FileSystemResolver();
++        resolver.setName("test");
++        resolver.setSettings(settings);
++        resolver.addIvyPattern("test/repositories/multi-ivypattern/ivy1/ivy-[revision].xml");
++        resolver.addIvyPattern("test/repositories/multi-ivypattern/ivy2/ivy-[revision].xml");
++        
++        ModuleRevisionId mrid = ModuleRevisionId.newInstance("org1", "mod1.1", "1.0+");
++        ResolvedResource ivyRef = resolver.findIvyFileRef(
++            new DefaultDependencyDescriptor(mrid, false), data);
++        
++        // check that the found ivy file is the one from the first pattern!
++        assertEquals("test/repositories/multi-ivypattern/ivy1/ivy-1.0.xml", 
++            ivyRef.getResource().getName().replace('\\', '/'));
++    }
+ 
+     private DownloadOptions getDownloadOptions(boolean useOrigin) {
+         return new DownloadOptions(cacheManager, useOrigin);

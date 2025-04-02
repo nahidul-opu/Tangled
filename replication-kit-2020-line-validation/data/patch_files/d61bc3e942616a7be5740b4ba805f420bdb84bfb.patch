@@ -1,0 +1,315 @@
+From d61bc3e942616a7be5740b4ba805f420bdb84bfb Mon Sep 17 00:00:00 2001
+From: Daniel Russ <druss@apache.org>
+Date: Wed, 4 Oct 2017 16:37:26 -0400
+Subject: [PATCH] OPENNLP-1133:GISTrainer can use the GaussianSmoother
+
+---
+ .../opennlp/tools/ml/maxent/GISTrainer.java   | 62 ++++++++++++---
+ .../tools/ml/maxent/FootballEventStream.java  | 49 ++++++++++++
+ .../tools/ml/maxent/GISTrainerTest.java       | 79 +++++++++++++++++++
+ .../ml/maxent/URLInputStreamFactory.java      | 39 +++++++++
+ .../opennlp/tools/ml/maxent/football.dat      | 14 ++++
+ 5 files changed, 231 insertions(+), 12 deletions(-)
+ create mode 100644 opennlp-tools/src/test/java/opennlp/tools/ml/maxent/FootballEventStream.java
+ create mode 100644 opennlp-tools/src/test/java/opennlp/tools/ml/maxent/GISTrainerTest.java
+ create mode 100644 opennlp-tools/src/test/java/opennlp/tools/ml/maxent/URLInputStreamFactory.java
+ create mode 100644 opennlp-tools/src/test/resources/opennlp/tools/ml/maxent/football.dat
+
+diff --git a/opennlp-tools/src/main/java/opennlp/tools/ml/maxent/GISTrainer.java b/opennlp-tools/src/main/java/opennlp/tools/ml/maxent/GISTrainer.java
+index cf1757b6d..1ec45d83c 100644
+--- a/opennlp-tools/src/main/java/opennlp/tools/ml/maxent/GISTrainer.java
++++ b/opennlp-tools/src/main/java/opennlp/tools/ml/maxent/GISTrainer.java
+@@ -60,7 +60,10 @@
+  */
+ public class GISTrainer extends AbstractEventTrainer {
+ 
+-  public static final String LOG_LIKELIHOOD_THRESHOLD_PARAM = "llthreshold";
++  @Deprecated
++  public static final String OLD_LL_THRESHOLD_PARAM = "llthreshold";
++  
++  public static final String LOG_LIKELIHOOD_THRESHOLD_PARAM = "LLThreshold";
+   public static final double LOG_LIKELIHOOD_THRESHOLD_DEFAULT = 0.0001;
+   private double llThreshold = 0.0001;
+   /**
+@@ -145,11 +148,16 @@ public class GISTrainer extends AbstractEventTrainer {
+    * the trainer to imagine that it saw a feature that it actually didn't see.
+    * Defaulted to 0.1.
+    */
+-  private static final double SMOOTHING_OBSERVATION = 0.1;
+-
+-  private static final String SMOOTHING_PARAM = "smoothing";
++  private static final String SMOOTHING_PARAM = "Smoothing";
+   private static final boolean SMOOTHING_DEFAULT = false;
++  private static final String SMOOTHING_OBSERVATION_PARAM = "SmoothingObservation";
++  private static final double SMOOTHING_OBSERVATION = 0.1;
+ 
++  private static final String GAUSSIAN_SMOOTHING_PARAM = "GaussianSmoothing";
++  private static final boolean GAUSSIAN_SMOOTHING_DEFAULT = false;
++  private static final String GAUSSIAN_SMOOTHING_SIGMA_PARAM = "GaussianSmoothingSigma";
++  private static final double GAUSSIAN_SMOOTHING_SIGMA_DEFAULT = 2.0;
++  
+   /**
+    * Creates a new <code>GISTrainer</code> instance which does not print
+    * progress messages about training to STDOUT.
+@@ -164,18 +172,48 @@ public boolean isSortAndMerge() {
+   }
+ 
+   @Override
+-  public MaxentModel doTrain(DataIndexer indexer) throws IOException {
+-    int iterations = getIterations();
+-
+-    AbstractModel model;
++  public void init(TrainingParameters trainingParameters, Map<String, String> reportMap) {
++    super.init(trainingParameters, reportMap);
++
++    // Just in case someone is using "llthreshold" instead of LLThreshold...
++    // this warning can be removed in a future version of OpenNLP.
++    if (trainingParameters.getDoubleParameter(OLD_LL_THRESHOLD_PARAM, -1.) > 0. ) {
++      display("WARNING: the training parameter: " + OLD_LL_THRESHOLD_PARAM + 
++          " has been deprecated.  Please use " +
++          LOG_LIKELIHOOD_THRESHOLD_DEFAULT + " instead");
++      // if they didn't supply a value for both llthreshold AND LLThreshold  copy it over..
++      if (trainingParameters.getDoubleParameter(LOG_LIKELIHOOD_THRESHOLD_PARAM, -1.) < 0. ) {
++        trainingParameters.put(LOG_LIKELIHOOD_THRESHOLD_PARAM,
++            trainingParameters.getDoubleParameter(OLD_LL_THRESHOLD_PARAM, LOG_LIKELIHOOD_THRESHOLD_DEFAULT));
++      }
++    }
+ 
+-    boolean smoothing = trainingParameters.getBooleanParameter(SMOOTHING_PARAM, SMOOTHING_DEFAULT);
+-    int threads = trainingParameters.getIntParameter(TrainingParameters.THREADS_PARAM, 1);
+     llThreshold = trainingParameters.getDoubleParameter(LOG_LIKELIHOOD_THRESHOLD_PARAM, 
+         LOG_LIKELIHOOD_THRESHOLD_DEFAULT);
++
++    useSimpleSmoothing = trainingParameters.getBooleanParameter(SMOOTHING_PARAM, SMOOTHING_DEFAULT);
++    if (useSimpleSmoothing) {
++      _smoothingObservation = 
++          trainingParameters.getDoubleParameter(SMOOTHING_OBSERVATION_PARAM, SMOOTHING_OBSERVATION);
++    }
++    
++    useGaussianSmoothing = 
++        trainingParameters.getBooleanParameter(GAUSSIAN_SMOOTHING_PARAM, GAUSSIAN_SMOOTHING_DEFAULT);
++    if (useGaussianSmoothing) {
++      sigma = trainingParameters.getDoubleParameter(
++          GAUSSIAN_SMOOTHING_SIGMA_PARAM, GAUSSIAN_SMOOTHING_SIGMA_DEFAULT);
++    }
+     
+-    this.setSmoothing(smoothing);
+-    model = trainModel(iterations, indexer, threads);
++    if (useSimpleSmoothing && useGaussianSmoothing) 
++      throw new RuntimeException("Cannot set both Gaussian smoothing and Simple smoothing");
++  }
++  
++  @Override
++  public MaxentModel doTrain(DataIndexer indexer) throws IOException {
++    int iterations = getIterations();
++
++    int threads = trainingParameters.getIntParameter(TrainingParameters.THREADS_PARAM, 1);
++    AbstractModel model = trainModel(iterations, indexer, threads);
+ 
+     return model;
+   }
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/FootballEventStream.java b/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/FootballEventStream.java
+new file mode 100644
+index 000000000..a5b03b4f7
+--- /dev/null
++++ b/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/FootballEventStream.java
+@@ -0,0 +1,49 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package opennlp.tools.ml.maxent;
++
++import java.io.IOException;
++import java.nio.charset.StandardCharsets;
++import java.util.Arrays;
++
++import opennlp.tools.ml.model.Event;
++import opennlp.tools.util.ObjectStream;
++import opennlp.tools.util.PlainTextByLineStream;
++
++public class FootballEventStream implements ObjectStream<Event> {
++  ObjectStream<String> textStream;
++  
++  public FootballEventStream() throws IOException {
++    textStream = new PlainTextByLineStream(
++        new URLInputStreamFactory(this.getClass().getResource("/opennlp/tools/ml/maxent/football.dat")),
++        StandardCharsets.US_ASCII );    
++  }
++  
++  @Override
++  public Event read() throws IOException {
++    String line = textStream.read();
++    if (line == null) return null;
++    String[] tokens = line.split("\\s+");
++    
++    return new Event(tokens[tokens.length - 1], Arrays.copyOf(tokens, tokens.length - 1));
++  }
++  
++  @Override
++  public void reset() throws IOException, UnsupportedOperationException {
++    textStream.reset();
++  }
++}
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/GISTrainerTest.java b/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/GISTrainerTest.java
+new file mode 100644
+index 000000000..f2baa174e
+--- /dev/null
++++ b/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/GISTrainerTest.java
+@@ -0,0 +1,79 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.ml.maxent;
++
++import java.util.HashMap;
++import java.util.Map;
++
++import org.junit.Assert;
++import org.junit.Test;
++
++import opennlp.tools.ml.EventTrainer;
++import opennlp.tools.ml.TrainerFactory;
++import opennlp.tools.ml.model.AbstractModel;
++import opennlp.tools.ml.model.Context;
++import opennlp.tools.ml.model.Event;
++import opennlp.tools.util.ObjectStream;
++import opennlp.tools.util.TrainingParameters;
++
++public class GISTrainerTest {
++
++  @SuppressWarnings("unchecked")
++  @Test
++  public void testGaussianSmoothing() throws Exception {
++   
++    TrainingParameters params = new TrainingParameters();
++    params.put("Algorithm", "MAXENT");
++    params.put("DataIndexer", "OnePass");
++    params.put("Cutoff", 0);
++    params.put("Iterations", 5);
++    params.put("GaussianSmoothing", true);
++
++    Map<String, String> reportMap = new HashMap<>();
++    EventTrainer trainer = TrainerFactory.getEventTrainer(params, reportMap);
++    
++    ObjectStream<Event> eventStream = new FootballEventStream();
++    AbstractModel smoothedModel = (AbstractModel)trainer.train(eventStream);
++    Map<String, Context> predMap = (Map<String, Context>)smoothedModel.getDataStructures()[1];
++
++    double[] nevilleFalseExpected = new double[] {-0.17,.10,0.05};
++    double[] nevilleTrueExpected = new double[] {0.080,-0.047,-0.080};
++
++    String predicateToTest = "Neville=false";
++    Assert.assertArrayEquals(nevilleFalseExpected, predMap.get(predicateToTest).getParameters(), 0.01);
++    predicateToTest = "Neville=true";
++    Assert.assertArrayEquals(nevilleTrueExpected, predMap.get(predicateToTest).getParameters(), 0.001);
++    
++    eventStream.reset();
++    params.put("GaussianSmoothing", false);
++    trainer = TrainerFactory.getEventTrainer(params, reportMap);
++    AbstractModel unsmoothedModel = (AbstractModel)trainer.train(eventStream);
++    predMap = (Map<String, Context>)unsmoothedModel.getDataStructures()[1];
++    
++    nevilleFalseExpected = new double[] {-0.19,0.11,0.06};
++    nevilleTrueExpected = new double[] {0.081,-0.050,-0.084};
++
++    predicateToTest = "Neville=false";
++    Assert.assertArrayEquals(nevilleFalseExpected, predMap.get(predicateToTest).getParameters(), 0.01);
++    predicateToTest = "Neville=true";
++    Assert.assertArrayEquals(nevilleTrueExpected, predMap.get(predicateToTest).getParameters(), 0.001);
++
++    eventStream.close();
++  }
++  
++}
+diff --git a/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/URLInputStreamFactory.java b/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/URLInputStreamFactory.java
+new file mode 100644
+index 000000000..4ea64d0ef
+--- /dev/null
++++ b/opennlp-tools/src/test/java/opennlp/tools/ml/maxent/URLInputStreamFactory.java
+@@ -0,0 +1,39 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package opennlp.tools.ml.maxent;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.net.URL;
++
++import opennlp.tools.util.InputStreamFactory;
++
++public class URLInputStreamFactory implements InputStreamFactory {
++
++
++  private URL url;
++  public URLInputStreamFactory(URL url) {
++    this.url = url;
++  }
++  
++  @Override
++  public InputStream createInputStream() throws IOException {
++    return url.openStream();
++  }
++
++}
+diff --git a/opennlp-tools/src/test/resources/opennlp/tools/ml/maxent/football.dat b/opennlp-tools/src/test/resources/opennlp/tools/ml/maxent/football.dat
+new file mode 100644
+index 000000000..b976925b3
+--- /dev/null
++++ b/opennlp-tools/src/test/resources/opennlp/tools/ml/maxent/football.dat
+@@ -0,0 +1,14 @@
++home=man_united Beckham=false Scholes=true Neville=true Henry=true Kanu=true Parlour=false Ferguson=confident Wengler=tense arsenal_lost_previous man_united_won_previous arsenal
++home=man_united Beckham=true Scholes=false Neville=true Henry=false Kanu=true Parlour=false Ferguson=tense Wengler=confident arsenal_won_previous man_united_lost_previous man_united
++home=man_united Beckham=false Scholes=true Neville=true Henry=true Kanu=true Parlour=false Ferguson=tense Wengler=tense arsenal_lost_previous man_united_won_previous tie
++home=man_united Beckham=true Scholes=true Neville=false Henry=true Kanu=false Parlour=false Ferguson=confident Wengler=confident arsenal_won_previous man_united_won_previous tie
++home=man_united Beckham=false Scholes=true Neville=true Henry=true Kanu=true Parlour=false Ferguson=confident Wengler=tense arsenal_won_previous man_united_won_previous arsenal
++home=man_united Beckham=false Scholes=true Neville=true Henry=false Kanu=true Parlour=false Ferguson=confident Wengler=confident arsenal_won_previous man_united_won_previous man_united
++home=man_united Beckham=true Scholes=true Neville=false Henry=true Kanu=true Parlour=false Ferguson=confident Wengler=tense arsenal_won_previous man_united_won_previous man_united
++home=arsenal Beckham=false Scholes=true Neville=true Henry=true Kanu=true Parlour=false Ferguson=confident Wengler=tense arsenal_lost_previous man_united_won_previous arsenal
++home=arsenal Beckham=true Scholes=false Neville=true Henry=false Kanu=true Parlour=false Ferguson=tense Wengler=confident arsenal_won_previous man_united_lost_previous arsenal
++home=arsenal Beckham=false Scholes=true Neville=true Henry=true Kanu=true Parlour=false Ferguson=tense Wengler=tense arsenal_lost_previous man_united_won_previous tie
++home=arsenal Beckham=true Scholes=true Neville=false Henry=true Kanu=false Parlour=false Ferguson=confident Wengler=confident arsenal_won_previous man_united_won_previous man_united
++home=arsenal Beckham=false Scholes=true Neville=true Henry=true Kanu=true Parlour=false Ferguson=confident Wengler=tense arsenal_won_previous man_united_won_previous arsenal
++home=arsenal Beckham=false Scholes=true Neville=true Henry=false Kanu=true Parlour=false Ferguson=confident Wengler=confident arsenal_won_previous man_united_won_previous man_united
++home=arsenal Beckham=true Scholes=true Neville=false Henry=true Kanu=true Parlour=false Ferguson=confident Wengler=tense arsenal_won_previous man_united_won_previous arsenal

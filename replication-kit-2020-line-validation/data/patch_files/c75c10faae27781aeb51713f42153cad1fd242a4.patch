@@ -1,0 +1,146 @@
+From c75c10faae27781aeb51713f42153cad1fd242a4 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Tue, 28 Feb 2012 05:00:26 +0000
+Subject: [PATCH] add workaround for broken implementations that use
+ backslashes rather than slashes in file names.  COMPRESS-176
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@1294460 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |   4 ++
+ .../archivers/zip/ZipArchiveEntry.java        |   4 ++
+ .../zip/ZipArchiveInputStreamTest.java        |  51 ++++++++++++++++++
+ .../compress/archivers/zip/ZipFileTest.java   |  11 ++++
+ src/test/resources/test-winzip.zip            | Bin 0 -> 903 bytes
+ 5 files changed, 70 insertions(+)
+ create mode 100644 src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java
+ create mode 100644 src/test/resources/test-winzip.zip
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 6447861ccdf..4cd4f99a1e4 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -46,6 +46,10 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+     <release version="1.4" date="unreleased"
+              description="Release 1.4">
++      <action issue="COMPRESS-176" type="update" date="2012-02-28">
++        Added a workaround for a Bug in WinZIP which uses backslashes
++        as path separators in Unicode Extra Fields.
++      </action> 
+       <action issue="COMPRESS-131" type="update" date="2012-02-23">
+         ArrayOutOfBounds while decompressing bz2. Added test case - code already seems to have been fixed.
+       </action> 
+diff --git a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveEntry.java b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveEntry.java
+index 88cf183f1dd..db07960a386 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveEntry.java
++++ b/src/main/java/org/apache/commons/compress/archivers/zip/ZipArchiveEntry.java
+@@ -509,6 +509,10 @@ public boolean isDirectory() {
+      * @param name the name to use
+      */
+     protected void setName(String name) {
++        if (name != null && getPlatform() == PLATFORM_FAT
++            && name.indexOf("/") == -1) {
++            name = name.replace('\\', '/');
++        }
+         this.name = name;
+     }
+ 
+diff --git a/src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java b/src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java
+new file mode 100644
+index 00000000000..54589767fd4
+--- /dev/null
++++ b/src/test/java/org/apache/commons/compress/archivers/zip/ZipArchiveInputStreamTest.java
+@@ -0,0 +1,51 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++
++package org.apache.commons.compress.archivers.zip;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.net.URI;
++import java.net.URL;
++import org.junit.Test;
++
++import static org.junit.Assert.assertEquals;
++
++public class ZipArchiveInputStreamTest {
++
++    /**
++     * @see https://issues.apache.org/jira/browse/COMPRESS-176
++     */
++    @Test
++    public void winzipBackSlashWorkaround() throws Exception {
++        URL zip = getClass().getResource("/test-winzip.zip");
++        ZipArchiveInputStream in = null;
++        try {
++            in = new ZipArchiveInputStream(new FileInputStream(new File(new URI(zip.toString()))));
++            ZipArchiveEntry zae = in.getNextZipEntry();
++            zae = in.getNextZipEntry();
++            zae = in.getNextZipEntry();
++            assertEquals("\u00e4/", zae.getName());
++        } finally {
++            if (in != null) {
++                in.close();
++            }
++        }
++    }
++
++}
+\ No newline at end of file
+diff --git a/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java b/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java
+index f7bc8bc8c86..d4f3c4e6807 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/zip/ZipFileTest.java
+@@ -139,6 +139,17 @@ public void testReadingOfStoredEntry() throws Exception {
+         }
+     }
+ 
++    /**
++     * @see https://issues.apache.org/jira/browse/COMPRESS-176
++     */
++    public void testWinzipBackSlashWorkaround() throws Exception {
++        URL zip = getClass().getResource("/test-winzip.zip");
++        File archive = new File(new URI(zip.toString()));
++        zf = new ZipFile(archive);
++        assertNull(zf.getEntry("\u00e4\\\u00fc.txt"));
++        assertNotNull(zf.getEntry("\u00e4/\u00fc.txt"));
++    }
++
+     /*
+      * ordertest.zip has been handcrafted.
+      *
+diff --git a/src/test/resources/test-winzip.zip b/src/test/resources/test-winzip.zip
+new file mode 100644
+index 0000000000000000000000000000000000000000..41e39e78ca0c2d7580570952e6bf676bf714323d
+GIT binary patch
+literal 903
+zcmWIWW@Zs#U}E54_><@7U{?O(vor$(gFFy(0dY!xvR+9=iC%iu<oC}Wtl-@KDLu*K
+zr2jSTl^Tf&DG5LR&u8Rf2ml%ZQp~`xGuO`n%zzRcKpJR-5y%XLDz}J06je+NJPa-R
+zr3D-ej4z9xZ#}#u2Ba3^s0Tn3bBt26%77+`FoGN<3RL^2DziWjh)W9u85pHCGG+nw
+z9NG*O<o=MBCYZ?3ID2OuACE_aXvhDMRIwNA3{wjlTh}eteAuL!c?IZx&JSrRo6--Y
+z&fuD&%CPj{uN@L12V~sXINNNWS8wayYj>DqaikjOTBeHv$%U2-X*wrlQbnFC%#Pi3
+zJ6rpNPKnil*;9F!v~hBnGiT;+c!(4TC(r_cok0lb<VH{!los$YFtQ|GvH-gG@E%C0
+zFfxfS;EDhhXgI<sM09X5D1ZeS86+4Qe)Inoe|?6rAR)#s`t2D;7(c)pWHzptK{neN
+zXcjD<kWEf_P%>EzXmY~k;^|--%11UCGd2yN&J_UCnLvyhx5(ySxKdyaa<Rd=PFoNS
+z<3r5Hl>#iG=7XrIVDs^&2V@HyG~@SzJTl>a448)Tkv)VNe`ZJ)dH@q4&e%k@>O+j$
+ZVvtqnbbvQ28^}CXAp8V0tR9FN7yxSH>OBAe
+
+literal 0
+HcmV?d00001
+

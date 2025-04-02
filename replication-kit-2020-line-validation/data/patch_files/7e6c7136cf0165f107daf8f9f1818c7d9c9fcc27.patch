@@ -1,0 +1,95 @@
+From 7e6c7136cf0165f107daf8f9f1818c7d9c9fcc27 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Thu, 14 Aug 2014 05:41:40 +0000
+Subject: [PATCH] COMPRESS-287 ignore unknown properties in 7z file headers
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/compress/trunk@1617883 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  4 ++
+ .../compress/archivers/sevenz/SevenZFile.java | 44 ++++++++++++++++---
+ 2 files changed, 42 insertions(+), 6 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index f5ba0696a62..e90e19be0a8 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -48,6 +48,10 @@ The <action> type attribute can be add,update,fix,remove.
+               due-to="Matthias Stevens">
+         Added support for DEFLATE streams without any gzip framing.
+       </action>
++      <action type="fix" date="2014-08-14" issue="COMPRESS-287">
++        When reading 7z files unknown file properties and properties
++        of type kDummy are now ignored.
++      </action>
+     </release>
+ 
+     <release version="1.8.1" date="2014-05-14"
+diff --git a/src/main/java/org/apache/commons/compress/archivers/sevenz/SevenZFile.java b/src/main/java/org/apache/commons/compress/archivers/sevenz/SevenZFile.java
+index ae350b6240a..dcafef8154e 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/sevenz/SevenZFile.java
++++ b/src/main/java/org/apache/commons/compress/archivers/sevenz/SevenZFile.java
+@@ -244,7 +244,7 @@ private void readHeader(final DataInput header, final Archive archive) throws IO
+         }
+         
+         if (nid != NID.kEnd) {
+-            throw new IOException("Badly terminated header");
++            throw new IOException("Badly terminated header, found " + nid);
+         }
+     }
+     
+@@ -708,13 +708,21 @@ private void readFilesInfo(final DataInput header, final Archive archive) throws
+                     throw new IOException("kStartPos is unsupported, please report");
+                 }
+                 case NID.kDummy: {
+-                    throw new IOException("kDummy is unsupported, please report");
++                    // 7z 9.20 asserts the content is all zeros and ignores the property
++                    // Compress up to 1.8.1 would throw an exception, now we ignore it (see COMPRESS-287
++                    
++                    if (skipBytesFully(header, size) < size) {
++                        throw new IOException("Incomplete kDummy property");
++                    }
++                    break;
+                 }
+-                
++
+                 default: {
+-                    throw new IOException("Unknown property " + propertyType);
+-                    // FIXME: Should actually:
+-                    //header.skipBytes((int)size);
++                    // Compress up to 1.8.1 would throw an exception, now we ignore it (see COMPRESS-287
++                    if (skipBytesFully(header, size) < size) {
++                        throw new IOException("Incomplete property of type " + propertyType);
++                    }
++                    break;
+                 }
+             }
+         }
+@@ -944,4 +952,28 @@ public static boolean matches(byte[] signature, int length) {
+         }
+         return true;
+     }
++
++    private static long skipBytesFully(DataInput input, long bytesToSkip) throws IOException {
++        if (bytesToSkip < 1) {
++            return 0;
++        }
++        long skipped = 0;
++        while (bytesToSkip > Integer.MAX_VALUE) {
++            long skippedNow = skipBytesFully(input, Integer.MAX_VALUE);
++            if (skippedNow == 0) {
++                return skipped;
++            }
++            skipped += skippedNow;
++            bytesToSkip -= skippedNow;
++        }
++        while (bytesToSkip > 0) {
++            int skippedNow = input.skipBytes((int) bytesToSkip);
++            if (skippedNow == 0) {
++                return skipped;
++            }
++            skipped += skippedNow;
++            bytesToSkip -= skippedNow;
++        }
++        return skipped;
++    }
+ }

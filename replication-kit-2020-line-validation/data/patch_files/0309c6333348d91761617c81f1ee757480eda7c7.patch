@@ -1,0 +1,307 @@
+From 0309c6333348d91761617c81f1ee757480eda7c7 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Sat, 24 Jan 2009 11:00:40 +0000
+Subject: [PATCH] FIX: TTL does not work as expected (IVY-1012)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@737330 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |   1 +
+ .../cache/DefaultRepositoryCacheManager.java  |   8 +-
+ .../core/cache/RepositoryCacheManager.java    |   8 ++
+ .../plugins/resolver/AbstractResolver.java    |   7 ++
+ .../ivy/plugins/resolver/BasicResolver.java   |   6 +-
+ .../apache/ivy/core/resolve/ResolveTest.java  | 100 +++++++++++++++++-
+ .../ivy/core/resolve/ivy-mod1.2-1.5.xml       |  26 +++++
+ .../ivy/plugins/resolver/MockResolver.java    |   2 +-
+ 8 files changed, 146 insertions(+), 12 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/core/resolve/ivy-mod1.2-1.5.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index f0592e6d2..975395083 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -87,6 +87,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - IMPROVEMENT: Error message is not clear when specifying an invalid value for checksums (IVY-977)
+ 
++- FIX: TTL does not work as expected (IVY-1012)
+ - FIX: Listing of URL's under a given URL does not handle fully specified URL's (IVY-959) (thanks to Randy Nott)
+ - FIX: <ivy:buildnumber> returns wrong result when resolve fails (IVY-970)
+ - FIX: listing possible token values doesn't work properly for the ibiblio resolver
+diff --git a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+index afc9c23cf..e2186cb77 100644
+--- a/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/DefaultRepositoryCacheManager.java
+@@ -24,6 +24,7 @@
+ import java.util.Map;
+ import java.util.regex.Pattern;
+ 
++import org.apache.ivy.core.IvyContext;
+ import org.apache.ivy.core.IvyPatternHelper;
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DefaultArtifact;
+@@ -683,7 +684,7 @@ private String getResolvedRevision(ModuleRevisionId mrid, CacheMetadataOptions o
+         }
+     }
+ 
+-    private void saveResolvedRevision(ModuleRevisionId mrid, String revision) {
++    public void saveResolvedRevision(ModuleRevisionId mrid, String revision) {
+         if (!lockMetadataArtifact(mrid)) {
+             Message.error("impossible to acquire lock for " + mrid);
+             return;
+@@ -846,11 +847,6 @@ public void originalToCachedModuleDescriptor(
+ 
+             saveResolvers(md, resolver.getName(), resolver.getName());
+             
+-            if (getSettings().getVersionMatcher().isDynamic(md.getModuleRevisionId())
+-                    && getTTL(md.getModuleRevisionId()) > 0) {
+-                saveResolvedRevision(md.getModuleRevisionId(), rmr.getId().getRevision());
+-            }
+-                
+             if (!md.isDefault()) {
+                 rmr.getReport().setOriginalLocalFile(originalFileInCache);
+             }
+diff --git a/src/java/org/apache/ivy/core/cache/RepositoryCacheManager.java b/src/java/org/apache/ivy/core/cache/RepositoryCacheManager.java
+index 4c4e05b72..3b04b2890 100644
+--- a/src/java/org/apache/ivy/core/cache/RepositoryCacheManager.java
++++ b/src/java/org/apache/ivy/core/cache/RepositoryCacheManager.java
+@@ -156,5 +156,13 @@ public void originalToCachedModuleDescriptor(DependencyResolver resolver,
+      * Cleans the whole cache.
+      */
+     public void clean();
++
++    /**
++     * Caches a dynamic revision constraint resolution.
++     * 
++     * @param dynamicMrid the dynamic module revision id
++     * @param revision the resolved revision
++     */
++    public void saveResolvedRevision(ModuleRevisionId dynamicMrid, String revision);
+     
+ }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+index 6d8b81b25..99dcb69ae 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+@@ -493,6 +493,7 @@ protected boolean isAfter(ResolvedModuleRevision rmr1, ResolvedModuleRevision rm
+     }
+ 
+     protected ResolvedModuleRevision checkLatest(
++            DependencyDescriptor dd,
+             ResolvedModuleRevision newModuleFound,
+             ResolveData data) {
+         // check if latest is asked and compare to return the most recent
+@@ -501,13 +502,19 @@ protected ResolvedModuleRevision checkLatest(
+         Message.debug("\tchecking " + newModuleDesc + " against " + describe(previousModuleFound));
+         if (previousModuleFound == null) {
+             Message.debug("\tmodule revision kept as first found: " + newModuleDesc);
++            getRepositoryCacheManager().saveResolvedRevision(
++                dd.getDependencyRevisionId(), newModuleFound.getId().getRevision());
+             return newModuleFound;
+         } else if (isAfter(newModuleFound, previousModuleFound, data.getDate())) {
+             Message.debug("\tmodule revision kept as younger: " + newModuleDesc);
++            getRepositoryCacheManager().saveResolvedRevision(
++                dd.getDependencyRevisionId(), newModuleFound.getId().getRevision());
+             return newModuleFound;
+         } else if (!newModuleFound.getDescriptor().isDefault() 
+                 && previousModuleFound.getDescriptor().isDefault()) {
+             Message.debug("\tmodule revision kept as better (not default): " + newModuleDesc);
++            getRepositoryCacheManager().saveResolvedRevision(
++                dd.getDependencyRevisionId(), newModuleFound.getId().getRevision());
+             return newModuleFound;
+         } else {
+             Message.debug("\tmodule revision discarded as older: " + newModuleDesc);
+diff --git a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+index 03f04244d..696c2ccac 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+@@ -213,7 +213,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                         + "): but we are in force mode, let's try to find one ourself");
+                 } else {
+                     Message.verbose("\t" + getName() + ": revision in cache: " + systemMrid);
+-                    return checkLatest(checkForcedResolvedModuleRevision(rmr), data);
++                    return checkLatest(systemDd, checkForcedResolvedModuleRevision(rmr), data);
+                 }
+             }
+             
+@@ -267,7 +267,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+                 }
+                 if (!rmr.getReport().isDownloaded() 
+                         && rmr.getReport().getLocalFile() != null) {
+-                    return checkLatest(checkForcedResolvedModuleRevision(rmr), data);
++                    return checkLatest(systemDd, checkForcedResolvedModuleRevision(rmr), data);
+                 } else {
+                     nsMd = rmr.getDescriptor();
+ 
+@@ -301,7 +301,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+ 
+             cacheModuleDescriptor(systemMd, systemMrid, ivyRef, rmr);            
+             
+-            return checkLatest(checkForcedResolvedModuleRevision(rmr), data);
++            return checkLatest(systemDd, checkForcedResolvedModuleRevision(rmr), data);
+         } catch (UnresolvedDependencyException ex) {
+             if (ex.getMessage().length() > 0) {
+                 if (ex.isError()) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 0d52275d8..9eb361b6e 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -498,6 +498,102 @@ public void testDynamicFromCache() throws Exception {
+             report.getConfigurationReport("default").getModuleRevisionIds());
+     }
+ 
++    public void testDynamicFromCacheWithMD() throws Exception {
++        // same as above, but this time the dependency has a module descriptor
++        // mod1.4;1.0.2 depends on mod1.2;[1.0,2.0[
++
++        Ivy ivy = ivyTestCache();
++        ivy.getSettings().setVariable("ivy.cache.ttl.default", "10s", true);
++
++        // set up repository
++        FileUtil.forceDelete(new File("build/testCache2"));
++        FileUtil.copy(
++            ResolveTest.class.getResourceAsStream("ivy-mod1.2-1.5.xml"), 
++            new File("build/testCache2/ivy-mod1.2-1.5.xml"), null);
++        FileUtil.copy(
++            new File("test/repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar"), 
++            new File("build/testCache2/mod1.2-1.5.jar"), null);
++
++        // we first do a simple resolve so that module is in cache
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/1/org1/mod1.4/ivys/ivy-1.0.2.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++
++        assertEquals(
++            new HashSet(Arrays.asList(new ModuleRevisionId[] {
++                    ModuleRevisionId.newInstance("org1", "mod1.2", "1.5")})), 
++            report.getConfigurationReport("default").getModuleRevisionIds());
++
++        // now we clean the repository to simulate repo not available (network pb for instance)
++        FileUtil.forceDelete(new File("build/testCache2"));
++
++        // now do a new resolve: it should use cached data
++        report = ivy.resolve(new File("test/repositories/1/org1/mod1.4/ivys/ivy-1.0.2.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++        
++        assertEquals(
++            new HashSet(Arrays.asList(new ModuleRevisionId[] {
++                    ModuleRevisionId.newInstance("org1", "mod1.2", "1.5")})), 
++            report.getConfigurationReport("default").getModuleRevisionIds());
++    }
++
++    public void testDynamicFromCacheWithMDAfterOneTTLExpiration() throws Exception {
++        // same as above, but this time we make a second resolve after ttl expiration before trying
++        // to use the cached resolved information
++        // mod1.4;1.0.2 depends on mod1.2;[1.0,2.0[
++
++        Ivy ivy = ivyTestCache();
++        ivy.getSettings().setVariable("ivy.cache.ttl.default", "500ms", true);
++
++        // set up repository
++        FileUtil.forceDelete(new File("build/testCache2"));
++        FileUtil.copy(
++            ResolveTest.class.getResourceAsStream("ivy-mod1.2-1.5.xml"), 
++            new File("build/testCache2/ivy-mod1.2-1.5.xml"), null);
++        FileUtil.copy(
++            new File("test/repositories/1/org1/mod1.2/jars/mod1.2-2.0.jar"), 
++            new File("build/testCache2/mod1.2-1.5.jar"), null);
++
++        // we first do a simple resolve so that module is in cache
++        ResolveReport report = ivy.resolve(new File(
++                "test/repositories/1/org1/mod1.4/ivys/ivy-1.0.2.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++
++        assertEquals(
++            new HashSet(Arrays.asList(new ModuleRevisionId[] {
++                    ModuleRevisionId.newInstance("org1", "mod1.2", "1.5")})), 
++            report.getConfigurationReport("default").getModuleRevisionIds());
++
++        // now we wait for ttl expiration
++        Thread.sleep(700);
++        
++        // we resolve again, it should work fine
++        report = ivy.resolve(new File("test/repositories/1/org1/mod1.4/ivys/ivy-1.0.2.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++        
++        assertEquals(
++            new HashSet(Arrays.asList(new ModuleRevisionId[] {
++                    ModuleRevisionId.newInstance("org1", "mod1.2", "1.5")})), 
++            report.getConfigurationReport("default").getModuleRevisionIds());
++        
++        // now we clean the repository to simulate repo not available (network pb for instance)
++        FileUtil.forceDelete(new File("build/testCache2"));
++
++        // now do a new resolve: it should use cached data
++        report = ivy.resolve(new File("test/repositories/1/org1/mod1.4/ivys/ivy-1.0.2.xml").toURL(),
++            getResolveOptions(new String[] {"*"}));
++        assertFalse(report.hasError());
++        
++        assertEquals(
++            new HashSet(Arrays.asList(new ModuleRevisionId[] {
++                    ModuleRevisionId.newInstance("org1", "mod1.2", "1.5")})), 
++            report.getConfigurationReport("default").getModuleRevisionIds());
++    }
++
+     public void testDynamicFromCacheWithTTL0() throws Exception {
+         // mod1.4;1.0.2 depends on mod1.2;[1.0,2.0[
+ 
+@@ -645,8 +741,8 @@ private Ivy ivyTestCache() {
+         resolver.setName("dual");
+         FileSystemResolver r = new FileSystemResolver();
+         r.setName("1");
+-        r.addArtifactPattern(settings.getBaseDir().getPath() 
+-            + "/build/testCache2/[artifact]-[revision].[ext]");
++        r.addIvyPattern(settings.getBaseDir().getPath() 
++            + "/build/testCache2/ivy-[module]-[revision].xml");
+         resolver.add(r);
+         r = new FileSystemResolver();
+         r.setName("2");
+diff --git a/test/java/org/apache/ivy/core/resolve/ivy-mod1.2-1.5.xml b/test/java/org/apache/ivy/core/resolve/ivy-mod1.2-1.5.xml
+new file mode 100644
+index 000000000..cc4177367
+--- /dev/null
++++ b/test/java/org/apache/ivy/core/resolve/ivy-mod1.2-1.5.xml
+@@ -0,0 +1,26 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.0">
++	<info organisation="org1"
++	       module="mod1.2"
++	       revision="1.5"
++	       status="integration"
++	       publication="20041101110000"
++	/>
++</ivy-module>
+diff --git a/test/java/org/apache/ivy/plugins/resolver/MockResolver.java b/test/java/org/apache/ivy/plugins/resolver/MockResolver.java
+index b19c540c6..b8df5c0a8 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/MockResolver.java
++++ b/test/java/org/apache/ivy/plugins/resolver/MockResolver.java
+@@ -77,7 +77,7 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+             }
+         }
+         askedDeps.add(dd);
+-        return checkLatest(rmr, data);
++        return checkLatest(dd, rmr, data);
+     }
+     
+     private boolean shouldReturnResolvedModule(DependencyDescriptor dd, ResolvedModuleRevision mr) {

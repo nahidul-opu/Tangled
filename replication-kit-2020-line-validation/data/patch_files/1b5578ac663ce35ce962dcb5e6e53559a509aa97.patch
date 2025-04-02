@@ -1,0 +1,566 @@
+From 1b5578ac663ce35ce962dcb5e6e53559a509aa97 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Thu, 10 May 2007 20:44:32 +0000
+Subject: [PATCH] FIX: Ant project reference lost from context on multiple ant
+ calls in single thread (IVY-497) (thanks to Jaroslaw Wypychowski)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@536990 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../org/apache/ivy/ant/AntBuildTrigger.java   |  2 +-
+ .../org/apache/ivy/ant/AntCallTrigger.java    |  2 +-
+ .../apache/ivy/ant/IvyArtifactProperty.java   |  2 +-
+ .../org/apache/ivy/ant/IvyArtifactReport.java |  2 +-
+ src/java/org/apache/ivy/ant/IvyBuildList.java |  2 +-
+ .../org/apache/ivy/ant/IvyBuildNumber.java    |  2 +-
+ .../org/apache/ivy/ant/IvyCacheFileset.java   |  2 +-
+ src/java/org/apache/ivy/ant/IvyCachePath.java |  2 +-
+ src/java/org/apache/ivy/ant/IvyCheck.java     |  2 +-
+ src/java/org/apache/ivy/ant/IvyConfigure.java |  2 +-
+ .../org/apache/ivy/ant/IvyConvertPom.java     |  2 +-
+ src/java/org/apache/ivy/ant/IvyDeliver.java   |  2 +-
+ .../apache/ivy/ant/IvyExtractFromSources.java |  2 +-
+ .../org/apache/ivy/ant/IvyFindRevision.java   |  2 +-
+ src/java/org/apache/ivy/ant/IvyInfo.java      |  2 +-
+ src/java/org/apache/ivy/ant/IvyInstall.java   |  5 +-
+ .../org/apache/ivy/ant/IvyListModules.java    |  2 +-
+ .../apache/ivy/ant/IvyPostResolveTask.java    |  1 -
+ src/java/org/apache/ivy/ant/IvyPublish.java   |  2 +-
+ src/java/org/apache/ivy/ant/IvyReport.java    |  2 +-
+ .../apache/ivy/ant/IvyRepositoryReport.java   |  2 +-
+ src/java/org/apache/ivy/ant/IvyResolve.java   |  2 +-
+ src/java/org/apache/ivy/ant/IvyRetrieve.java  |  2 +-
+ src/java/org/apache/ivy/ant/IvyTask.java      | 42 ++++++++--
+ src/java/org/apache/ivy/ant/IvyVar.java       |  2 +-
+ src/java/org/apache/ivy/core/IvyContext.java  | 84 +++++++++++++++++++
+ .../ivy/ant/IvyPostResolveTaskTest.java       |  2 +-
+ 28 files changed, 148 insertions(+), 32 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index e6018ec97..c7caa5a1e 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -43,6 +43,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	John Shields
+ 	Johan Stuyts
+ 	John Williams
++	Jaroslaw Wypychowski
+ 
+    version in SVN
+ =====================================
+@@ -50,6 +51,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+ - IMPROVEMENT: Allow "main" parameters to be passed directly (instead of using -args flag) (IVY-480) (thanks to Archie Cobbs)
+ 
++- FIX: Ant project reference lost from context on multiple ant calls in single thread (IVY-497) (thanks to Jaroslaw Wypychowski)
+ - FIX: EOL in the doc pages (IVY-470)
+ - FIX: Cache is storing ArtifactOrigin properties with no guarantee of unicity and types telescope during resolve. (IVY-430) (thanks to Stephane Bailliez)
+ - FIX: ivy:install ant task does not fail on error (IVY-475) (thanks to Jeffrey Blatttman)
+diff --git a/src/java/org/apache/ivy/ant/AntBuildTrigger.java b/src/java/org/apache/ivy/ant/AntBuildTrigger.java
+index 0ab9f472f..a2b250f66 100644
+--- a/src/java/org/apache/ivy/ant/AntBuildTrigger.java
++++ b/src/java/org/apache/ivy/ant/AntBuildTrigger.java
+@@ -64,7 +64,7 @@ public void progress(IvyEvent event) {
+ 				Message.verbose("target build file already built, skipping: "+f);
+ 			} else {
+ 				Ant ant = new Ant();
+-				Project project = (Project)IvyContext.getContext().get(IvyTask.ANT_PROJECT_CONTEXT_KEY);
++				Project project = (Project)IvyContext.getContext().peek(IvyTask.ANT_PROJECT_CONTEXT_KEY);
+ 				if (project == null) {
+ 					project = new Project();
+ 					project.init();
+diff --git a/src/java/org/apache/ivy/ant/AntCallTrigger.java b/src/java/org/apache/ivy/ant/AntCallTrigger.java
+index 7f6728d26..f5f2952ef 100644
+--- a/src/java/org/apache/ivy/ant/AntCallTrigger.java
++++ b/src/java/org/apache/ivy/ant/AntCallTrigger.java
+@@ -57,7 +57,7 @@ public class AntCallTrigger extends AbstractTrigger implements Trigger {
+ 	private String _prefix;
+ 
+ 	public void progress(IvyEvent event) {
+-		Project project = (Project)IvyContext.getContext().get(IvyTask.ANT_PROJECT_CONTEXT_KEY);
++		Project project = (Project)IvyContext.getContext().peek(IvyTask.ANT_PROJECT_CONTEXT_KEY);
+ 		if (project == null) {
+ 			Message.info("ant call trigger can only be used from an ant build. Ignoring.");
+ 			return;
+diff --git a/src/java/org/apache/ivy/ant/IvyArtifactProperty.java b/src/java/org/apache/ivy/ant/IvyArtifactProperty.java
+index a874be1d6..468fd3a4c 100644
+--- a/src/java/org/apache/ivy/ant/IvyArtifactProperty.java
++++ b/src/java/org/apache/ivy/ant/IvyArtifactProperty.java
+@@ -49,7 +49,7 @@ public void setValue(String value) {
+         _value = value;
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+     	prepareAndCheck();
+ 
+         try {
+diff --git a/src/java/org/apache/ivy/ant/IvyArtifactReport.java b/src/java/org/apache/ivy/ant/IvyArtifactReport.java
+index a83c0bae1..1765f2eb1 100644
+--- a/src/java/org/apache/ivy/ant/IvyArtifactReport.java
++++ b/src/java/org/apache/ivy/ant/IvyArtifactReport.java
+@@ -68,7 +68,7 @@ public void setPattern(String pattern) {
+         _pattern = pattern;
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+     	prepareAndCheck();
+         if (_tofile == null) {
+             throw new BuildException("no destination file name: please provide it through parameter 'tofile'");
+diff --git a/src/java/org/apache/ivy/ant/IvyBuildList.java b/src/java/org/apache/ivy/ant/IvyBuildList.java
+index f080c6804..f5e14b62d 100644
+--- a/src/java/org/apache/ivy/ant/IvyBuildList.java
++++ b/src/java/org/apache/ivy/ant/IvyBuildList.java
+@@ -116,7 +116,7 @@ public void setDelimiter(String delimiter) {
+ 		_delimiter = delimiter;
+ 	}
+ 	
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         if (_reference == null) {
+             throw new BuildException("reference should be provided in ivy build list");
+         }
+diff --git a/src/java/org/apache/ivy/ant/IvyBuildNumber.java b/src/java/org/apache/ivy/ant/IvyBuildNumber.java
+index bfb84c568..7e48037ed 100644
+--- a/src/java/org/apache/ivy/ant/IvyBuildNumber.java
++++ b/src/java/org/apache/ivy/ant/IvyBuildNumber.java
+@@ -91,7 +91,7 @@ public void setPrefix(String prefix) {
+ 		_prefix = prefix;
+ 	}
+ 
+-	public void execute() throws BuildException {
++	public void doExecute() throws BuildException {
+         if (_organisation == null) {
+             throw new BuildException("no organisation provided for ivy findmodules");
+         }
+diff --git a/src/java/org/apache/ivy/ant/IvyCacheFileset.java b/src/java/org/apache/ivy/ant/IvyCacheFileset.java
+index 41ab5783b..b7d31e90a 100644
+--- a/src/java/org/apache/ivy/ant/IvyCacheFileset.java
++++ b/src/java/org/apache/ivy/ant/IvyCacheFileset.java
+@@ -49,7 +49,7 @@ public void setUseOrigin(boolean useOrigin) {
+     	}
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         prepareAndCheck();
+         if (_setid == null) {
+             throw new BuildException("setid is required in ivy cachefileset");
+diff --git a/src/java/org/apache/ivy/ant/IvyCachePath.java b/src/java/org/apache/ivy/ant/IvyCachePath.java
+index 229e1cc33..fb6406af1 100644
+--- a/src/java/org/apache/ivy/ant/IvyCachePath.java
++++ b/src/java/org/apache/ivy/ant/IvyCachePath.java
+@@ -50,7 +50,7 @@ public void setId(String id) {
+         _id = id;
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         prepareAndCheck();
+         if (_pathid == null) {
+         	if (_id != null) {
+diff --git a/src/java/org/apache/ivy/ant/IvyCheck.java b/src/java/org/apache/ivy/ant/IvyCheck.java
+index a624ed659..4beb7f16f 100644
+--- a/src/java/org/apache/ivy/ant/IvyCheck.java
++++ b/src/java/org/apache/ivy/ant/IvyCheck.java
+@@ -64,7 +64,7 @@ public void setResolvername(String resolverName) {
+     }
+     
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         try {
+         Ivy ivy = getIvyInstance();
+         if (_file != null) {
+diff --git a/src/java/org/apache/ivy/ant/IvyConfigure.java b/src/java/org/apache/ivy/ant/IvyConfigure.java
+index a2d426707..80ad0ed29 100644
+--- a/src/java/org/apache/ivy/ant/IvyConfigure.java
++++ b/src/java/org/apache/ivy/ant/IvyConfigure.java
+@@ -125,7 +125,7 @@ public void addConfiguredCredentials(Credentials  c) {
+     	CredentialsStore.INSTANCE.addCredentials(c.getRealm(), c.getHost(), c.getUsername(), c.getPasswd());
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         try {
+ 	        loadDefaultProperties();
+         } catch (Exception ex) {
+diff --git a/src/java/org/apache/ivy/ant/IvyConvertPom.java b/src/java/org/apache/ivy/ant/IvyConvertPom.java
+index 92fbc55f5..3f2e8dc2f 100644
+--- a/src/java/org/apache/ivy/ant/IvyConvertPom.java
++++ b/src/java/org/apache/ivy/ant/IvyConvertPom.java
+@@ -53,7 +53,7 @@ public void setIvyFile(File ivyFile) {
+     }
+     
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         try {
+             if (_pomFile == null) {
+                 throw new BuildException("source pom file is required for convertpom task");
+diff --git a/src/java/org/apache/ivy/ant/IvyDeliver.java b/src/java/org/apache/ivy/ant/IvyDeliver.java
+index 43f2d0757..15620ddc9 100644
+--- a/src/java/org/apache/ivy/ant/IvyDeliver.java
++++ b/src/java/org/apache/ivy/ant/IvyDeliver.java
+@@ -314,7 +314,7 @@ public void setConf(String confs) {
+     	_conf = confs;
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+     	Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+         
+diff --git a/src/java/org/apache/ivy/ant/IvyExtractFromSources.java b/src/java/org/apache/ivy/ant/IvyExtractFromSources.java
+index a525eff34..f510ac672 100644
+--- a/src/java/org/apache/ivy/ant/IvyExtractFromSources.java
++++ b/src/java/org/apache/ivy/ant/IvyExtractFromSources.java
+@@ -109,7 +109,7 @@ public void addFileSet(FileSet fileSet) {
+         _concat.addFileset(fileSet);
+     }
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         configureConcat();
+         Writer out = new StringWriter();
+         _concat.setWriter(out);
+diff --git a/src/java/org/apache/ivy/ant/IvyFindRevision.java b/src/java/org/apache/ivy/ant/IvyFindRevision.java
+index 327c73d5f..eb1f8cd8c 100644
+--- a/src/java/org/apache/ivy/ant/IvyFindRevision.java
++++ b/src/java/org/apache/ivy/ant/IvyFindRevision.java
+@@ -81,7 +81,7 @@ public void setProperty(String prefix) {
+ 	}
+ 
+ 
+-	public void execute() throws BuildException {
++	public void doExecute() throws BuildException {
+         if (_organisation == null) {
+             throw new BuildException("no organisation provided for ivy findmodules");
+         }
+diff --git a/src/java/org/apache/ivy/ant/IvyInfo.java b/src/java/org/apache/ivy/ant/IvyInfo.java
+index 1664dfc31..23fc45f13 100644
+--- a/src/java/org/apache/ivy/ant/IvyInfo.java
++++ b/src/java/org/apache/ivy/ant/IvyInfo.java
+@@ -49,7 +49,7 @@ public void setFile(File file) {
+         _file = file;
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+         if (_file == null) {
+diff --git a/src/java/org/apache/ivy/ant/IvyInstall.java b/src/java/org/apache/ivy/ant/IvyInstall.java
+index 97ed87d6f..8ed10cc11 100644
+--- a/src/java/org/apache/ivy/ant/IvyInstall.java
++++ b/src/java/org/apache/ivy/ant/IvyInstall.java
+@@ -21,12 +21,11 @@
+ 
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.report.ResolveReport;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.plugins.matcher.PatternMatcher;
+ import org.apache.ivy.util.filter.FilterHelper;
+ import org.apache.tools.ant.BuildException;
+-import org.apache.ivy.core.report.ResolveReport;
+-import org.apache.tools.ant.BuildException;
+ 
+ /**
+  * Allow to install a module or a set of module from repository to another one.
+@@ -48,7 +47,7 @@ public class IvyInstall extends IvyTask {
+     private String _matcher = PatternMatcher.EXACT;
+     private boolean _haltOnFailure = true;
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+         if (_cache == null) {
+diff --git a/src/java/org/apache/ivy/ant/IvyListModules.java b/src/java/org/apache/ivy/ant/IvyListModules.java
+index 84e8fbee5..38c756662 100644
+--- a/src/java/org/apache/ivy/ant/IvyListModules.java
++++ b/src/java/org/apache/ivy/ant/IvyListModules.java
+@@ -97,7 +97,7 @@ public void setBranch(String branch) {
+ 		_branch = branch;
+ 	}
+ 
+-	public void execute() throws BuildException {
++	public void doExecute() throws BuildException {
+         if (_organisation == null) {
+             throw new BuildException("no organisation provided for ivy findmodules");
+         }
+diff --git a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+index eaab8420a..4caeaad81 100644
+--- a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
++++ b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+@@ -26,7 +26,6 @@
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.report.ResolveReport;
+-import org.apache.ivy.core.resolve.ResolveOptions;
+ import org.apache.ivy.core.settings.IvySettings;
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.StringUtils;
+diff --git a/src/java/org/apache/ivy/ant/IvyPublish.java b/src/java/org/apache/ivy/ant/IvyPublish.java
+index 63b078cc5..e5116ba10 100644
+--- a/src/java/org/apache/ivy/ant/IvyPublish.java
++++ b/src/java/org/apache/ivy/ant/IvyPublish.java
+@@ -165,7 +165,7 @@ public void setReplacedynamicrev(boolean replacedynamicrev) {
+         _replacedynamicrev = replacedynamicrev;
+     }
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+ 
+diff --git a/src/java/org/apache/ivy/ant/IvyReport.java b/src/java/org/apache/ivy/ant/IvyReport.java
+index 411692bdb..5b97c597a 100644
+--- a/src/java/org/apache/ivy/ant/IvyReport.java
++++ b/src/java/org/apache/ivy/ant/IvyReport.java
+@@ -119,7 +119,7 @@ public void setResolveId(String resolveId) {
+     	_resolveId = resolveId;
+     }
+ 
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+         
+diff --git a/src/java/org/apache/ivy/ant/IvyRepositoryReport.java b/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
+index 9ffb7583f..ddffb6094 100644
+--- a/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
++++ b/src/java/org/apache/ivy/ant/IvyRepositoryReport.java
+@@ -64,7 +64,7 @@ public class IvyRepositoryReport extends IvyTask {
+     private String _xslext = "html";
+     private List _params = new ArrayList();
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+         if (_cache == null) {
+diff --git a/src/java/org/apache/ivy/ant/IvyResolve.java b/src/java/org/apache/ivy/ant/IvyResolve.java
+index acf31b6dc..f186644bc 100644
+--- a/src/java/org/apache/ivy/ant/IvyResolve.java
++++ b/src/java/org/apache/ivy/ant/IvyResolve.java
+@@ -133,7 +133,7 @@ public String getFailureProperty() {
+     	return _failureProperty;
+     }
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+         try {
+diff --git a/src/java/org/apache/ivy/ant/IvyRetrieve.java b/src/java/org/apache/ivy/ant/IvyRetrieve.java
+index 6094e3720..ab25eee86 100644
+--- a/src/java/org/apache/ivy/ant/IvyRetrieve.java
++++ b/src/java/org/apache/ivy/ant/IvyRetrieve.java
+@@ -42,7 +42,7 @@ public void setPattern(String pattern) {
+         _pattern = pattern;
+     }
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+     	prepareAndCheck();
+ 
+         _pattern = getProperty(_pattern, getSettings(), "ivy.retrieve.pattern");
+diff --git a/src/java/org/apache/ivy/ant/IvyTask.java b/src/java/org/apache/ivy/ant/IvyTask.java
+index 471edf063..731690c2d 100644
+--- a/src/java/org/apache/ivy/ant/IvyTask.java
++++ b/src/java/org/apache/ivy/ant/IvyTask.java
+@@ -31,7 +31,6 @@
+ import org.apache.ivy.util.Message;
+ import org.apache.ivy.util.StringUtils;
+ import org.apache.tools.ant.BuildException;
+-import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.Task;
+ 
+ 
+@@ -41,7 +40,7 @@
+  * @author Xavier Hanin
+  *
+  */
+-public class IvyTask extends Task {
++public abstract class IvyTask extends Task {
+     public static final String ANT_PROJECT_CONTEXT_KEY = "ant-project";
+ 	private Boolean _validate = null; 
+ 
+@@ -252,9 +251,42 @@ protected String getProperty(IvySettings ivy, String name) {
+         return val;
+     }
+     
+-    public void setProject(Project project) {
+-    	super.setProject(project);
+-    	IvyContext.getContext().set(ANT_PROJECT_CONTEXT_KEY, project);
++    /**
++     * Called when task starts its execution.
++     */
++    protected void prepareTask(){
++    	//push current project on the stack in context
++		IvyContext.getContext().push(ANT_PROJECT_CONTEXT_KEY, getProject());
++    }
++    
++    /**
++     * Called when task is about to finish
++     * Should clean up all state related information (stacks for example)
++     */
++    protected void finalizeTask(){
++		if(!IvyContext.getContext().pop(ANT_PROJECT_CONTEXT_KEY,getProject())){
++			Message.error("ANT project poped from stack not equals current !. Ignoring");
++		}
+     }
+     
++    /**
++     * Ant task execute. 
++     * Calls prepareTask, doExecute, finalzeTask
++     */
++    public final void execute() throws BuildException{
++    	try{
++    		prepareTask();
++    		doExecute();
++    	} finally {
++    		finalizeTask();
++    	}
++    }
++
++    /**
++     * The real logic of task execution after project has been set in the context.
++     * MUST be implemented by subclasses
++     * @throws BuildException
++     */
++    public abstract void doExecute() throws BuildException;
++    
+ }
+diff --git a/src/java/org/apache/ivy/ant/IvyVar.java b/src/java/org/apache/ivy/ant/IvyVar.java
+index 7ba653e05..48821e0cc 100644
+--- a/src/java/org/apache/ivy/ant/IvyVar.java
++++ b/src/java/org/apache/ivy/ant/IvyVar.java
+@@ -92,7 +92,7 @@ public void setValue(String value) {
+         _value = value;
+     }
+     
+-    public void execute() throws BuildException {
++    public void doExecute() throws BuildException {
+         Ivy ivy = getIvyInstance();
+         IvySettings settings = ivy.getSettings();
+         if (getName() != null) {
+diff --git a/src/java/org/apache/ivy/core/IvyContext.java b/src/java/org/apache/ivy/core/IvyContext.java
+index 759ac0e69..4489082c6 100644
+--- a/src/java/org/apache/ivy/core/IvyContext.java
++++ b/src/java/org/apache/ivy/core/IvyContext.java
+@@ -20,6 +20,8 @@
+ import java.io.File;
+ import java.lang.ref.WeakReference;
+ import java.util.HashMap;
++import java.util.LinkedList;
++import java.util.List;
+ import java.util.Map;
+ import java.util.Stack;
+ 
+@@ -129,7 +131,89 @@ public Object get(String key) {
+ 	public void set(String key, Object value) {
+ 		_contextMap.put(key, new WeakReference(value));
+ 	}
++	
++	/**
++	 * Reads the first object from the list saved under given key in the context.
++	 * If value under key represents non List object then a RuntimeException is thrown.
++	 * @param key context key for the string
++	 * @return top object from the list (index 0) or null if no key or list empty
++	 */
++	public Object peek(String key){
++		synchronized(_contextMap){
++			Object o=_contextMap.get(key);
++			if(o==null) return null;
++			if(o instanceof List){
++				if(((List)o).size()==0) return null;
++				Object ret=((List)o).get(0);
++				return ret;
++			} else {
++				throw new RuntimeException("Cannot top from non List object "+o);
++			}
++		}
++	}
++	
++	/**
++	 * Removes and returns first object from the list saved under given key in the context.
++	 * If value under key represents non List object then a RuntimeException is thrown.
++	 * @param key context key for the string
++	 * @return top object from the list (index 0) or null if no key or list empty
++	 */
++	public Object pop(String key){
++		synchronized(_contextMap){
++			Object o=_contextMap.get(key);
++			if(o==null) return null;
++			if(o instanceof List){
++				if(((List)o).size()==0) return null;
++				Object ret=((List)o).remove(0);
++				return ret;
++			} else {
++				throw new RuntimeException("Cannot pop from non List object "+o);
++			}
++		}
++	}
+ 
++	/**
++	 * Removes and returns first object from the list saved under given key in the context
++	 * but only if it equals the given expectedValue - if not a false value is returned.
++	 * If value under key represents non List object then a RuntimeException is thrown.
++	 * @param key context key for the string
++	 * @return true if the r
++	 */
++	public boolean pop(String key, Object expectedValue){
++		synchronized(_contextMap){
++			Object o=_contextMap.get(key);
++			if(o==null) return false;
++			if(!o.equals(expectedValue)) return false;
++			if(o instanceof List){
++				if(((List)o).size()==0) return false;
++				((List)o).remove(0);
++				return true;
++			} else {
++				throw new RuntimeException("Cannot pop from non List object "+o);
++			}
++		}
++	}
++
++	/**
++	 * Puts a new object at the start of the list saved under given key in the context.
++	 * If value under key represents non List object then a RuntimeException is thrown.
++	 * If no list exists under given key a new LinkedList is created. This is kept
++	 * without WeakReference in opposite to the put() results.
++	 * @param key key context key for the string
++	 * @param value value to be saved under the key
++	 */
++	public void push(String key, Object value){
++		synchronized(_contextMap){
++			if(!_contextMap.containsKey(key)) _contextMap.put(key, new LinkedList());
++			Object o=_contextMap.get(key);
++			if(o instanceof List){
++				((List)o).add(0,value);
++			} else {
++				throw new RuntimeException("Cannot push to non List object "+o);
++			}
++		}
++	}
++	
+ 	public Thread getOperatingThread() {
+ 		return _operatingThread;
+ 	}
+diff --git a/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java b/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
+index 8b4b03242..3c58e5728 100644
+--- a/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
++++ b/test/java/org/apache/ivy/ant/IvyPostResolveTaskTest.java
+@@ -42,7 +42,7 @@ protected void setUp() throws Exception {
+         _project.setProperty("ivy.settings.file", "test/repositories/ivysettings.xml");
+ 
+         _task = new IvyPostResolveTask() {
+-        	public void execute() throws BuildException {
++        	public void doExecute() throws BuildException {
+         		prepareAndCheck();
+         	}
+         };

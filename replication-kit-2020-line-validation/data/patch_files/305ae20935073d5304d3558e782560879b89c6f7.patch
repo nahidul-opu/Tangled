@@ -1,0 +1,110 @@
+From 305ae20935073d5304d3558e782560879b89c6f7 Mon Sep 17 00:00:00 2001
+From: Nicolas Lalevee <hibou@apache.org>
+Date: Tue, 18 Dec 2012 23:39:25 +0000
+Subject: [PATCH] merge r1422714 and r1423716:
+
+IVY-1388
+- add a shutdownhook to delete any lock which might not have been released
+
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/branches/2.3.x@1423717 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../ivy/plugins/lock/DeleteOnExitHook.java    | 54 +++++++++++++++++++
+ .../plugins/lock/FileBasedLockStrategy.java   |  2 +
+ 3 files changed, 57 insertions(+)
+ create mode 100644 src/java/org/apache/ivy/plugins/lock/DeleteOnExitHook.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 81a68367a..5a6d146b9 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -132,6 +132,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ =====================================
+ - FIX: Maven2: resolve failure when parent has <dependencyManagement> with dependency in 'import' scope (IVY-1376)
+ - FIX: IvyPublish fails when using extend tags with no explicit location attribute (IVY-1391)
++- FIX: *.lck files created by "artifact-lock" lock strategy are not cleaned up if ivy quits abruptly (IVY-1388) (thanks to Wei Chen)
+ 
+    2.3.0-rc2
+ =====================================
+diff --git a/src/java/org/apache/ivy/plugins/lock/DeleteOnExitHook.java b/src/java/org/apache/ivy/plugins/lock/DeleteOnExitHook.java
+new file mode 100644
+index 000000000..112f76086
+--- /dev/null
++++ b/src/java/org/apache/ivy/plugins/lock/DeleteOnExitHook.java
+@@ -0,0 +1,54 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.plugins.lock;
++
++import java.io.File;
++import java.util.Iterator;
++import java.util.LinkedHashSet;
++
++class DeleteOnExitHook {
++
++    static {
++        Runtime.getRuntime().addShutdownHook(new Thread() {
++            public void run() {
++                runHook();
++            }
++        });
++    }
++
++    private static LinkedHashSet files = new LinkedHashSet();
++
++    private DeleteOnExitHook() {
++    }
++
++    static synchronized void add(File file) {
++        files.add(file);
++    }
++
++    static synchronized void remove(File file) {
++        files.remove(file);
++    }
++
++    static synchronized void runHook() {
++        Iterator itr = files.iterator();
++        while (itr.hasNext()) {
++            ((File) itr.next()).delete();
++            itr.remove();
++        }
++    }
++}
+\ No newline at end of file
+diff --git a/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java b/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java
+index 5ebe68788..0e8d37163 100644
+--- a/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java
++++ b/src/java/org/apache/ivy/plugins/lock/FileBasedLockStrategy.java
+@@ -150,6 +150,7 @@ public boolean tryLock(File file) {
+             try {
+                 if (file.getParentFile().exists() || file.getParentFile().mkdirs()) {
+                     if (file.createNewFile()) {
++                        DeleteOnExitHook.add(file);
+                         return true;
+                     } else {
+                         if (debugLocking) {
+@@ -167,6 +168,7 @@ public boolean tryLock(File file) {
+ 
+         public void unlock(File file) {
+             file.delete();
++            DeleteOnExitHook.remove(file);
+         }
+     }
+     /**

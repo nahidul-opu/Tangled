@@ -1,0 +1,153 @@
+From befe5e408a220c5003f6d87e8f720bfed12cc4ac Mon Sep 17 00:00:00 2001
+From: Scokart Gilles <gscokart@apache.org>
+Date: Wed, 21 Nov 2007 14:00:41 +0000
+Subject: [PATCH] Handle also relocation for artefactId and version number
+ (IVY-586)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@597090 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../parser/m2/PomModuleDescriptorParser.java  | 25 ++++++++++++--
+ .../apache/ivy/core/resolve/ResolveTest.java  | 31 +++++++++++++++--
+ .../relocated/test3full/1.1/test3full-1.1.pom | 33 +++++++++++++++++++
+ 3 files changed, 85 insertions(+), 4 deletions(-)
+ create mode 100755 test/repositories/m2/org/relocated/test3full/1.1/test3full-1.1.pom
+
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+index 188821c3e..b805a160f 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParser.java
+@@ -155,6 +155,10 @@ private static final class Parser extends AbstractParser {
+         
+         private StringBuffer buffer = new StringBuffer();
+ 
++        private String relocationModule;
++
++        private String relocationRevision;
++
+         public Parser(ModuleDescriptorParser parser, Resource res) {
+             super(parser);
+             setResource(res);
+@@ -288,8 +292,17 @@ public void endElement(String uri, String localName, String qName) throws SAXExc
+             } else if ("project/distributionManagement/relocation".equals(context)) {
+                 md.setModuleRevisionId(ModuleRevisionId
+                         .newInstance(organisation, module, revision));
++                if (relocationOrganisation == null ) {
++                    relocationOrganisation = organisation;
++                }
++                if (relocationModule == null ) {
++                    relocationModule = module;
++                }
++                if (relocationRevision == null ) {
++                    relocationRevision = revision;
++                }
+                 dd = new DefaultDependencyDescriptor(md, ModuleRevisionId.newInstance(
+-                    relocationOrganisation, module, revision), true, false, true);
++                    relocationOrganisation, relocationModule, relocationRevision), true, false, true);
+                 dd.addDependencyConfiguration("*", "@");
+                 md.addDependency(dd);
+                 dd = null;
+@@ -331,7 +344,15 @@ private void processTextContent() {
+                     return;
+                 } 
+                 if (context.equals("project/distributionManagement/relocation/groupId")) {
+-                    relocationOrganisation = txt;
++                    relocationOrganisation= txt;
++                    return;
++                }
++                if (context.equals("project/distributionManagement/relocation/artifactId")) {
++                    relocationModule = txt;
++                    return;
++                }
++                if (context.equals("project/distributionManagement/relocation/version")) {
++                    relocationRevision = txt;
+                     return;
+                 }
+                 if (context.startsWith("project/parent")) {
+diff --git a/test/java/org/apache/ivy/core/resolve/ResolveTest.java b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+index 021b8c538..dee068735 100644
+--- a/test/java/org/apache/ivy/core/resolve/ResolveTest.java
++++ b/test/java/org/apache/ivy/core/resolve/ResolveTest.java
+@@ -2938,8 +2938,7 @@ public void testResolveMaven2() throws Exception {
+             "test", "jar", "jar").exists());
+     }
+ 
+-    
+-    public void testResolveMaven2Relocation() throws Exception {
++    public void testResolveMaven2RelocationOfGroupId() throws Exception {
+         //Same as testResolveMaven2 but with a relocated module pointing to the module
+         //used in testResolveMaven2.
+         ivy = new Ivy();
+@@ -2966,6 +2965,34 @@ public void testResolveMaven2Relocation() throws Exception {
+         }
+     }
+ 
++
++    public void testResolveMaven2FullRelocation() throws Exception {
++        //Same as testResolveMaven2 but with a relocated module pointing to the module
++        //used in testResolveMaven2.
++        ivy = new Ivy();
++        ivy.configure(new File("test/repositories/m2/ivysettings.xml"));
++        ivy.pushContext();
++        try {        
++            ResolveReport report = ivy.resolve(new File(
++                    "test/repositories/m2/org/relocated/test3full/1.1/test3full-1.1.pom").toURL(),
++                getResolveOptions(new String[] {"*"}));
++            assertNotNull(report);
++    
++            // dependencies
++            assertTrue(ivy.getCacheManager(cache).getIvyFileInCache(
++                ModuleRevisionId.newInstance("org.apache", "test2", "1.0")).exists());
++            assertTrue(TestHelper.getArchiveFileInCache(ivy, cache, "org.apache", "test2", "1.0",
++                "test2", "jar", "jar").exists());
++    
++            assertTrue(ivy.getCacheManager(cache).getIvyFileInCache(
++                ModuleRevisionId.newInstance("org.apache", "test", "1.0")).exists());
++            assertTrue(TestHelper.getArchiveFileInCache(ivy, cache, "org.apache", "test", "1.0",
++                "test", "jar", "jar").exists());
++        } finally {
++            ivy.popContext();
++        }
++    }
++
+     
+     public void testResolveMaven2Classifiers() throws Exception {
+         // test case for IVY-418
+diff --git a/test/repositories/m2/org/relocated/test3full/1.1/test3full-1.1.pom b/test/repositories/m2/org/relocated/test3full/1.1/test3full-1.1.pom
+new file mode 100755
+index 000000000..e710ac425
+--- /dev/null
++++ b/test/repositories/m2/org/relocated/test3full/1.1/test3full-1.1.pom
+@@ -0,0 +1,33 @@
++<?xml version="1.0"?>
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project>
++  <modelVersion>4.0.0</modelVersion>
++  <groupId>org.relocated</groupId>
++  <artifactId>test3full</artifactId>
++  <name>Test Module for Ivy M2 relocation parsing</name>
++  <version>1.1</version>
++  <distributionManagement>
++	<relocation>
++	   <groupId>org.apache</groupId>
++       <artifactId>test3</artifactId>
++       <version>1.0</version>
++    </relocation>
++  </distributionManagement>
++</project>

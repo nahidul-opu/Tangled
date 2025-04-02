@@ -1,0 +1,151 @@
+From 41a824e349b48eed614b70fd66ee6c5a850c2352 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Sun, 11 Nov 2007 22:06:07 +0000
+Subject: [PATCH] FIX: Resolution failure when no ivy.xml file present
+ (IVY-630)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@593971 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../plugins/resolver/util/ResolverHelper.java |  5 +++-
+ .../org/apache/ivy/ant/IvyResolveTest.java    | 16 +++++++++++
+ test/java/org/apache/ivy/ant/ivy-630.xml      | 24 +++++++++++++++++
+ test/repositories/IVY-630/ivysettings.xml     | 27 +++++++++++++++++++
+ .../IVY-630/junit-4.1/jars/junit-4.1.jar      |  1 +
+ 6 files changed, 73 insertions(+), 1 deletion(-)
+ create mode 100644 test/java/org/apache/ivy/ant/ivy-630.xml
+ create mode 100644 test/repositories/IVY-630/ivysettings.xml
+ create mode 100644 test/repositories/IVY-630/junit-4.1/jars/junit-4.1.jar
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index df8c24f35..873464bc0 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -53,6 +53,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 
+    version in SVN
+ =====================================
++- FIX: Resolution failure when no ivy.xml file present (IVY-630)
+ - FIX: ${parent.version} property is not recognized in maven2 pom (IVY-620)
+ - FIX: Ivy doesn't work with Ant 1.6.2 (IVY-614)
+ - FIX: EmptyStackException when upgrading from 1.4 to 2.0 (IVY-610)
+diff --git a/src/java/org/apache/ivy/plugins/resolver/util/ResolverHelper.java b/src/java/org/apache/ivy/plugins/resolver/util/ResolverHelper.java
+index a9079a347..a6a76cbfb 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/util/ResolverHelper.java
++++ b/src/java/org/apache/ivy/plugins/resolver/util/ResolverHelper.java
+@@ -139,7 +139,10 @@ public static ResolvedResource[] findAll(Repository rep, ModuleRevisionId mrid,
+                 String rres = IvyPatternHelper.substituteToken(partiallyResolvedPattern,
+                     IvyPatternHelper.REVISION_KEY, revs[i]);
+                 try {
+-                    ret.add(new ResolvedResource(rep.getResource(rres), revs[i]));
++                    Resource res = rep.getResource(rres);
++                    if ((res != null) && res.exists()) {
++                        ret.add(new ResolvedResource(res, revs[i]));
++                    }
+                 } catch (IOException e) {
+                     Message.warn("impossible to get resource from name listed by repository: "
+                             + rres + ": " + e.getMessage());
+diff --git a/test/java/org/apache/ivy/ant/IvyResolveTest.java b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+index 0c907940b..5ff0174c9 100644
+--- a/test/java/org/apache/ivy/ant/IvyResolveTest.java
++++ b/test/java/org/apache/ivy/ant/IvyResolveTest.java
+@@ -24,6 +24,8 @@
+ import org.apache.ivy.Ivy;
+ import org.apache.ivy.TestHelper;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.util.DefaultMessageImpl;
++import org.apache.ivy.util.Message;
+ import org.apache.tools.ant.BuildException;
+ import org.apache.tools.ant.Project;
+ import org.apache.tools.ant.taskdefs.Delete;
+@@ -72,6 +74,20 @@ public void testSimple() throws Exception {
+                 .exists());
+         assertTrue(getArchiveFileInCache("org1", "mod1.2", "2.0", "mod1.2", "jar", "jar").exists());
+     }
++    
++    public void testResolveWithoutIvyFile() throws Exception {
++        // IVY-630
++        resolve.getProject().setProperty("ivy.settings.file", "test/repositories/IVY-630/ivysettings.xml");
++        
++        resolve.setFile(new File("test/java/org/apache/ivy/ant/ivy-630.xml"));
++        resolve.setConf("default");
++        resolve.setHaltonfailure(false);
++        resolve.execute();
++        
++        assertTrue(getIvyFileInCache(ModuleRevisionId.newInstance("junit", "junit", "4.1"))
++            .exists());
++        assertTrue(getArchiveFileInCache("junit", "junit", "4.1", "junit", "jar", "jar").exists());
++    }
+ 
+     private File getArchiveFileInCache(String organisation, String module, String revision,
+             String artifact, String type, String ext) {
+diff --git a/test/java/org/apache/ivy/ant/ivy-630.xml b/test/java/org/apache/ivy/ant/ivy-630.xml
+new file mode 100644
+index 000000000..8d0eccd50
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/ivy-630.xml
+@@ -0,0 +1,24 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivy-module version="1.2">
++  <info organisation="apache" module="630"/>
++  <dependencies>
++    <dependency org="junit" name="junit" rev="latest.integration" conf="default" transitive="false" />
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-630/ivysettings.xml b/test/repositories/IVY-630/ivysettings.xml
+new file mode 100644
+index 000000000..51391a64e
+--- /dev/null
++++ b/test/repositories/IVY-630/ivysettings.xml
+@@ -0,0 +1,27 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<settings defaultCache="${cache.dir}" defaultResolver="1" checkUpToDate="true" />
++	<resolvers>
++		<filesystem allownomd="true" name="1">
++			<ivy pattern="${ivy.settings.dir}/[module]-[revision]/ivy.xml"/>
++			<artifact pattern="${ivy.settings.dir}/[module]-[revision]/jars/[artifact]-[revision].[ext]"/>
++		</filesystem>
++	</resolvers>
++</ivysettings>
+diff --git a/test/repositories/IVY-630/junit-4.1/jars/junit-4.1.jar b/test/repositories/IVY-630/junit-4.1/jars/junit-4.1.jar
+new file mode 100644
+index 000000000..56f3b36e2
+--- /dev/null
++++ b/test/repositories/IVY-630/junit-4.1/jars/junit-4.1.jar
+@@ -0,0 +1 @@
++ 

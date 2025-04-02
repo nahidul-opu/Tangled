@@ -1,0 +1,151 @@
+From 47756f7570b35a1af39e44309cf2750a53beb5c5 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Fri, 28 Mar 2008 23:24:38 +0000
+Subject: [PATCH] FIX: multiple cleancache and inline retrieve error (IVY-778)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@642425 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../apache/ivy/ant/IvyPostResolveTask.java    | 19 ++++++++++
+ .../apache/ivy/ant/IvyRetrieveBuildFile.xml   | 35 ++++++++++++++++++
+ .../ivy/ant/IvyRetrieveBuildFileTest.java     | 36 +++++++++++++++++++
+ 4 files changed, 91 insertions(+)
+ create mode 100644 test/java/org/apache/ivy/ant/IvyRetrieveBuildFile.xml
+ create mode 100644 test/java/org/apache/ivy/ant/IvyRetrieveBuildFileTest.java
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 487b46bb7..101b04bc5 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -75,6 +75,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Parse description and home page from poms (IVY-767)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: multiple cleancache and inline retrieve error (IVY-778)
+ - FIX: buildlist evicts modules with the same name, but different organisation (IVY-731)
+ - FIX: Out of memory/Stack overflow for new highly coupled project (IVY-595)
+ - FIX: Compatibility with maven's dependencyMangement (IVY-753) (not completed yet)
+diff --git a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+index 0c84ac3aa..5b245201d 100644
+--- a/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
++++ b/src/java/org/apache/ivy/ant/IvyPostResolveTask.java
+@@ -20,8 +20,10 @@
+ import java.io.File;
+ import java.util.Arrays;
+ import java.util.HashSet;
++import java.util.Iterator;
+ 
+ import org.apache.ivy.Ivy;
++import org.apache.ivy.core.cache.ResolutionCacheManager;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+@@ -245,7 +247,24 @@ private String[] getConfsToResolve(ModuleDescriptor reference, String conf, Stri
+             } else {
+                 confs = splitConfs(conf);
+             }
++            
+             HashSet rconfsSet = new HashSet(Arrays.asList(rconfs));
++            
++            // for each resolved configuration, check if the report still exists
++            ResolutionCacheManager cache = getSettings().getResolutionCacheManager();
++            for (Iterator it = rconfsSet.iterator(); it.hasNext(); ) {
++                String resolvedConf = (String) it.next();
++                String resolveId = getResolveId();
++                if (resolveId == null) {
++                    resolveId = ResolveOptions.getDefaultResolveId(reference);
++                }
++                File report = cache.getConfigurationResolveReportInCache(resolveId, resolvedConf);
++                if (!report.exists()) {
++                    // the report doesn't exist any longer, we have to recreate it...
++                    it.remove();
++                }
++            }
++            
+             HashSet confsSet = new HashSet(Arrays.asList(confs));
+             Message.debug("resolved configurations:   " + rconfsSet);
+             Message.debug("asked configurations:      " + confsSet);
+diff --git a/test/java/org/apache/ivy/ant/IvyRetrieveBuildFile.xml b/test/java/org/apache/ivy/ant/IvyRetrieveBuildFile.xml
+new file mode 100644
+index 000000000..bb674e840
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/IvyRetrieveBuildFile.xml
+@@ -0,0 +1,35 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<project xmlns:ivy="antlib:org.apache.ivy.ant" basedir="../../../../../..">
++  <target name="setUp">
++    <property name="ivy.cache.repository" value="build/cache" />
++  </target>
++
++  <target name="tearDown">
++  	<delete dir="build/cache" />
++  </target>
++
++  <target name="testMultipleInlineRetrievesWithCacheCleaning">
++  	<ivy:settings file="test/repositories/ivysettings.xml" />
++  	<ivy:retrieve organisation="org1" module="mod1.2" revision="2.0" inline="true" keep="true" />
++  	<ivy:cleancache />
++  	<ivy:retrieve organisation="org1" module="mod1.2" revision="2.0" inline="true" keep="true" />
++  </target>
++
++</project>
+\ No newline at end of file
+diff --git a/test/java/org/apache/ivy/ant/IvyRetrieveBuildFileTest.java b/test/java/org/apache/ivy/ant/IvyRetrieveBuildFileTest.java
+new file mode 100644
+index 000000000..0fe21d99a
+--- /dev/null
++++ b/test/java/org/apache/ivy/ant/IvyRetrieveBuildFileTest.java
+@@ -0,0 +1,36 @@
++/*
++ *  Licensed to the Apache Software Foundation (ASF) under one or more
++ *  contributor license agreements.  See the NOTICE file distributed with
++ *  this work for additional information regarding copyright ownership.
++ *  The ASF licenses this file to You under the Apache License, Version 2.0
++ *  (the "License"); you may not use this file except in compliance with
++ *  the License.  You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ *
++ */
++package org.apache.ivy.ant;
++
++import org.apache.ivy.core.report.ResolveReport;
++import org.apache.tools.ant.BuildFileTest;
++
++public class IvyRetrieveBuildFileTest extends BuildFileTest {
++    
++    protected void setUp() throws Exception {
++        configureProject("test/java/org/apache/ivy/ant/IvyRetrieveBuildFile.xml");
++    }
++    
++    public void testMultipleInlineRetrievesWithCacheCleaning() {
++        executeTarget("testMultipleInlineRetrievesWithCacheCleaning");
++        ResolveReport report = (ResolveReport) getProject().getReference("ivy.resolved.report");
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        assertEquals(1, report.getDependencies().size());
++    }
++}

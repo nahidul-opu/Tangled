@@ -1,0 +1,167 @@
+From c8fc11146f39ce3243fb5360ae148a5a4cb633ce Mon Sep 17 00:00:00 2001
+From: Gilles Sadowski <erans@apache.org>
+Date: Thu, 8 Aug 2013 23:18:59 +0000
+Subject: [PATCH] MATH-1010 Added utility to shuffle an array (based on the
+ method "shuffle" located in "o.a.c.m.random.RandomDataGenerator"). See also
+ MATH-1019.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/math/trunk@1512095 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../apache/commons/math3/util/MathArrays.java | 83 +++++++++++++++++++
+ .../commons/math3/util/MathArraysTest.java    | 46 ++++++++++
+ 2 files changed, 129 insertions(+)
+
+diff --git a/src/main/java/org/apache/commons/math3/util/MathArrays.java b/src/main/java/org/apache/commons/math3/util/MathArrays.java
+index 8f83d96a54..8123ae4cc7 100644
+--- a/src/main/java/org/apache/commons/math3/util/MathArrays.java
++++ b/src/main/java/org/apache/commons/math3/util/MathArrays.java
+@@ -25,6 +25,9 @@
+ import java.util.List;
+ 
+ import org.apache.commons.math3.Field;
++import org.apache.commons.math3.random.RandomGenerator;
++import org.apache.commons.math3.random.Well19937c;
++import org.apache.commons.math3.distribution.UniformIntegerDistribution;
+ import org.apache.commons.math3.exception.DimensionMismatchException;
+ import org.apache.commons.math3.exception.MathArithmeticException;
+ import org.apache.commons.math3.exception.MathIllegalArgumentException;
+@@ -1422,4 +1425,84 @@ public static double[] convolve(double[] x, double[] h)
+ 
+          return y;
+      }
++
++    /**
++     * Specification for indicating that some operation applies
++     * before or after a given index.
++     */
++    public static enum Position {
++        /** Designates the beginning of the array (near index 0). */
++        HEAD,
++        /** Designates the end of the array. */
++        TAIL
++    }
++
++    /**
++     * Shuffle the entries of the given array.
++     * The {@code start} and {@code pos} parameters select which portion
++     * of the array is randomized and which is left untouched.
++     *
++     * @param list Array whose entries will be shuffled (in-place).
++     * @param start Index at which shuffling begins.
++     * @param pos Shuffling is performed for index positions between
++     * {@code start} and either the end (if {@link Position#TAIL})
++     * or the beginning (if {@link Position#HEAD}) of the array.
++     */
++    public static void shuffle(int[] list,
++                               int start,
++                               Position pos) {
++        shuffle(list, start, pos, new Well19937c());
++    }
++
++    /**
++     * Shuffle the entries of the given array.
++     * The {@code start} and {@code pos} parameters select which portion
++     * of the array is randomized and which is left untouched.
++     *
++     * @param list Array whose entries will be shuffled (in-place).
++     * @param start Index at which shuffling begins.
++     * @param pos Shuffling is performed for index positions between
++     * {@code start} and either the end (if {@link Position#TAIL})
++     * or the beginning (if {@link Position#HEAD}) of the array.
++     * @param rng Random number generator.
++     */
++    public static void shuffle(int[] list,
++                               int start,
++                               Position pos,
++                               RandomGenerator rng) {
++        switch (pos) {
++        case TAIL: {
++            for (int i = list.length - 1; i >= start; i--) {
++                final int target;
++                if (i == start) {
++                    target = start;
++                } else {
++                    // NumberIsTooLargeException cannot occur.
++                    target = new UniformIntegerDistribution(start, i).sample();
++                }
++                final int temp = list[target];
++                list[target] = list[i];
++                list[i] = temp;
++            }
++        }
++            break;
++        case HEAD: {
++            for (int i = 0; i <= start; i++) {
++                final int target;
++                if (i == start) {
++                    target = start;
++                } else {
++                    // NumberIsTooLargeException cannot occur.
++                    target = new UniformIntegerDistribution(i, start).sample();
++                }
++                final int temp = list[target];
++                list[target] = list[i];
++                list[i] = temp;
++            }
++        }
++            break;
++        default:
++            throw new MathInternalError(); // Should never happen.
++        }
++    }
+ }
+diff --git a/src/test/java/org/apache/commons/math3/util/MathArraysTest.java b/src/test/java/org/apache/commons/math3/util/MathArraysTest.java
+index 7d6b8128b8..3b954a1b74 100644
+--- a/src/test/java/org/apache/commons/math3/util/MathArraysTest.java
++++ b/src/test/java/org/apache/commons/math3/util/MathArraysTest.java
+@@ -932,4 +932,50 @@ public void testConvolve() {
+             // expected behavior
+         }
+     }
++
++    @Test
++    public void testShuffleTail() {
++        final int[] orig = new int[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
++        final int[] list = orig.clone();
++        final int start = 4;
++        MathArrays.shuffle(list, start, MathArrays.Position.TAIL, new Well1024a(7654321L));
++
++        // Ensure that all entries below index "start" did not move.
++        for (int i = 0; i < start; i++) {
++            Assert.assertEquals(orig[i], list[i]);
++        }
++
++        // Ensure that at least one entry has moved.
++        boolean ok = false;
++        for (int i = start; i < orig.length - 1; i++) {
++            if (orig[i] != list[i]) {
++                ok = true;
++                break;
++            }
++        }
++        Assert.assertTrue(ok);
++    }
++
++    @Test
++    public void testShuffleHead() {
++        final int[] orig = new int[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
++        final int[] list = orig.clone();
++        final int start = 4;
++        MathArrays.shuffle(list, start, MathArrays.Position.HEAD, new Well1024a(1234567L));
++
++        // Ensure that all entries above index "start" did not move.
++        for (int i = start + 1; i < orig.length; i++) {
++            Assert.assertEquals(orig[i], list[i]);
++        }
++
++        // Ensure that at least one entry has moved.
++        boolean ok = false;
++        for (int i = 0; i <= start; i++) {
++            if (orig[i] != list[i]) {
++                ok = true;
++                break;
++            }
++        }
++        Assert.assertTrue(ok);
++    }
+ }

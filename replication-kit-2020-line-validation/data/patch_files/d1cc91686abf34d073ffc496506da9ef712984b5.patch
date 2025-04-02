@@ -1,0 +1,72 @@
+From d1cc91686abf34d073ffc496506da9ef712984b5 Mon Sep 17 00:00:00 2001
+From: "Gary D. Gregory" <ggregory@apache.org>
+Date: Sat, 6 Oct 2018 14:38:28 +0000
+Subject: [PATCH] [BEANUTILS-509] WeakHashmap enters into infinite loop in
+ WrapDynaClass.java. Comment and always shutdown executor in a finally clause.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/beanutils/trunk@1843015 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../beanutils2/bugs/Jira509TestCase.java      | 32 +++++++++++--------
+ 1 file changed, 18 insertions(+), 14 deletions(-)
+
+diff --git a/src/test/java/org/apache/commons/beanutils2/bugs/Jira509TestCase.java b/src/test/java/org/apache/commons/beanutils2/bugs/Jira509TestCase.java
+index 21f2245b0..95f51a338 100644
+--- a/src/test/java/org/apache/commons/beanutils2/bugs/Jira509TestCase.java
++++ b/src/test/java/org/apache/commons/beanutils2/bugs/Jira509TestCase.java
+@@ -40,7 +40,7 @@
+  * The bug causes an infinite loop in WeakHashMap.get which was not accessed in a thread safe manner. This originates
+  * with WrapDynaClass.createDynaClass().
+  */
+-@Ignore("https://issues.apache.org/jira/browse/BEANUTILS-509; always fails with a JUnit test timeout; with or without the change applied to WrapDynaClass.")
++@Ignore("https://issues.apache.org/jira/browse/BEANUTILS-509.")
+ public class Jira509TestCase {
+ 
+     protected int random(final int max) {
+@@ -56,6 +56,7 @@ public void test_concurrent() throws InterruptedException {
+         final List<Class<?>> classList = Arrays.asList(Map.class, HashMap.class, Collections.class, Arrays.class,
+                 Collection.class, Set.class, ArrayList.class, List.class, HashSet.class);
+ 
++        // All daemon threads.
+         final ExecutorService executor = Executors.newFixedThreadPool(100, new ThreadFactory() {
+ 
+             @Override
+@@ -66,22 +67,25 @@ public Thread newThread(final Runnable r) {
+             }
+         });
+ 
+-        for (int i = 1; i < 100_000_000; i++) {
+-            executor.submit(new Runnable() {
+-                Class<?> c = classList.get(random(classList.size()));
++        try {
++            // Loop _may_ hang without fix.
++            for (int i = 1; i < 10_000_000; i++) {
++                executor.submit(new Runnable() {
++                    Class<?> clazz = classList.get(random(classList.size()));
+ 
+-                @Override
+-                public void run() {
+-                    final WrapDynaClass w = WrapDynaClass.createDynaClass(c);
+-                    assert w != null;
+-                }
++                    @Override
++                    public void run() {
++                        final WrapDynaClass w = WrapDynaClass.createDynaClass(clazz);
++                        assert w != null;
++                    }
+ 
+-            });
+-        }
+-
+-        executor.shutdown();
+-        executor.awaitTermination(3500, TimeUnit.MILLISECONDS);
++                });
++            }
++        } finally {
++            executor.shutdown();
++            executor.awaitTermination(3500, TimeUnit.MILLISECONDS);
+ 
++        }
+     }
+ 
+ }
+\ No newline at end of file

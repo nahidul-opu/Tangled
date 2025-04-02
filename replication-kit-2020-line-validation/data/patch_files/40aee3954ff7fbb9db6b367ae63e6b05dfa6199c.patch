@@ -1,0 +1,387 @@
+From 40aee3954ff7fbb9db6b367ae63e6b05dfa6199c Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 3 Mar 2009 21:56:28 +0000
+Subject: [PATCH] FIX: Dependencies don't inherit exclusions from
+ dependencyManagement (IVY-974) (thanks to John Gibson)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@749782 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 +
+ .../parser/m2/DefaultPomDependencyMgt.java    | 12 +++-
+ .../plugins/parser/m2/PomDependencyMgt.java   |  3 +
+ .../parser/m2/PomModuleDescriptorBuilder.java | 61 +++++++++++++++++-
+ .../ivy/plugins/parser/m2/PomReader.java      | 42 ++++++------
+ .../m2/PomModuleDescriptorParserTest.java     |  9 +++
+ .../plugins/parser/m2/test-dependencyMgt.pom  | 64 +++++++++++--------
+ 7 files changed, 142 insertions(+), 51 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 4ede0982c..8a366c45f 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -31,6 +31,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ 	Danno Ferrin
+ 	Benjamin Francisoud	
+ 	Jacob Grydholt Jensen
++	John Gibson
+ 	Scott Goldstein
+ 	Pierre Hägnestrand
+ 	Scott Hebert
+@@ -98,6 +99,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Error message is not clear when specifying an invalid value for checksums (IVY-977)
+ - IMPROVEMENT: catch AccessControlException on System.getProperties() (IVY-1015)
+ 
++- FIX: Dependencies don't inherit exclusions from dependencyManagement (IVY-974) (thanks to John Gibson)
+ - FIX: Dependency Configuration Negation does not work (IVY-982)
+ - FIX: Ivy retrieve does not honor validate="false" from ivysettings (IVY-992)
+ - FIX: Snapshot issues when using ibiblio resolver with m2compatible is false (IVY-1028)
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java b/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java
+index 96e02f9c8..93740e7bd 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/DefaultPomDependencyMgt.java
+@@ -17,18 +17,22 @@
+  */
+ package org.apache.ivy.plugins.parser.m2;
+ 
++import java.util.List;
++
+ public class DefaultPomDependencyMgt implements PomDependencyMgt {
+     private String groupId;
+     private String artifactId;
+     private String version;
+     private String scope;
++    private List /*<ModuleId>*/ excludedModules;
+     
+     public DefaultPomDependencyMgt(
+-            String groupId, String artifactId, String version, String scope) {
++            String groupId, String artifactId, String version, String scope, List /*<ModuleId>*/ excludedModules) {
+         this.groupId = groupId;
+         this.artifactId = artifactId;
+         this.version = version;
+         this.scope = scope;
++        this.excludedModules = excludedModules;
+     }
+     
+     public String getScope() {
+@@ -38,12 +42,16 @@ public String getScope() {
+     public String getGroupId() {
+         return groupId;
+     }
++    
+     public String getArtifactId() {
+         return artifactId;
+     }
++    
+     public String getVersion() {
+         return version;
+     }
+     
+-    
++    public List /*<ModuleId>*/ getExcludedModules() {
++        return excludedModules;
++    }
+ }
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java b/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java
+index 51ea625e9..72f632061 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomDependencyMgt.java
+@@ -17,6 +17,8 @@
+  */
+ package org.apache.ivy.plugins.parser.m2;
+ 
++import java.util.List;
++
+ public interface PomDependencyMgt {
+ 
+     public abstract String getGroupId();
+@@ -27,4 +29,5 @@ public interface PomDependencyMgt {
+     
+     public abstract String getScope();
+ 
++    public List /*<ModuleId>*/ getExcludedModules();
+ }
+\ No newline at end of file
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+index 8532a301a..0b2442e3b 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorBuilder.java
+@@ -25,6 +25,7 @@
+ import java.util.HashMap;
+ import java.util.Iterator;
+ import java.util.LinkedHashMap;
++import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Map.Entry;
+@@ -305,7 +306,15 @@ public void addDependency(Resource res, PomDependencyData dep) {
+             dd.addDependencyArtifact(optionalizedScope, depArtifact);
+         }
+         
+-        for (Iterator itExcl = dep.getExcludedModules().iterator(); itExcl.hasNext();) {
++        // experimentation shows the following, excluded modules are
++        // inherited from parent POMs if either of the following is true:
++        // the <exclusions> element is missing or the <exclusions> element
++        // is present, but empty.
++        List /*<ModuleId>*/ excluded = dep.getExcludedModules();
++        if (excluded.isEmpty()) {
++            excluded = getDependencyMgtExclusions(ivyModuleDescriptor, dep.getGroupId(), dep.getArtifactId());
++        }
++        for (Iterator itExcl = excluded.iterator(); itExcl.hasNext();) {
+             ModuleId excludedModule = (ModuleId) itExcl.next();
+             String[] confs = dd.getModuleConfigurations();
+             for (int k = 0; k < confs.length; k++) {
+@@ -334,6 +343,17 @@ public void addDependencyMgt(PomDependencyMgt dep) {
+                                     dep.getGroupId(), dep.getArtifactId());
+             ivyModuleDescriptor.addExtraInfo(scopeKey, dep.getScope());
+         }
++        if(!dep.getExcludedModules().isEmpty()) {
++            final String exclusionPrefix = getDependencyMgtExtraInfoPrefixForExclusion(
++                    dep.getGroupId(), dep.getArtifactId());
++            int index = 0;
++            for (final Iterator iter = dep.getExcludedModules().iterator(); iter.hasNext();) {
++                final ModuleId excludedModule = (ModuleId) iter.next();
++                ivyModuleDescriptor.addExtraInfo(exclusionPrefix + index,
++                        excludedModule.getOrganisation() + EXTRA_INFO_DELIMITER + excludedModule.getName());
++                index += 1;
++            }
++        }
+         // dependency management info is also used for version mediation of transitive dependencies
+         ivyModuleDescriptor.addDependencyDescriptorMediator(
+             ModuleId.newInstance(dep.getGroupId(), dep.getArtifactId()), 
+@@ -394,6 +414,10 @@ public String getVersion() {
+         public String getScope() {
+             return null;
+         }
++
++        public List /*<ModuleId>*/ getExcludedModules() {
++            return Collections.EMPTY_LIST; // probably not used?
++        }
+     }
+ 
+     private String getDefaultVersion(PomDependencyData dep) {
+@@ -425,6 +449,38 @@ private static String getPropertyExtraInfoKey(String propertyName) {
+         return PROPERTIES + EXTRA_INFO_DELIMITER + propertyName;
+     }
+ 
++    private static String getDependencyMgtExtraInfoPrefixForExclusion(
++                                String groupId, String artifaceId) {
++        return DEPENDENCY_MANAGEMENT + EXTRA_INFO_DELIMITER + groupId
++                + EXTRA_INFO_DELIMITER + artifaceId + EXTRA_INFO_DELIMITER + "exclusion_";
++    }
++
++    private static List /*<ModuleId>*/ getDependencyMgtExclusions(
++                                final ModuleDescriptor descriptor,
++                                final String groupId,
++                                final String artifactId) {
++        final String exclusionPrefix = getDependencyMgtExtraInfoPrefixForExclusion(
++                groupId, artifactId);
++        final List /*<ModuleId>*/ exclusionIds = new LinkedList /*<ModuleId>*/ ();
++        final Map /*<String,String>*/ extras = descriptor.getExtraInfo();
++        for (final Iterator entIter = extras.entrySet().iterator(); entIter.hasNext();) {
++            final Map.Entry /*<String,String>*/ ent = (Map.Entry) entIter.next();
++            final String key = (String) ent.getKey();
++            if (key.startsWith(exclusionPrefix)) {
++                final String full_exclusion = (String) ent.getValue();
++                final String[] exclusion_parts = full_exclusion.split(EXTRA_INFO_DELIMITER);
++                if(exclusion_parts.length != 2) {
++                    Message.error("what seemed to be a dependency management extra info exclusion " +
++                            "had the wrong number of parts (should have 2) " + exclusion_parts.length + " : " + full_exclusion);
++                    continue;
++                }
++                exclusionIds.add(ModuleId.newInstance(exclusion_parts[0], exclusion_parts[1]));
++            }
++        }
++
++        return exclusionIds;
++    }
++
+     public static Map/*<ModuleId, String version>*/ 
+             getDependencyManagementMap(ModuleDescriptor md) {
+         Map ret = new LinkedHashMap();
+@@ -466,7 +522,8 @@ public static List getDependencyManagements(ModuleDescriptor md) {
+                     String version = (String) md.getExtraInfo().get(versionKey);
+                     String scope = (String) md.getExtraInfo().get(scopeKey);
+                     
+-                    result.add(new DefaultPomDependencyMgt(parts[1], parts[2], version, scope));
++                    List /*<ModuleId>*/ exclusions = getDependencyMgtExclusions(md, parts[1], parts[2]);
++                    result.add(new DefaultPomDependencyMgt(parts[1], parts[2], version, scope, exclusions));
+                 }
+             }
+         }
+diff --git a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+index 52c10479e..a0e0ea0ed 100644
+--- a/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
++++ b/src/java/org/apache/ivy/plugins/parser/m2/PomReader.java
+@@ -25,6 +25,7 @@
+ import java.io.LineNumberReader;
+ import java.net.URL;
+ import java.util.ArrayList;
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.Iterator;
+ import java.util.LinkedList;
+@@ -325,6 +326,24 @@ public String getScope() {
+             return replaceProps(val);
+         }
+         
++        public List /*<ModuleId>*/ getExcludedModules() {
++            Element exclusionsElement = getFirstChildElement(depElement, EXCLUSIONS);
++            LinkedList exclusions = new LinkedList();
++            if (exclusionsElement != null) {
++                NodeList childs = exclusionsElement.getChildNodes();
++                for (int i = 0; i < childs.getLength(); i++) {
++                    Node node = childs.item(i);
++                    if (node instanceof Element && EXCLUSION.equals(node.getNodeName())) {
++                        String groupId = getFirstChildText((Element) node, GROUP_ID);
++                        String artifactId = getFirstChildText((Element) node, ARTIFACT_ID);
++                        if ((groupId != null) && (artifactId != null)) {
++                            exclusions.add(ModuleId.newInstance(groupId, artifactId));
++                        }
++                    }
++                }
++            }
++            return exclusions;
++        }
+     }
+     
+     public List /* <PomPluginElement> */ getPlugins() {
+@@ -374,6 +393,9 @@ public String getScope() {
+             return null; // not used
+         }
+         
++        public List /*<ModuleId>*/ getExcludedModules() {
++            return Collections.EMPTY_LIST; // probably not used?
++        }
+     }
+     
+     
+@@ -403,26 +425,6 @@ public boolean isOptional() {
+             Element e = getFirstChildElement(depElement, OPTIONAL); 
+             return (e != null) && "true".equalsIgnoreCase(getTextContent(e));
+         }
+-        
+-        public List /*<ModuleId>*/ getExcludedModules() {
+-            Element exclusionsElement = getFirstChildElement(depElement, EXCLUSIONS);
+-            LinkedList exclusions = new LinkedList();
+-            if (exclusionsElement != null) {
+-                NodeList childs = exclusionsElement.getChildNodes();
+-                for (int i = 0; i < childs.getLength(); i++) {
+-                    Node node = childs.item(i);
+-                    if (node instanceof Element && EXCLUSION.equals(node.getNodeName())) {
+-                        String groupId = getFirstChildText((Element) node, GROUP_ID);
+-                        String artifactId = getFirstChildText((Element) node, ARTIFACT_ID);
+-                        if ((groupId != null) && (artifactId != null)) {
+-                            exclusions.add(ModuleId.newInstance(groupId, artifactId));
+-                        }
+-                    }
+-                }
+-            }
+-            return exclusions;            
+-        }
+-
+     }
+     
+     /**
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+index fed1fbe77..b89364370 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
++++ b/test/java/org/apache/ivy/plugins/parser/m2/PomModuleDescriptorParserTest.java
+@@ -28,6 +28,7 @@
+ import org.apache.ivy.core.module.descriptor.Artifact;
+ import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
+ import org.apache.ivy.core.module.descriptor.DependencyDescriptor;
++import org.apache.ivy.core.module.descriptor.ExcludeRule;
+ import org.apache.ivy.core.module.descriptor.License;
+ import org.apache.ivy.core.module.descriptor.ModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleId;
+@@ -629,6 +630,14 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dd, ResolveData
+             dds[0].getDependencyRevisionId());
+         assertEquals(ModuleRevisionId.newInstance("commons-logging", "commons-logging", "1.0.4"),
+             dds[1].getDependencyRevisionId());
++        
++        ExcludeRule[] excludes = dds[0].getAllExcludeRules();
++        assertNotNull(excludes);
++        assertEquals(2, excludes.length);
++        assertEquals("javax.mail", excludes[0].getId().getModuleId().getOrganisation());
++        assertEquals("mail", excludes[0].getId().getModuleId().getName());
++        assertEquals("javax.jms", excludes[1].getId().getModuleId().getOrganisation());
++        assertEquals("jms", excludes[1].getId().getModuleId().getName());
+     }
+ 
+     public void testParentProperties() throws ParseException, IOException {
+diff --git a/test/java/org/apache/ivy/plugins/parser/m2/test-dependencyMgt.pom b/test/java/org/apache/ivy/plugins/parser/m2/test-dependencyMgt.pom
+index 8a5d025ba..6f78189f5 100644
+--- a/test/java/org/apache/ivy/plugins/parser/m2/test-dependencyMgt.pom
++++ b/test/java/org/apache/ivy/plugins/parser/m2/test-dependencyMgt.pom
+@@ -18,34 +18,44 @@
+    under the License.    
+ -->
+ <project>
+-  <modelVersion>4.0.0</modelVersion>
+-  <groupId>org.apache</groupId>
+-  <artifactId>test-depMgt</artifactId>
+-  <name>Test Module for Ivy M2 parsing</name>
+-  <version>1.0</version>
+-  <url>http://ivy.jayasoft.org/</url>
+-  <organization>
+-    <name>Jayasoft</name>
+-    <url>http://www.jayasoft.org/</url>
+-  </organization>
+-  <dependencyManagement>
++    <modelVersion>4.0.0</modelVersion>
++    <groupId>org.apache</groupId>
++    <artifactId>test-depMgt</artifactId>
++    <name>Test Module for Ivy M2 parsing</name>
++    <version>1.0</version>
++    <url>http://ivy.jayasoft.org/</url>
++    <organization>
++        <name>Jayasoft</name>
++        <url>http://www.jayasoft.org/</url>
++    </organization>
++    <dependencyManagement>
++        <dependencies>
++            <dependency>
++                <groupId>commons-logging</groupId>
++                <artifactId>commons-logging</artifactId>
++                <version>1.0.4</version>
++            </dependency>
++            <dependency>
++                <groupId>commons-collection</groupId>
++                <artifactId>commons-collection</artifactId>
++                <version>1.0.5</version>
++                <exclusions>
++                    <exclusion>
++                        <groupId>javax.mail</groupId>
++                        <artifactId>mail</artifactId>
++                    </exclusion>
++                    <exclusion>
++                        <groupId>javax.jms</groupId>
++                        <artifactId>jms</artifactId>
++                    </exclusion>
++                </exclusions>
++            </dependency>
++        </dependencies>
++    </dependencyManagement>
+     <dependencies>
+-		<dependency>
+-          <groupId>commons-logging</groupId>
+-          <artifactId>commons-logging</artifactId>
+-	      <version>1.0.4</version>
+-        </dependency>
+-		<dependency>
+-          <groupId>commons-collection</groupId>
+-          <artifactId>commons-collection</artifactId>
+-	      <version>1.0.5</version>
++        <dependency>
++            <groupId>commons-logging</groupId>
++            <artifactId>commons-logging</artifactId>
+         </dependency>
+     </dependencies>
+-  </dependencyManagement>
+-  <dependencies>
+-    <dependency>
+-      <groupId>commons-logging</groupId>
+-      <artifactId>commons-logging</artifactId>
+-    </dependency>
+-  </dependencies>
+ </project>

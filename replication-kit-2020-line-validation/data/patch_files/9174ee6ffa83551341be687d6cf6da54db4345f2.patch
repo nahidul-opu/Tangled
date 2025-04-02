@@ -1,0 +1,1045 @@
+From 9174ee6ffa83551341be687d6cf6da54db4345f2 Mon Sep 17 00:00:00 2001
+From: Aaron Smuts <asmuts@apache.org>
+Date: Wed, 16 Aug 2006 20:59:26 +0000
+Subject: [PATCH] Fixed JCS-1 Recyle bin was returning the last element even if
+ it was smaller. I added tests and updated the changes file. I started a new
+ sub.sub version for this and the previous fix JCS-5
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/jcs/trunk@432032 13f79535-47bb-0310-9956-ffa450edef68
+---
+ project.xml                                   |   2 +-
+ .../disk/indexed/IndexedDiskCache.java        |   1 -
+ .../utils/struct/SortedPreferentialArray.java | 106 +++--
+ .../disk/indexed/IndexDiskCacheUnitTest.java  |  84 +++-
+ .../utils/struct/SortedPrefArrayUnitTest.java | 104 +++--
+ xdocs/RegionProperties.xml                    | 378 ++++++++++--------
+ xdocs/changes.xml                             |  26 +-
+ 7 files changed, 414 insertions(+), 287 deletions(-)
+
+diff --git a/project.xml b/project.xml
+index c6e6f80e3..a0f99aabc 100644
+--- a/project.xml
++++ b/project.xml
+@@ -5,7 +5,7 @@
+ 	<pomVersion>3</pomVersion>
+ 	<name>JCS</name>
+ 	<id>jcs</id>
+-	<currentVersion>1.2.7.8</currentVersion>
++	<currentVersion>1.2.7.9</currentVersion>
+ 	<organization>
+ 		<name>Apache Software Foundation</name>
+ 		<url>http://jakarta.apache.org/</url>
+diff --git a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+index 41dddd5ce..b9d8a276e 100644
+--- a/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
++++ b/src/java/org/apache/jcs/auxiliary/disk/indexed/IndexedDiskCache.java
+@@ -386,7 +386,6 @@ public void doUpdate( ICacheElement ce )
+                             recycleCnt++;
+                             if ( log.isDebugEnabled() )
+                             {
+-
+                                 log.debug( "using recycled ded " + ded.pos + " rep.len = " + rep.len + " ded.len = "
+                                     + ded.len );
+                             }
+diff --git a/src/java/org/apache/jcs/utils/struct/SortedPreferentialArray.java b/src/java/org/apache/jcs/utils/struct/SortedPreferentialArray.java
+index c0a0051fe..c18a34adc 100644
+--- a/src/java/org/apache/jcs/utils/struct/SortedPreferentialArray.java
++++ b/src/java/org/apache/jcs/utils/struct/SortedPreferentialArray.java
+@@ -1,28 +1,24 @@
+ package org.apache.jcs.utils.struct;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache
+- * License, Version 2.0 (the "License") you may not use this file except in
+- * compliance with the License. You may obtain a copy of the License at
+- * http://www.apache.org/licenses/LICENSE-2.0 Unless required by applicable law
+- * or agreed to in writing, software distributed under the License is
+- * distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+- * KIND, either express or implied. See the License for the specific language
+- * governing permissions and limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ 
+ /**
+- * This maintains a sorted array with a preferential replacement policy when
+- * full.
++ * This maintains a sorted array with a preferential replacement policy when full.
+  * <p>
+  * Insertion time is n, search is log(n)
+  * <p>
+- * Clients must manage thread safety on previous version. I synchronized the
+- * public methods to add easy thread safety. I synchronized all public methods
+- * that make modifications.
++ * Clients must manage thread safety on previous version. I synchronized the public methods to add
++ * easy thread safety. I synchronized all public methods that make modifications.
+  */
+ public class SortedPreferentialArray
+ {
+@@ -42,8 +38,7 @@ public class SortedPreferentialArray
+     /**
+      * Consruct the array with the maximum size.
+      * <p>
+-     * @param maxSize
+-     *            int
++     * @param maxSize int
+      */
+     public SortedPreferentialArray( int maxSize )
+     {
+@@ -52,12 +47,10 @@ public SortedPreferentialArray( int maxSize )
+     }
+ 
+     /**
+-     * If the array is full this will remove the smallest if preferLarge==true
+-     * and if obj is bigger, or the largest if preferLarge=false and obj is
+-     * smaller than the largest.
++     * If the array is full this will remove the smallest if preferLarge==true and if obj is bigger,
++     * or the largest if preferLarge=false and obj is smaller than the largest.
+      * <p>
+-     * @param obj
+-     *            Object
++     * @param obj Object
+      */
+     public synchronized void add( Comparable obj )
+     {
+@@ -125,17 +118,16 @@ public synchronized Comparable getSmallest()
+     }
+ 
+     /**
+-     * Insert looks for the nearest largest. It then determines which way to
+-     * shuffle depending on the preference.
++     * Insert looks for the nearest largest. It then determines which way to shuffle depending on
++     * the preference.
+      * <p>
+-     * @param obj
+-     *            Comparable
++     * @param obj Comparable
+      */
+     private void insert( Comparable obj )
+     {
+         try
+         {
+-            int nLar = findNearestLargerOrEqualPosition( obj );
++            int nLar = findNearestLargerEqualOrLastPosition( obj );
+             if ( log.isDebugEnabled() )
+             {
+                 log.debug( "nLar = " + nLar + " obj = " + obj );
+@@ -249,8 +241,7 @@ private void insert( Comparable obj )
+     /**
+      * Determines whether the preference is for large or small.
+      * <p>
+-     * @param pref
+-     *            boolean
++     * @param pref boolean
+      */
+     public synchronized void setPreferLarge( boolean pref )
+     {
+@@ -260,8 +251,7 @@ public synchronized void setPreferLarge( boolean pref )
+     /**
+      * Returns and removes the nearer larger or equal object from the aray.
+      * <p>
+-     * @param obj
+-     *            Comparable
++     * @param obj Comparable
+      * @return Comparable, null if arg is null or none was found.
+      */
+     public synchronized Comparable takeNearestLargerOrEqual( Comparable obj )
+@@ -313,11 +303,10 @@ public int size()
+     }
+ 
+     /**
+-     * This determines the position in the array that is occupied by an object
+-     * that is larger or equal to the argument. If none exists, -1 is returned.
++     * This determines the position in the array that is occupied by an object that is larger or
++     * equal to the argument. If none exists, -1 is returned.
+      * <p>
+-     * @param obj
+-     *            Object
++     * @param obj Object
+      * @return Object
+      */
+     private int findNearestOccupiedLargerOrEqualPosition( Comparable obj )
+@@ -329,7 +318,8 @@ private int findNearestOccupiedLargerOrEqualPosition( Comparable obj )
+         }
+ 
+         // this gives us an insert position.
+-        int pos = findNearestLargerOrEqualPosition( obj );
++        int pos = findNearestLargerEqualOrLastPosition( obj );
++
+         // see if the previous will do to handle the empty insert spot position
+         if ( pos == curSize )
+         { // && curSize < maxSize ) {
+@@ -343,36 +333,42 @@ private int findNearestOccupiedLargerOrEqualPosition( Comparable obj )
+                 pos = -1;
+             }
+         }
++        else
++        {
++            // the find nearest, returns the last, since it is used by insertion.
++            if ( obj.compareTo( array[pos] ) > 0 )
++            {
++                return -1;
++            }
++        }
++
+         return pos;
+     }
+ 
+     /**
+-     * This method determines the position where an insert should take place for
+-     * a given object. With some additional checking, this can also be used to
+-     * find an object matching or greater than the argument.
++     * This method determines the position where an insert should take place for a given object.
++     * With some additional checking, this can also be used to find an object matching or greater
++     * than the argument.
+      * <p>
+-     * If the array is not full and the current object is larger than all the
+-     * rest the first open slot at the end will be returned.
++     * If the array is not full and the current object is larger than all the rest the first open
++     * slot at the end will be returned.
+      * <p>
+-     * If the object is larger than the largest and it is full, it will return
+-     * the last position.
++     * NOTE: If the object is larger than the largest and it is full, it will return the last position.
+      * <p>
+      * If the array is empty, the first spot is returned.
+      * <p>
+-     * If the object is smaller than all the rests, the first position is
+-     * returned. The caller must decide what to do given the preference.
++     * If the object is smaller than all the rests, the first position is returned. The caller must
++     * decide what to do given the preference.
+      * <p>
+-     * Returns the position of the object nearest to or equal to the larger
+-     * object.
++     * Returns the position of the object nearest to or equal to the larger object.
+      * <p>
+      * If you want to find the takePosition, you have to calculate it.
+-     * findNearestOccupiedLargerOrEqualPosition will calculate this for you
++     * findNearestOccupiedLargerOrEqualPosition will calculate this for you.
+      * <p>
+-     * @param obj
+-     *            Comparable
++     * @param obj Comparable
+      * @return int
+      */
+-    private int findNearestLargerOrEqualPosition( Comparable obj )
++    private int findNearestLargerEqualOrLastPosition( Comparable obj )
+     {
+         // do nothing if a null was passed in
+         if ( obj == null )
+@@ -441,9 +437,8 @@ private int findNearestLargerOrEqualPosition( Comparable obj )
+                 }
+                 else
+                 {
+-                    // the obj is less than the largest, so we know that the
+-                    // last
+-                    // item is larger
++                    // the obj is less than or equal to the largest, so we know that the
++                    // last item is larger or equal
+                     greaterPos = curSize - 1;
+                 }
+             }
+@@ -548,11 +543,10 @@ else if ( prevPos == -1 )
+     }
+ 
+     /**
+-     * Removes the item from the array at the specified position. The remaining
+-     * items to the right are shifted left.
++     * Removes the item from the array at the specified position. The remaining items to the right
++     * are shifted left.
+      * <p>
+-     * @param position
+-     *            int
++     * @param position int
+      * @throw IndexOutOfBoundsException if position is out of range.
+      */
+     private void remove( int position )
+diff --git a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
+index 100d47547..16fe3ad0e 100644
+--- a/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
++++ b/src/test/org/apache/jcs/auxiliary/disk/indexed/IndexDiskCacheUnitTest.java
+@@ -9,9 +9,8 @@
+ 
+ /**
+  * Tests for common functionality.
+- * 
++ * <p>
+  * @author Aaron Smuts
+- * 
+  */
+ public class IndexDiskCacheUnitTest
+     extends TestCase
+@@ -19,7 +18,6 @@ public class IndexDiskCacheUnitTest
+ 
+     /**
+      * Simply verify that we can put items in the disk cache and retrieve them.
+-     * 
+      */
+     public void testSimplePutAndGet()
+     {
+@@ -47,13 +45,12 @@ public void testSimplePutAndGet()
+             assertNotNull( "Should have recevied an element.", element );
+             assertEquals( "Element is wrong.", "data:" + i, element.getVal() );
+         }
+-        
++
+         System.out.println( disk.getStats() );
+     }
+ 
+     /**
+      * Add some items to the disk cache and then remove them one by one.
+-     * 
+      */
+     public void testRemoveItems()
+     {
+@@ -84,4 +81,81 @@ public void testRemoveItems()
+         }
+     }
+ 
++    /**
++     * Verify that we don't override the largest item.
++     */
++    public void testRecycleBin()
++    {
++        IndexedDiskCacheAttributes cattr = new IndexedDiskCacheAttributes();
++        cattr.setCacheName( "testRemoveItems" );
++        cattr.setMaxRecycleBinSize( 2 );
++        cattr.setOptimizeAtRemoveCount( 7 );
++        cattr.setMaxKeySize( 5 );
++        cattr.setMaxPurgatorySize( 0 );
++        cattr.setDiskPath( "target/test-sandbox/BreakIndexTest" );
++        IndexedDiskCache disk = new IndexedDiskCache( cattr );
++
++        String[] test = { "a", "bb", "ccc", "dddd", "eeeee", "ffffff", "ggggggg", "hhhhhhhhh", "iiiiiiiiii" };
++        String[] expect = { null, "bb", "ccc", null, null, "ffffff", null, "hhhhhhhhh", "iiiiiiiiii" };
++
++        System.out.println( "------------------------- testRecycleBin " );
++
++        for ( int i = 0; i < 6; i++ )
++        {
++            ICacheElement element = new CacheElement( "testRecycleBin", "key:" + test[i], test[i] );
++            System.out.println( "About to add " + "key:" + test[i] + " i = " + i );
++            disk.doUpdate( element );
++        }
++
++        for ( int i = 3; i < 5; i++ )
++        {
++            System.out.println( "About to remove " + "key:" + test[i] + " i = " + i );
++            disk.remove( "key:" + test[i] );
++        }
++
++        // there was a bug where 7 would try to be put in the empty slot left by 4's removal, but it
++        // will not fit.
++        for ( int i = 7; i < 9; i++ )
++        {
++            ICacheElement element = new CacheElement( "testRecycleBin", "key:" + test[i], test[i] );
++            System.out.println( "About to add " + "key:" + test[i] + " i = " + i );
++            disk.doUpdate( element );
++        }
++
++        try
++        {
++            for ( int i = 0; i < 9; i++ )
++            {
++                ICacheElement element = disk.get( "key:" + test[i] );
++                if ( element != null )
++                {
++                    System.out.println( "element = " + element.getVal() );
++                }
++                else
++                {
++                    System.out.println( "null --" + "key:" + test[i] );
++                }
++
++                String expectedValue = expect[i];
++                if ( expectedValue == null )
++                {
++                    assertNull( "Expected a null element", element );
++                }
++                else
++                {
++                    assertNotNull( "The element for key [" + "key:" + test[i] + "] should not be null. i = " + i,
++                                   element );
++                    assertEquals( "Elements contents do not match expected", element.getVal(), expectedValue );
++                }
++            }
++        }
++        catch ( Exception e )
++        {
++            e.printStackTrace();
++            fail( "Should not get an exception: " + e.toString() );
++        }
++
++        disk.removeAll();
++    }
++
+ }
+diff --git a/src/test/org/apache/jcs/utils/struct/SortedPrefArrayUnitTest.java b/src/test/org/apache/jcs/utils/struct/SortedPrefArrayUnitTest.java
+index c6a5913e0..6a58d3ba1 100644
+--- a/src/test/org/apache/jcs/utils/struct/SortedPrefArrayUnitTest.java
++++ b/src/test/org/apache/jcs/utils/struct/SortedPrefArrayUnitTest.java
+@@ -1,28 +1,19 @@
+ package org.apache.jcs.utils.struct;
+ 
+ /*
+- * Copyright 2001-2004 The Apache Software Foundation.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License")
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
++ * Copyright 2001-2004 The Apache Software Foundation. Licensed under the Apache License, Version
++ * 2.0 (the "License") you may not use this file except in compliance with the License. You may
++ * obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0 Unless required by
++ * applicable law or agreed to in writing, software distributed under the License is distributed on
++ * an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See
++ * the License for the specific language governing permissions and limitations under the License.
+  */
+ 
+ import junit.framework.TestCase;
+ 
+ /**
+  * Tests the SortedPrefArray used by the recycle bin.
+- * 
+  * @author aaronsm
+- * 
+  */
+ public class SortedPrefArrayUnitTest
+     extends TestCase
+@@ -30,9 +21,7 @@ public class SortedPrefArrayUnitTest
+ 
+     /**
+      * Constructor for the TestSimpleLoad object
+-     * 
+-     * @param testName
+-     *            Description of the Parameter
++     * @param testName Description of the Parameter
+      */
+     public SortedPrefArrayUnitTest( String testName )
+     {
+@@ -41,9 +30,7 @@ public SortedPrefArrayUnitTest( String testName )
+ 
+     /**
+      * Description of the Method
+-     * 
+-     * @param args
+-     *            Description of the Parameter
++     * @param args Description of the Parameter
+      */
+     public static void main( String args[] )
+     {
+@@ -52,8 +39,6 @@ public static void main( String args[] )
+     }
+ 
+     /**
+-     * 
+-     * 
+      * @exception Exception
+      */
+     public void testLargePref()
+@@ -125,7 +110,6 @@ public void testLargePref()
+ 
+     /**
+      * Verify that we don't get an error when taking from an empty array.
+-     * 
+      * @throws Exception
+      */
+     public void testEmptyTake()
+@@ -143,7 +127,6 @@ public void testEmptyTake()
+ 
+     /**
+      * Verify that we don't get a null pointer if we insert a null.
+-     * 
+      * @throws Exception
+      */
+     public void testNullInsertion()
+@@ -211,7 +194,6 @@ public void testNullInsertion()
+ 
+     /**
+      * Verify that we don't get an npe when taking with a null
+-     * 
+      * @throws Exception
+      */
+     public void testNullTake()
+@@ -234,7 +216,6 @@ public void testNullTake()
+ 
+     /**
+      * Verify that we don't get an npe when taking from an array of only one
+-     * 
+      * @throws Exception
+      */
+     public void testSingleItemTake()
+@@ -261,7 +242,6 @@ public void testSingleItemTake()
+ 
+     /**
+      * Verify that we don't get an npe when taking from an array of only one
+-     * 
+      * @throws Exception
+      */
+     public void testSingleItemTakeLarger()
+@@ -286,7 +266,6 @@ public void testSingleItemTakeLarger()
+ 
+     /**
+      * Verify that we don't get an npe when taking from an array of none
+-     * 
+      * @throws Exception
+      */
+     public void testSingleItemTakeLargerEmpty()
+@@ -309,7 +288,6 @@ public void testSingleItemTakeLargerEmpty()
+ 
+     /**
+      * Test taking the largest item.
+-     * 
+      * @exception Exception
+      */
+     public void testTakeLargestItem()
+@@ -320,16 +298,7 @@ public void testTakeLargestItem()
+         SortedPreferentialArray array = new SortedPreferentialArray( maxSize );
+         // array.setPreferLarge( false );
+         array.setPreferLarge( true );
+-        String[] elem = {
+-            "01",
+-            "02",
+-            "03",
+-            "04",
+-            "05",
+-            "08",
+-            "07",
+-            "06",
+-            "09",};
++        String[] elem = { "01", "02", "03", "04", "05", "08", "07", "06", "09", };
+ 
+         // put more than the max in a random order
+         for ( int i = 0; i < elem.length; i++ )
+@@ -357,7 +326,7 @@ public void testTakeLargestItem()
+ 
+     /**
+      * Test taking every last item.
+-     * 
++     * <p>
+      * @exception Exception
+      */
+     public void testTakeEveryLastItem()
+@@ -368,16 +337,7 @@ public void testTakeEveryLastItem()
+         SortedPreferentialArray array = new SortedPreferentialArray( maxSize );
+         // array.setPreferLarge( false );
+         array.setPreferLarge( true );
+-        String[] elem = {
+-            "01",
+-            "02",
+-            "03",
+-            "04",
+-            "05",
+-            "08",
+-            "07",
+-            "06",
+-            "09",};
++        String[] elem = { "01", "02", "03", "04", "05", "08", "07", "06", "09", };
+ 
+         // put more than the max in a random order
+         for ( int i = 0; i < elem.length; i++ )
+@@ -398,18 +358,46 @@ public void testTakeEveryLastItem()
+         // this should take 96;
+         String taken = (String) array.takeNearestLargerOrEqual( "09" );
+         assertEquals( "Taken is not as expected", "09", taken );
+-        assertEquals( "Size was not as expected.", ( maxSize - 1 ), array.size() );
++        assertEquals( "Size was not as expected. " + array.dumpArray(), ( maxSize - 1 ), array.size() );
+ 
+         System.out.println( "testTakeEveryLastItem" + array.dumpArray() );
+ 
+         // take the rest
+-        // put more than the max in a random order
+-        for ( int i = elem.length -1; i >= 0; i-- )
++        // take more than the max in a reverse order
++        for ( int i = elem.length - 1; i >= 0; i-- )
+         {
+             array.takeNearestLargerOrEqual( elem[i] );
+-        }        
++        }
+         System.out.println( "testTakeEveryLastItem" + array.dumpArray() );
+-        
+-        assertEquals( "There should nothing left.", 0, array.size() );
+-    }    
++
++        assertEquals( "There should nothing left. " + array.dumpArray(), 0, array.size() );
++    }
++
++    /**
++     * Try taking an item larger than the greatest.
++     */
++    public void testTakeLargerThanGreatest()
++    {
++        int maxSize = 3;
++
++        SortedPreferentialArray array = new SortedPreferentialArray( maxSize );
++        // array.setPreferLarge( false );
++        array.setPreferLarge( true );
++        String[] elem = { "01", "02", "03" };
++
++        // put more than the max in a random order
++        for ( int i = 0; i < elem.length; i++ )
++        {
++            array.add( elem[i] );
++            System.out.println( array.dumpArray() );
++        }
++
++        // DO WORK
++        Comparable taken = array.takeNearestLargerOrEqual( "04" );
++        System.out.println( "testTakeLargerThanGreatest" + array.dumpArray() );
++
++        assertNull( "We should have nothing since the largest element was smaller than what we asked for. "
++            + " Instead we got " + taken, taken );
++    }
++
+ }
+diff --git a/xdocs/RegionProperties.xml b/xdocs/RegionProperties.xml
+index d19dbe2a8..c69816e4d 100644
+--- a/xdocs/RegionProperties.xml
++++ b/xdocs/RegionProperties.xml
+@@ -1,166 +1,217 @@
+ <?xml version="1.0"?>
+ 
+ <document>
+-  <properties>
+-    <title>Cache Region Configuration</title>
+-    <author email="ASmuts@apache.org">Aaron Smuts</author>
+-  </properties>
++	<properties>
++		<title>Cache Region Configuration</title>
++		<author email="ASmuts@apache.org">Aaron Smuts</author>
++	</properties>
+ 
+-  <body>
+-    <section name="Cache Region Configuration">
++	<body>
++		<section name="Cache Region Configuration">
+ 
+-      <p>
+-        The following properties apply to any cache region.  They can be specified as
+-        default values and specified on a region by region basis.  There are three types
+-        of settings: auxiliary, cache, and element.  The cache settings define the memory management for the region.
+-        The element settings define default element behavior within the region.
+-      </p>
++			<p>
++				The following properties apply to any cache region. They
++				can be specified as default values and specified on a
++				region by region basis. There are three types of
++				settings: auxiliary, cache, and element. The cache
++				settings define the memory management for the region.
++				The element settings define default element behavior
++				within the region.
++			</p>
+ 
+-	  <subsection name="Region (Auxiliary) Properties">
+-        <table>
+-          <tr>
+-            <th>Property</th>
+-            <th>Description</th>
+-            <th>Required</th>
+-            <th>Default Value</th>
+-          </tr>
+-          <tr>
+-            <td></td>
+-            <td>
+-              You can specify the list of auxiliaries that regions can use.  This has no attribute name.
+-              The list can be empty, otherwise it should be comma delimited. 
+-            </td>
+-            <td>Y</td>
+-            <td>n/a</td>
+-          </tr>
+-        </table>
+-      </subsection>
+-                
+-	  <subsection name="Region (Cache) Properties">
+-        <table>
+-          <tr>
+-            <th>Property</th>
+-            <th>Description</th>
+-            <th>Required</th>
+-            <th>Default Value</th>
+-          </tr>
+-          <tr>
+-            <td>MaxObjects</td>
+-            <td>
+-			  The maximum number of items allowed in memory. Eviction of elements
+-			  in excess of this number is determined by the memory cache.  By default
+-			  JCS uses the LRU memory cache.	
+-            </td>
+-            <td>Y</td>
+-            <td>n/a</td>
+-          </tr>
+-          <tr>
+-            <td>MemoryCacheName</td>
+-            <td>
+-			  This property allows you to specify what memory manager you would like to use.
+-			  You can create your own memory manager by implementing the org.apache.jcs.engine.memory.MemoryCache interface.
+-			  Alternatively, you can extend the org.apache.jcs.engine.memory.AbstractMemoryCache class.  Several different
+-			  memory caches are available: two LRU implementations, an LFU, and an adaptive replacement algorithm.
+-            </td>
+-            <td>N</td>
+-            <td>org.apache.jcs.engine.memory.lru.LRUMemoryCache</td>
+-          </tr>
+-          <tr>
+-            <td>UseMemoryShrinker</td>
+-            <td>
+-			  By default, the memory shrinker is shared by all regions that use the
+-			  LRU memory cache.  The memory shrinker iterates through the items in
+-			  memory, looking for items that have expired or that have exceeded their max
+-			  memory idle time.
+-            </td>
+-            <td>N</td>
+-            <td>false</td>
+-          </tr>
+-          <tr>
+-            <td>MaxMemoryIdleTimeSeconds</td>
+-            <td>
+-			  This is only used if you are using the memory shrinker.  If
+-			  this value is set above -1, then if an item has not been accessed
+-			  in this number of seconds, it will be spooled to disk if
+-			  the disk is available.  You can register an event handler on this
+-			  event.	
+-            </td>
+-            <td>N</td>
+-            <td>-1</td>
+-          </tr>    
+-          <tr>
+-            <td>ShrinkerIntervalSeconds</td>
+-            <td>
+- 	          This specifies how often the shrinker should run, if it has
+- 	          been activated.  If you set UseMemoryShrinker to false, then this
+- 	          setting has no effect.
+-            </td>
+-            <td>N</td>
+-            <td>60</td>
+-          </tr>                 
+-        </table>
+-      </subsection>
+-      
+-	  <subsection name="Region (Element) Properties">
+-        <table>
+-          <tr>
+-            <th>Property</th>
+-            <th>Description</th>
+-            <th>Required</th>
+-            <th>Default Value</th>
+-          </tr>
+-          <tr>
+-            <td>IsEternal</td>
+-            <td>
+-			  If an element is specified as eternal, then it will never be subject to
+-			  removal for exceeding its max life.  
+-            </td>
+-            <td>N</td>
+-            <td>true</td>
+-          </tr>
+-          <tr>
+-            <td>MaxLifeSeconds</td>
+-            <td>
+-			  If you specify that elements within a region are not eternal, then
+-			  you can set the max life seconds.  If this is exceeded the elmenets will
+-			  be removed passively when a client tries to retrieve them.  If you
+-			  are using a memory shrinker, then the items can be removed actively.			  
+-            </td>
+-            <td>N</td>
+-            <td>-1</td>
+-          </tr>
+-          <tr>
+-            <td>IsSpool</td>
+-            <td>
+-              By default, can elements in this region be sent to a disk cache
+-              if one is available.
+-            </td>
+-            <td>N</td>
+-            <td>true</td>
+-          </tr>
+-          <tr>
+-            <td>IsRemote</td>
+-            <td>
+-              By default, can elements in this region be sent to a lateral cache
+-              if one is available.            
+-            </td>
+-            <td>N</td>
+-            <td>true</td>
+-          </tr>
+-          <tr>
+-            <td>IsLateral</td>
+-            <td>
+-              By default, can elements in this region be sent to a remote cache
+-              if one is available.            
+-            </td>
+-            <td>N</td>
+-            <td>true</td>
+-          </tr>
+-        </table>
+-      </subsection>      
+-      
+-      <subsection name="Example Configuration">
+-              <source><![CDATA[
++			<subsection name="Region (Auxiliary) Properties">
++				<table>
++					<tr>
++						<th>Property</th>
++						<th>Description</th>
++						<th>Required</th>
++						<th>Default Value</th>
++					</tr>
++					<tr>
++						<td></td>
++						<td>
++							You can specify the list of auxiliaries that
++							regions can use. This has no attribute name.
++							The list can be empty, otherwise it should
++							be comma delimited.
++						</td>
++						<td>Y</td>
++						<td>n/a</td>
++					</tr>
++				</table>
++			</subsection>
++
++			<subsection name="Region (Cache) Properties">
++				<table>
++					<tr>
++						<th>Property</th>
++						<th>Description</th>
++						<th>Required</th>
++						<th>Default Value</th>
++					</tr>
++					<tr>
++						<td>MaxObjects</td>
++						<td>
++							The maximum number of items allowed in
++							memory. Eviction of elements in excess of
++							this number is determined by the memory
++							cache. By default JCS uses the LRU memory
++							cache.
++						</td>
++						<td>Y</td>
++						<td>n/a</td>
++					</tr>
++					<tr>
++						<td>MemoryCacheName</td>
++						<td>
++							This property allows you to specify what
++							memory manager you would like to use. You
++							can create your own memory manager by
++							implementing the
++							org.apache.jcs.engine.memory.MemoryCache
++							interface. Alternatively, you can extend the
++							org.apache.jcs.engine.memory.AbstractMemoryCache
++							class. Several different memory caches are
++							available: two LRU implementations, an LFU,
++							and an adaptive replacement algorithm.
++						</td>
++						<td>N</td>
++						<td>
++							org.apache.jcs.engine.memory.lru.LRUMemoryCache
++						</td>
++					</tr>
++					<tr>
++						<td>UseMemoryShrinker</td>
++						<td>
++							By default, the memory shrinker is shared by
++							all regions that use the LRU memory cache.
++							The memory shrinker iterates through the
++							items in memory, looking for items that have
++							expired or that have exceeded their max
++							memory idle time.
++						</td>
++						<td>N</td>
++						<td>false</td>
++					</tr>
++					<tr>
++						<td>MaxMemoryIdleTimeSeconds</td>
++						<td>
++							This is only used if you are using the
++							memory shrinker. If this value is set above
++							-1, then if an item has not been accessed in
++							this number of seconds, it will be spooled
++							to disk if the disk is available. You can
++							register an event handler on this event.
++						</td>
++						<td>N</td>
++						<td>-1</td>
++					</tr>
++					<tr>
++						<td>ShrinkerIntervalSeconds</td>
++						<td>
++							This specifies how often the shrinker should
++							run, if it has been activated. If you set
++							UseMemoryShrinker to false, then this
++							setting has no effect.
++						</td>
++						<td>N</td>
++						<td>60</td>
++					</tr>
++					<tr>
++						<td>DiskUsagePattern</td>
++						<td>
++							SWAP is the default. Under the swap pattern,
++							data is only put to disk when the max memory
++							size is reached. Since items puled from disk
++							are put into memory, if the memory cache is
++							full and you get an item off disk, the lest
++							recently used item will be spooled to disk.
++							If you have a low memory hit ration, you end
++							up thrashing.
++
++							The UPDATE usage pattern allows items to go
++							to disk on an update. It disables the swap.
++							This allows you to persist all items to
++							disk. If you are using the JDBC disk cache
++							for instance, you can put all the items on
++							disk while using the memory cache for
++							performance, and not worry about lossing
++							data from a system crash or improper
++							shutdown. Also, since all items are on disk,
++							there is no need to swap to disk. This
++							prevents the possibility of thrashing.
++						</td>
++						<td>N</td>
++						<td>SWAP</td>
++					</tr>
++				</table>
++			</subsection>
++
++			<subsection name="Region (Element) Properties">
++				<table>
++					<tr>
++						<th>Property</th>
++						<th>Description</th>
++						<th>Required</th>
++						<th>Default Value</th>
++					</tr>
++					<tr>
++						<td>IsEternal</td>
++						<td>
++							If an element is specified as eternal, then
++							it will never be subject to removal for
++							exceeding its max life.
++						</td>
++						<td>N</td>
++						<td>true</td>
++					</tr>
++					<tr>
++						<td>MaxLifeSeconds</td>
++						<td>
++							If you specify that elements within a region
++							are not eternal, then you can set the max
++							life seconds. If this is exceeded the
++							elmenets will be removed passively when a
++							client tries to retrieve them. If you are
++							using a memory shrinker, then the items can
++							be removed actively.
++						</td>
++						<td>N</td>
++						<td>-1</td>
++					</tr>
++					<tr>
++						<td>IsSpool</td>
++						<td>
++							By default, can elements in this region be
++							sent to a disk cache if one is available.
++						</td>
++						<td>N</td>
++						<td>true</td>
++					</tr>
++					<tr>
++						<td>IsRemote</td>
++						<td>
++							By default, can elements in this region be
++							sent to a lateral cache if one is available.
++						</td>
++						<td>N</td>
++						<td>true</td>
++					</tr>
++					<tr>
++						<td>IsLateral</td>
++						<td>
++							By default, can elements in this region be
++							sent to a remote cache if one is available.
++						</td>
++						<td>N</td>
++						<td>true</td>
++					</tr>
++				</table>
++			</subsection>
++
++			<subsection name="Example Configuration">
++				<source>
++					<![CDATA[
+ jcs.default=
+ jcs.default.cacheattributes=org.apache.jcs.engine.CompositeCacheAttributes
+ jcs.default.cacheattributes.MaxObjects=200001
+@@ -190,9 +241,10 @@ jcs.region.testCache1.elementattributes.MaxLifeSeconds=60000
+ jcs.region.testCache1.elementattributes.IsSpool=true
+ jcs.region.testCache1.elementattributes.IsLateral=true
+ jcs.region.testCache1.elementattributes.IsRemote=true
+-        ]]></source>
+-      </subsection>
+-      
+-    </section>
+-  </body>
+-</document>      
+\ No newline at end of file
++        ]]>
++				</source>
++			</subsection>
++
++		</section>
++	</body>
++</document>
+\ No newline at end of file
+diff --git a/xdocs/changes.xml b/xdocs/changes.xml
+index 1436a93a6..51a4133ae 100644
+--- a/xdocs/changes.xml
++++ b/xdocs/changes.xml
+@@ -5,11 +5,31 @@
+ 	</properties>
+ 	<body>
+ 
++		<release version="1.2.7.9" date="in CVS">
++			<action dev="asmuts" type="update" issue="JCS-5">
++				Added the ability to send all items to disk or to use
++				the disk merely as a swap. This is done by setting the
++				DiskUsagePattern on the cache attributes for a region.
++			</action>
++			<action dev="asmuts" type="fix" issue="JCS-1">
++				Fixed last element too small recycle bin bug.
++			</action>
++		</release>
++
++		<release version="1.2.7.8" date="in CVS">
++			<action dev="asmuts" type="update">
++				Added the ability to schedule optimizations for the
++				MySQL disk cache. It can also recover from optimization
++				failure and repair the table. It's been tested and is
++				running in a production environment.
++			</action>
++		</release>
++
+ 		<release version="1.2.7.7" date="in CVS">
+ 			<action dev="asmuts" type="fix"
+-			due-to="Brian Crow  @noteworthyms.com">
+-				Fixed the array index out of bounds exception in the Sorted
+-				Preferential Array.  
++				due-to="Brian Crow  @noteworthyms.com">
++				Fixed the array index out of bounds exception in the
++				Sorted Preferential Array.
+ 			</action>
+ 		</release>
+ 

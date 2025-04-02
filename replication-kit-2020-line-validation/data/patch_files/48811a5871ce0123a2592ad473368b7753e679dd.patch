@@ -1,0 +1,96 @@
+From 48811a5871ce0123a2592ad473368b7753e679dd Mon Sep 17 00:00:00 2001
+From: gpetracek <gpetracek@apache.org>
+Date: Thu, 2 Jan 2014 20:16:26 +0100
+Subject: [PATCH] DELTASPIKE-484 fixed handling of contextual-storages
+
+---
+ .../impl/scope/window/WindowBeanHolder.java   | 29 ++++++++++++-------
+ .../impl/scope/window/WindowContextImpl.java  | 11 ++-----
+ 2 files changed, 21 insertions(+), 19 deletions(-)
+
+diff --git a/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowBeanHolder.java b/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowBeanHolder.java
+index 429fa20e2..a94966f04 100644
+--- a/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowBeanHolder.java
++++ b/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowBeanHolder.java
+@@ -36,6 +36,8 @@
+ @SessionScoped
+ public class WindowBeanHolder implements Serializable
+ {
++    private static final long serialVersionUID = 6313493410718133308L;
++
+     /**
+      * key: the windowId for the browser tab or window
+      * value: the {@link ContextualStorage} which holds all the
+@@ -46,27 +48,32 @@ public class WindowBeanHolder implements Serializable
+     /**
+      * This method will return the ContextualStorage or create a new one
+      * if no one is yet assigned to the current windowId.
+-     * @param beanManager we need the CDI {@link BeanManager} for serialisation.
++     * @param beanManager we need the CDI {@link javax.enterprise.inject.spi.BeanManager} for serialisation.
+      * @param windowId the windowId for the current browser tab or window.
++     * @param createIfNotExist true if a new storage should get created (if it doesn't exist already), false otherwise
+      */
+-    public ContextualStorage getContextualStorage(BeanManager beanManager, String windowId)
++    public ContextualStorage getContextualStorage(BeanManager beanManager, String windowId, boolean createIfNotExist)
+     {
+         ContextualStorage contextualStorage = storageMap.get(windowId);
+-        if (contextualStorage == null)
++        if (contextualStorage == null && createIfNotExist)
+         {
+-            synchronized (this)
+-            {
+-                contextualStorage = storageMap.get(windowId);
+-                if (contextualStorage == null)
+-                {
+-                    storageMap.put(windowId, new ContextualStorage(beanManager, true, true));
+-                }
+-            }
++            contextualStorage = createContextualStorage(beanManager, windowId);
+         }
+ 
+         return contextualStorage;
+     }
+ 
++    private synchronized ContextualStorage createContextualStorage(BeanManager beanManager, String windowId)
++    {
++        ContextualStorage contextualStorage = storageMap.get(windowId);
++        if (contextualStorage == null)
++        {
++            contextualStorage = new ContextualStorage(beanManager, true, true);
++            storageMap.put(windowId, contextualStorage);
++        }
++        return contextualStorage;
++    }
++
+     public Map<String, ContextualStorage> getStorageMap()
+     {
+         return storageMap;
+diff --git a/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowContextImpl.java b/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowContextImpl.java
+index ebda22914..ce637083b 100644
+--- a/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowContextImpl.java
++++ b/deltaspike/core/impl/src/main/java/org/apache/deltaspike/core/impl/scope/window/WindowContextImpl.java
+@@ -92,13 +92,8 @@ public boolean closeWindow(String windowId)
+             return false;
+         }
+ 
+-        ContextualStorage windowStorage = windowBeanHolder.getContextualStorage(beanManager, windowId);
+-        if (windowStorage == null)
+-        {
+-            return false;
+-        }
+-
+-        return true;
++        ContextualStorage windowStorage = windowBeanHolder.getContextualStorage(beanManager, windowId, false);
++        return windowStorage != null;
+     }
+ 
+     @Override
+@@ -110,7 +105,7 @@ protected ContextualStorage getContextualStorage(boolean createIfNotExist)
+             throw new ContextNotActiveException("WindowContext: no windowId set for the current Thread yet!");
+         }
+ 
+-        return windowBeanHolder.getContextualStorage(beanManager, windowId);
++        return windowBeanHolder.getContextualStorage(beanManager, windowId, createIfNotExist);
+     }
+ 
+     @Override

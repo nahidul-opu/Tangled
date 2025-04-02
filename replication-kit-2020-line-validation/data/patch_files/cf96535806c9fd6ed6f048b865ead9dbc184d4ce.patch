@@ -1,0 +1,124 @@
+From cf96535806c9fd6ed6f048b865ead9dbc184d4ce Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?J=C3=B6rn=20Kottmann?= <joern@apache.org>
+Date: Wed, 8 Feb 2012 09:51:50 +0000
+Subject: [PATCH] OPENNLP-427 Fixed two bugs which caused exceptions on empty
+ CASes. Removed unused code. Fixed formating.
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/opennlp/trunk@1241839 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../main/java/opennlp/uima/parser/Parser.java | 55 +++++++++----------
+ 1 file changed, 27 insertions(+), 28 deletions(-)
+
+diff --git a/opennlp-uima/src/main/java/opennlp/uima/parser/Parser.java b/opennlp-uima/src/main/java/opennlp/uima/parser/Parser.java
+index a8e14f488..ae3e62550 100644
+--- a/opennlp-uima/src/main/java/opennlp/uima/parser/Parser.java
++++ b/opennlp-uima/src/main/java/opennlp/uima/parser/Parser.java
+@@ -71,7 +71,7 @@ private static class ParseConverter {
+     
+     private Parse mParseForTagger;
+     
+-    private String mSentence;
++    private final String mSentence;
+     
+     /**
+      * Initializes a new instance.
+@@ -106,7 +106,8 @@ public ParseConverter(String sentence, Span tokens[]) {
+       }
+       
+       // remove last space
+-      sentenceStringBuilder.setLength(sentenceStringBuilder.length() - 1);
++      if (sentenceStringBuilder.length() > 0)
++        sentenceStringBuilder.setLength(sentenceStringBuilder.length() - 1);
+       
+       String tokenizedSentence = sentenceStringBuilder.toString();
+       
+@@ -184,6 +185,9 @@ Parse transformParseFromTagger(Parse parseFromTagger) {
+   public static final String TYPE_FEATURE_PARAMETER = 
+       "opennlp.uima.TypeFeature";
+   
++  public static final String CHILDREN_FEATURE_PARAMETER = 
++      "opennlp.uima.ChildrenFeature";
++  
+   protected UimaContext context;
+   
+   protected Logger mLogger;
+@@ -197,6 +201,8 @@ Parse transformParseFromTagger(Parse parseFromTagger) {
+   private Type mParseType;
+ 
+   private Feature mTypeFeature;
++  
++  private Feature childrenFeature;
+ 
+   /**
+    * Initializes the current instance with the given context.
+@@ -245,6 +251,9 @@ public void typeSystemInit(TypeSystem typeSystem)
+ 
+     mTypeFeature = AnnotatorUtil.getRequiredFeatureParameter(context,
+         mParseType, TYPE_FEATURE_PARAMETER, CAS.TYPE_NAME_STRING);
++    
++    childrenFeature = AnnotatorUtil.getRequiredFeatureParameter(context,
++        mParseType, CHILDREN_FEATURE_PARAMETER, CAS.TYPE_NAME_FS_ARRAY);
+   }
+   
+   /**
+@@ -264,24 +273,9 @@ protected void process(CAS cas, AnnotationFS sentenceAnnotation) {
+     ContainingConstraint containingConstraint = 
+         new ContainingConstraint(sentenceAnnotation);
+     
+-    Iterator<AnnotationFS> containingTokens = cas.createFilteredIterator(
+-        allTokens.iterator(), containingConstraint);
+-  
+-    StringBuilder sentenceStringBuilder = new StringBuilder();
+-    
+-    while (containingTokens.hasNext()) {
+-      AnnotationFS token = (AnnotationFS) containingTokens.next();
++    String sentence = sentenceAnnotation.getCoveredText();
+ 
+-      sentenceStringBuilder.append(token.getCoveredText());
+-
+-      // attention the offsets moves inside the sentence...
+-      sentenceStringBuilder.append(' ');
+-    }
+-     
+-    String sentence = sentenceStringBuilder.toString();
+-    sentence = sentenceAnnotation.getCoveredText();
+-
+-    containingTokens = cas.createFilteredIterator(
++    Iterator<AnnotationFS> containingTokens = cas.createFilteredIterator(
+         allTokens.iterator(), containingConstraint);
+    
+     List<Span> tokenSpans = new LinkedList<Span>();
+@@ -295,19 +289,24 @@ protected void process(CAS cas, AnnotationFS sentenceAnnotation) {
+     
+     ParseConverter converter = new ParseConverter(sentence,(Span[]) 
+         tokenSpans.toArray(new Span[tokenSpans.size()]));
+-    
+-   Parse parse = mParser.parse(converter.getParseForTagger());
++   
++    Parse unparsedTree = converter.getParseForTagger();
++   
++    if (unparsedTree.getChildCount() > 0) {
++      
++      Parse parse = mParser.parse(unparsedTree);
+   
+-   parse = converter.transformParseFromTagger(parse);
++      parse = converter.transformParseFromTagger(parse);
+    
+-   if (mLogger.isLoggable(Level.INFO)) {
+-     StringBuffer parseString = new StringBuffer();
+-     parse.show(parseString);
++      if (mLogger.isLoggable(Level.INFO)) {
++        StringBuffer parseString = new StringBuffer();
++        parse.show(parseString);
+      
+-     mLogger.log(Level.INFO, parseString.toString());
+-   }
++        mLogger.log(Level.INFO, parseString.toString());
++      }
+    
+-   createAnnotation(cas, sentenceAnnotation.getBegin(), parse);
++      createAnnotation(cas, sentenceAnnotation.getBegin(), parse);
++    }
+   }
+   
+   protected void createAnnotation(CAS cas, int offset, Parse parse) {

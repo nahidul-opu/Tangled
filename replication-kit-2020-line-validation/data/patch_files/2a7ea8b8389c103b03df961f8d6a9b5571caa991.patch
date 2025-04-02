@@ -1,0 +1,90 @@
+From 2a7ea8b8389c103b03df961f8d6a9b5571caa991 Mon Sep 17 00:00:00 2001
+From: Pavan Kumar <pavanka@fb.com>
+Date: Tue, 13 May 2014 15:07:29 -0700
+Subject: [PATCH] GIRAPH-896: Fix memory leak in SuperstepMetricsRegistry
+ (edunov via pavanka)
+
+---
+ CHANGELOG                                     |  2 +
+ .../NettyWorkerClientRequestProcessor.java    | 50 ++++++++++++-------
+ 2 files changed, 35 insertions(+), 17 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index b51ccf64a..3f0d819e0 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-896: Fix memory leak in SuperstepMetricsRegistry (edunov via pavanka)  
++
+   GIRAPH-897: Add an option to dump only live objects to JMap (edunov via pavanka)  
+ 
+   GIRAPH-895: Trim the edges in Giraph (edunov via pavanka)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java
+index 016671395..43c01ce48 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java
++++ b/giraph-core/src/main/java/org/apache/giraph/comm/netty/NettyWorkerClientRequestProcessor.java
+@@ -155,23 +155,7 @@ public NettyWorkerClientRequestProcessor(
+     SuperstepMetricsRegistry smr = GiraphMetrics.get().perSuperstep();
+     localRequests = smr.getCounter(MetricNames.LOCAL_REQUESTS);
+     remoteRequests = smr.getCounter(MetricNames.REMOTE_REQUESTS);
+-    final Gauge<Long> totalRequests = smr.getGauge(MetricNames.TOTAL_REQUESTS,
+-        new Gauge<Long>() {
+-          @Override
+-          public Long value() {
+-            return localRequests.count() + remoteRequests.count();
+-          }
+-        }
+-    );
+-    smr.getGauge(MetricNames.PERCENT_LOCAL_REQUESTS, new PercentGauge() {
+-      @Override protected double getNumerator() {
+-        return localRequests.count();
+-      }
+-
+-      @Override protected double getDenominator() {
+-        return totalRequests.value();
+-      }
+-    });
++    setupGauges(smr, localRequests, remoteRequests);
+   }
+ 
+   @Override
+@@ -487,4 +471,36 @@ public void doRequest(WorkerInfo workerInfo,
+       remoteRequests.inc();
+     }
+   }
++
++  /**
++   * Sets up gauges for superstep metrics.
++   * This has to be static so that internal objects created here don't
++   * hold references to this$0. Otherwise we memory leaking
++   * NettyWorkerClientRequestProcessor objects.
++   *
++   * @param smr metric registry for current superstep
++   * @param localRequests counter for local requests
++   * @param remoteRequests counter for remote requests
++   */
++  private static void setupGauges(SuperstepMetricsRegistry smr,
++                                  final Counter localRequests,
++                                  final Counter remoteRequests) {
++    final Gauge<Long> totalRequests = smr.getGauge(MetricNames.TOTAL_REQUESTS,
++        new Gauge<Long>() {
++          @Override
++          public Long value() {
++            return localRequests.count() + remoteRequests.count();
++          }
++        }
++    );
++    smr.getGauge(MetricNames.PERCENT_LOCAL_REQUESTS, new PercentGauge() {
++      @Override protected double getNumerator() {
++        return localRequests.count();
++      }
++
++      @Override protected double getDenominator() {
++        return totalRequests.value();
++      }
++    });
++  }
+ }

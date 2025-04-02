@@ -1,0 +1,101 @@
+From 7085fe1d0559de673ed7f5b4cf506b0fa8c582b8 Mon Sep 17 00:00:00 2001
+From: Phil Steitz <psteitz@apache.org>
+Date: Fri, 24 Apr 2015 00:34:03 +0000
+Subject: [PATCH] Made BasicDataSource set disconnection properties on its PCF.
+ JIRA: DBCP-437.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/dbcp/trunk@1675737 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  5 +++++
+ .../apache/commons/dbcp2/BasicDataSource.java |  2 ++
+ .../dbcp2/managed/BasicManagedDataSource.java |  2 ++
+ .../commons/dbcp2/TestBasicDataSource.java    | 22 +++++++++++++++++++
+ 4 files changed, 31 insertions(+)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 8df0b3e313..25ac3193fa 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -60,6 +60,11 @@ The <action> type attribute can be add,update,fix,remove.
+      -->
+ 
+   <body>
++    <release version="2.1.1" date="TBD" description="Bug fixes.">
++    <action issue="DBCP-437" dev="psteitz" type="fix">
++      BasicDataSource does not set disconnectionSql properties on its PoolableConnectionFactory.
++    </action>
++    </release>
+     <release version="2.1" date="23 Feb 2015" description=
+  "This is minor release, including bug fixes and enhancements. Note that
+   one of the enhancements (DBCP-423) is to implement AutoCloseable in
+diff --git a/src/main/java/org/apache/commons/dbcp2/BasicDataSource.java b/src/main/java/org/apache/commons/dbcp2/BasicDataSource.java
+index c1d8e60aa2..cf5545d29a 100644
+--- a/src/main/java/org/apache/commons/dbcp2/BasicDataSource.java
++++ b/src/main/java/org/apache/commons/dbcp2/BasicDataSource.java
+@@ -2284,6 +2284,8 @@ protected PoolableConnectionFactory createPoolableConnectionFactory(
+             connectionFactory.setRollbackOnReturn(getRollbackOnReturn());
+             connectionFactory.setEnableAutoCommitOnReturn(getEnableAutoCommitOnReturn());
+             connectionFactory.setDefaultQueryTimeout(getDefaultQueryTimeout());
++            connectionFactory.setFastFailValidation(fastFailValidation);
++            connectionFactory.setDisconnectionSqlCodes(disconnectionSqlCodes);
+             validateConnectionFactory(connectionFactory);
+         } catch (RuntimeException e) {
+             throw e;
+diff --git a/src/main/java/org/apache/commons/dbcp2/managed/BasicManagedDataSource.java b/src/main/java/org/apache/commons/dbcp2/managed/BasicManagedDataSource.java
+index ef85d22103..201108a04f 100644
+--- a/src/main/java/org/apache/commons/dbcp2/managed/BasicManagedDataSource.java
++++ b/src/main/java/org/apache/commons/dbcp2/managed/BasicManagedDataSource.java
+@@ -201,6 +201,8 @@ protected PoolableConnectionFactory createPoolableConnectionFactory(
+             connectionFactory.setRollbackOnReturn(getRollbackOnReturn());
+             connectionFactory.setEnableAutoCommitOnReturn(getEnableAutoCommitOnReturn());
+             connectionFactory.setDefaultQueryTimeout(getDefaultQueryTimeout());
++            connectionFactory.setFastFailValidation(getFastFailValidation());
++            connectionFactory.setDisconnectionSqlCodes(getDisconnectionSqlCodes());
+             validateConnectionFactory(connectionFactory);
+         } catch (RuntimeException e) {
+             throw e;
+diff --git a/src/test/java/org/apache/commons/dbcp2/TestBasicDataSource.java b/src/test/java/org/apache/commons/dbcp2/TestBasicDataSource.java
+index 588dba2dc7..6c7cff9211 100644
+--- a/src/test/java/org/apache/commons/dbcp2/TestBasicDataSource.java
++++ b/src/test/java/org/apache/commons/dbcp2/TestBasicDataSource.java
+@@ -23,6 +23,7 @@
+ import java.lang.management.ManagementFactory;
+ import java.sql.Connection;
+ import java.sql.SQLException;
++import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Properties;
+ import java.util.Set;
+@@ -736,6 +737,26 @@ public void testJmxDisabled() throws Exception {
+         // Nothing should be registered
+         assertEquals(0, mbs.queryNames(commons, null).size());
+     }
++    
++    /**
++     * JIRA: DBCP-437
++     * Verify that BasicDataSource sets disconnect codes properties.
++     * Functionality is verified in pcf tests.
++     */
++    @Test
++    public void testDisconnectSqlCodes() throws Exception {
++        ArrayList<String> disconnectionSqlCodes = new ArrayList<String>();
++        disconnectionSqlCodes.add("XXX");
++        ds.setDisconnectionSqlCodes(disconnectionSqlCodes);
++        ds.setFastFailValidation(true);
++        ds.getConnection();  // Triggers initialization - pcf creation
++        // Make sure factory got the properties
++        PoolableConnectionFactory pcf = 
++                (PoolableConnectionFactory) ds.getConnectionPool().getFactory();
++        assertTrue(pcf.isFastFailValidation());
++        assertTrue(pcf.getDisconnectionSqlCodes().contains("XXX"));
++        assertEquals(1, pcf.getDisconnectionSqlCodes().size());   
++    }
+ }
+ 
+ /**
+@@ -788,4 +809,5 @@ public Connection connect(String url, Properties info) throws SQLException {
+     public boolean acceptsURL(String url) throws SQLException {
+         return url.startsWith(CONNECT_STRING);
+     }
++    
+ }

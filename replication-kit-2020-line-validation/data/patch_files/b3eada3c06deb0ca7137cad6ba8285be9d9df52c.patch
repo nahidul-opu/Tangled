@@ -1,0 +1,145 @@
+From b3eada3c06deb0ca7137cad6ba8285be9d9df52c Mon Sep 17 00:00:00 2001
+From: Claudio Martella <claudio@apache.org>
+Date: Tue, 15 Oct 2013 23:33:11 +0200
+Subject: [PATCH] GIRAPH-773
+
+---
+ CHANGELOG                                     |  6 +++--
+ .../apache/giraph/bsp/BspOutputFormat.java    | 19 ++++++++++++----
+ .../apache/giraph/conf/GiraphConstants.java   |  2 +-
+ .../job/GiraphConfigurationValidator.java     | 22 +++++++++++++++++--
+ 4 files changed, 40 insertions(+), 9 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 3df31643f..f45702666 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,8 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-773: Cannot use only EdgeOutputFormat (armax00 via claudio)
++
+   GIRAPH-779: Make it easier to reuse objects with hive-io input (majakabiljo)
+ 
+   GIRAPH-778: Testing with TestGraph is broken (majakabiljo)
+@@ -27,9 +29,9 @@ Release 1.1.0 - unreleased
+   GIRAPH-746: Track and log versions of dependencies (nitay)
+ 
+   GIRAPH-751: Build error: convertEdgeToLine in two different classes have the 
+-  same erasure, yet neither overrides the other (aarmax0 via claudio)
++  same erasure, yet neither overrides the other (armax00 via claudio)
+ 
+-  GIRAPH-732: EdgeOutputFormat (aarmax00 via claudio)
++  GIRAPH-732: EdgeOutputFormat (armax00 via claudio)
+ 
+   GIRAPH-512: JavaDoc warnings (tdn120 via nitay)
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/bsp/BspOutputFormat.java b/giraph-core/src/main/java/org/apache/giraph/bsp/BspOutputFormat.java
+index 7e7c65fc8..cdb82b2f0 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/bsp/BspOutputFormat.java
++++ b/giraph-core/src/main/java/org/apache/giraph/bsp/BspOutputFormat.java
+@@ -42,12 +42,18 @@ public void checkOutputSpecs(JobContext context)
+     throws IOException, InterruptedException {
+     ImmutableClassesGiraphConfiguration conf =
+         new ImmutableClassesGiraphConfiguration(context.getConfiguration());
+-    if (!conf.hasVertexOutputFormat()) {
++    if (!conf.hasVertexOutputFormat() && !conf.hasEdgeOutputFormat()) {
+       LOG.warn("checkOutputSpecs: ImmutableOutputCommiter" +
+           " will not check anything");
+       return;
+     }
+-    conf.createWrappedVertexOutputFormat().checkOutputSpecs(context);
++
++    if (conf.hasVertexOutputFormat()) {
++      conf.createWrappedVertexOutputFormat().checkOutputSpecs(context);
++    }
++    if (conf.hasEdgeOutputFormat()) {
++      conf.createWrappedEdgeOutputFormat().checkOutputSpecs(context);
++    }
+   }
+ 
+   @Override
+@@ -55,12 +61,17 @@ public OutputCommitter getOutputCommitter(TaskAttemptContext context)
+     throws IOException, InterruptedException {
+     ImmutableClassesGiraphConfiguration conf =
+         new ImmutableClassesGiraphConfiguration(context.getConfiguration());
+-    if (!conf.hasVertexOutputFormat()) {
++    if (!conf.hasVertexOutputFormat() && !conf.hasEdgeOutputFormat()) {
+       LOG.warn("getOutputCommitter: Returning " +
+           "ImmutableOutputCommiter (does nothing).");
+       return new ImmutableOutputCommitter();
+     }
+-    return conf.createWrappedVertexOutputFormat().getOutputCommitter(context);
++
++    if (conf.hasVertexOutputFormat()) {
++      return conf.createWrappedVertexOutputFormat().getOutputCommitter(context);
++    } else {
++      return conf.createWrappedEdgeOutputFormat().getOutputCommitter(context);
++    }
+   }
+ 
+   @Override
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
+index 89fce6105..eb8eb2157 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
+@@ -229,7 +229,7 @@ public interface GiraphConstants {
+           EdgeOutputFormat.class, "EdgeOutputFormat class");
+   /** EdgeOutputFormat sub-directory */
+   StrConfOption EDGE_OUTPUT_FORMAT_SUBDIR =
+-    new StrConfOption("giraph.edge.output.subdir", "edges",
++    new StrConfOption("giraph.edge.output.subdir", "",
+                       "EdgeOutputFormat sub-directory");
+ 
+   /** GiraphTextOuputFormat Separator */
+diff --git a/giraph-core/src/main/java/org/apache/giraph/job/GiraphConfigurationValidator.java b/giraph-core/src/main/java/org/apache/giraph/job/GiraphConfigurationValidator.java
+index fcb5b87ea..73a7aaba9 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/job/GiraphConfigurationValidator.java
++++ b/giraph-core/src/main/java/org/apache/giraph/job/GiraphConfigurationValidator.java
+@@ -28,6 +28,7 @@
+ import org.apache.giraph.graph.VertexValueCombiner;
+ import org.apache.giraph.graph.VertexResolver;
+ import org.apache.giraph.io.EdgeInputFormat;
++import org.apache.giraph.io.EdgeOutputFormat;
+ import org.apache.giraph.io.VertexInputFormat;
+ import org.apache.giraph.io.VertexOutputFormat;
+ import org.apache.hadoop.conf.Configuration;
+@@ -140,6 +141,7 @@ public void validateConfiguration() {
+     verifyVertexInputFormatGenericTypes();
+     verifyEdgeInputFormatGenericTypes();
+     verifyVertexOutputFormatGenericTypes();
++    verifyEdgeOutputFormatGenericTypes();
+     verifyVertexResolverGenericTypes();
+     verifyVertexValueCombinerGenericTypes();
+     verifyMessageCombinerGenericTypes();
+@@ -276,11 +278,27 @@ private void verifyMessageCombinerGenericTypes() {
+     }
+   }
+ 
+-  /** Verify that the output format's generic params match the job. */
++  /** Verify that the vertex output format's generic params match the job. */
+   private void verifyVertexOutputFormatGenericTypes() {
++    Class<? extends EdgeOutputFormat<I, V, E>>
++      edgeOutputFormatClass = conf.getEdgeOutputFormatClass();
++    if (conf.hasEdgeOutputFormat()) {
++      Class<?>[] classList =
++        getTypeArguments(EdgeOutputFormat.class, edgeOutputFormatClass);
++      checkAssignable(classList, ID_PARAM_INDEX, vertexIndexType(),
++          VertexOutputFormat.class, "vertex index");
++      checkAssignable(classList, VALUE_PARAM_INDEX, vertexValueType(),
++          VertexOutputFormat.class, "vertex value");
++      checkAssignable(classList, EDGE_PARAM_INDEX, edgeValueType(),
++          VertexOutputFormat.class, "edge value");
++    }
++  }
++
++  /** Verify that the edge output format's generic params match the job. */
++  private void verifyEdgeOutputFormatGenericTypes() {
+     Class<? extends VertexOutputFormat<I, V, E>>
+       vertexOutputFormatClass = conf.getVertexOutputFormatClass();
+-    if (vertexOutputFormatClass != null) {
++    if (conf.hasVertexOutputFormat()) {
+       Class<?>[] classList =
+         getTypeArguments(VertexOutputFormat.class, vertexOutputFormatClass);
+       checkAssignable(classList, ID_PARAM_INDEX, vertexIndexType(),

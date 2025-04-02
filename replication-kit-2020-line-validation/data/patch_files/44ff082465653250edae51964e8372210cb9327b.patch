@@ -1,0 +1,178 @@
+From 44ff082465653250edae51964e8372210cb9327b Mon Sep 17 00:00:00 2001
+From: kazk <kazk@unknown>
+Date: Fri, 20 Jul 2012 07:00:12 +0000
+Subject: [PATCH] Fixes GORA-153 to correctly handle DELETED State for MAP
+
+git-svn-id: https://svn.apache.org/repos/asf/gora/trunk@1363667 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  2 ++
+ .../StatefulHashMapSerializer.java            | 20 ++++++++++-----
+ .../gora/cassandra/store/CassandraClient.java | 25 +++++++++++++++++++
+ .../gora/cassandra/store/CassandraStore.java  |  4 +--
+ .../gora/cassandra/store/HectorUtils.java     |  5 ++++
+ pom.xml                                       |  2 +-
+ 6 files changed, 48 insertions(+), 10 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 8d0dffd92..490e22651 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -6,6 +6,8 @@ Gora Change Log
+ 
+ 0.3 (trunk) Current Development:
+ 
++* GORA-153 gora-cassandra does not correctly handle DELETED State for MAP (kazk)
++
+ * GORA-152 gora-core test incorrectly uses ByteBuffer's array() method to get its byte array (kazk)
+ 
+ * GORA-151 CassandraStore's schemaExists() method always returns false (kazk)
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/StatefulHashMapSerializer.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/StatefulHashMapSerializer.java
+index 92ac50f7f..492222035 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/StatefulHashMapSerializer.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/serializers/StatefulHashMapSerializer.java
+@@ -36,6 +36,7 @@
+ import org.apache.avro.Schema.Type;
+ import org.apache.avro.specific.SpecificFixed;
+ import org.apache.avro.util.Utf8;
++import org.apache.gora.persistency.State;
+ import org.apache.gora.persistency.StatefulHashMap;
+ 
+ import org.slf4j.Logger;
+@@ -134,13 +135,16 @@ public ByteBuffer toByteBuffer(StatefulHashMap<Utf8, T> map) {
+   }
+ 
+   private ByteBuffer toByteBufferWithFixedLengthElements(StatefulHashMap<Utf8, T> map) {
+-    int n = (int) map.size();
+-    List<byte[]> list = new ArrayList<byte[]>(n);
+-    n *= 4;
++    List<byte[]> list = new ArrayList<byte[]>(map.size());
++    int n = 0;
+     for (Utf8 key : map.keySet()) {
++      if (map.getState(key) == State.DELETED) {
++        continue;
++      }
+       T value = map.get(key);
+       byte[] bytes = BytesArraySerializer.get().fromByteBuffer(Utf8Serializer.get().toByteBuffer(key));
+       list.add(bytes);
++      n += 4;
+       n += bytes.length;
+       bytes = BytesArraySerializer.get().fromByteBuffer(valueSerializer.toByteBuffer(value));
+       list.add(bytes);
+@@ -160,16 +164,20 @@ private ByteBuffer toByteBufferWithFixedLengthElements(StatefulHashMap<Utf8, T>
+   }
+ 
+   private ByteBuffer toByteBufferWithVariableLengthElements(StatefulHashMap<Utf8, T> map) {
+-    int n = (int) map.size();
+-    List<byte[]> list = new ArrayList<byte[]>(n);
+-    n *= 8;
++    List<byte[]> list = new ArrayList<byte[]>(map.size());
++    int n = 0;
+     for (Utf8 key : map.keySet()) {
++      if (map.getState(key) == State.DELETED) {
++        continue;
++      }
+       T value = map.get(key);
+       byte[] bytes = BytesArraySerializer.get().fromByteBuffer(Utf8Serializer.get().toByteBuffer(key));
+       list.add(bytes);
++      n += 4;
+       n += bytes.length;
+       bytes = BytesArraySerializer.get().fromByteBuffer(valueSerializer.toByteBuffer(value));
+       list.add(bytes);
++      n += 4;
+       n += bytes.length;
+     }
+     ByteBuffer byteBuffer = ByteBuffer.allocate(n);
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+index a5643bfa8..d29f2c4a6 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraClient.java
+@@ -56,6 +56,7 @@
+ import org.apache.gora.cassandra.serializers.TypeUtils;
+ import org.apache.gora.mapreduce.GoraRecordReader;
+ import org.apache.gora.persistency.Persistent;
++import org.apache.gora.persistency.State;
+ import org.apache.gora.persistency.StatefulHashMap;
+ import org.apache.gora.query.Query;
+ import org.apache.gora.util.ByteUtils;
+@@ -198,6 +199,26 @@ public void addSubColumn(K key, String fieldName, Integer columnName, Object val
+   }
+ 
+ 
++  /**
++   * Delete a member in a super column. This is used for map and record Avro types.
++   * @param key the row key
++   * @param fieldName the field name
++   * @param columnName the column name (the member name, or the index of array)
++   */
++  @SuppressWarnings("unchecked")
++  public void deleteSubColumn(K key, String fieldName, ByteBuffer columnName) {
++
++    String columnFamily = this.cassandraMapping.getFamily(fieldName);
++    String superColumnName = this.cassandraMapping.getColumn(fieldName);
++    
++    HectorUtils.deleteSubColumn(mutator, key, columnFamily, superColumnName, columnName);
++  }
++
++  public void deleteSubColumn(K key, String fieldName, String columnName) {
++    deleteSubColumn(key, fieldName, StringSerializer.get().toByteBuffer(columnName));
++  }
++
++
+   @SuppressWarnings("unchecked")
+   public void addGenericArray(K key, String fieldName, GenericArray array) {
+     if (isSuper( cassandraMapping.getFamily(fieldName) )) {
+@@ -228,6 +249,10 @@ public void addStatefulHashMap(K key, String fieldName, StatefulHashMap<Utf8,Obj
+     if (isSuper( cassandraMapping.getFamily(fieldName) )) {
+       int i= 0;
+       for (Utf8 mapKey: map.keySet()) {
++        if (map.getState(mapKey) == State.DELETED) {
++          deleteSubColumn(key, fieldName, mapKey.toString());
++          continue;
++        }
+ 
+         // TODO: hack, do not store empty arrays
+         Object mapValue = map.get(mapKey);
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+index 0f377f9b6..d3ad37141 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/CassandraStore.java
+@@ -295,9 +295,7 @@ public void put(K key, T value) throws IOException {
+             fieldValue = newRecord;
+             break;
+           case MAP:
+-            StatefulHashMap<?, ?> map = (StatefulHashMap<?, ?>) fieldValue;
+-            StatefulHashMap<?, ?> newMap = new StatefulHashMap(map);
+-            fieldValue = newMap;
++            // needs to keep State.DELETED.
+             break;
+           case ARRAY:
+             GenericArray array = (GenericArray) fieldValue;
+diff --git a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java
+index 6d5b97f1d..1ebdd833c 100644
+--- a/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java
++++ b/gora-cassandra/src/main/java/org/apache/gora/cassandra/store/HectorUtils.java
+@@ -74,6 +74,11 @@ public static<K> void insertSubColumn(Mutator<K> mutator, K key, String columnFa
+   }
+ 
+ 
++  public static<K> void deleteSubColumn(Mutator<K> mutator, K key, String columnFamily, String superColumnName, ByteBuffer columnName) {
++    mutator.subDelete(key, columnFamily, superColumnName, columnName, StringSerializer.get(), ByteBufferSerializer.get());
++  }
++
++
+   public static<K> HSuperColumn<String,ByteBuffer,ByteBuffer> createSuperColumn(String superColumnName, ByteBuffer columnName, ByteBuffer columnValue) {
+     return HFactory.createSuperColumn(superColumnName, Arrays.asList(createColumn(columnName, columnValue)), StringSerializer.get(), ByteBufferSerializer.get(), ByteBufferSerializer.get());
+   }
+diff --git a/pom.xml b/pom.xml
+index 44c90d4ac..e65283357 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -523,7 +523,7 @@
+         <avro.version>1.3.3</avro.version>
+         <cxf-rt-frontend-jaxrs.version>2.5.2</cxf-rt-frontend-jaxrs.version>
+         <!-- Cassandra Dependencies -->
+-        <cassandra.version>1.1.0</cassandra.version>
++        <cassandra.version>1.1.2</cassandra.version>
+         <libthrift.version>0.7.0</libthrift.version>
+         <hector.version>1.1-0</hector.version>
+         <!-- Misc Dependencies -->

@@ -1,0 +1,143 @@
+From 232a7324e926588477875409b6a6bccf46a36ec6 Mon Sep 17 00:00:00 2001
+From: "Gary D. Gregory" <ggregory@apache.org>
+Date: Sat, 6 Oct 2012 11:41:04 +0000
+Subject: [PATCH] [VFS-437][FTP] StackOverFlowError getting the type of a
+ directory with a symbolic link to a parent directory with the same name.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/vfs/trunk@1395004 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../vfs2/provider/ftp/FtpFileObject.java      | 64 ++++++++++++++-----
+ src/changes/changes.xml                       |  3 +
+ 2 files changed, 51 insertions(+), 16 deletions(-)
+
+diff --git a/core/src/main/java/org/apache/commons/vfs2/provider/ftp/FtpFileObject.java b/core/src/main/java/org/apache/commons/vfs2/provider/ftp/FtpFileObject.java
+index c326b4dbdf..ee80d28d72 100644
+--- a/core/src/main/java/org/apache/commons/vfs2/provider/ftp/FtpFileObject.java
++++ b/core/src/main/java/org/apache/commons/vfs2/provider/ftp/FtpFileObject.java
+@@ -334,10 +334,20 @@ else if (this.fileInfo.isFile())
+             }
+             else if (this.fileInfo.isSymbolicLink())
+             {
+-                return getLinkDestination().getType();
++                FileObject linkDest = getLinkDestination();
++                // VFS-437: We need to check if the symbolic link links back to the symbolic link itself
++                if (this.isCircular(linkDest))
++                {
++                    // If the symbolic link links back to itself, treat it as an imaginary file to prevent following
++                    // this link. If the user tries to access the link as a file or directory, the user will end up with
++                    // a FileSystemException warning that the file cannot be accessed. This is to prevent the infinite
++                    // call back to doGetType() to prevent the StackOverFlow
++                    return FileType.IMAGINARY;
++                }
++                return linkDest.getType();
++
+             }
+         }
+-
+         throw new FileSystemException("vfs.provider.ftp/get-type.error", getName());
+     }
+ 
+@@ -369,10 +379,15 @@ protected FileObject[] doListChildrenResolved() throws Exception
+         {
+             if (this.fileInfo != null && this.fileInfo.isSymbolicLink())
+             {
+-                return getLinkDestination().getChildren();
++                final FileObject linkDest = getLinkDestination();
++                // VFS-437: Try to avoid a recursion loop.
++                if (this.isCircular(linkDest))
++                {
++                    return null;
++                }
++                return linkDest.getChildren();
+             }
+         }
+-
+         return null;
+     }
+ 
+@@ -399,7 +414,6 @@ public FileObject[] getChildren() throws FileSystemException
+             throw new FileNotFolderException(getName(), ex);
+         }
+ 
+-
+         try
+         {
+             /* Wrap our parent implementation, noting that we're refreshing so
+@@ -548,7 +562,13 @@ protected long doGetContentSize() throws Exception
+         {
+             if (this.fileInfo.isSymbolicLink())
+             {
+-                return getLinkDestination().getContent().getSize();
++                final FileObject linkDest = getLinkDestination();
++                // VFS-437: Try to avoid a recursion loop.
++                if (this.isCircular(linkDest))
++                {
++                    return this.fileInfo.getSize();
++                }
++                return linkDest.getContent().getSize();
+             }
+             else
+             {
+@@ -569,19 +589,17 @@ protected long doGetLastModifiedTime() throws Exception
+         {
+             if (this.fileInfo.isSymbolicLink())
+             {
+-                return getLinkDestination().getContent().getLastModifiedTime();
++                final FileObject linkDest = getLinkDestination();
++                // VFS-437: Try to avoid a recursion loop.
++                if (this.isCircular(linkDest))
++                {
++                    return getTimestamp();
++                }
++                return linkDest.getContent().getLastModifiedTime();
+             }
+             else
+             {
+-                Calendar timestamp = this.fileInfo.getTimestamp();
+-                if (timestamp == null)
+-                {
+-                    return 0L;
+-                }
+-                else
+-                {
+-                    return timestamp.getTime().getTime();
+-                }
++                return getTimestamp();
+             }
+         }
+     }
+@@ -657,6 +675,20 @@ String getRelPath()
+         return relPath;
+     }
+ 
++    private long getTimestamp()
++    {
++        Calendar timestamp = this.fileInfo.getTimestamp();
++        return timestamp == null ? 0L : timestamp.getTime().getTime();
++    }
++
++    /**
++     * This is an over simplistic implementation for VFS-437.
++     */
++    private boolean isCircular(FileObject linkDest) throws FileSystemException
++    {
++        return linkDest.getName().getPathDecoded().equals(this.getName().getPathDecoded());
++    }
++
+     FtpInputStream getInputStream(long filePointer) throws IOException
+     {
+         final FtpClient client = getAbstractFileSystem().getClient();
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 93873325d4..cd25e87c5d 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -26,6 +26,9 @@
+       <action issue="VFS-439" dev="ggregory" type="fix" due-to="pensecit">
+         StaticUserAuthenticator usage example wrong.
+       </action>
++      <action issue="VFS-437" dev="ggregory" type="add" due-to="denniszhu, danttran, jpowang">
++        [FTP] StackOverFlowError getting the type of a directory with a symbolic link to a parent directory with the same name.
++      </action>
+       <action issue="VFS-435" dev="ggregory" type="add" due-to="george scott">
+         FileSystemConfigBuilder does not use prefix for some system property lookups.
+       </action>

@@ -1,0 +1,606 @@
+From e2fdd8576922f7784e2809e8b2b3724ffb157f91 Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Tue, 6 Mar 2007 15:03:00 +0000
+Subject: [PATCH] FIX: latest conflict with latest-time strategy and transitive
+ eviction (IVY-407)
+
+git-svn-id: https://svn.apache.org/repos/asf/incubator/ivy/core/trunk@515137 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../org/apache/ivy/core/resolve/IvyNode.java  |  15 ++++
+ .../ivy/core/resolve/IvyNodeEviction.java     |  18 ++++
+ .../ivy/core/resolve/ResolveEngine.java       |  79 ++++++++++++------
+ .../conflict/LatestConflictManagerTest.java   |  45 +++++++++-
+ .../conflict/ivy-latest-time-transitivity.xml |   8 ++
+ .../ivyconf-latest-time-transitivity.xml      |  12 +++
+ .../IVY-407/MyCompany/A/ivy-1.0.0.xml         |  15 ++++
+ .../IVY-407/MyCompany/A/lib/A-1.0.0.jar       |   3 +
+ .../MyCompany/A/thirdparty/A-1.0.0.tar.gz     | Bin 0 -> 200 bytes
+ .../IVY-407/MyCompany/B/ivy-1.0.0.xml         |  14 ++++
+ .../IVY-407/MyCompany/B/lib/B-1.0.0.jar       |   3 +
+ .../MyCompany/B/thirdparty/B-1.0.0.tar.gz     | Bin 0 -> 198 bytes
+ .../IVY-407/MyCompany/C/ivy-1.0.0.xml         |  13 +++
+ .../IVY-407/MyCompany/C/ivy-1.0.1.xml         |  13 +++
+ .../IVY-407/MyCompany/C/ivy-1.0.2.xml         |  13 +++
+ .../IVY-407/MyCompany/C/lib/C-1.0.0.jar       |   3 +
+ .../IVY-407/MyCompany/C/lib/C-1.0.1.jar       |   3 +
+ .../IVY-407/MyCompany/C/lib/C-1.0.2.jar       |   3 +
+ .../MyCompany/C/thirdparty/C-1.0.0.tar.gz     | Bin 0 -> 199 bytes
+ .../MyCompany/C/thirdparty/C-1.0.1.tar.gz     | Bin 0 -> 198 bytes
+ .../MyCompany/C/thirdparty/C-1.0.2.tar.gz     | Bin 0 -> 195 bytes
+ .../IVY-407/MyCompany/D/ivy-1.0.0.xml         |  14 ++++
+ .../IVY-407/MyCompany/D/lib/D-1.0.0.jar       |   3 +
+ .../MyCompany/D/thirdparty/D-1.0.0.tar.gz     | Bin 0 -> 198 bytes
+ 24 files changed, 252 insertions(+), 25 deletions(-)
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-transitivity.xml
+ create mode 100644 test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time-transitivity.xml
+ create mode 100644 test/repositories/IVY-407/MyCompany/A/ivy-1.0.0.xml
+ create mode 100644 test/repositories/IVY-407/MyCompany/A/lib/A-1.0.0.jar
+ create mode 100644 test/repositories/IVY-407/MyCompany/A/thirdparty/A-1.0.0.tar.gz
+ create mode 100644 test/repositories/IVY-407/MyCompany/B/ivy-1.0.0.xml
+ create mode 100644 test/repositories/IVY-407/MyCompany/B/lib/B-1.0.0.jar
+ create mode 100644 test/repositories/IVY-407/MyCompany/B/thirdparty/B-1.0.0.tar.gz
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/ivy-1.0.0.xml
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/ivy-1.0.1.xml
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/ivy-1.0.2.xml
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/lib/C-1.0.0.jar
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/lib/C-1.0.1.jar
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/lib/C-1.0.2.jar
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.0.tar.gz
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.1.tar.gz
+ create mode 100644 test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.2.tar.gz
+ create mode 100644 test/repositories/IVY-407/MyCompany/D/ivy-1.0.0.xml
+ create mode 100644 test/repositories/IVY-407/MyCompany/D/lib/D-1.0.0.jar
+ create mode 100644 test/repositories/IVY-407/MyCompany/D/thirdparty/D-1.0.0.tar.gz
+
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNode.java b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+index 5216ff0e4..c029c7bfa 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNode.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNode.java
+@@ -1091,4 +1091,19 @@ public int compareTo(Object obj) {
+     public int hashCode() {
+         return getId().hashCode();
+     }
++
++    /**
++     * Returns a collection of Nodes in conflict for which conflict has been detected
++     * but conflict resolution hasn't been done yet
++     * @param rootModuleConf
++     * @param mid the module id for which pending conflicts should be found
++     * @return a Collection of IvyNode in pending conflict
++     */
++	public Collection getPendingConflicts(String rootModuleConf, ModuleId mid) {
++		return _eviction.getPendingConflicts(rootModuleConf, mid);
++	}
++
++	public void setPendingConflicts(ModuleId moduleId, String rootModuleConf, Collection conflicts) {
++		_eviction.setPendingConflicts(moduleId, rootModuleConf, conflicts);
++	}
+ }
+diff --git a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+index 34e94fa38..064f77bdc 100644
+--- a/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
++++ b/src/java/org/apache/ivy/core/resolve/IvyNodeEviction.java
+@@ -114,6 +114,7 @@ public int hashCode() {
+     private IvyNode _node;
+ 
+     private Map _selectedDeps = new HashMap(); // Map (ModuleIdConf -> Set(Node)) // map indicating for each dependency which node has been selected
++    private Map _pendingConflicts = new HashMap(); // Map (ModuleIdConf -> Set(Node)) // map indicating for each dependency which nodes are in pending conflict (conflict detected but not yet resolved)
+ 
+     private Map _evictedDeps = new HashMap(); // Map (ModuleIdConf -> Set(Node)) // map indicating for each dependency which node has been evicted
+     private Map _evictedRevs = new HashMap(); // Map (ModuleIdConf -> Set(ModuleRevisionId)) // map indicating for each dependency which revision has been evicted
+@@ -306,4 +307,21 @@ public EvictionData getEvictionDataInRoot(String rootModuleConf, IvyNode ancesto
+         return new EvictionData(rootModuleConf, ancestor, _node.getRoot().getConflictManager(_node.getModuleId()), selectedNodes);
+     }
+ 
++	public Collection getPendingConflicts(String rootModuleConf, ModuleId mid) {
++        Collection resolved = (Collection)_pendingConflicts.get(new ModuleIdConf(mid, rootModuleConf));
++        Set ret = new HashSet();
++        if (resolved != null) {
++            for (Iterator iter = resolved.iterator(); iter.hasNext();) {
++                IvyNode node = (IvyNode)iter.next();
++                ret.add(node.getRealNode());
++            }
++        }
++        return ret;
++	}
++
++	public void setPendingConflicts(ModuleId moduleId, String rootModuleConf, Collection conflicts) {
++        ModuleIdConf moduleIdConf = new ModuleIdConf(moduleId, rootModuleConf);
++        _pendingConflicts.put(moduleIdConf, new HashSet(conflicts));
++	}
++
+ }
+diff --git a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+index 4f03e38bf..20bab839e 100644
+--- a/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
++++ b/src/java/org/apache/ivy/core/resolve/ResolveEngine.java
+@@ -578,17 +578,52 @@ private boolean isDependenciesFetched(IvyNode node, String conf) {
+     private void resolveConflict(VisitNode node) {
+         resolveConflict(node, node.getParent(), Collections.EMPTY_SET);
+     }
+-    private void resolveConflict(VisitNode node, VisitNode ancestor, Collection toevict) {
++    /**
++     * Resolves conflict for the given node in the given ancestor.
++     * This method do conflict resolution in ancestor parents recursively,
++     * unless not necessary.
++     * @param node the node for which conflict resolution should be done
++     * @param ancestor the ancestor in which the conflict resolution should be done
++     * @param toevict a collection of IvyNode to evict (as computed by conflict resolution in descendants of ancestor)
++     * @return true if conflict resolution has been done, false it can't be done yet
++     */
++    private boolean resolveConflict(VisitNode node, VisitNode ancestor, Collection toevict) {
+         if (ancestor == null || node == ancestor) {
+-            return;
++            return true;
+         }
+         // check if job is not already done
+-        if (checkConflictSolved(node, ancestor)) {
+-            return;
++        if (checkConflictSolvedEvicted(node, ancestor)) {
++        	// job is done and node is evicted, nothing to do
++            return true;
++        }
++        if (checkConflictSolvedSelected(node, ancestor)) {
++        	// job is done and node is selected, nothing to do for this ancestor, but we still have 
++        	// to check higher levels, for which conflict resolution might have been impossible
++        	// before
++        	if (resolveConflict(node, ancestor.getParent(), toevict)) {
++        		// now that conflict resolution is ok in ancestors
++        		// we just have to check if the node wasn't previously evicted in root ancestor
++        		EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), ancestor);
++        		if (evictionData != null) {
++        			// node has been previously evicted in an ancestor: we mark it as evicted
++        			if (_settings.debugConflictResolution()) {
++        				Message.debug(node+" was previously evicted in root module conf "+node.getRootModuleConf());
++        			}
++
++        			node.markEvicted(evictionData);                
++        			if (_settings.debugConflictResolution()) {
++        				Message.debug("evicting "+node+" by "+evictionData);
++        			}
++        		}
++        		return true;
++        	} else {
++        		return false;
++        	}
+         }
+         
+         // compute conflicts
+         Collection resolvedNodes = new HashSet(ancestor.getNode().getResolvedNodes(node.getModuleId(), node.getRootModuleConf()));
++        resolvedNodes.addAll(ancestor.getNode().getPendingConflicts(node.getRootModuleConf(), node.getModuleId()));
+         Collection conflicts = computeConflicts(node, ancestor, toevict, resolvedNodes);
+         
+         if (_settings.debugConflictResolution()) {
+@@ -601,8 +636,10 @@ private void resolveConflict(VisitNode node, VisitNode ancestor, Collection toev
+ 		if (resolved == null) {
+             if (_settings.debugConflictResolution()) {
+                 Message.debug("impossible to resolve conflicts for "+node+" in "+ancestor+" yet");
++                Message.debug("setting all nodes as pending conflicts for later conflict resolution: "+conflicts);
+             }
+-            return;
++            ancestor.getNode().setPendingConflicts(node.getModuleId(), node.getRootModuleConf(), conflicts);
++            return false;
+         }
+         
+         if (_settings.debugConflictResolution()) {
+@@ -633,8 +670,9 @@ private void resolveConflict(VisitNode node, VisitNode ancestor, Collection toev
+             evicted.removeAll(resolved);
+             evicted.addAll(toevict);
+             ancestor.getNode().setEvictedNodes(node.getModuleId(), node.getRootModuleConf(), evicted);
++            ancestor.getNode().setPendingConflicts(node.getModuleId(), node.getRootModuleConf(), Collections.EMPTY_SET);
+             
+-            resolveConflict(node, ancestor.getParent(), toevict);
++            return resolveConflict(node, ancestor.getParent(), toevict);
+         } else {
+             // node has been evicted for the current parent
+             if (resolved.isEmpty()) {
+@@ -652,6 +690,7 @@ private void resolveConflict(VisitNode node, VisitNode ancestor, Collection toev
+             evicted.addAll(toevict);
+             evicted.add(node.getNode());
+             ancestor.getNode().setEvictedNodes(node.getModuleId(), node.getRootModuleConf(), evicted);
++            ancestor.getNode().setPendingConflicts(node.getModuleId(), node.getRootModuleConf(), Collections.EMPTY_SET);
+ 
+             
+             node.markEvicted(ancestor, conflictManager, resolved);
+@@ -661,16 +700,17 @@ private void resolveConflict(VisitNode node, VisitNode ancestor, Collection toev
+ 
+             // if resolved changed we have to go up in the graph
+             Collection prevResolved = ancestor.getNode().getResolvedNodes(node.getModuleId(), node.getRootModuleConf());
++            boolean solved = true;
+             if (!prevResolved.equals(resolved)) {                
+                 ancestor.getNode().setResolvedNodes(node.getModuleId(), node.getRootModuleConf(), resolved);
+                 for (Iterator iter = resolved.iterator(); iter.hasNext();) {
+                     IvyNode sel = (IvyNode)iter.next();
+                     if (!prevResolved.contains(sel)) {
+-                        resolveConflict(node.gotoNode(sel), ancestor.getParent(), toevict);
++                        solved &= resolveConflict(node.gotoNode(sel), ancestor.getParent(), toevict);
+                     }
+                 }
+             }
+-
++            return solved;
+         }
+     }
+ 
+@@ -705,29 +745,20 @@ private Collection computeConflicts(VisitNode node, VisitNode ancestor, Collecti
+         return conflicts;
+     }
+ 
+-    private boolean checkConflictSolved(VisitNode node, VisitNode ancestor) {
++    private boolean checkConflictSolvedSelected(VisitNode node, VisitNode ancestor) {
+         if (ancestor.getResolvedRevisions(node.getModuleId()).contains(node.getResolvedId())) {
+             // resolve conflict has already be done with node with the same id
+-            // => job already done, we just have to check if the node wasn't previously evicted in root ancestor
+             if (_settings.debugConflictResolution()) {
+                 Message.debug("conflict resolution already done for "+node+" in "+ancestor);
+             }
+-            EvictionData evictionData = node.getEvictionDataInRoot(node.getRootModuleConf(), ancestor);
+-            if (evictionData != null) {
+-                // node has been previously evicted in an ancestor: we mark it as evicted
+-                if (_settings.debugConflictResolution()) {
+-                    Message.debug(node+" was previously evicted in root module conf "+node.getRootModuleConf());
+-                }
+-
+-                node.markEvicted(evictionData);                
+-                if (_settings.debugConflictResolution()) {
+-                    Message.debug("evicting "+node+" by "+evictionData);
+-                }
+-            }
+             return true;
+-        } else if (ancestor.getEvictedRevisions(node.getModuleId()).contains(node.getResolvedId())) {
++        } 
++        return false;
++    }
++
++    private boolean checkConflictSolvedEvicted(VisitNode node, VisitNode ancestor) {
++        if (ancestor.getEvictedRevisions(node.getModuleId()).contains(node.getResolvedId())) {
+             // resolve conflict has already be done with node with the same id
+-            // => job already done, we just have to check if the node wasn't previously selected in root ancestor
+             if (_settings.debugConflictResolution()) {
+                 Message.debug("conflict resolution already done for "+node+" in "+ancestor);
+             }
+diff --git a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+index e285bb535..379e1c412 100644
+--- a/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
++++ b/test/java/org/apache/ivy/plugins/conflict/LatestConflictManagerTest.java
+@@ -126,7 +126,50 @@ else if (mrid.getName().equals("mod1.2")) {
+         }
+     }
+     
++    /*
++    Test case for issue IVY-407 (with transitivity)
++
++    There are 5 modules A, B, C, D and E.
++		1) publish C-1.0.0, C-1.0.1 and C-1.0.2
++		2) B needs C-1.0.0 : retrieve ok and publish B-1.0.0
++		3) A needs B-1.0.0 and C-1.0.2 : retrieve ok and publish A-1.0.0
++		4) D needs C-1.0.1 : retrieve ok and publish D-1.0.0
++		5) E needs D-1.0.0 and A-1.0.0 (D before A in ivy file) retrieve failed to get C-1.0.2 from A
++		(get apparently C-1.0.1 from D)
++     */
++    public void testLatestTimeTransitivity() throws Exception {
++    	ivy = new Ivy();
++    	ivy.configure(LatestConflictManagerTest.class
++    			.getResource("ivyconf-latest-time-transitivity.xml"));
++    	ivy.getSettings().setVariable("ivy.log.conflict.resolution", "true", true);
++    	ResolveReport report =
++    		ivy.resolve( LatestConflictManagerTest.class.getResource( "ivy-latest-time-transitivity.xml" ), 
++    				getResolveOptions() );
++    	ConfigurationResolveReport defaultReport =
++    		report.getConfigurationReport("default");
++    	Iterator iter = defaultReport.getModuleRevisionIds().iterator();
++    	while (iter.hasNext()) {
++    		ModuleRevisionId mrid = (ModuleRevisionId)iter.next();
++
++    		if (mrid.getName().equals("A")) {
++    			assertEquals("A revision should be 1.0.0", "1.0.0", mrid.getRevision());
++    		}
++    		else if (mrid.getName().equals("D")) {
++    			assertEquals("D revision should be 1.0.0", "1.0.0", mrid.getRevision());
++    		}
++    		// by transitivity
++    		else if (mrid.getName().equals("B")) {
++    			assertEquals("B revision should be 1.0.0", "1.0.0", mrid.getRevision());
++    		}
++    		else if (mrid.getName().equals("C")) {
++    			assertEquals("C revision should be 1.0.2", "1.0.2", mrid.getRevision());
++    		}
++    	}
++    }
++
+     private ResolveOptions getResolveOptions() {
+-		return new ResolveOptions().setCache(CacheManager.getInstance(ivy.getSettings())).setValidate(false);
++		return new ResolveOptions()
++			.setCache(CacheManager.getInstance(ivy.getSettings()))
++			.setValidate(false);
+ 	}
+ }
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-transitivity.xml b/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-transitivity.xml
+new file mode 100644
+index 000000000..80e2538dc
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivy-latest-time-transitivity.xml
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="utf-8"?>
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="E" revision="1.0.0" status="release" />
++  <dependencies>
++    <dependency org="MyCompany" name="D" rev="1.0.0" changing="true" />
++    <dependency org="MyCompany" name="A" rev="1.0.0" changing="true" />
++  </dependencies>
++</ivy-module>
+\ No newline at end of file
+diff --git a/test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time-transitivity.xml b/test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time-transitivity.xml
+new file mode 100644
+index 000000000..3ab29c5fe
+--- /dev/null
++++ b/test/java/org/apache/ivy/plugins/conflict/ivyconf-latest-time-transitivity.xml
+@@ -0,0 +1,12 @@
++<ivyconf>
++
++    <conf defaultResolver="test" defaultConflictManager="latest-time" />
++
++    <resolvers>
++       <filesystem name="test" latest="latest-time" checkmodified="true">
++        <artifact pattern="test/repositories/IVY-407/[organisation]/[module]/[type]/[artifact]-[revision].[ext]" />
++        <ivy pattern="test/repositories/IVY-407/[organisation]/[module]/ivy-[revision].xml" />
++      </filesystem>
++   </resolvers>
++
++</ivyconf>
+diff --git a/test/repositories/IVY-407/MyCompany/A/ivy-1.0.0.xml b/test/repositories/IVY-407/MyCompany/A/ivy-1.0.0.xml
+new file mode 100644
+index 000000000..ee8ad08de
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/A/ivy-1.0.0.xml
+@@ -0,0 +1,15 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="A" revision="1.0.0" status="integration" publication="20070226113607"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="A" ext="tar.gz" type="thirdparty" conf="all"/>
++    <artifact name="A" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="MyCompany" name="B" rev="1.0.0" changing="true"/>
++    <dependency org="MyCompany" name="C" rev="1.0.2" changing="true"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-407/MyCompany/A/lib/A-1.0.0.jar b/test/repositories/IVY-407/MyCompany/A/lib/A-1.0.0.jar
+new file mode 100644
+index 000000000..0b91aa3e1
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/A/lib/A-1.0.0.jar
+@@ -0,0 +1,3 @@
++
++ 	A.jar REV 1.0.0 DATE February 26 2007 1136
++ 
+\ No newline at end of file
+diff --git a/test/repositories/IVY-407/MyCompany/A/thirdparty/A-1.0.0.tar.gz b/test/repositories/IVY-407/MyCompany/A/thirdparty/A-1.0.0.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..685b2744ea2b98a2ec5abafa38579c6d74e3c9ae
+GIT binary patch
+literal 200
+zcmb2|=3sz;w^#OZ9WoGUd$^`b^f}in&)HATu)b#P*b!cE;o!no5AH_SvuP@EtX0}~
+zUTB}{oG09x>Ujl1SCT~3#cxHvKbURO>zbIA>$h{}WQ#u;=VZUP?|PXy|J}nn7t6@p
+zGUok_+kbt(m3H~T%m2c8f2ZHvHr>18-0EclabM)u-rj%oi3|Je7YFBmx1V-#Yt77X
+y?~gOnv@RC~p3K>s)mK_P$;NZt+vRU+Cm#FswvZ9(To84kknOG5p{)!W3=9B&hF{A7
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/repositories/IVY-407/MyCompany/B/ivy-1.0.0.xml b/test/repositories/IVY-407/MyCompany/B/ivy-1.0.0.xml
+new file mode 100644
+index 000000000..675d2ad40
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/B/ivy-1.0.0.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="B" revision="1.0.0" status="integration" publication="20070226112304"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="B" ext="tar.gz" type="thirdparty" conf="all"/>
++    <artifact name="B" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="MyCompany" name="C" rev="1.0.0" changing="true"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-407/MyCompany/B/lib/B-1.0.0.jar b/test/repositories/IVY-407/MyCompany/B/lib/B-1.0.0.jar
+new file mode 100644
+index 000000000..deaaaafbe
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/B/lib/B-1.0.0.jar
+@@ -0,0 +1,3 @@
++
++ 	B.jar REV 1.0.0 DATE February 26 2007 1123
++ 
+\ No newline at end of file
+diff --git a/test/repositories/IVY-407/MyCompany/B/thirdparty/B-1.0.0.tar.gz b/test/repositories/IVY-407/MyCompany/B/thirdparty/B-1.0.0.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..a8ccc570a54eadd2b93d0cd6e742dec0effe0de9
+GIT binary patch
+literal 198
+zcmb2|=3sz;x0m*E9WoGcc(~@5$al_Lv$tfXb$?}axf5M*;o!ns2e)tk#}nitAmwUv
+zU+A4sURBgGHLH`R75Z*^B?b4`SKF;PKZpC)`Bv_89sT=f8Qy&uv0eF&am}56jmv4f
+z`~UFoxqkm!@dca3|JCpOntn2GO8<vBp}L>`xYo<J{dG?4&Dhc__owpzN}qKfQzO?N
+wRhzZqO!{gsvDwSszWS!JPGI>h_Dy=TPi?=>3Uw@qI&eU8p|70*g9ZZw0PXKxh5!Hn
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/repositories/IVY-407/MyCompany/C/ivy-1.0.0.xml b/test/repositories/IVY-407/MyCompany/C/ivy-1.0.0.xml
+new file mode 100644
+index 000000000..17693930a
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/C/ivy-1.0.0.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="C" revision="1.0.0" status="integration" publication="20070226112211"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="C" ext="tar.gz" type="thirdparty" conf="all"/>
++    <artifact name="C" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-407/MyCompany/C/ivy-1.0.1.xml b/test/repositories/IVY-407/MyCompany/C/ivy-1.0.1.xml
+new file mode 100644
+index 000000000..9da1088c6
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/C/ivy-1.0.1.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="C" revision="1.0.1" status="integration" publication="20070226112225"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="C" ext="tar.gz" type="thirdparty" conf="all"/>
++    <artifact name="C" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-407/MyCompany/C/ivy-1.0.2.xml b/test/repositories/IVY-407/MyCompany/C/ivy-1.0.2.xml
+new file mode 100644
+index 000000000..794cbff11
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/C/ivy-1.0.2.xml
+@@ -0,0 +1,13 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="C" revision="1.0.2" status="integration" publication="20070226112233"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="C" ext="tar.gz" type="thirdparty" conf="all"/>
++    <artifact name="C" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.0.jar b/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.0.jar
+new file mode 100644
+index 000000000..953a30ceb
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.0.jar
+@@ -0,0 +1,3 @@
++
++ 	C.jar REV 1.0.0 DATE February 26 2007 1122
++ 
+\ No newline at end of file
+diff --git a/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.1.jar b/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.1.jar
+new file mode 100644
+index 000000000..8a0e1b9e0
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.1.jar
+@@ -0,0 +1,3 @@
++
++ 	C.jar REV 1.0.1 DATE February 26 2007 1122
++ 
+\ No newline at end of file
+diff --git a/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.2.jar b/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.2.jar
+new file mode 100644
+index 000000000..3b76d185b
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/C/lib/C-1.0.2.jar
+@@ -0,0 +1,3 @@
++
++ 	C.jar REV 1.0.2 DATE February 26 2007 1122
++ 
+\ No newline at end of file
+diff --git a/test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.0.tar.gz b/test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.0.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..4868c0e6016e40803fe2e82729f8e01fdbaf4609
+GIT binary patch
+literal 199
+zcmb2|=3sz;x0h}Cnj8ci9_D@(DQ1$G7Q4-?gWcemoDjFJP5@W_`(MElNj^Rf$u;qt
+zXSVU|S?Y84#gWVpaXm2^@AvS}{I$Std)Q|S@ogM#e}1f%ye!*SYJH&im;QI<Q(JDn
+zbKl4O{%d(5->WJA<`=w<SKIAqcc^$~*26p9|Lnf}W|#k8FPpoVz5ZUk*5vG($gu2_
+uLcSr-HixQq`(7?9trm*z2<>e&%3l8IZ7CzvwIJ$3F<aMng+B}$3=9B;$W}f8
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.1.tar.gz b/test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.1.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..06efa529b8b35847337319eb1bfa08b5578c2731
+GIT binary patch
+literal 198
+zcmb2|=3sz;x0h}Cnj8ci9_D@(DQ21@8@bJ_gWcemoDjFJP5@WF{y&j631Q(268Ep?
+zEK_98KdGKqFe!`2aZXIe^F91=&Q}afjqjhEnR?MvqR#aBtiv1ER9E<Ye_H2aw{qL>
+z#`g!R|E`_8c$wFK{~ce?Pma}>e`vXW*3y^V{}ju9AHVSLzts&l{(pP^N4Q=8u}SCJ
+uBVpe?XVO<YiOpV>cj}kQw9b{=8u#3c*tb^?>R2#kb*_Zdnwvp`fdK%!5m#pb
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.2.tar.gz b/test/repositories/IVY-407/MyCompany/C/thirdparty/C-1.0.2.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..d55cd94165b8c604e6595b55644e95bb0f7083b0
+GIT binary patch
+literal 195
+zcmb2|=3sz;x0m*E9WoGcc(~@5$al_Lvu`h(x%3*lK;iZW3!0s`Hs|O6m0Z%H5aDWb
+zUuaXy>^W0bO3!&B<t(6{ek(d(dc9)Si8Ds8zqPu)SK+arRs8nfhOB!9e*cT?7x}zC
+zoA<!}L)HHkmVfOZ-P-T7Ex)qm_@1nZ&;5V3-*_+2UAm~*x8(Wx-~Fj2o%)}%H0>@P
+sNwJCyF^azKyF05dsdYw{_=(xQPj5eFg1Qt$EqKntdd13~L4$z-0M^Y~=Kufz
+
+literal 0
+HcmV?d00001
+
+diff --git a/test/repositories/IVY-407/MyCompany/D/ivy-1.0.0.xml b/test/repositories/IVY-407/MyCompany/D/ivy-1.0.0.xml
+new file mode 100644
+index 000000000..0d8202dac
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/D/ivy-1.0.0.xml
+@@ -0,0 +1,14 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<ivy-module version="1.0">
++  <info organisation="MyCompany" module="D" revision="1.0.0" status="integration" publication="20070226112331"/>
++  <configurations>
++   <conf name="all"/>
++  </configurations>
++  <publications>
++    <artifact name="D" ext="tar.gz" type="thirdparty" conf="all"/>
++    <artifact name="D" ext="jar" type="lib" conf="all"/>
++  </publications>
++  <dependencies>
++    <dependency org="MyCompany" name="C" rev="1.0.1" changing="true"/>
++  </dependencies>
++</ivy-module>
+diff --git a/test/repositories/IVY-407/MyCompany/D/lib/D-1.0.0.jar b/test/repositories/IVY-407/MyCompany/D/lib/D-1.0.0.jar
+new file mode 100644
+index 000000000..24e4be5bf
+--- /dev/null
++++ b/test/repositories/IVY-407/MyCompany/D/lib/D-1.0.0.jar
+@@ -0,0 +1,3 @@
++
++ 	D.jar REV 1.0.0 DATE February 26 2007 1123
++ 
+\ No newline at end of file
+diff --git a/test/repositories/IVY-407/MyCompany/D/thirdparty/D-1.0.0.tar.gz b/test/repositories/IVY-407/MyCompany/D/thirdparty/D-1.0.0.tar.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..b752357344db0415d364222dbc5029449455692d
+GIT binary patch
+literal 198
+zcmb2|=3sz;x0h`Bnj8ci9_Bt3DQ1$G7Q4-ikw2lwRz)l-Vu8rLdta9u9GNkr;n<IT
+zx+hFhrnyg@d9w5JgS`?vFC6@A_vBUcuS3U#pI>S_)G@!#H2K%zjW69Q&VMMfUv%o$
+z+qy^f5BC1kJLfoe@qhI@zrtVUP3iv-vo6Z&`=b5)hyN|?`CGcFSME>cf0wlDKQ^to
+wK56-^RUw~4b-R6UfAuXFitY;SZ7hmb`SiAw5$aeFWl+F&ibc+eL4$z-04(%if&c&j
+
+literal 0
+HcmV?d00001
+

@@ -1,0 +1,194 @@
+From b49d62d8196a5f6288ee49fc29eca1804a1f2a6c Mon Sep 17 00:00:00 2001
+From: Mario Ivankovits <imario@apache.org>
+Date: Mon, 19 Mar 2007 20:17:42 +0000
+Subject: [PATCH] VFS-107: finally avoid reading jsch/sftp files into the
+ memory, looks good with jsch 0.1.31
+
+git-svn-id: https://svn.apache.org/repos/asf/jakarta/commons/proper/vfs/trunk@520079 13f79535-47bb-0310-9956-ffa450edef68
+---
+ core/pom.xml                                  |  2 +-
+ .../vfs/provider/sftp/SftpFileObject.java     | 44 +++++++++++++++++--
+ .../java/org/apache/commons/vfs/RunTest.java  | 26 ++---------
+ 3 files changed, 44 insertions(+), 28 deletions(-)
+
+diff --git a/core/pom.xml b/core/pom.xml
+index 3d26e816a2..3dcfe383e5 100644
+--- a/core/pom.xml
++++ b/core/pom.xml
+@@ -94,7 +94,7 @@
+ 		<dependency>
+ 			<groupId>com.jcraft</groupId>
+ 			<artifactId>jsch</artifactId>
+-			<version>0.1.23</version>
++			<version>0.1.31</version>
+ 			<optional>true</optional>
+ 		</dependency>
+ 		<dependency>
+diff --git a/core/src/main/java/org/apache/commons/vfs/provider/sftp/SftpFileObject.java b/core/src/main/java/org/apache/commons/vfs/provider/sftp/SftpFileObject.java
+index 9c5c1a9395..14436e25c8 100644
+--- a/core/src/main/java/org/apache/commons/vfs/provider/sftp/SftpFileObject.java
++++ b/core/src/main/java/org/apache/commons/vfs/provider/sftp/SftpFileObject.java
+@@ -29,9 +29,10 @@
+ import org.apache.commons.vfs.VFS;
+ import org.apache.commons.vfs.provider.AbstractFileObject;
+ import org.apache.commons.vfs.provider.UriParser;
++import org.apache.commons.vfs.util.FileObjectUtils;
++import org.apache.commons.vfs.util.MonitorInputStream;
+ import org.apache.commons.vfs.util.MonitorOutputStream;
+ import org.apache.commons.vfs.util.RandomAccessMode;
+-import org.apache.commons.vfs.util.FileObjectUtils;
+ 
+ import java.io.ByteArrayInputStream;
+ import java.io.ByteArrayOutputStream;
+@@ -348,6 +349,7 @@ InputStream getInputStream(long filePointer) throws IOException
+ 			// hmmm - using the in memory method is soooo much faster ...
+ 			// TODO - Don't read the entire file into memory. Use the
+ 			// stream-based methods on ChannelSftp once they work properly final
++			// .... no stream based method with resume???
+ 			ByteArrayOutputStream outstr = new ByteArrayOutputStream();
+ 			try
+ 			{
+@@ -383,15 +385,19 @@ protected InputStream doGetInputStream() throws Exception
+ 
+ 				// TODO - Don't read the entire file into memory. Use the
+ 				// stream-based methods on ChannelSftp once they work properly
++
++				/*
+ 				final ByteArrayOutputStream outstr = new ByteArrayOutputStream();
+ 				channel.get(relPath, outstr);
+ 				outstr.close();
+ 				return new ByteArrayInputStream(outstr.toByteArray());
++				*/
++				return new SftpInputStream(channel, channel.get(relPath));
+ 
+ 			}
+ 			finally
+ 			{
+-				fileSystem.putChannel(channel);
++//				fileSystem.putChannel(channel);
+ 			}
+ 		}
+ 	}
+@@ -403,8 +409,35 @@ protected OutputStream doGetOutputStream(boolean bAppend) throws Exception
+ 	{
+ 		// TODO - Don't write the entire file into memory. Use the stream-based
+ 		// methods on ChannelSftp once the work properly
++		/*
+ 		final ChannelSftp channel = fileSystem.getChannel();
+ 		return new SftpOutputStream(channel);
++		*/
++
++		final ChannelSftp channel = fileSystem.getChannel();
++		return new SftpOutputStream(channel, channel.put(relPath));
++	}
++
++	/**
++	 * An InputStream that monitors for end-of-file.
++	 */
++	private class SftpInputStream extends MonitorInputStream
++	{
++		private final ChannelSftp channel;
++
++		public SftpInputStream(final ChannelSftp channel, final InputStream in)
++		{
++			super(in);
++			this.channel = channel;
++		}
++
++		/**
++		 * Called after the stream has been closed.
++		 */
++		protected void onClose() throws IOException
++		{
++			fileSystem.putChannel(channel);
++		}
+ 	}
+ 
+ 	/**
+@@ -415,9 +448,9 @@ private class SftpOutputStream extends MonitorOutputStream
+ 	{
+ 		private final ChannelSftp channel;
+ 
+-		public SftpOutputStream(final ChannelSftp channel)
++		public SftpOutputStream(final ChannelSftp channel, OutputStream out)
+ 		{
+-			super(new ByteArrayOutputStream());
++			super(out);
+ 			this.channel = channel;
+ 		}
+ 
+@@ -426,6 +459,7 @@ public SftpOutputStream(final ChannelSftp channel)
+ 		 */
+ 		protected void onClose() throws IOException
+ 		{
++			/*
+ 			try
+ 			{
+ 				final ByteArrayOutputStream outstr = (ByteArrayOutputStream) out;
+@@ -437,9 +471,11 @@ protected void onClose() throws IOException
+ 				throw new FileSystemException(e);
+ 			}
+ 			finally
++			*/
+ 			{
+ 				fileSystem.putChannel(channel);
+ 			}
+ 		}
+ 	}
++
+ }
+diff --git a/core/src/test/java/org/apache/commons/vfs/RunTest.java b/core/src/test/java/org/apache/commons/vfs/RunTest.java
+index 3b4451c9ee..71eaf82438 100644
+--- a/core/src/test/java/org/apache/commons/vfs/RunTest.java
++++ b/core/src/test/java/org/apache/commons/vfs/RunTest.java
+@@ -19,27 +19,7 @@
+ import junit.framework.AssertionFailedError;
+ import junit.framework.Test;
+ import junit.framework.TestResult;
+-import org.apache.commons.vfs.provider.http.test.HttpProviderTestCase;
+-import org.apache.commons.vfs.provider.jar.test.JarProviderTestCase;
+-import org.apache.commons.vfs.provider.jar.test.NestedJarTestCase;
+ import org.apache.commons.vfs.provider.sftp.test.SftpProviderTestCase;
+-import org.apache.commons.vfs.provider.tar.test.NestedTarTestCase;
+-import org.apache.commons.vfs.provider.tar.test.NestedTbz2TestCase;
+-import org.apache.commons.vfs.provider.tar.test.NestedTgzTestCase;
+-import org.apache.commons.vfs.provider.tar.test.TarProviderTestCase;
+-import org.apache.commons.vfs.provider.tar.test.Tbz2ProviderTestCase;
+-import org.apache.commons.vfs.provider.tar.test.TgzProviderTestCase;
+-import org.apache.commons.vfs.provider.zip.test.NestedZipTestCase;
+-import org.apache.commons.vfs.provider.zip.test.ZipProviderTestCase;
+-import org.apache.commons.vfs.provider.ftp.test.FtpProviderTestCase;
+-import org.apache.commons.vfs.provider.local.test.LocalProviderTestCase;
+-import org.apache.commons.vfs.provider.res.test.ResourceProviderTestCase;
+-import org.apache.commons.vfs.provider.temp.test.TemporaryProviderTestCase;
+-import org.apache.commons.vfs.provider.url.test.UrlProviderTestCase;
+-import org.apache.commons.vfs.provider.url.test.UrlProviderHttpTestCase;
+-import org.apache.commons.vfs.provider.test.VirtualProviderTestCase;
+-import org.apache.commons.vfs.provider.test.GenericFileNameTestCase;
+-import org.apache.commons.vfs.provider.ram.test.RamProviderTestCase;
+ 
+ import java.util.Properties;
+ 
+@@ -61,11 +41,11 @@ public static void main(String[] args) throws Exception
+ 		props.setProperty("test.webdav.uri",
+ 				"webdav://vfsusr:vfs%2f%25\\te:st@172.16.110.129/vfstest");
+ 		props.setProperty("test.sftp.uri",
+-				"sftp://vfsusr:vfs%2f%25\\te:st@172.16.110.129/vfstest");
++				"sftp://vfsusr:vfs%2f%25\\te:st@192.168.72.128/vfstest");
+ 
+ 		Test tests[] = new Test[]
+ 		{
+-			RamProviderTestCase.suite(),
++			// RamProviderTestCase.suite(),
+ 
+ 			// SmbProviderTestCase.suite(),
+ 
+@@ -84,7 +64,7 @@ public static void main(String[] args) throws Exception
+ 
+ 		// WebdavProviderTestCase.suite(),
+ 
+-		// SftpProviderTestCase.suite(),
++		SftpProviderTestCase.suite(),
+ 
+ 		// JarProviderTestCase.suite(),
+ //		NestedJarTestCase.suite(),

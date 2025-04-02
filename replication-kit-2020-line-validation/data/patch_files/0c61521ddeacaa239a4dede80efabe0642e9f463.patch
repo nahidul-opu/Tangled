@@ -1,0 +1,3274 @@
+From 0c61521ddeacaa239a4dede80efabe0642e9f463 Mon Sep 17 00:00:00 2001
+From: Joakim Erdfelt <joakime@apache.org>
+Date: Fri, 25 May 2007 15:05:51 +0000
+Subject: [PATCH] [MRM-330]: Searching gives an HTTP 500 Next phase of work
+ towards a search/find fix. Many improvements in indexer / configuration
+
+git-svn-id: https://svn.apache.org/repos/asf/maven/archiva/trunk@541680 13f79535-47bb-0310-9956-ffa450edef68
+---
+ .../functors/IndexedRepositoryPredicate.java  |  53 +++
+ .../lucene/IndexContentConsumer.java          |   2 +-
+ .../maven/archiva/indexer/ArtifactKeys.java   |  25 ++
+ .../indexer/RepositoryContentIndex.java       |  56 +--
+ .../bytecode/BytecodeEntryConverter.java      |   2 +
+ .../indexer/bytecode/BytecodeRecord.java      |  16 +-
+ .../filecontent/FileContentConverter.java     |  14 +-
+ .../filecontent/FileContentRecord.java        |  50 ++-
+ .../functors/BytecodeIndexTransformer.java    |  51 +++
+ .../functors/FileContentIndexTransformer.java |  51 +++
+ .../functors/HashcodesIndexTransformer.java   |  51 +++
+ .../functors/IndexExistsPredicate.java        |  63 ++++
+ .../functors/SearchableTransformer.java       |  56 +++
+ ...serAllowedToSearchRepositoryPredicate.java |  48 +++
+ .../hashcodes/HashcodesEntryConverter.java    |   4 +-
+ .../indexer/hashcodes/HashcodesRecord.java    |  27 +-
+ .../indexer/lucene/LuceneDocumentMaker.java   |  13 +-
+ .../archiva/indexer/lucene/LuceneQuery.java   |   2 +-
+ .../lucene/LuceneRepositoryContentIndex.java  | 167 +++------
+ .../LuceneRepositoryContentIndexFactory.java  |  19 +-
+ .../lucene/LuceneRepositoryContentRecord.java |   7 +
+ .../indexer/search/CrossRepositorySearch.java |  40 ++-
+ .../search/DefaultCrossRepositorySearch.java  | 330 +++++++++++-------
+ .../indexer/search/SearchResultHit.java       | 115 ++++++
+ .../indexer/search/SearchResultLimits.java    |  70 ++++
+ .../archiva/indexer/search/SearchResults.java | 128 ++++++-
+ .../indexer/AbstractSearchTestCase.java       |  64 +++-
+ .../maven/archiva/indexer/AllTests.java       |   1 +
+ .../indexer/bytecode/BytecodeSearchTest.java  |  37 +-
+ .../indexer/hashcodes/HashcodesIndexTest.java |   1 +
+ .../hashcodes/HashcodesSearchTest.java        |  45 ++-
+ .../archiva/indexer/search/AllTests.java      |  41 +++
+ .../search/BytecodeIndexPopulator.java        |   1 +
+ .../DefaultCrossRepositorySearchTest.java     |  72 +++-
+ .../search/FileContentIndexPopulator.java     |  17 +-
+ .../search/HashcodesIndexPopulator.java       |   1 +
+ .../src/test/resources/log4j.xml              |  76 ++++
+ .../DefaultCrossRepositorySearchTest.xml      |  26 +-
+ .../functors/ManagedRepositoryPredicate.java  |  53 +++
+ .../archiva/web/action/SearchAction.java      |  41 +--
+ .../src/main/webapp/WEB-INF/jsp/results.jsp   |  81 +++--
+ 41 files changed, 1534 insertions(+), 483 deletions(-)
+ create mode 100644 archiva-base/archiva-configuration/src/main/java/org/apache/maven/archiva/configuration/functors/IndexedRepositoryPredicate.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/BytecodeIndexTransformer.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/FileContentIndexTransformer.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/HashcodesIndexTransformer.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/IndexExistsPredicate.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/SearchableTransformer.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java
+ create mode 100644 archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultLimits.java
+ create mode 100644 archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/AllTests.java
+ create mode 100644 archiva-base/archiva-indexer/src/test/resources/log4j.xml
+ create mode 100644 archiva-base/archiva-model/src/main/java/org/apache/maven/archiva/model/functors/ManagedRepositoryPredicate.java
+
+diff --git a/archiva-base/archiva-configuration/src/main/java/org/apache/maven/archiva/configuration/functors/IndexedRepositoryPredicate.java b/archiva-base/archiva-configuration/src/main/java/org/apache/maven/archiva/configuration/functors/IndexedRepositoryPredicate.java
+new file mode 100644
+index 0000000000..1c5422c993
+--- /dev/null
++++ b/archiva-base/archiva-configuration/src/main/java/org/apache/maven/archiva/configuration/functors/IndexedRepositoryPredicate.java
+@@ -0,0 +1,53 @@
++package org.apache.maven.archiva.configuration.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Predicate;
++import org.apache.maven.archiva.configuration.RepositoryConfiguration;
++
++/**
++ * Predicate for Repositories with their Indexed setting set to true. 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ */
++public class IndexedRepositoryPredicate
++    implements Predicate
++{
++    private static IndexedRepositoryPredicate INSTANCE = new IndexedRepositoryPredicate();
++
++    public static IndexedRepositoryPredicate getInstance()
++    {
++        return INSTANCE;
++    }
++
++    public boolean evaluate( Object object )
++    {
++        boolean satisfies = false;
++
++        if ( object instanceof RepositoryConfiguration )
++        {
++            RepositoryConfiguration repoconfig = (RepositoryConfiguration) object;
++            return repoconfig.isIndexed();
++        }
++
++        return satisfies;
++    }
++}
+diff --git a/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java b/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java
+index 98da60d372..f65666ddeb 100644
+--- a/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java
++++ b/archiva-base/archiva-consumers/archiva-lucene-consumers/src/main/java/org/apache/maven/archiva/consumers/lucene/IndexContentConsumer.java
+@@ -135,7 +135,7 @@ public void processFile( String path )
+         try
+         {
+             File file = new File( repositoryDir, path );
+-            record.setFile( file );
++            record.setFilename( path );
+             record.setContents( FileUtils.readFileToString( file, null ) );
+ 
+             index.modifyRecord( record );
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/ArtifactKeys.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/ArtifactKeys.java
+index b86e51d59b..dcce7ee9f2 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/ArtifactKeys.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/ArtifactKeys.java
+@@ -1,5 +1,30 @@
+ package org.apache.maven.archiva.indexer;
+ 
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++/**
++ * ArtifactKeys 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ */
+ public class ArtifactKeys
+ {
+     public static final String GROUPID = "groupId";
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/RepositoryContentIndex.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/RepositoryContentIndex.java
+index 18ec218873..984c861f86 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/RepositoryContentIndex.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/RepositoryContentIndex.java
+@@ -19,13 +19,15 @@
+  * under the License.
+  */
+ 
++import org.apache.lucene.analysis.Analyzer;
+ import org.apache.lucene.queryParser.QueryParser;
++import org.apache.lucene.search.Searchable;
++import org.apache.maven.archiva.indexer.lucene.LuceneEntryConverter;
+ import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentRecord;
+-import org.apache.maven.archiva.indexer.query.Query;
++import org.apache.maven.archiva.model.ArchivaRepository;
+ 
+ import java.io.File;
+ import java.util.Collection;
+-import java.util.List;
+ 
+ /**
+  * Common access methods for a Repository Content index.
+@@ -61,17 +63,6 @@ public void modifyRecords( Collection records )
+     public void modifyRecord( LuceneRepositoryContentRecord record )
+         throws RepositoryIndexException;
+ 
+-    /**
+-     * Search the index based on the search criteria specified. Returns a list of index records.
+-     *
+-     * @param query The query that contains the search criteria
+-     * @return the index records found
+-     * @throws RepositoryIndexSearchException if there is a problem searching
+-     * @todo should it return "SearchResult" instances that contain the index record and other search data (like score?)
+-     */
+-    List search( Query query )
+-        throws RepositoryIndexSearchException;
+-
+     /**
+      * Check if the index already exists.
+      *
+@@ -90,15 +81,6 @@ boolean exists()
+     void deleteRecords( Collection records )
+         throws RepositoryIndexException;
+ 
+-    /**
+-     * Retrieve all records in the index.
+-     *
+-     * @return the collection of {@link LuceneRepositoryContentRecord} objects.
+-     * @throws RepositoryIndexSearchException if there was an error searching the index
+-     */
+-    Collection getAllRecords()
+-        throws RepositoryIndexSearchException;
+-
+     /**
+      * Retrieve all primary keys of records in the index.
+      *
+@@ -128,4 +110,34 @@ Collection getAllRecordKeys()
+      * @return the id of index.
+      */
+     String getId();
++
++    /**
++     * Get the repository that this index belongs to.
++     * 
++     * @return the repository that this index belongs to.
++     */
++    ArchivaRepository getRepository();
++
++    /**
++     * Get the analyzer in use for this index.
++     * 
++     * @return the analyzer in use.
++     */
++    Analyzer getAnalyzer();
++
++    /**
++     * Get the document to record (and back again) converter.
++     * 
++     * @return the converter in use.
++     */
++    LuceneEntryConverter getEntryConverter();
++
++    /**
++     * Create a Searchable for this index.
++     * 
++     * @return the Searchable.
++     * @throws RepositoryIndexSearchException if there was a problem creating the searchable.
++     */
++    Searchable getSearchable()
++        throws RepositoryIndexSearchException;
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeEntryConverter.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeEntryConverter.java
+index c0a8ad6ac5..b98a57927d 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeEntryConverter.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeEntryConverter.java
+@@ -76,6 +76,8 @@ public LuceneRepositoryContentRecord convert( Document document ) throws ParseEx
+     {
+         BytecodeRecord record = new BytecodeRecord();
+ 
++        record.setRepositoryId( document.get( LuceneDocumentMaker.REPOSITORY_ID ) );
++        
+         // Artifact Reference
+         String groupId = document.get( ArtifactKeys.GROUPID );
+         String artifactId = document.get( ArtifactKeys.ARTIFACTID );
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeRecord.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeRecord.java
+index b23cdb6d0d..6704656883 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeRecord.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/bytecode/BytecodeRecord.java
+@@ -30,8 +30,11 @@
+  * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
+  * @version $Id$
+  */
+-public class BytecodeRecord implements LuceneRepositoryContentRecord
++public class BytecodeRecord
++    implements LuceneRepositoryContentRecord
+ {
++    private String repositoryId;
++
+     private ArchivaArtifact artifact;
+ 
+     private String filename;
+@@ -62,6 +65,11 @@ public List getMethods()
+         return methods;
+     }
+ 
++    public String getRepositoryId()
++    {
++        return repositoryId;
++    }
++
+     public String getPrimaryKey()
+     {
+         StringBuffer id = new StringBuffer();
+@@ -99,6 +107,11 @@ public void setMethods( List methods )
+         this.methods = methods;
+     }
+ 
++    public void setRepositoryId( String repositoryId )
++    {
++        this.repositoryId = repositoryId;
++    }
++
+     public int hashCode()
+     {
+         final int PRIME = 31;
+@@ -161,4 +174,5 @@ public String toString()
+         sb.append( "]" );
+         return sb.toString();
+     }
++
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java
+index d948048cf3..4d352fb501 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentConverter.java
+@@ -24,7 +24,6 @@
+ import org.apache.maven.archiva.indexer.lucene.LuceneEntryConverter;
+ import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentRecord;
+ 
+-import java.io.File;
+ import java.text.ParseException;
+ 
+ /**
+@@ -33,7 +32,8 @@
+  * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
+  * @version $Id$
+  */
+-public class FileContentConverter implements LuceneEntryConverter
++public class FileContentConverter
++    implements LuceneEntryConverter
+ {
+ 
+     public Document convert( LuceneRepositoryContentRecord record )
+@@ -41,24 +41,26 @@ public Document convert( LuceneRepositoryContentRecord record )
+         if ( !( record instanceof FileContentRecord ) )
+         {
+             throw new ClassCastException( "Unable to convert type " + record.getClass().getName() + " to "
+-                            + FileContentRecord.class.getName() + "." );
++                + FileContentRecord.class.getName() + "." );
+         }
+ 
+         FileContentRecord filecontent = (FileContentRecord) record;
+ 
+         LuceneDocumentMaker doc = new LuceneDocumentMaker( filecontent );
+ 
+-        doc.addFieldTokenized( FileContentKeys.FILENAME, filecontent.getFile().getAbsolutePath() );
++        doc.addFieldTokenized( FileContentKeys.FILENAME, filecontent.getFilename() );
+         doc.addFieldTokenized( FileContentKeys.CONTENT, filecontent.getContents() );
+ 
+         return doc.getDocument();
+     }
+ 
+-    public LuceneRepositoryContentRecord convert( Document document ) throws ParseException
++    public LuceneRepositoryContentRecord convert( Document document )
++        throws ParseException
+     {
+         FileContentRecord record = new FileContentRecord();
+ 
+-        record.setFile( new File( document.get( FileContentKeys.FILENAME ) ) );
++        record.setRepositoryId( document.get( LuceneDocumentMaker.REPOSITORY_ID ) );
++        record.setFilename( document.get( FileContentKeys.FILENAME ) );
+         record.setContents( document.get( FileContentKeys.CONTENT ) );
+ 
+         return record;
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java
+index 799078605f..5ca95282a4 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/filecontent/FileContentRecord.java
+@@ -29,42 +29,45 @@
+  * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
+  * @version $Id$
+  */
+-public class FileContentRecord implements LuceneRepositoryContentRecord
++public class FileContentRecord
++    implements LuceneRepositoryContentRecord
+ {
+-    private File file;
++    private String repositoryId;
++
++    private String filename;
+ 
+     private String contents;
+ 
+-    public String getContents()
++    public String getRepositoryId()
+     {
+-        return contents;
++        return repositoryId;
+     }
+ 
+-    public void setContents( String contents )
++    public void setRepositoryId( String repositoryId )
+     {
+-        this.contents = contents;
++        this.repositoryId = repositoryId;
+     }
+ 
+-    public File getFile()
++    public String getContents()
+     {
+-        return file;
++        return contents;
+     }
+ 
+-    public void setFile( File file )
++    public void setContents( String contents )
+     {
+-        this.file = file;
++        this.contents = contents;
+     }
+ 
+     public String getPrimaryKey()
+     {
+-        return file.getAbsolutePath();
++        return filename;
+     }
+ 
+     public int hashCode()
+     {
+         final int PRIME = 31;
+         int result = 1;
+-        result = PRIME * result + ( ( file == null ) ? 0 : file.hashCode() );
++        result = PRIME * result + ( ( filename == null ) ? 0 : filename.hashCode() );
+         return result;
+     }
+ 
+@@ -74,31 +77,40 @@ public boolean equals( Object obj )
+         {
+             return true;
+         }
+-        
++
+         if ( obj == null )
+         {
+             return false;
+         }
+-        
++
+         if ( getClass() != obj.getClass() )
+         {
+             return false;
+         }
+-        
++
+         final FileContentRecord other = (FileContentRecord) obj;
+-        
+-        if ( file == null )
++
++        if ( filename == null )
+         {
+-            if ( other.file != null )
++            if ( other.filename != null )
+             {
+                 return false;
+             }
+         }
+-        else if ( !file.equals( other.file ) )
++        else if ( !filename.equals( other.filename ) )
+         {
+             return false;
+         }
+         return true;
+     }
+ 
++    public String getFilename()
++    {
++        return filename;
++    }
++
++    public void setFilename( String filename )
++    {
++        this.filename = filename;
++    }
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/BytecodeIndexTransformer.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/BytecodeIndexTransformer.java
+new file mode 100644
+index 0000000000..78060fcda8
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/BytecodeIndexTransformer.java
+@@ -0,0 +1,51 @@
++package org.apache.maven.archiva.indexer.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Transformer;
++import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
++import org.apache.maven.archiva.model.ArchivaRepository;
++
++/**
++ * BytecodeIndexTransformer 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ * 
++ * @plexus.component role="org.apache.commons.collections.Transformer" role-hint="bytecode"
++ */
++public class BytecodeIndexTransformer
++    implements Transformer
++{
++    /**
++     * @plexus.requirement role-hint="lucene"
++     */
++    private RepositoryContentIndexFactory indexFactory;
++
++    public Object transform( Object input )
++    {
++        if ( input instanceof ArchivaRepository )
++        {
++            return indexFactory.createBytecodeIndex( (ArchivaRepository) input );
++        }
++
++        return input;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/FileContentIndexTransformer.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/FileContentIndexTransformer.java
+new file mode 100644
+index 0000000000..264341b174
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/FileContentIndexTransformer.java
+@@ -0,0 +1,51 @@
++package org.apache.maven.archiva.indexer.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Transformer;
++import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
++import org.apache.maven.archiva.model.ArchivaRepository;
++
++/**
++ * FileContentIndexTransformer 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ * 
++ * @plexus.component role="org.apache.commons.collections.Transformer" role-hint="filecontent"
++ */
++public class FileContentIndexTransformer
++    implements Transformer
++{
++    /**
++     * @plexus.requirement role-hint="lucene"
++     */
++    private RepositoryContentIndexFactory indexFactory;
++
++    public Object transform( Object input )
++    {
++        if ( input instanceof ArchivaRepository )
++        {
++            return indexFactory.createFileContentIndex( (ArchivaRepository) input );
++        }
++
++        return input;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/HashcodesIndexTransformer.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/HashcodesIndexTransformer.java
+new file mode 100644
+index 0000000000..be5c90ce5b
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/HashcodesIndexTransformer.java
+@@ -0,0 +1,51 @@
++package org.apache.maven.archiva.indexer.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Transformer;
++import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
++import org.apache.maven.archiva.model.ArchivaRepository;
++
++/**
++ * HashcodesIndexTransformer 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ * 
++ * @plexus.component role="org.apache.commons.collections.Transformer" role-hint="hashcodes"
++ */
++public class HashcodesIndexTransformer
++    implements Transformer
++{
++    /**
++     * @plexus.requirement role-hint="lucene"
++     */
++    private RepositoryContentIndexFactory indexFactory;
++
++    public Object transform( Object input )
++    {
++        if ( input instanceof ArchivaRepository )
++        {
++            return indexFactory.createHashcodeIndex( (ArchivaRepository) input );
++        }
++
++        return input;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/IndexExistsPredicate.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/IndexExistsPredicate.java
+new file mode 100644
+index 0000000000..a8fb3068ea
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/IndexExistsPredicate.java
+@@ -0,0 +1,63 @@
++package org.apache.maven.archiva.indexer.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Predicate;
++import org.apache.maven.archiva.indexer.RepositoryContentIndex;
++import org.apache.maven.archiva.indexer.RepositoryIndexException;
++import org.codehaus.plexus.logging.AbstractLogEnabled;
++
++/**
++ * Test the {@link RepositoryContentIndex} object for the existance of an index. 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ * 
++ * @plexus.component 
++ *      role="org.apache.commons.collections.Predicate" 
++ *      role-hint="index-exists"
++ */
++public class IndexExistsPredicate
++    extends AbstractLogEnabled
++    implements Predicate
++{
++    public boolean evaluate( Object object )
++    {
++        boolean satisfies = false;
++
++        if ( object instanceof RepositoryContentIndex )
++        {
++            RepositoryContentIndex index = (RepositoryContentIndex) object;
++            try
++            {
++                satisfies = index.exists();
++            }
++            catch ( RepositoryIndexException e )
++            {
++                getLogger().info(
++                                  "Repository Content Index [" + index.getId() + "] for repository ["
++                                      + index.getRepository().getId() + "] does not exist yet in ["
++                                      + index.getIndexDirectory().getAbsolutePath() + "]." );
++            }
++        }
++        
++        return satisfies;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/SearchableTransformer.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/SearchableTransformer.java
+new file mode 100644
+index 0000000000..addbd92bd9
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/SearchableTransformer.java
+@@ -0,0 +1,56 @@
++package org.apache.maven.archiva.indexer.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Transformer;
++import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
++import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentIndex;
++import org.codehaus.plexus.logging.AbstractLogEnabled;
++
++/**
++ * SearchableTransformer 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ * 
++ * @plexus.component role="org.apache.commons.collections.Transformer" role-hint="searchable"
++ */
++public class SearchableTransformer
++    extends AbstractLogEnabled
++    implements Transformer
++{
++    public Object transform( Object input )
++    {
++        if ( input instanceof LuceneRepositoryContentIndex )
++        {
++            try
++            {
++                LuceneRepositoryContentIndex index = (LuceneRepositoryContentIndex) input;
++                return index.getSearchable();
++            }
++            catch ( RepositoryIndexSearchException e )
++            {
++                getLogger().warn("Unable to get searchable for index:" + e.getMessage(), e);
++            }
++        }
++        
++        return input;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java
+new file mode 100644
+index 0000000000..e408010128
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/functors/UserAllowedToSearchRepositoryPredicate.java
+@@ -0,0 +1,48 @@
++package org.apache.maven.archiva.indexer.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Predicate;
++import org.apache.maven.archiva.model.ArchivaRepository;
++
++/**
++ * UserAllowedToSearchRepositoryPredicate 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ */
++public class UserAllowedToSearchRepositoryPredicate
++    implements Predicate
++{
++    public boolean evaluate( Object object )
++    {
++        boolean satisfies = false;
++
++        if ( object instanceof ArchivaRepository )
++        {
++            // TODO: perform check here.
++            satisfies = true; // Everyone is allowed! (for now)
++        }
++
++        System.out.println( "AllowedToSearchRepo: " + satisfies );
++
++        return satisfies;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesEntryConverter.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesEntryConverter.java
+index 6df3d2b873..2565f03a29 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesEntryConverter.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesEntryConverter.java
+@@ -48,7 +48,7 @@ public Document convert( LuceneRepositoryContentRecord record )
+         HashcodesRecord hashcodes = (HashcodesRecord) record;
+ 
+         LuceneDocumentMaker doc = new LuceneDocumentMaker( hashcodes );
+-
++        
+         // Artifact Reference
+         doc.addFieldTokenized( ArtifactKeys.GROUPID, hashcodes.getArtifact().getGroupId() );
+         doc.addFieldExact( ArtifactKeys.GROUPID_EXACT, hashcodes.getArtifact().getGroupId() );
+@@ -69,6 +69,8 @@ public Document convert( LuceneRepositoryContentRecord record )
+     public LuceneRepositoryContentRecord convert( Document document ) throws ParseException
+     {
+         HashcodesRecord record = new HashcodesRecord();
++        
++        record.setRepositoryId( document.get( LuceneDocumentMaker.REPOSITORY_ID ) );
+ 
+         // Artifact Reference
+         String groupId = document.get( ArtifactKeys.GROUPID );
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesRecord.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesRecord.java
+index 21a13bdaef..400d09f078 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesRecord.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesRecord.java
+@@ -28,8 +28,11 @@
+  * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
+  * @version $Id$
+  */
+-public class HashcodesRecord implements LuceneRepositoryContentRecord
++public class HashcodesRecord
++    implements LuceneRepositoryContentRecord
+ {
++    private String repositoryId;
++
+     private ArchivaArtifact artifact;
+ 
+     private String filename;
+@@ -60,7 +63,7 @@ public String getPrimaryKey()
+ 
+         return id.toString();
+     }
+-    
++
+     public int hashCode()
+     {
+         final int PRIME = 31;
+@@ -75,19 +78,19 @@ public boolean equals( Object obj )
+         {
+             return true;
+         }
+-        
++
+         if ( obj == null )
+         {
+             return false;
+         }
+-        
++
+         if ( getClass() != obj.getClass() )
+         {
+             return false;
+         }
+-        
++
+         final HashcodesRecord other = (HashcodesRecord) obj;
+-        
++
+         if ( artifact == null )
+         {
+             if ( other.artifact != null )
+@@ -103,6 +106,16 @@ else if ( !artifact.equals( other.artifact ) )
+         return true;
+     }
+ 
++    public String getRepositoryId()
++    {
++        return this.repositoryId;
++    }
++
++    public void setRepositoryId( String repositoryId )
++    {
++        this.repositoryId = repositoryId;
++    }
++
+     public String getFilename()
+     {
+         return filename;
+@@ -112,7 +125,7 @@ public void setFilename( String filename )
+     {
+         this.filename = filename;
+     }
+-    
++
+     public String toString()
+     {
+         StringBuffer sb = new StringBuffer();
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneDocumentMaker.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneDocumentMaker.java
+index 795b2c94a6..7dac0e9955 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneDocumentMaker.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneDocumentMaker.java
+@@ -34,6 +34,8 @@
+ public class LuceneDocumentMaker
+ {
+     public static final String PRIMARY_KEY = "pk";
++    
++    public static final String REPOSITORY_ID = "repoId";
+ 
+     private Document document;
+ 
+@@ -52,19 +54,22 @@ public LuceneDocumentMaker( LuceneRepositoryContentRecord record ) throws Illega
+ 
+         String primaryKey = record.getPrimaryKey();
+ 
+-        if ( primaryKey == null )
++        if ( StringUtils.isBlank( primaryKey ) )
+         {
+-            throw new IllegalArgumentException( "Not allowed to have a null primary key." );
++            throw new IllegalArgumentException( "Not allowed to have a blank primary key." );
+         }
+ 
+-        if ( primaryKey.trim().length() <= 0 )
++        String repositoryId = record.getRepositoryId();
++        
++        if ( StringUtils.isBlank( repositoryId ) )
+         {
+-            throw new IllegalArgumentException( "Not allowed to have an empty primary key." );
++            throw new IllegalArgumentException( "Not allowed to have a blank repository id." );
+         }
+ 
+         document = new Document();
+ 
+         document.add( new Field( PRIMARY_KEY, primaryKey, Field.Store.NO, Field.Index.UN_TOKENIZED ) );
++        document.add( new Field( REPOSITORY_ID, repositoryId, Field.Store.YES, Field.Index.UN_TOKENIZED ) );
+     }
+ 
+     public LuceneDocumentMaker addFieldTokenized( String key, String value )
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneQuery.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneQuery.java
+index 3c23fecc1a..c476c059d1 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneQuery.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneQuery.java
+@@ -36,7 +36,7 @@ public LuceneQuery( org.apache.lucene.search.Query query )
+         this.query = query;
+     }
+ 
+-    org.apache.lucene.search.Query getLuceneQuery()
++    public org.apache.lucene.search.Query getLuceneQuery()
+     {
+         return query;
+     }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndex.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndex.java
+index 0e1241d611..5fcfa10e5d 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndex.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndex.java
+@@ -19,6 +19,7 @@
+  * under the License.
+  */
+ 
++import org.apache.lucene.analysis.Analyzer;
+ import org.apache.lucene.document.Document;
+ import org.apache.lucene.index.IndexModifier;
+ import org.apache.lucene.index.IndexReader;
+@@ -26,17 +27,15 @@
+ import org.apache.lucene.index.Term;
+ import org.apache.lucene.index.TermEnum;
+ import org.apache.lucene.queryParser.QueryParser;
+-import org.apache.lucene.search.Hits;
+ import org.apache.lucene.search.IndexSearcher;
+-import org.apache.lucene.search.MatchAllDocsQuery;
++import org.apache.lucene.search.Searchable;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndex;
+ import org.apache.maven.archiva.indexer.RepositoryIndexException;
+ import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
+-import org.apache.maven.archiva.indexer.query.Query;
++import org.apache.maven.archiva.model.ArchivaRepository;
+ 
+ import java.io.File;
+ import java.io.IOException;
+-import java.text.ParseException;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Iterator;
+@@ -64,9 +63,12 @@ public class LuceneRepositoryContentIndex
+      * The Lucene Index Handlers
+      */
+     private LuceneIndexHandlers indexHandlers;
++    
++    private ArchivaRepository repository;
+ 
+-    public LuceneRepositoryContentIndex( File indexDir, LuceneIndexHandlers handlers )
++    public LuceneRepositoryContentIndex( ArchivaRepository repository, File indexDir, LuceneIndexHandlers handlers )
+     {
++        this.repository = repository;
+         this.indexLocation = indexDir;
+         this.indexHandlers = handlers;
+     }
+@@ -219,12 +221,6 @@ public void deleteRecords( Collection records )
+         }
+     }
+ 
+-    public Collection getAllRecords()
+-        throws RepositoryIndexSearchException
+-    {
+-        return search( new LuceneQuery( new MatchAllDocsQuery() ) );
+-    }
+-
+     public Collection getAllRecordKeys()
+         throws RepositoryIndexException
+     {
+@@ -267,64 +263,20 @@ private List getAllFieldValues( String fieldName )
+         }
+         return keys;
+     }
+-
+-    //    public List getAllGroupIds() throws RepositoryIndexException
+-    //    {
+-    //        return getAllFieldValues( StandardIndexRecordFields.GROUPID_EXACT );
+-    //    }
+-    //
+-    //    public List getArtifactIds( String groupId ) throws RepositoryIndexSearchException
+-    //    {
+-    //        return searchField( new TermQuery( new Term( StandardIndexRecordFields.GROUPID_EXACT, groupId ) ),
+-    //                            StandardIndexRecordFields.ARTIFACTID );
+-    //    }
+-    //
+-    //    public List getVersions( String groupId, String artifactId ) throws RepositoryIndexSearchException
+-    //    {
+-    //        BooleanQuery query = new BooleanQuery();
+-    //        query.add( new TermQuery( new Term( StandardIndexRecordFields.GROUPID_EXACT, groupId ) ),
+-    //                   BooleanClause.Occur.MUST );
+-    //        query.add( new TermQuery( new Term( StandardIndexRecordFields.ARTIFACTID_EXACT, artifactId ) ),
+-    //                   BooleanClause.Occur.MUST );
+-    //
+-    //        return searchField( query, StandardIndexRecordFields.VERSION );
+-    //    }
+-
+-    //    private List searchField( org.apache.lucene.search.Query luceneQuery, String fieldName )
+-    //        throws RepositoryIndexSearchException
+-    //    {
+-    //        Set results = new LinkedHashSet();
+-    //
+-    //        IndexSearcher searcher;
+-    //        try
+-    //        {
+-    //            searcher = new IndexSearcher( indexLocation.getAbsolutePath() );
+-    //        }
+-    //        catch ( IOException e )
+-    //        {
+-    //            throw new RepositoryIndexSearchException( "Unable to open index: " + e.getMessage(), e );
+-    //        }
+-    //
+-    //        try
+-    //        {
+-    //            Hits hits = searcher.search( luceneQuery );
+-    //            for ( int i = 0; i < hits.length(); i++ )
+-    //            {
+-    //                Document doc = hits.doc( i );
+-    //
+-    //                results.add( doc.get( fieldName ) );
+-    //            }
+-    //        }
+-    //        catch ( IOException e )
+-    //        {
+-    //            throw new RepositoryIndexSearchException( "Unable to search index: " + e.getMessage(), e );
+-    //        }
+-    //        finally
+-    //        {
+-    //            closeQuietly( searcher );
+-    //        }
+-    //        return new ArrayList( results );
+-    //    }
++    
++    public Searchable getSearchable()
++        throws RepositoryIndexSearchException
++    {
++        try
++        {
++            IndexSearcher searcher = new IndexSearcher( indexLocation.getAbsolutePath() );
++            return searcher;
++        }
++        catch ( IOException e )
++        {
++            throw new RepositoryIndexSearchException( "Unable to open index: " + e.getMessage(), e );
++        }
++    }
+ 
+     public boolean exists()
+         throws RepositoryIndexException
+@@ -354,70 +306,26 @@ else if ( indexLocation.isDirectory() )
+         }
+     }
+ 
+-    public List search( Query query )
+-        throws RepositoryIndexSearchException
+-    {
+-        LuceneQuery lQuery = (LuceneQuery) query;
+-
+-        org.apache.lucene.search.Query luceneQuery = lQuery.getLuceneQuery();
+-
+-        IndexSearcher searcher;
+-        try
+-        {
+-            searcher = new IndexSearcher( indexLocation.getAbsolutePath() );
+-        }
+-        catch ( IOException e )
+-        {
+-            throw new RepositoryIndexSearchException( "Unable to open index: " + e.getMessage(), e );
+-        }
+-
+-        List records = new ArrayList();
+-        try
+-        {
+-            Hits hits = searcher.search( luceneQuery );
+-            for ( int i = 0; i < hits.length(); i++ )
+-            {
+-                Document doc = hits.doc( i );
+-
+-                records.add( indexHandlers.getConverter().convert( doc ) );
+-            }
+-        }
+-        catch ( IOException e )
+-        {
+-            throw new RepositoryIndexSearchException( "Unable to search index: " + e.getMessage(), e );
+-        }
+-        catch ( ParseException e )
+-        {
+-            throw new RepositoryIndexSearchException( "Unable to search index: " + e.getMessage(), e );
+-        }
+-        finally
+-        {
+-            closeQuietly( searcher );
+-        }
+-
+-        return records;
+-    }
+-
+     public QueryParser getQueryParser()
+     {
+         return this.indexHandlers.getQueryParser();
+     }
+ 
+-    private static void closeQuietly( IndexSearcher searcher )
++    public static void closeSearchable( Searchable searchable )
+     {
+-        try
++        if( searchable != null )
+         {
+-            if ( searcher != null )
++            try
+             {
+-                searcher.close();
++                searchable.close();
++            }
++            catch ( IOException e )
++            {
++                // Ignore
+             }
+-        }
+-        catch ( IOException e )
+-        {
+-            // ignore
+         }
+     }
+-
++    
+     private static void closeQuietly( TermEnum terms )
+         throws RepositoryIndexException
+     {
+@@ -490,4 +398,19 @@ public String getId()
+     {
+         return this.indexHandlers.getId();
+     }
++
++    public ArchivaRepository getRepository()
++    {
++        return repository;
++    }
++    
++    public Analyzer getAnalyzer()
++    {
++        return this.indexHandlers.getAnalyzer();
++    }
++    
++    public LuceneEntryConverter getEntryConverter()
++    {
++        return this.indexHandlers.getConverter();
++    }
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndexFactory.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndexFactory.java
+index f029cabdf5..3e2e964608 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndexFactory.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentIndexFactory.java
+@@ -19,6 +19,7 @@
+  * under the License.
+  */
+ 
++import org.apache.commons.lang.StringUtils;
+ import org.apache.maven.archiva.configuration.ArchivaConfiguration;
+ import org.apache.maven.archiva.configuration.RepositoryConfiguration;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndex;
+@@ -38,7 +39,8 @@
+  * 
+  * @plexus.component role="org.apache.maven.archiva.indexer.RepositoryContentIndexFactory" role-hint="lucene"
+  */
+-public class LuceneRepositoryContentIndexFactory implements RepositoryContentIndexFactory
++public class LuceneRepositoryContentIndexFactory
++    implements RepositoryContentIndexFactory
+ {
+     /**
+      * @plexus.requirement
+@@ -48,19 +50,19 @@ public class LuceneRepositoryContentIndexFactory implements RepositoryContentInd
+     public RepositoryContentIndex createBytecodeIndex( ArchivaRepository repository )
+     {
+         File indexDir = toIndexDir( repository, "bytecode" );
+-        return new LuceneRepositoryContentIndex( indexDir, new BytecodeHandlers() );
++        return new LuceneRepositoryContentIndex( repository, indexDir, new BytecodeHandlers() );
+     }
+ 
+     public RepositoryContentIndex createFileContentIndex( ArchivaRepository repository )
+     {
+         File indexDir = toIndexDir( repository, "filecontent" );
+-        return new LuceneRepositoryContentIndex( indexDir, new FileContentHandlers() );
++        return new LuceneRepositoryContentIndex( repository, indexDir, new FileContentHandlers() );
+     }
+ 
+     public RepositoryContentIndex createHashcodeIndex( ArchivaRepository repository )
+     {
+         File indexDir = toIndexDir( repository, "hashcodes" );
+-        return new LuceneRepositoryContentIndex( indexDir, new HashcodesHandlers() );
++        return new LuceneRepositoryContentIndex( repository, indexDir, new HashcodesHandlers() );
+     }
+ 
+     /**
+@@ -91,6 +93,15 @@ private File toIndexDir( ArchivaRepository repository, String indexId )
+         {
+             // Use configured index dir.
+             String repoPath = repoConfig.getIndexDir();
++            if ( StringUtils.isBlank( repoPath ) )
++            {
++                repoPath = repository.getUrl().getPath();
++                if ( !repoPath.endsWith( "/" ) )
++                {
++                    repoPath += "/";
++                }
++                repoPath += ".index";
++            }
+             indexDir = new File( repoPath, "/" + indexId + "/" );
+         }
+ 
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentRecord.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentRecord.java
+index 73852bc5c2..f3ec7b5405 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentRecord.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/lucene/LuceneRepositoryContentRecord.java
+@@ -32,4 +32,11 @@ public interface LuceneRepositoryContentRecord
+      * @return the primary key
+      */
+     public String getPrimaryKey();
++    
++    /**
++     * Get the repository that this record belongs to.
++     * 
++     * @return the repository id for this record.
++     */
++    public String getRepositoryId();
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/CrossRepositorySearch.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/CrossRepositorySearch.java
+index c735d4d771..2cebe2f8fe 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/CrossRepositorySearch.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/CrossRepositorySearch.java
+@@ -1,7 +1,26 @@
+ package org.apache.maven.archiva.indexer.search;
+ 
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
+ /**
+- * Search across repositories for specified term. 
++ * Search across repositories in lucene indexes. 
+  *
+  * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
+  * @version $Id$
+@@ -13,15 +32,26 @@ public interface CrossRepositorySearch
+      * Search for the specific term across all repositories.
+      * 
+      * @param term the term to search for.
++     * @param limits the limits to apply to the search results.
++     * @return the results.
++     */
++    public SearchResults searchForTerm( String term, SearchResultLimits limits );
++    
++    /**
++     * Search for the specific bytecode across all repositories.
++     * 
++     * @param term the term to search for.
++     * @param limits the limits to apply to the search results.
+      * @return the results.
+      */
+-    public SearchResults searchForTerm( String term );
++    public SearchResults searchForBytecode( String term, SearchResultLimits limits );
+ 
+     /**
+-     * Search for the specific MD5 string across all repositories.
++     * Search for the specific checksum string across all repositories.
+      * 
+-     * @param md5 the md5 string to search for.
++     * @param checksum the checksum string to search for.
++     * @param limits the limits to apply to the search results.
+      * @return the results.
+      */
+-    public SearchResults searchForMd5( String md5 );
++    public SearchResults searchForChecksum( String checksum, SearchResultLimits limits );
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearch.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearch.java
+index 1c90465e0e..dacf10054f 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearch.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearch.java
+@@ -19,19 +19,31 @@
+  * under the License.
+  */
+ 
++import org.apache.commons.collections.CollectionUtils;
++import org.apache.commons.collections.Predicate;
++import org.apache.commons.collections.Transformer;
++import org.apache.commons.collections.functors.AndPredicate;
++import org.apache.lucene.document.Document;
++import org.apache.lucene.queryParser.MultiFieldQueryParser;
+ import org.apache.lucene.queryParser.ParseException;
+ import org.apache.lucene.queryParser.QueryParser;
++import org.apache.lucene.search.Hits;
++import org.apache.lucene.search.MultiSearcher;
++import org.apache.lucene.search.Searchable;
+ import org.apache.maven.archiva.configuration.ArchivaConfiguration;
+ import org.apache.maven.archiva.configuration.ConfigurationNames;
+ import org.apache.maven.archiva.configuration.RepositoryConfiguration;
++import org.apache.maven.archiva.configuration.functors.IndexedRepositoryPredicate;
++import org.apache.maven.archiva.configuration.functors.LocalRepositoryPredicate;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndex;
+-import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
+-import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
+-import org.apache.maven.archiva.indexer.bytecode.BytecodeKeys;
+-import org.apache.maven.archiva.indexer.filecontent.FileContentKeys;
++import org.apache.maven.archiva.indexer.bytecode.BytecodeHandlers;
++import org.apache.maven.archiva.indexer.filecontent.FileContentHandlers;
++import org.apache.maven.archiva.indexer.functors.UserAllowedToSearchRepositoryPredicate;
++import org.apache.maven.archiva.indexer.hashcodes.HashcodesHandlers;
+ import org.apache.maven.archiva.indexer.hashcodes.HashcodesKeys;
++import org.apache.maven.archiva.indexer.lucene.LuceneEntryConverter;
+ import org.apache.maven.archiva.indexer.lucene.LuceneQuery;
+-import org.apache.maven.archiva.model.ArchivaRepository;
++import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentRecord;
+ import org.apache.maven.archiva.repository.ArchivaConfigurationAdaptor;
+ import org.codehaus.plexus.logging.AbstractLogEnabled;
+ import org.codehaus.plexus.personality.plexus.lifecycle.phase.Initializable;
+@@ -39,12 +51,10 @@
+ import org.codehaus.plexus.registry.Registry;
+ import org.codehaus.plexus.registry.RegistryListener;
+ 
++import java.io.IOException;
+ import java.util.ArrayList;
+-import java.util.HashMap;
+-import java.util.Iterator;
++import java.util.Collection;
+ import java.util.List;
+-import java.util.Map;
+-import java.util.Map.Entry;
+ 
+ /**
+  * DefaultCrossRepositorySearch 
+@@ -57,184 +67,237 @@ public class DefaultCrossRepositorySearch
+     extends AbstractLogEnabled
+     implements CrossRepositorySearch, RegistryListener, Initializable
+ {
++    /**
++     * @plexus.requirement role-hint="bytecode"
++     */
++    private Transformer bytecodeIndexTransformer;
+ 
+-    private static final int UNKNOWN = 0;
+-
+-    private static final int FILE_CONTENT = 1;
++    /**
++     * @plexus.requirement role-hint="filecontent"
++     */
++    private Transformer filecontentIndexTransformer;
+ 
+-    private static final int BYTECODE = 2;
++    /**
++     * @plexus.requirement role-hint="hashcodes"
++     */
++    private Transformer hashcodesIndexTransformer;
+ 
+-    private static final int HASHCODE = 3;
++    /**
++     * @plexus.requirement role-hint="searchable"
++     */
++    private Transformer searchableTransformer;
+ 
+     /**
+-     * @plexus.requirement role-hint="lucene"
++     * @plexus.requirement role-hint="index-exists"
+      */
+-    private RepositoryContentIndexFactory indexFactory;
++    private Predicate indexExistsPredicate;
+ 
+     /**
+      * @plexus.requirement
+      */
+     private ArchivaConfiguration configuration;
+ 
+-    private Map repositoryMap = new HashMap();
++    private List localIndexedRepositories = new ArrayList();
+ 
+-    public SearchResults searchForMd5( String md5 )
++    public SearchResults searchForChecksum( String checksum, SearchResultLimits limits )
+     {
+-        // TODO Auto-generated method stub
+-        return null;
+-    }
++        List indexes = getHashcodeIndexes();
+ 
+-    public SearchResults searchForTerm( String term )
+-    {
+-        List indexes = new ArrayList();
++        try
++        {
++            QueryParser parser = new MultiFieldQueryParser( new String[] { HashcodesKeys.MD5, HashcodesKeys.SHA1 },
++                                                            new HashcodesHandlers().getAnalyzer() );
++            LuceneQuery query = new LuceneQuery( parser.parse( checksum ) );
++            SearchResults results = searchAll( query, limits, indexes );
++            results.getRepositories().addAll( this.localIndexedRepositories );
+ 
+-        indexes.addAll( getBytecodeIndexes() );
+-        indexes.addAll( getFileContentIndexes() );
+-        indexes.addAll( getHashcodeIndexes() );
++            return results;
++        }
++        catch ( ParseException e )
++        {
++            getLogger().warn( "Unable to parse query [" + checksum + "]: " + e.getMessage(), e );
++        }
+ 
+-        SearchResults results = new SearchResults();
++        // empty results.
++        return new SearchResults();
++    }
+ 
+-        results.getRepositories().addAll( this.repositoryMap.values() );
++    public SearchResults searchForBytecode( String term, SearchResultLimits limits )
++    {
++        List indexes = getHashcodeIndexes();
+ 
+-        Iterator it = indexes.iterator();
+-        while ( it.hasNext() )
++        try
+         {
+-            RepositoryContentIndex index = (RepositoryContentIndex) it.next();
++            QueryParser parser = new BytecodeHandlers().getQueryParser();
++            LuceneQuery query = new LuceneQuery( parser.parse( term ) );
++            SearchResults results = searchAll( query, limits, indexes );
++            results.getRepositories().addAll( this.localIndexedRepositories );
+ 
+-            try
+-            {
+-                QueryParser parser = index.getQueryParser();
+-                LuceneQuery query = new LuceneQuery( parser.parse( term ) );
+-                List hits = index.search( query );
+-
+-                switch ( getIndexId( index ) )
+-                {
+-                    case BYTECODE:
+-                        results.getBytecodeHits().addAll( hits );
+-                        break;
+-                    case FILE_CONTENT:
+-                        results.getContentHits().addAll( hits );
+-                        break;
+-                    case HASHCODE:
+-                        results.getHashcodeHits().addAll( hits );
+-                        break;
+-                }
+-            }
+-            catch ( ParseException e )
+-            {
+-                getLogger().warn( "Unable to parse query [" + term + "]: " + e.getMessage(), e );
+-            }
+-            catch ( RepositoryIndexSearchException e )
+-            {
+-                getLogger().warn( "Unable to search index [" + index + "] for term [" + term + "]: " + e.getMessage(),
+-                                  e );
+-            }
++            return results;
++        }
++        catch ( ParseException e )
++        {
++            getLogger().warn( "Unable to parse query [" + term + "]: " + e.getMessage(), e );
+         }
+ 
+-        return results;
++        // empty results.
++        return new SearchResults();
+     }
+ 
+-    private int getIndexId( RepositoryContentIndex index )
++    public SearchResults searchForTerm( String term, SearchResultLimits limits )
+     {
+-        if ( FileContentKeys.ID.equals( index.getId() ) )
+-        {
+-            return FILE_CONTENT;
+-        }
++        List indexes = getFileContentIndexes();
+ 
+-        if ( BytecodeKeys.ID.equals( index.getId() ) )
++        try
+         {
+-            return BYTECODE;
+-        }
++            QueryParser parser = new FileContentHandlers().getQueryParser();
++            LuceneQuery query = new LuceneQuery( parser.parse( term ) );
++            SearchResults results = searchAll( query, limits, indexes );
++            results.getRepositories().addAll( this.localIndexedRepositories );
+ 
+-        if ( HashcodesKeys.ID.equals( index.getId() ) )
++            return results;
++        }
++        catch ( ParseException e )
+         {
+-            return HASHCODE;
++            getLogger().warn( "Unable to parse query [" + term + "]: " + e.getMessage(), e );
+         }
+ 
+-        return UNKNOWN;
++        // empty results.
++        return new SearchResults();
+     }
+ 
+-    public List getBytecodeIndexes()
++    private SearchResults searchAll( LuceneQuery luceneQuery, SearchResultLimits limits, List indexes )
+     {
+-        List ret = new ArrayList();
++        org.apache.lucene.search.Query specificQuery = luceneQuery.getLuceneQuery();
++
++        SearchResults results = new SearchResults();
++
++        if ( indexes.isEmpty() )
++        {
++            // No point going any further.
++            return results;
++        }
++
++        // Setup the converter
++        LuceneEntryConverter converter = null;
++        RepositoryContentIndex index = (RepositoryContentIndex) indexes.get( 0 );
++        converter = index.getEntryConverter();
++
++        // Process indexes into an array of Searchables.
++        List searchableList = new ArrayList( indexes );
++        CollectionUtils.transform( searchableList, searchableTransformer );
+ 
+-        synchronized ( this.repositoryMap )
++        Searchable searchables[] = new Searchable[searchableList.size()];
++        searchableList.toArray( searchables );
++
++        try
+         {
+-            Iterator it = this.repositoryMap.values().iterator();
+-            while ( it.hasNext() )
++            // Create a multi-searcher for looking up the information.
++            MultiSearcher searcher = new MultiSearcher( searchables );
++
++            // Perform the search.
++            Hits hits = searcher.search( specificQuery );
++
++            int hitCount = hits.length();
++
++            // Now process the limits.
++            results.setLimits( limits );
++            results.setTotalHits( hitCount );
++
++            int fetchCount = limits.getPageSize();
++            int offset = ( limits.getSelectedPage() * limits.getPageSize() );
++
++            if ( limits.getSelectedPage() == SearchResultLimits.ALL_PAGES )
+             {
+-                ArchivaRepository repo = (ArchivaRepository) it.next();
++                fetchCount = hitCount;
++                offset = 0;
++            }
+ 
+-                if ( !isSearchAllowed( repo ) )
++            // Goto offset.
++            if ( offset < hitCount )
++            {
++                // only process if the offset is within the hit count.
++                for ( int i = 0; i <= fetchCount; i++ )
+                 {
+-                    continue;
++                    // Stop fetching if we are past the total # of available hits.
++                    if ( offset + i >= hitCount )
++                    {
++                        break;
++                    }
++
++                    try
++                    {
++                        Document doc = hits.doc( offset + i );
++                        LuceneRepositoryContentRecord record = converter.convert( doc );
++                        results.addHit( record );
++                    }
++                    catch ( java.text.ParseException e )
++                    {
++                        getLogger().warn( "Unable to parse document into record: " + e.getMessage(), e );
++                    }
+                 }
+-
+-                ret.add( indexFactory.createBytecodeIndex( repo ) );
+             }
+         }
++        catch ( IOException e )
++        {
++            getLogger().error( "Unable to setup multi-search: " + e.getMessage(), e );
++        }
+ 
+-        return ret;
++        return results;
+     }
+ 
+-    public List getFileContentIndexes()
++    private Predicate getAllowedToSearchReposPredicate()
++    {
++        return new UserAllowedToSearchRepositoryPredicate();
++    }
++
++    public List getBytecodeIndexes()
+     {
+         List ret = new ArrayList();
+ 
+-        synchronized ( this.repositoryMap )
++        synchronized ( this.localIndexedRepositories )
+         {
+-            Iterator it = this.repositoryMap.values().iterator();
+-            while ( it.hasNext() )
+-            {
+-                ArchivaRepository repo = (ArchivaRepository) it.next();
+-
+-                if ( !isSearchAllowed( repo ) )
+-                {
+-                    continue;
+-                }
+-
+-                ret.add( indexFactory.createFileContentIndex( repo ) );
+-            }
++            ret.addAll( CollectionUtils.select( this.localIndexedRepositories, getAllowedToSearchReposPredicate() ) );
++            CollectionUtils.transform( ret, bytecodeIndexTransformer );
++            CollectionUtils.filter( ret, indexExistsPredicate );
+         }
+ 
+         return ret;
+     }
+ 
+-    public List getHashcodeIndexes()
++    public List getFileContentIndexes()
+     {
+         List ret = new ArrayList();
+ 
+-        synchronized ( this.repositoryMap )
++        synchronized ( this.localIndexedRepositories )
+         {
+-            Iterator it = this.repositoryMap.values().iterator();
+-            while ( it.hasNext() )
+-            {
+-                ArchivaRepository repo = (ArchivaRepository) it.next();
+-
+-                if ( !isSearchAllowed( repo ) )
+-                {
+-                    continue;
+-                }
+-
+-                ret.add( indexFactory.createHashcodeIndex( repo ) );
+-            }
++            ret.addAll( CollectionUtils.select( this.localIndexedRepositories, getAllowedToSearchReposPredicate() ) );
++            CollectionUtils.transform( ret, filecontentIndexTransformer );
++            CollectionUtils.filter( ret, indexExistsPredicate );
+         }
+ 
+         return ret;
+     }
+ 
+-    public boolean isSearchAllowed( ArchivaRepository repo )
++    public List getHashcodeIndexes()
+     {
+-        // TODO: test if user has permissions to search in this repo.
++        List ret = new ArrayList();
+ 
+-        return true;
++        synchronized ( this.localIndexedRepositories )
++        {
++            ret.addAll( CollectionUtils.select( this.localIndexedRepositories, getAllowedToSearchReposPredicate() ) );
++            CollectionUtils.transform( ret, hashcodesIndexTransformer );
++            CollectionUtils.filter( ret, indexExistsPredicate );
++        }
++
++        return ret;
+     }
+ 
+     public void afterConfigurationChange( Registry registry, String propertyName, Object propertyValue )
+     {
+         if ( ConfigurationNames.isRepositories( propertyName ) )
+         {
+-            initRepositoryMap();
++            initRepositories();
+         }
+     }
+ 
+@@ -243,28 +306,41 @@ public void beforeConfigurationChange( Registry registry, String propertyName, O
+         /* Nothing to do here */
+     }
+ 
+-    private void initRepositoryMap()
++    private void initRepositories()
+     {
+-        synchronized ( this.repositoryMap )
++        synchronized ( this.localIndexedRepositories )
+         {
+-            this.repositoryMap.clear();
++            this.localIndexedRepositories.clear();
++
++            Predicate localIndexedRepos = AndPredicate.getInstance( LocalRepositoryPredicate.getInstance(),
++                                                                    IndexedRepositoryPredicate.getInstance() );
+ 
+-            Iterator it = configuration.getConfiguration().createRepositoryMap().entrySet().iterator();
+-            while ( it.hasNext() )
++            Collection repos = CollectionUtils.select( configuration.getConfiguration().getRepositories(),
++                                                       localIndexedRepos );
++            
++            Transformer toArchivaRepository = new Transformer()
+             {
+-                Map.Entry entry = (Entry) it.next();
+-                String key = (String) entry.getKey();
+-                RepositoryConfiguration repoConfig = (RepositoryConfiguration) entry.getValue();
+-                ArchivaRepository repository = ArchivaConfigurationAdaptor.toArchivaRepository( repoConfig );
+-                this.repositoryMap.put( key, repository );
+-            }
++
++                public Object transform( Object input )
++                {
++                    if ( input instanceof RepositoryConfiguration )
++                    {
++                        return ArchivaConfigurationAdaptor.toArchivaRepository( (RepositoryConfiguration) input );
++                    }
++                    return input;
++                }
++            };
++
++            CollectionUtils.transform( repos, toArchivaRepository );
++
++            this.localIndexedRepositories.addAll( repos );
+         }
+     }
+ 
+     public void initialize()
+         throws InitializationException
+     {
+-        initRepositoryMap();
++        initRepositories();
+         configuration.addChangeListener( this );
+     }
+ }
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java
+new file mode 100644
+index 0000000000..aed7671cd7
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultHit.java
+@@ -0,0 +1,115 @@
++package org.apache.maven.archiva.indexer.search;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.lang.StringUtils;
++import org.apache.maven.archiva.model.ArchivaArtifact;
++
++import java.util.ArrayList;
++import java.util.List;
++
++/**
++ * SearchResultHit 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ */
++public class SearchResultHit
++{
++    // The (optional) context for this result.
++    private String context;
++
++    // Basic hit, direct to non-artifact resource.
++    private String url;
++
++    // Advanced hit, reference to groupId.
++    private String groupId;
++
++    //  Advanced hit, reference to artifactId.
++    private String artifactId;
++
++    // Advanced hit, if artifact, all versions of artifact
++    private List artifacts = new ArrayList();
++
++    public String getContext()
++    {
++        return context;
++    }
++
++    public void setContext( String context )
++    {
++        this.context = context;
++    }
++
++    public String getUrl()
++    {
++        return url;
++    }
++
++    public void setUrl( String url )
++    {
++        this.url = url;
++    }
++
++    public String getArtifactId()
++    {
++        return artifactId;
++    }
++
++    public void setArtifactId( String artifactId )
++    {
++        this.artifactId = artifactId;
++    }
++
++    public void addArtifact( ArchivaArtifact artifact )
++    {
++        this.artifacts.add( artifact );
++
++        if ( StringUtils.isBlank( this.groupId ) )
++        {
++            this.groupId = artifact.getGroupId();
++        }
++
++        if ( StringUtils.isBlank( this.artifactId ) )
++        {
++            this.artifactId = artifact.getArtifactId();
++        }
++    }
++
++    public List getArtifacts()
++    {
++        return artifacts;
++    }
++
++    public void setArtifacts( List artifacts )
++    {
++        this.artifacts = artifacts;
++    }
++
++    public String getGroupId()
++    {
++        return groupId;
++    }
++
++    public void setGroupId( String groupId )
++    {
++        this.groupId = groupId;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultLimits.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultLimits.java
+new file mode 100644
+index 0000000000..a344f2f182
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResultLimits.java
+@@ -0,0 +1,70 @@
++package org.apache.maven.archiva.indexer.search;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++/**
++ * SearchResultLimits - used to provide the search some limits on how the results are returned.
++ * This can provide paging for the 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ */
++public class SearchResultLimits
++{
++    /** 
++     * Constant to use for {@link #setSelectedPage(int)} to indicate a desire to get ALL PAGES.
++     * USE WITH CAUTION!!
++     */
++    public static final int ALL_PAGES = ( -1 );
++
++    private int pageSize = 30;
++
++    private int selectedPage = 0;
++
++    public SearchResultLimits( int selectedPage )
++    {
++        this.selectedPage = selectedPage;
++    }
++
++    public int getPageSize()
++    {
++        return pageSize;
++    }
++
++    /**
++     * Set page size for maximum # of hits to return per page.
++     * 
++     * @param pageSize size of page by # of hits. (maximum value is 200)
++     */
++    public void setPageSize( int pageSize )
++    {
++        this.pageSize = Math.min( 200, pageSize );
++    }
++
++    public int getSelectedPage()
++    {
++        return selectedPage;
++    }
++
++    public void setSelectedPage( int selectedPage )
++    {
++        this.selectedPage = selectedPage;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java
+index 3062f040cd..8ecbf22371 100644
+--- a/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java
++++ b/archiva-base/archiva-indexer/src/main/java/org/apache/maven/archiva/indexer/search/SearchResults.java
+@@ -19,8 +19,17 @@
+  * under the License.
+  */
+ 
++import org.apache.commons.lang.StringUtils;
++import org.apache.maven.archiva.indexer.bytecode.BytecodeRecord;
++import org.apache.maven.archiva.indexer.filecontent.FileContentRecord;
++import org.apache.maven.archiva.indexer.hashcodes.HashcodesRecord;
++import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentRecord;
++import org.apache.maven.archiva.model.ArchivaArtifact;
++
+ import java.util.ArrayList;
++import java.util.HashMap;
+ import java.util.List;
++import java.util.Map;
+ 
+ /**
+  * SearchResults 
+@@ -32,59 +41,140 @@ public class SearchResults
+ {
+     private List repositories = new ArrayList();
+ 
+-    private List contentHits = new ArrayList();
++    private Map hits = new HashMap();
+ 
+-    private List bytecodeHits = new ArrayList();
++    private int totalHits;
+ 
+-    private List hashcodeHits = new ArrayList();
++    private SearchResultLimits limits;
+ 
+     public SearchResults()
+     {
+         /* do nothing */
+     }
+ 
+-    public boolean isEmpty()
++    public void addHit( LuceneRepositoryContentRecord record )
+     {
+-        return ( bytecodeHits.isEmpty() && hashcodeHits.isEmpty() && contentHits.isEmpty() );
++        if ( record instanceof FileContentRecord )
++        {
++            FileContentRecord filecontent = (FileContentRecord) record;
++            addFileContentHit( filecontent );
++        }
++        else if ( record instanceof HashcodesRecord )
++        {
++            HashcodesRecord hashcodes = (HashcodesRecord) record;
++            addHashcodeHit( hashcodes );
++        }
++        else if ( record instanceof BytecodeRecord )
++        {
++            BytecodeRecord bytecode = (BytecodeRecord) record;
++            addBytecodeHit( bytecode );
++        }
+     }
+ 
+-    public List getBytecodeHits()
++    private void addBytecodeHit( BytecodeRecord bytecode )
+     {
+-        return bytecodeHits;
++        String key = toKey( bytecode.getArtifact() );
++
++        SearchResultHit hit = (SearchResultHit) this.hits.get( key );
++
++        if ( hit == null )
++        {
++            hit = new SearchResultHit();
++        }
++
++        hit.addArtifact( bytecode.getArtifact() );
++        hit.setContext( null ); // TODO: provide context on why this is a valuable hit.
++
++        this.hits.put( key, hit );
+     }
+ 
+-    public List getContentHits()
++    private String toKey( ArchivaArtifact artifact )
+     {
+-        return contentHits;
++        StringBuffer key = new StringBuffer();
++
++        key.append( StringUtils.defaultString( artifact.getGroupId() ) ).append( ":" );
++        key.append( StringUtils.defaultString( artifact.getArtifactId() ) );
++
++        return key.toString();
+     }
+ 
+-    public List getHashcodeHits()
++    private void addHashcodeHit( HashcodesRecord hashcodes )
+     {
+-        return hashcodeHits;
++        String key = toKey( hashcodes.getArtifact() );
++
++        SearchResultHit hit = (SearchResultHit) this.hits.get( key );
++
++        if ( hit == null )
++        {
++            hit = new SearchResultHit();
++        }
++
++        hit.addArtifact( hashcodes.getArtifact() );
++        hit.setContext( null ); // TODO: provide context on why this is a valuable hit.
++
++        this.hits.put( key, hit );
+     }
+ 
+-    public List getRepositories()
++    public void addFileContentHit( FileContentRecord filecontent )
+     {
+-        return repositories;
++        String key = filecontent.getPrimaryKey();
++
++        SearchResultHit hit = (SearchResultHit) this.hits.get( key );
++
++        if ( hit == null )
++        {
++            // Only need to worry about this hit if it is truely new.
++            hit = new SearchResultHit();
++
++            hit.setUrl( filecontent.getRepositoryId() + "/" + filecontent.getFilename() );
++            hit.setContext( null ); // TODO: handle context + highlight later.
++
++            this.hits.put( key, hit );
++        }
+     }
+ 
+-    public void setBytecodeHits( List bytecodeHits )
++    /**
++     * Get the list of {@link SearchResultHit} objects.
++     * 
++     * @return the list of {@link SearchResultHit} objects.
++     */
++    public List getHits()
+     {
+-        this.bytecodeHits = bytecodeHits;
++        return new ArrayList( hits.values() );
+     }
+ 
+-    public void setContentHits( List contentHits )
++    public List getRepositories()
+     {
+-        this.contentHits = contentHits;
++        return repositories;
+     }
+ 
+-    public void setHashcodeHits( List hashcodeHits )
++    public boolean isEmpty()
+     {
+-        this.hashcodeHits = hashcodeHits;
++        return hits.isEmpty();
+     }
+ 
+     public void setRepositories( List repositories )
+     {
+         this.repositories = repositories;
+     }
++
++    public SearchResultLimits getLimits()
++    {
++        return limits;
++    }
++
++    public void setLimits( SearchResultLimits limits )
++    {
++        this.limits = limits;
++    }
++
++    public int getTotalHits()
++    {
++        return totalHits;
++    }
++
++    public void setTotalHits( int totalHits )
++    {
++        this.totalHits = totalHits;
++    }
+ }
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AbstractSearchTestCase.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AbstractSearchTestCase.java
+index 5d4d62cb43..0cf046f86f 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AbstractSearchTestCase.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AbstractSearchTestCase.java
+@@ -19,14 +19,19 @@
+  * under the License.
+  */
+ 
++import org.apache.lucene.document.Document;
+ import org.apache.lucene.index.Term;
+ import org.apache.lucene.queryParser.ParseException;
+ import org.apache.lucene.queryParser.QueryParser;
++import org.apache.lucene.search.Hit;
++import org.apache.lucene.search.Hits;
+ import org.apache.lucene.search.Query;
++import org.apache.lucene.search.Searcher;
+ import org.apache.lucene.search.TermQuery;
+-import org.apache.maven.archiva.indexer.lucene.LuceneQuery;
+ import org.apache.maven.archiva.indexer.lucene.LuceneRepositoryContentRecord;
+ 
++import java.io.IOException;
++import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
+@@ -39,13 +44,15 @@
+  * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
+  * @version $Id$
+  */
+-public abstract class AbstractSearchTestCase extends AbstractIndexerTestCase
++public abstract class AbstractSearchTestCase
++    extends AbstractIndexerTestCase
+ {
+     protected Map records;
+ 
+     protected abstract Map createSampleRecordsMap();
+ 
+-    protected void setUp() throws Exception
++    protected void setUp()
++        throws Exception
+     {
+         super.setUp();
+ 
+@@ -59,7 +66,8 @@ protected Query createExactMatchQuery( String field, String value )
+         return new TermQuery( new Term( field, value ) );
+     }
+ 
+-    protected Query createMatchQuery( String field, String value ) throws ParseException
++    protected Query createMatchQuery( String field, String value )
++        throws ParseException
+     {
+         QueryParser queryParser = new QueryParser( field, indexHandlers.getAnalyzer() );
+         queryParser.setLowercaseExpandedTerms( true );
+@@ -81,8 +89,8 @@ protected void assertResults( String expectedKeys[], List actualResults )
+         if ( expectedKeys.length != actualResults.size() )
+         {
+             dumpResults( actualResults );
+-            throw new ComparisonFailure( "Results count", String.valueOf( expectedKeys.length ),
+-                                         String.valueOf( actualResults.size() ) );
++            throw new ComparisonFailure( "Results count", String.valueOf( expectedKeys.length ), String
++                .valueOf( actualResults.size() ) );
+         }
+ 
+         assertEquals( "Results count", expectedKeys.length, actualResults.size() );
+@@ -96,8 +104,7 @@ protected void assertResults( String expectedKeys[], List actualResults )
+             {
+                 dumpResults( actualResults );
+                 fail( "Expected record <" + key
+-                                + "> not in records map (smack the unit test developer, tell them to fix method "
+-                                + getName() + ")" );
++                    + "> not in records map (smack the unit test developer, tell them to fix method " + getName() + ")" );
+             }
+ 
+             if ( !actualResults.contains( record ) )
+@@ -133,31 +140,56 @@ protected void assertNoResults( List results )
+         }
+     }
+ 
+-    protected void assertQueryExactMatchNoResults( String key, String term ) throws RepositoryIndexSearchException
++    protected void assertQueryExactMatchNoResults( String key, String term )
++        throws Exception
+     {
+         Query query = createExactMatchQuery( key, term );
+-        List results = index.search( new LuceneQuery( query ) );
++        List results = search( query );
+         assertNoResults( results );
+     }
+ 
+-    protected void assertQueryExactMatch( String key, String names[], String term ) throws RepositoryIndexSearchException
++    protected void assertQueryExactMatch( String key, String names[], String term )
++        throws Exception
+     {
+         Query query = createExactMatchQuery( key, term );
+-        List results = index.search( new LuceneQuery( query ) );
++        List results = search( query );
+         assertResults( names, results );
+     }
+ 
+-    protected void assertQueryMatch( String key, String names[], String term ) throws Exception
++    protected void assertQueryMatch( String key, String names[], String term )
++        throws Exception
+     {
+         Query query = createMatchQuery( key, term );
+-        List results = index.search( new LuceneQuery( query ) );
++        List results = search( query );
+         assertResults( names, results );
+     }
+ 
+-    protected void assertQueryMatchNoResults( String key, String term ) throws Exception
++    protected void assertQueryMatchNoResults( String key, String term )
++        throws Exception
+     {
+         Query query = createMatchQuery( key, term );
+-        List results = index.search( new LuceneQuery( query ) );
++
++        List results = search( query );
++
+         assertNoResults( results );
+     }
++
++    protected List search( Query query )
++        throws RepositoryIndexSearchException, IOException, java.text.ParseException
++    {
++        Searcher searcher = (Searcher) index.getSearchable();; // this shouldn't cause a problem.
++
++        Hits hits = searcher.search( query );
++
++        List results = new ArrayList();
++        Iterator it = hits.iterator();
++        while ( it.hasNext() )
++        {
++            Hit hit = (Hit) it.next();
++            Document doc = hit.getDocument();
++            LuceneRepositoryContentRecord record = index.getEntryConverter().convert( doc );
++            results.add( record );
++        }
++        return results;
++    }
+ }
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AllTests.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AllTests.java
+index 2cd47bfc64..82bcb21584 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AllTests.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/AllTests.java
+@@ -38,6 +38,7 @@ public static Test suite()
+         suite.addTest( org.apache.maven.archiva.indexer.bytecode.AllTests.suite() );
+         suite.addTest( org.apache.maven.archiva.indexer.hashcodes.AllTests.suite() );
+         suite.addTest( org.apache.maven.archiva.indexer.query.AllTests.suite() );
++        suite.addTest( org.apache.maven.archiva.indexer.search.AllTests.suite() );
+         //$JUnit-END$
+         return suite;
+     }
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/bytecode/BytecodeSearchTest.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/bytecode/BytecodeSearchTest.java
+index 47b22721ee..0dadb2761d 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/bytecode/BytecodeSearchTest.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/bytecode/BytecodeSearchTest.java
+@@ -26,9 +26,7 @@
+ import org.apache.maven.archiva.indexer.ArtifactKeys;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndex;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
+-import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
+ import org.apache.maven.archiva.indexer.lucene.LuceneIndexHandlers;
+-import org.apache.maven.archiva.indexer.lucene.LuceneQuery;
+ import org.apache.maven.archiva.model.ArchivaArtifact;
+ import org.apache.maven.archiva.model.ArchivaRepository;
+ 
+@@ -72,96 +70,97 @@ protected Map createSampleRecordsMap()
+             ArchivaArtifact artifact = (ArchivaArtifact) entry.getValue();
+             File dumpFile = getDumpFile( artifact );
+             BytecodeRecord record = BytecodeRecordLoader.loadRecord( dumpFile, artifact );
++            record.setRepositoryId( "test-repo" );
+             records.put( entry.getKey(), record );
+         }
+ 
+         return records;
+     }
+ 
+-    public void testExactMatchVersionSimple() throws RepositoryIndexSearchException
++    public void testExactMatchVersionSimple() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "archiva-common" }, "1.0" );
+     }
+ 
+-    public void testExactMatchVersionSnapshot() throws RepositoryIndexSearchException
++    public void testExactMatchVersionSnapshot() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "continuum-webapp" }, "1.0.3-SNAPSHOT" );
+     }
+ 
+-    public void testExactMatchVersionAlphaSnapshot() throws RepositoryIndexSearchException
++    public void testExactMatchVersionAlphaSnapshot() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "redback-authorization-open" },
+                                "1.0-alpha-1-SNAPSHOT" );
+     }
+ 
+-    public void testExactMatchVersionTimestampedSnapshot() throws RepositoryIndexSearchException
++    public void testExactMatchVersionTimestampedSnapshot() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "wagon-provider-api" },
+                                "1.0-beta-3-20070209.213958-2" );
+     }
+ 
+-    public void testExactMatchVersionInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchVersionInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.VERSION_EXACT, "foo" );
+     }
+ 
+-    public void testExactMatchGroupIdOrgApacheMavenArchiva() throws RepositoryIndexSearchException
++    public void testExactMatchGroupIdOrgApacheMavenArchiva() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.GROUPID_EXACT, new String[] { "archiva-common" },
+                                "org.apache.maven.archiva" );
+     }
+ 
+-    public void testExactMatchGroupIdOrgApacheMaven() throws RepositoryIndexSearchException
++    public void testExactMatchGroupIdOrgApacheMaven() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.GROUPID_EXACT, new String[] { "maven-archetype-simple" },
+                                "org.apache.maven" );
+     }
+ 
+-    public void testExactMatchGroupIdInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchGroupIdInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.GROUPID_EXACT, "foo" );
+     }
+ 
+-    public void testExactMatchArtifactIdArchivaCommon() throws RepositoryIndexSearchException
++    public void testExactMatchArtifactIdArchivaCommon() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.ARTIFACTID_EXACT, new String[] { "archiva-common" }, "archiva-common" );
+     }
+ 
+-    public void testExactMatchArtifactIdTestNg() throws RepositoryIndexSearchException
++    public void testExactMatchArtifactIdTestNg() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.ARTIFACTID_EXACT, new String[] { "testng" }, "testng" );
+     }
+ 
+-    public void testExactMatchArtifactIdInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchArtifactIdInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.ARTIFACTID_EXACT, "foo" );
+     }
+ 
+-    public void testExactMatchTypeJar() throws RepositoryIndexSearchException
++    public void testExactMatchTypeJar() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "archiva-common", "redback-authorization-open",
+             "testng", "wagon-provider-api" } ), "jar" );
+     }
+ 
+-    public void testExactMatchTypeWar() throws RepositoryIndexSearchException
++    public void testExactMatchTypeWar() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "continuum-webapp" } ), "war" );
+     }
+ 
+     /* TODO: Fix 'maven-plugin' type
+-     public void testExactMatchTypePlugin() throws RepositoryIndexSearchException
++     public void testExactMatchTypePlugin() throws Exception
+      {
+      assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "maven-help-plugin" } ), "maven-plugin" );
+      } */
+ 
+     /* TODO: Fix 'maven-archetype' type
+-     public void testExactMatchTypeArchetype() throws RepositoryIndexSearchException
++     public void testExactMatchTypeArchetype() throws Exception
+      {
+      assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "maven-archetype-simple" } ), "maven-archetype" );
+      }
+      */
+ 
+-    public void testExactMatchTypeInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchTypeInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.TYPE, "foo" );
+     }
+@@ -250,7 +249,7 @@ public void testMatchClassifierNotJdk15() throws Exception
+         BooleanQuery bQuery = new BooleanQuery();
+         bQuery.add( new MatchAllDocsQuery(), BooleanClause.Occur.MUST );
+         bQuery.add( createMatchQuery( ArtifactKeys.CLASSIFIER, "jdk15" ), BooleanClause.Occur.MUST_NOT );
+-        List results = index.search( new LuceneQuery( bQuery ) );
++        List results = search( bQuery );
+ 
+         assertResults( new String[] { "archiva-common", "continuum-webapp", "redback-authorization-open",
+             "daytrader-ear", "maven-archetype-simple", "maven-help-plugin", "wagon-provider-api" }, results );
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesIndexTest.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesIndexTest.java
+index 8693f23ee7..abacb665af 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesIndexTest.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesIndexTest.java
+@@ -55,6 +55,7 @@ protected LuceneRepositoryContentRecord createSimpleRecord()
+         ArchivaArtifact artifact = new ArchivaArtifact( "com.foo", "projfoo", "1.0", "", "jar" );
+         
+         HashcodesRecord record = new HashcodesRecord();
++        record.setRepositoryId( "test-repo" );
+         record.setArtifact( artifact );
+         
+         artifact.getModel().setChecksumSHA1( "c66f18bf192cb613fc2febb4da541a34133eedc2" );
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesSearchTest.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesSearchTest.java
+index c25a06e2b7..d32d0d605c 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesSearchTest.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/hashcodes/HashcodesSearchTest.java
+@@ -26,9 +26,7 @@
+ import org.apache.maven.archiva.indexer.ArtifactKeys;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndex;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
+-import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
+ import org.apache.maven.archiva.indexer.lucene.LuceneIndexHandlers;
+-import org.apache.maven.archiva.indexer.lucene.LuceneQuery;
+ import org.apache.maven.archiva.model.ArchivaArtifact;
+ import org.apache.maven.archiva.model.ArchivaRepository;
+ 
+@@ -72,118 +70,119 @@ protected Map createSampleRecordsMap()
+             ArchivaArtifact artifact = (ArchivaArtifact) entry.getValue();
+             File dumpFile = getDumpFile( artifact );
+             HashcodesRecord record = HashcodesRecordLoader.loadRecord( dumpFile, artifact );
++            record.setRepositoryId( "test-repo" );
+             records.put( entry.getKey(), record );
+         }
+ 
+         return records;
+     }
+ 
+-    public void testExactMatchVersionSimple() throws RepositoryIndexSearchException
++    public void testExactMatchVersionSimple() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "archiva-common" }, "1.0" );
+     }
+ 
+-    public void testExactMatchVersionSnapshot() throws RepositoryIndexSearchException
++    public void testExactMatchVersionSnapshot() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "continuum-webapp" }, "1.0.3-SNAPSHOT" );
+     }
+ 
+-    public void testExactMatchVersionAlphaSnapshot() throws RepositoryIndexSearchException
++    public void testExactMatchVersionAlphaSnapshot() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "redback-authorization-open" },
+                                "1.0-alpha-1-SNAPSHOT" );
+     }
+ 
+-    public void testExactMatchVersionTimestampedSnapshot() throws RepositoryIndexSearchException
++    public void testExactMatchVersionTimestampedSnapshot() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.VERSION_EXACT, new String[] { "wagon-provider-api" },
+                                "1.0-beta-3-20070209.213958-2" );
+     }
+ 
+-    public void testExactMatchVersionInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchVersionInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.VERSION_EXACT, "foo" );
+     }
+ 
+-    public void testExactMatchGroupIdOrgApacheMavenArchiva() throws RepositoryIndexSearchException
++    public void testExactMatchGroupIdOrgApacheMavenArchiva() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.GROUPID_EXACT, new String[] { "archiva-common" },
+                                "org.apache.maven.archiva" );
+     }
+ 
+-    public void testExactMatchGroupIdOrgApacheMaven() throws RepositoryIndexSearchException
++    public void testExactMatchGroupIdOrgApacheMaven() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.GROUPID_EXACT, new String[] { "maven-archetype-simple" },
+                                "org.apache.maven" );
+     }
+ 
+-    public void testExactMatchGroupIdInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchGroupIdInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.GROUPID_EXACT, "foo" );
+     }
+ 
+-    public void testExactMatchArtifactIdArchivaCommon() throws RepositoryIndexSearchException
++    public void testExactMatchArtifactIdArchivaCommon() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.ARTIFACTID_EXACT, new String[] { "archiva-common" }, "archiva-common" );
+     }
+ 
+-    public void testExactMatchArtifactIdTestNg() throws RepositoryIndexSearchException
++    public void testExactMatchArtifactIdTestNg() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.ARTIFACTID_EXACT, new String[] { "testng" }, "testng" );
+     }
+ 
+-    public void testExactMatchArtifactIdInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchArtifactIdInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.ARTIFACTID_EXACT, "foo" );
+     }
+ 
+-    public void testExactMatchTypeJar() throws RepositoryIndexSearchException
++    public void testExactMatchTypeJar() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "archiva-common", "redback-authorization-open",
+             "testng", "wagon-provider-api" } ), "jar" );
+     }
+ 
+-    public void testExactMatchTypeWar() throws RepositoryIndexSearchException
++    public void testExactMatchTypeWar() throws Exception
+     {
+         assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "continuum-webapp" } ), "war" );
+     }
+ 
+     /* TODO: Fix 'maven-plugin' type
+-     public void testExactMatchTypePlugin() throws RepositoryIndexSearchException
++     public void testExactMatchTypePlugin() throws Exception
+      {
+      assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "maven-help-plugin" } ), "maven-plugin" );
+      } */
+ 
+     /* TODO: Fix 'maven-archetype' type
+-     public void testExactMatchTypeArchetype() throws RepositoryIndexSearchException
++     public void testExactMatchTypeArchetype() throws Exception
+      {
+      assertQueryExactMatch( ArtifactKeys.TYPE, ( new String[] { "maven-archetype-simple" } ), "maven-archetype" );
+      }
+      */
+ 
+-    public void testExactMatchTypeInvalid() throws RepositoryIndexSearchException
++    public void testExactMatchTypeInvalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( ArtifactKeys.TYPE, "foo" );
+     }
+ 
+-    public void testExactMatchMd5() throws RepositoryIndexSearchException
++    public void testExactMatchMd5() throws Exception
+     {
+         assertQueryExactMatch( HashcodesKeys.MD5, ( new String[] { "redback-authorization-open" } ),
+                                "f42047fe2e177ac04d0df7aa44d408be" );
+     }
+ 
+-    public void testExactMatchMd5Invalid() throws RepositoryIndexSearchException
++    public void testExactMatchMd5Invalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( HashcodesKeys.MD5, "foo" );
+     }
+ 
+-    public void testExactMatchSha1() throws RepositoryIndexSearchException
++    public void testExactMatchSha1() throws Exception
+     {
+         assertQueryExactMatch( HashcodesKeys.SHA1, ( new String[] { "archiva-common" } ),
+                                "c2635a1b38bd4520a6604664c04b2b3c32330864" );
+     }
+ 
+-    public void testExactMatchSha1Invalid() throws RepositoryIndexSearchException
++    public void testExactMatchSha1Invalid() throws Exception
+     {
+         assertQueryExactMatchNoResults( HashcodesKeys.SHA1, "foo" );
+     }
+@@ -272,7 +271,7 @@ public void testMatchClassifierNotJdk15() throws Exception
+         BooleanQuery bQuery = new BooleanQuery();
+         bQuery.add( new MatchAllDocsQuery(), BooleanClause.Occur.MUST );
+         bQuery.add( createMatchQuery( ArtifactKeys.CLASSIFIER, "jdk15" ), BooleanClause.Occur.MUST_NOT );
+-        List results = index.search( new LuceneQuery( bQuery ) );
++        List results = search( bQuery );
+ 
+         assertResults( new String[] { "archiva-common", "continuum-webapp", "redback-authorization-open",
+             "daytrader-ear", "maven-archetype-simple", "maven-help-plugin", "wagon-provider-api" }, results );
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/AllTests.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/AllTests.java
+new file mode 100644
+index 0000000000..2f65f1d4be
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/AllTests.java
+@@ -0,0 +1,41 @@
++package org.apache.maven.archiva.indexer.search;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import junit.framework.Test;
++import junit.framework.TestSuite;
++
++/**
++ * AllTests - conveinence test suite for IDE users. 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ */
++public class AllTests
++{
++    public static Test suite()
++    {
++        TestSuite suite = new TestSuite( "Test for org.apache.maven.archiva.indexer.search" );
++        //$JUnit-BEGIN$
++        suite.addTestSuite( DefaultCrossRepositorySearchTest.class );
++        //$JUnit-END$
++        return suite;
++    }
++}
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/BytecodeIndexPopulator.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/BytecodeIndexPopulator.java
+index f79f115f2d..69e3d891df 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/BytecodeIndexPopulator.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/BytecodeIndexPopulator.java
+@@ -98,6 +98,7 @@ public Map populate( File basedir )
+             ArchivaArtifact artifact = (ArchivaArtifact) entry.getValue();
+             File dumpFile = getDumpFile( basedir, artifact );
+             BytecodeRecord record = BytecodeRecordLoader.loadRecord( dumpFile, artifact );
++            record.setRepositoryId( "test-repo" );
+             records.put( entry.getKey(), record );
+         }
+ 
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java
+index 21fe151215..8928381281 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.java
+@@ -20,11 +20,16 @@
+  */
+ 
+ import org.apache.commons.lang.StringUtils;
++import org.apache.lucene.search.Hits;
++import org.apache.lucene.search.MatchAllDocsQuery;
++import org.apache.lucene.search.Query;
++import org.apache.lucene.search.Searcher;
+ import org.apache.maven.archiva.configuration.ArchivaConfiguration;
+ import org.apache.maven.archiva.configuration.RepositoryConfiguration;
+ import org.apache.maven.archiva.indexer.MockConfiguration;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndex;
+ import org.apache.maven.archiva.indexer.RepositoryContentIndexFactory;
++import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
+ import org.apache.maven.archiva.model.ArchivaRepository;
+ import org.codehaus.plexus.PlexusTestCase;
+ import org.codehaus.plexus.util.FileUtils;
+@@ -68,6 +73,7 @@ protected void setUp()
+         repoConfig.setName( repository.getModel().getName() );
+         repoConfig.setUrl( repository.getModel().getUrl() );
+         repoConfig.setIndexDir( indexLocation.getAbsolutePath() );
++        repoConfig.setIndexed( true );
+ 
+         if ( indexLocation.exists() )
+         {
+@@ -84,10 +90,27 @@ protected void setUp()
+         // Now populate them.
+         Map hashcodesMap = ( new HashcodesIndexPopulator() ).populate( new File( getBasedir() ) );
+         indexHashcode.indexRecords( hashcodesMap.values() );
++        assertEquals( "Hashcode Key Count", hashcodesMap.size(), indexHashcode.getAllRecordKeys().size() );
++        assertRecordCount( indexHashcode, hashcodesMap.size() );
++
+         Map bytecodeMap = ( new BytecodeIndexPopulator() ).populate( new File( getBasedir() ) );
+         indexBytecode.indexRecords( bytecodeMap.values() );
++        assertEquals( "Bytecode Key Count", bytecodeMap.size(), indexBytecode.getAllRecordKeys().size() );
++        assertRecordCount( indexBytecode, bytecodeMap.size() );
++
+         Map contentMap = ( new FileContentIndexPopulator() ).populate( new File( getBasedir() ) );
+         indexContents.indexRecords( contentMap.values() );
++        assertEquals( "File Content Key Count", contentMap.size(), indexContents.getAllRecordKeys().size() );
++        assertRecordCount( indexContents, contentMap.size() );
++    }
++
++    private void assertRecordCount( RepositoryContentIndex index, int expectedCount )
++        throws Exception
++    {
++        Query query = new MatchAllDocsQuery();
++        Searcher searcher = (Searcher) index.getSearchable();
++        Hits hits = searcher.search( query );
++        assertEquals( "Expected Record Count for " + index.getId(), expectedCount, hits.length() );
+     }
+ 
+     private CrossRepositorySearch lookupCrossRepositorySearch()
+@@ -98,34 +121,47 @@ private CrossRepositorySearch lookupCrossRepositorySearch()
+         return search;
+     }
+ 
+-    public void testSearchTerm()
++    public void testSearchTerm_Org()
++        throws Exception
++    {
++        CrossRepositorySearch search = lookupCrossRepositorySearch();
++
++        SearchResultLimits limits = new SearchResultLimits( 0 );
++        limits.setPageSize( 20 );
++
++        SearchResults results = search.searchForTerm( "org", limits );
++        assertResults( 1, 7, results );
++    }
++
++    public void testSearchTerm_Junit()
+         throws Exception
+     {
+         CrossRepositorySearch search = lookupCrossRepositorySearch();
+ 
+-        SearchResults results = search.searchForTerm( "org" );
+-        assertHitCounts( 1, 8, 8, 1, results );
++        SearchResultLimits limits = new SearchResultLimits( 0 );
++        limits.setPageSize( 20 );
+ 
+-        results = search.searchForTerm( "junit" );
+-        assertHitCounts( 1, 1, 0, 1, results );
+-        
+-        results = search.searchForTerm( "monosodium" );
+-        assertHitCounts( 1, 0, 0, 0, results );
++        SearchResults results = search.searchForTerm( "junit", limits );
++        assertResults( 1, 3, results );
+     }
+ 
+-    private void assertHitCounts( int repoCount, int bytecodeCount, int hashcodeCount, int contentCount,
+-                                  SearchResults results )
++    public void testSearchInvalidTerm()
++        throws Exception
++    {
++        CrossRepositorySearch search = lookupCrossRepositorySearch();
++
++        SearchResultLimits limits = new SearchResultLimits( 0 );
++        limits.setPageSize( 20 );
++
++        SearchResults results = search.searchForTerm( "monosodium", limits );
++        assertResults( 1, 0, results );
++    }
++
++    private void assertResults( int repoCount, int hitCount, SearchResults results )
+     {
+         assertNotNull( "Search Results should not be null.", results );
+         assertEquals( "Repository Hits", repoCount, results.getRepositories().size() );
+ 
+-        if ( ( bytecodeCount != results.getBytecodeHits().size() )
+-            || ( hashcodeCount != results.getHashcodeHits().size() )
+-            /* || ( contentCount != results.getContentHits().size() ) */ )
+-        {
+-            fail( "Failed to get expected results hit count.  Expected: (bytecode,hashcode,content) <" + bytecodeCount
+-                + "," + hashcodeCount + "," + contentCount + ">, but got <" + results.getBytecodeHits().size() + ","
+-                + results.getHashcodeHits().size() + "," + results.getContentHits().size() + "> instead." );
+-        }
++        assertEquals( "Search Result Hits", hitCount, results.getHits().size() );
+     }
+ }
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/FileContentIndexPopulator.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/FileContentIndexPopulator.java
+index 9a8bdb44d9..a098c4c13e 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/FileContentIndexPopulator.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/FileContentIndexPopulator.java
+@@ -49,8 +49,18 @@ public Map populate( File basedir )
+ 
+         File repoDir = new File( basedir, "src/test/managed-repository" );
+ 
+-        map.put( "parent-pom-1",
+-                 createFileContentRecord( repoDir, "org/apache/maven/archiva/record/parent-pom/1/parent-pom-1.pom" ) );
++        String prefix = "org/apache/maven/archiva/record/";
++
++        map.put( "parent-pom-1", createFileContentRecord( repoDir, prefix + "parent-pom/1/parent-pom-1.pom" ) );
++        map.put( "child-pom-1.0-SNAPSHOT", createFileContentRecord( repoDir, prefix
++            + "test-child-pom/1.0-SNAPSHOT/test-child-pom-1.0-20060728.121314-1.pom" ) );
++        map.put( "test-archetype-1.0", createFileContentRecord( repoDir, prefix
++            + "test-archetype/1.0/test-archetype-1.0.pom" ) );
++        map.put( "test-jar-and-pom-1.0-alpha-1", createFileContentRecord( repoDir, prefix
++            + "test-jar-and-pom/1.0-alpha-1/test-jar-and-pom-1.0-alpha-1.pom" ) );
++        map.put( "test-plugin-1.0", createFileContentRecord( repoDir, prefix + "test-plugin/1.0/test-plugin-1.0.pom" ) );
++        map.put( "test-pom-1.0", createFileContentRecord( repoDir, prefix + "test-pom/1.0/test-pom-1.0.pom" ) );
++        map.put( "test-skin-1.0", createFileContentRecord( repoDir, prefix + "test-skin/1.0/test-skin-1.0.pom" ) );
+ 
+         return map;
+     }
+@@ -65,7 +75,8 @@ private FileContentRecord createFileContentRecord( File repoDir, String path )
+         }
+ 
+         FileContentRecord record = new FileContentRecord();
+-        record.setFile( pathToFile );
++        record.setRepositoryId( "test-repo" );
++        record.setFilename( path );
+ 
+         try
+         {
+diff --git a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/HashcodesIndexPopulator.java b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/HashcodesIndexPopulator.java
+index f61ce86e4e..686d6d838e 100644
+--- a/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/HashcodesIndexPopulator.java
++++ b/archiva-base/archiva-indexer/src/test/java/org/apache/maven/archiva/indexer/search/HashcodesIndexPopulator.java
+@@ -64,6 +64,7 @@ public Map populate( File basedir )
+             ArchivaArtifact artifact = (ArchivaArtifact) entry.getValue();
+             File dumpFile = getDumpFile( basedir, artifact );
+             HashcodesRecord record = HashcodesRecordLoader.loadRecord( dumpFile, artifact );
++            record.setRepositoryId( "test-repo" );
+             records.put( entry.getKey(), record );
+         }
+ 
+diff --git a/archiva-base/archiva-indexer/src/test/resources/log4j.xml b/archiva-base/archiva-indexer/src/test/resources/log4j.xml
+new file mode 100644
+index 0000000000..a11494a31f
+--- /dev/null
++++ b/archiva-base/archiva-indexer/src/test/resources/log4j.xml
+@@ -0,0 +1,76 @@
++<?xml version="1.0" encoding="UTF-8" ?>
++<!DOCTYPE log4j:configuration SYSTEM "log4j.dtd">
++
++<log4j:configuration xmlns:log4j="http://jakarta.apache.org/log4j/">
++
++  <appender name="console" class="org.apache.log4j.ConsoleAppender">
++    <param name="Target" value="System.out"/>
++    <layout class="org.apache.log4j.PatternLayout">
++      <param name="ConversionPattern" value="%d [%t] %-5p %-30c{1} - %m%n"/>
++    </layout>
++  </appender>
++
++  <!-- Help identify bugs during testing -->
++  <logger name="org.apache.maven">
++    <level value="debug"/>
++  </logger>
++
++  <logger name="org.codehaus.plexus.security">
++    <level value="info"/>
++  </logger>
++
++  <!-- squelch noisy objects (for now) -->
++  <logger name="org.codehaus.plexus.mailsender.MailSender">
++    <level value="info"/>
++  </logger>
++
++  <logger name="org.quartz">
++    <level value="info"/>
++  </logger>
++
++  <logger name="org.apache.jasper">
++    <level value="info"/>
++  </logger>
++
++  <logger name="com.opensymphony.xwork">
++    <level value="info"/>
++  </logger>
++
++  <logger name="com.opensymphony.webwork">
++    <level value="info"/>
++  </logger>
++
++  <logger name="org.codehaus.plexus.PlexusContainer">
++    <level value="info"/>
++  </logger>
++
++  <logger name="JPOX">
++    <level value="warn"/>
++  </logger>
++
++  <logger name="JPOX.MetaData">
++    <level value="error"/>
++  </logger>
++
++  <logger name="JPOX.RDBMS.SQL">
++    <level value="error"/>
++  </logger>
++
++  <logger name="SQL">
++    <level value="error"/>
++  </logger>
++
++  <logger name="freemarker">
++    <level value="warn"/>
++  </logger>
++
++  <logger name="org.codehaus.plexus.component.manager.ClassicSingletonComponentManager">
++    <level value="error"/>
++  </logger>
++
++  <root>
++    <priority value="debug" />
++    <appender-ref ref="console" />
++  </root>
++
++</log4j:configuration>
+diff --git a/archiva-base/archiva-indexer/src/test/resources/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.xml b/archiva-base/archiva-indexer/src/test/resources/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.xml
+index 61a859c7a0..4b078f6a82 100644
+--- a/archiva-base/archiva-indexer/src/test/resources/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.xml
++++ b/archiva-base/archiva-indexer/src/test/resources/org/apache/maven/archiva/indexer/search/DefaultCrossRepositorySearchTest.xml
+@@ -25,9 +25,29 @@
+       <description>DefaultCrossRepositorySearch</description>
+       <requirements>
+         <requirement>
+-          <role>org.apache.maven.archiva.indexer.RepositoryContentIndexFactory</role>
+-          <role-hint>lucene</role-hint>
+-          <field-name>indexFactory</field-name>
++          <role>org.apache.commons.collections.Transformer</role>
++          <role-hint>bytecode</role-hint>
++          <field-name>bytecodeIndexTransformer</field-name>
++        </requirement>
++        <requirement>
++          <role>org.apache.commons.collections.Transformer</role>
++          <role-hint>filecontent</role-hint>
++          <field-name>filecontentIndexTransformer</field-name>
++        </requirement>
++        <requirement>
++          <role>org.apache.commons.collections.Transformer</role>
++          <role-hint>hashcodes</role-hint>
++          <field-name>hashcodesIndexTransformer</field-name>
++        </requirement>
++        <requirement>
++          <role>org.apache.commons.collections.Transformer</role>
++          <role-hint>searchable</role-hint>
++          <field-name>searchableTransformer</field-name>
++        </requirement>
++        <requirement>
++          <role>org.apache.commons.collections.Predicate</role>
++          <role-hint>index-exists</role-hint>
++          <field-name>indexExistsPredicate</field-name>
+         </requirement>
+         <requirement>
+           <role>org.apache.maven.archiva.configuration.ArchivaConfiguration</role>
+diff --git a/archiva-base/archiva-model/src/main/java/org/apache/maven/archiva/model/functors/ManagedRepositoryPredicate.java b/archiva-base/archiva-model/src/main/java/org/apache/maven/archiva/model/functors/ManagedRepositoryPredicate.java
+new file mode 100644
+index 0000000000..14d608df39
+--- /dev/null
++++ b/archiva-base/archiva-model/src/main/java/org/apache/maven/archiva/model/functors/ManagedRepositoryPredicate.java
+@@ -0,0 +1,53 @@
++package org.apache.maven.archiva.model.functors;
++
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements.  See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership.  The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License.  You may obtain a copy of the License at
++ *
++ *  http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied.  See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++
++import org.apache.commons.collections.Predicate;
++import org.apache.maven.archiva.model.ArchivaRepository;
++
++/**
++ * ManagedRepositoryPredicate 
++ *
++ * @author <a href="mailto:joakim@erdfelt.com">Joakim Erdfelt</a>
++ * @version $Id$
++ */
++public class ManagedRepositoryPredicate
++    implements Predicate
++{
++    public static final Predicate INSTANCE = new ManagedRepositoryPredicate();
++
++    public static Predicate getInstance()
++    {
++        return INSTANCE;
++    }
++
++    public boolean evaluate( Object object )
++    {
++        boolean satisfies = false;
++
++        if ( object instanceof ArchivaRepository )
++        {
++            ArchivaRepository repo = (ArchivaRepository) object;
++            return repo.isManaged();
++        }
++
++        return satisfies;
++    }
++}
+diff --git a/archiva-web/archiva-webapp/src/main/java/org/apache/maven/archiva/web/action/SearchAction.java b/archiva-web/archiva-webapp/src/main/java/org/apache/maven/archiva/web/action/SearchAction.java
+index 54ae70edbe..a67aca9f8c 100644
+--- a/archiva-web/archiva-webapp/src/main/java/org/apache/maven/archiva/web/action/SearchAction.java
++++ b/archiva-web/archiva-webapp/src/main/java/org/apache/maven/archiva/web/action/SearchAction.java
+@@ -19,10 +19,12 @@
+  * under the License.
+  */
+ 
++import org.apache.commons.lang.StringUtils;
+ import org.apache.lucene.queryParser.ParseException;
+ import org.apache.maven.archiva.indexer.RepositoryIndexException;
+ import org.apache.maven.archiva.indexer.RepositoryIndexSearchException;
+ import org.apache.maven.archiva.indexer.search.CrossRepositorySearch;
++import org.apache.maven.archiva.indexer.search.SearchResultLimits;
+ import org.apache.maven.archiva.indexer.search.SearchResults;
+ import org.codehaus.plexus.xwork.action.PlexusActionSupport;
+ 
+@@ -41,11 +43,6 @@ public class SearchAction
+      */
+     private String q;
+ 
+-    /**
+-     * The MD5 to search by.
+-     */
+-    private String md5;
+-    
+     /**
+      * The Search Results.
+      */
+@@ -65,13 +62,15 @@ public String quickSearch()
+     {
+         /* TODO: give action message if indexing is in progress.
+          * This should be based off a count of 'unprocessed' artifacts.
+-         * This (yet to be written) routine could tell the user that X artifacts are not yet 
++         * This (yet to be written) routine could tell the user that X (unprocessed) artifacts are not yet 
+          * present in the full text search.
+          */
+ 
+         assert q != null && q.length() != 0;
+ 
+-        results = crossRepoSearch.searchForTerm( q );
++        SearchResultLimits limits = new SearchResultLimits( 0 );
++
++        results = crossRepoSearch.searchForTerm( q, limits );
+ 
+         if ( results.isEmpty() )
+         {
+@@ -80,7 +79,7 @@ public String quickSearch()
+         }
+ 
+         // TODO: filter / combine the artifacts by version? (is that even possible with non-artifact hits?)
+-        
++
+         /* I don't think that we should, as I expect us to utilize the 'score' system in lucene in 
+          * the future to return relevant links better.
+          * I expect the lucene scoring system to take multiple hits on different areas of a single document
+@@ -96,18 +95,25 @@ public String findArtifact()
+     {
+         // TODO: give action message if indexing is in progress
+ 
+-        assert md5 != null && md5.length() != 0;
++        if ( StringUtils.isBlank( q ) )
++        {
++            addActionError( "Unable to search for a blank checksum" );
++            return INPUT;
++        }
++
++        SearchResultLimits limits = new SearchResultLimits( 0 );
++
++        results = crossRepoSearch.searchForChecksum( q, limits );
+ 
+-        results = crossRepoSearch.searchForMd5( q );
+-        
+         if ( results.isEmpty() )
+         {
+             addActionError( "No results found" );
+             return INPUT;
+         }
+-        
+-        if ( results.getHashcodeHits().size() == 1 )
++
++        if ( results.getHits().size() == 1 )
+         {
++            // 1 hit? return it's information directly!
+             return ARTIFACT;
+         }
+         else
+@@ -131,13 +137,8 @@ public void setQ( String q )
+         this.q = q;
+     }
+ 
+-    public String getMd5()
+-    {
+-        return md5;
+-    }
+-
+-    public void setMd5( String md5 )
++    public SearchResults getResults()
+     {
+-        this.md5 = md5;
++        return results;
+     }
+ }
+diff --git a/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp b/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp
+index b0e1ac38d9..5c11f5a4cd 100644
+--- a/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp
++++ b/archiva-web/archiva-webapp/src/main/webapp/WEB-INF/jsp/results.jsp
+@@ -19,6 +19,7 @@
+ 
+ <%@ taglib uri="/webwork" prefix="ww" %>
+ <%@ taglib uri="http://java.sun.com/jsp/jstl/core" prefix="c" %>
++<%@ taglib prefix="fn" uri="http://java.sun.com/jsp/jstl/functions" %>
+ <%@ taglib prefix="my" tagdir="/WEB-INF/tags" %>
+ 
+ <html>
+@@ -39,48 +40,44 @@
+   <h1>Results</h1>
+ 
+   <div id="resultsBox">
+-    <ww:set name="searchResults" value="searchResults"/>
+-    <c:forEach items="${searchResults}" var="record" varStatus="i">
+-
+-
+-      <h3 class="artifact-title">
+-        <my:showArtifactTitle groupId="${record.groupId}" artifactId="${record.artifactId}"
+-                              version="${record.version}"/>
+-      </h3>
+-
+-      <p>
+-        <my:showArtifactLink groupId="${record.groupId}" artifactId="${record.artifactId}"
+-                             version="${record.version}" versions="${record.versions}"/>
+-
+-          <%-- TODO: hits
+-          <table border="1px" width="100%" cellspacing="0">
+-            <c:forEach items="${result.fieldMatchesEntrySet}" var="entry">
+-              <tr>
+-                <td valign="top" width="15%" align="right"><c:out value="${entry.key}"/></td>
+-                <td valign="top">
+-                  <c:forEach items="${entry.value}" var="item">
+-                    <c:out value="${item}" />
+-                  </c:forEach>
+-                  <br/>
+-                </td>
+-              </tr>
+-            </c:forEach>
+-          </table>
+-        </td>
+-          <td>
+-
+-            <code>org.apache.maven</code>
+-            (package)
+-            <br/>
+-            <code>org.apache.maven.model</code>
+-            (package)
+-          </td>
+-          <td>
+-            <a href="artifact.html">Details</a>
+-          </td>
+-          --%>
+-      </p>
+-    </c:forEach>
++    <p>Hits: ${fn:length(results.hits)}</p>
++    
++    <c:choose>
++      <c:when test="${empty results.hits}">
++        <p>No results</p>
++      </c:when>
++      <c:otherwise>
++        <c:forEach items="${results.hits}" var="record" varStatus="i">
++          <p>${record.url}</p>
++          <p>${record.groupId}</p>
++          <p>${record.artifactId}</p>
++        </c:forEach>
++        <%--
++        <c:forEach items="${results.hachcodeHits}" var="record" varStatus="i">
++          <p>${record}</p>
++          <h3 class="artifact-title">
++            <my:showArtifactTitle groupId="${record.groupId}" artifactId="${record.artifactId}"
++                                  version="${record.version}"/>
++          </h3>
++          <p>
++            <my:showArtifactLink groupId="${record.groupId}" artifactId="${record.artifactId}"
++                                 version="${record.version}" versions="${record.versions}"/>
++          </p>
++        </c:forEach>
++        <c:forEach items="${results.bytecodeHits}" var="record" varStatus="i">
++          <p>${record}</p>
++          <h3 class="artifact-title">
++            <my:showArtifactTitle groupId="${record.groupId}" artifactId="${record.artifactId}"
++                                  version="${record.version}"/>
++          </h3>
++          <p>
++            <my:showArtifactLink groupId="${record.groupId}" artifactId="${record.artifactId}"
++                                 version="${record.version}" versions="${record.versions}"/>
++          </p>
++        </c:forEach>
++         --%>
++      </c:otherwise>
++    </c:choose>
+   </div>
+ </div>
+ </body>

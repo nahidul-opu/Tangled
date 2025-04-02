@@ -1,0 +1,151 @@
+From 39deb0e69d7bf453f13223fee1638b0f6dcc21b0 Mon Sep 17 00:00:00 2001
+From: Colm O Heigeartaigh <coheigea@apache.org>
+Date: Wed, 27 Apr 2011 10:16:29 +0000
+Subject: [PATCH] [SANTUARIO-191] - xml:id attributes are not correctly handled
+ when using c14n11
+
+git-svn-id: https://svn.apache.org/repos/asf/santuario/xml-security-java/branches/1.4.x-fixes@1097064 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGELOG.txt                                 |  1 +
+ .../c14n/implementations/Canonicalizer11.java |  2 +-
+ .../apache/xml/security/test/ModuleTest.java  |  1 +
+ .../implementations/Santuario191Test.java     | 94 +++++++++++++++++++
+ 4 files changed, 97 insertions(+), 1 deletion(-)
+ create mode 100644 src_unitTests/org/apache/xml/security/test/c14n/implementations/Santuario191Test.java
+
+diff --git a/CHANGELOG.txt b/CHANGELOG.txt
+index bb8fe01d7a..39f20f589e 100644
+--- a/CHANGELOG.txt
++++ b/CHANGELOG.txt
+@@ -1,5 +1,6 @@
+ Changelog for "Apache xml-security" <http://santuario.apache.org/>
+ New in v1.4.5-SNAPSHOT
++    Fixed SANTUARIO-291: xml:id attributes are not correctly handled when using c14n11.
+     Fixed SANTUARIO-266: c14n11 produces different signatures using version 1.4.3 and 1.4.4.
+     Fixed SANTUARIO-253: org.apache.xml.security.utils.resolver.ResourceResolver is not thread safe.
+     Fixed SANTUARIO-263: Canonicalizer can't handle dynamical created DOM correctly. Thanks to Martin Koegler.
+diff --git a/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java b/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java
+index 3213b58fa2..0e4648d67a 100644
+--- a/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java
++++ b/src/org/apache/xml/security/c14n/implementations/Canonicalizer11.java
+@@ -422,7 +422,7 @@ void handleParent(Element e, NameSpaceSymbTable ns) {
+ 	    Attr N = (Attr) attrs.item(i);
+ 	    if (!Constants.NamespaceSpecNS.equals(N.getNamespaceURI())) {
+ 		// Not a namespace definition, ignore.
+-		if (XML_LANG_URI.equals(N.getNamespaceURI())) {
++	    if (!"id".equals(N.getLocalName()) && XML_LANG_URI.equals(N.getNamespaceURI())) {
+ 		    xmlattrStack.addXmlnsAttr(N);
+ 		}
+ 		continue;
+diff --git a/src_unitTests/org/apache/xml/security/test/ModuleTest.java b/src_unitTests/org/apache/xml/security/test/ModuleTest.java
+index 9bcf570e6d..f0179c08c8 100644
+--- a/src_unitTests/org/apache/xml/security/test/ModuleTest.java
++++ b/src_unitTests/org/apache/xml/security/test/ModuleTest.java
+@@ -49,6 +49,7 @@ public static Test suite() {
+       suite.addTest(org.apache.xml.security.test.c14n.implementations.Canonicalizer20010315ExclusiveTest.suite());
+       suite.addTest(org.apache.xml.security.test.c14n.implementations.ExclusiveC14NInterop.suite());
+       suite.addTest(org.apache.xml.security.test.c14n.implementations.Bug45961Test.suite());
++      suite.addTest(org.apache.xml.security.test.c14n.implementations.Santuario191Test.suite());
+       suite.addTest(org.apache.xml.security.test.external.org.apache.xalan.XPathAPI.XalanBug1425Test.suite());
+       suite.addTest(org.apache.xml.security.test.external.org.apache.xalan.XPathAPI.AttributeAncestorOrSelfTest.suite());
+       suite.addTest(org.apache.xml.security.test.signature.AllTests.suite());      
+diff --git a/src_unitTests/org/apache/xml/security/test/c14n/implementations/Santuario191Test.java b/src_unitTests/org/apache/xml/security/test/c14n/implementations/Santuario191Test.java
+new file mode 100644
+index 0000000000..351d8c4bb6
+--- /dev/null
++++ b/src_unitTests/org/apache/xml/security/test/c14n/implementations/Santuario191Test.java
+@@ -0,0 +1,94 @@
++/**
++ * Licensed to the Apache Software Foundation (ASF) under one
++ * or more contributor license agreements. See the NOTICE file
++ * distributed with this work for additional information
++ * regarding copyright ownership. The ASF licenses this file
++ * to you under the Apache License, Version 2.0 (the
++ * "License"); you may not use this file except in compliance
++ * with the License. You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing,
++ * software distributed under the License is distributed on an
++ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++ * KIND, either express or implied. See the License for the
++ * specific language governing permissions and limitations
++ * under the License.
++ */
++package org.apache.xml.security.test.c14n.implementations;
++
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
++
++import junit.framework.Test;
++import junit.framework.TestCase;
++import junit.framework.TestSuite;
++
++import org.w3c.dom.Document;
++import org.w3c.dom.NodeList;
++
++import org.apache.xml.security.c14n.implementations.Canonicalizer11;
++import org.apache.xml.security.c14n.implementations.Canonicalizer11_OmitComments;
++
++/**
++ * This is a test for Santuario-191:
++ * 
++ * https://issues.apache.org/jira/browse/SANTUARIO-191
++ *
++ * An xml:Id attribute is appearing in a child element, contrary to the C14n11 spec.
++ */
++public class Santuario191Test extends TestCase {
++
++    private static final String INPUT_DATA =
++        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
++      + "<test xml:id=\"testid1\">"
++      + "<data>"
++      + "    <user1>Alice</user1>"
++      + "    <user2>Bob</user2>"
++      + "</data>"
++      + "</test>";
++    private static final String EXPECTED_RESULT =
++        "<data>"
++      + "    <user1>Alice</user1>"
++      + "    <user2>Bob</user2>"
++      + "</data>";
++
++    private DocumentBuilder db;
++    
++    static {
++        org.apache.xml.security.Init.init();
++    }
++    
++    public static Test suite() {
++        return new TestSuite(Santuario191Test.class);
++    }
++
++    public void testSantuario191() throws Exception {
++        //
++        // Parse the Data
++        //
++        DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
++        dbf.setNamespaceAware(true);
++        db = dbf.newDocumentBuilder();
++        Document doc = db.parse(new ByteArrayInputStream(INPUT_DATA.getBytes("UTF8")));
++        
++        //
++        // Canonicalize the data
++        //
++        NodeList dataNodes = doc.getElementsByTagName("data");
++        Canonicalizer11 c14ner = new Canonicalizer11_OmitComments();
++        byte[] result = c14ner.engineCanonicalizeSubTree(dataNodes.item(0));
++        
++        //
++        // Test against expected result
++        //
++        ByteArrayOutputStream out = new ByteArrayOutputStream();
++        out.write(result);
++        assertTrue(EXPECTED_RESULT.equals(out.toString("UTF8")));
++    }
++    
++}

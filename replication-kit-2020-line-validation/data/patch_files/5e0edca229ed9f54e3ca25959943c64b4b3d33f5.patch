@@ -1,0 +1,142 @@
+From 5e0edca229ed9f54e3ca25959943c64b4b3d33f5 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Tue, 6 Mar 2012 10:25:59 +0000
+Subject: [PATCH] FIX: extends ignores
+ defaultconfmapping/defaultconf/confmappingoverride attributes from parent's
+ configurations and dependencies tags (IVY-1213)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@1297407 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../descriptor/DefaultModuleDescriptor.java   | 20 +++++++++++++++++++
+ .../AbstractModuleDescriptorParser.java       |  2 ++
+ .../parser/xml/XmlModuleDescriptorParser.java | 20 ++++++++++++-------
+ 4 files changed, 36 insertions(+), 7 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 5403b0281..3b221d81a 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -139,6 +139,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: ivy:retrieve can now convert 'dotted'-organisation names into a directory tree.
+ - IMPROVEMENT: ivy:retrieve now accepts a nested mapper type.
+ 
++- FIX: extends ignores defaultconfmapping/defaultconf/confmappingoverride attributes from parent's configurations and dependencies tags (IVY-1213)
+ - FIX: NullPointerException when providing empty password to <credentials> (IVY-1335)
+ - FIX: [originalname] not expanded for source and javadoc types during publish in ivy:install (IVY-1324)
+ - FIX: cannot resolve from repositories that return HTTP 204 in response to an HTTP HEAD request (IVY-1328)
+diff --git a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+index 5594d93cf..ade53ded2 100644
+--- a/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
++++ b/src/java/org/apache/ivy/core/module/descriptor/DefaultModuleDescriptor.java
+@@ -230,6 +230,10 @@ public static ModuleDescriptor transformInstance(ModuleDescriptor md, Namespace
+ 
+     private Namespace namespace;
+ 
++    private String defaultConf;
++
++    private String defaultConfMapping;
++
+     private boolean mappingOverride;
+ 
+     private ModuleDescriptorParser parser;
+@@ -717,6 +721,22 @@ private void checkConf(Stack confs, String confName) {
+         }
+     }
+ 
++    public String getDefaultConf() {
++        return defaultConf;
++    }
++
++    public void setDefaultConf(String defaultConf) {
++        this.defaultConf = defaultConf;
++    }
++
++    public String getDefaultConfMapping() {
++        return defaultConfMapping;
++    }
++
++    public void setDefaultConfMapping(String defaultConfMapping) {
++        this.defaultConfMapping = defaultConfMapping;
++    }
++
+     public void setMappingOverride(boolean override) {
+         mappingOverride = override;
+     }
+diff --git a/src/java/org/apache/ivy/plugins/parser/AbstractModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/AbstractModuleDescriptorParser.java
+index 8b125d9cb..3a36c0761 100644
+--- a/src/java/org/apache/ivy/plugins/parser/AbstractModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/AbstractModuleDescriptorParser.java
+@@ -106,6 +106,7 @@ protected String getDefaultConfMapping() {
+ 
+         protected void setDefaultConfMapping(String defaultConf) {
+             defaultConfMapping = defaultConf;
++            getMd().setDefaultConfMapping(defaultConf);
+         }
+ 
+         protected void parseDepsConfs(String confs, DefaultDependencyDescriptor dd) {
+@@ -336,6 +337,7 @@ protected String getDefaultConf() {
+ 
+         protected void setDefaultConf(String defaultConf) {
+             this.defaultConf = defaultConf;
++            getMd().setDefaultConf(defaultConf);
+         }
+ 
+         public ModuleDescriptor getModuleDescriptor() throws ParseException {
+diff --git a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+index 2856d458f..d69584f71 100644
+--- a/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
++++ b/src/java/org/apache/ivy/plugins/parser/xml/XmlModuleDescriptorParser.java
+@@ -468,7 +468,7 @@ protected void extendsStarted(Attributes attributes) throws ParseException {
+          * @param parent a given parent module descriptor
+          */
+         protected void mergeWithOtherModuleDescriptor(List/* <String> */extendTypes,
+-                ModuleDescriptor parent) {
++                ModuleDescriptor parent) throws ParseException {
+ 
+             if (extendTypes.contains("all")) {
+                 mergeAll(parent);
+@@ -478,7 +478,7 @@ protected void mergeWithOtherModuleDescriptor(List/* <String> */extendTypes,
+                 }
+                 
+                 if (extendTypes.contains("configurations")) {
+-                    mergeConfigurations(parent.getModuleRevisionId(), parent.getConfigurations());
++                    mergeConfigurations(parent);
+                 }
+ 
+                 if (extendTypes.contains("dependencies")) {
+@@ -500,9 +500,8 @@ protected void mergeWithOtherModuleDescriptor(List/* <String> */extendTypes,
+          * @param parent a given parent module desciptor
+          */
+         protected void mergeAll(ModuleDescriptor parent) {
+-            ModuleRevisionId sourceMrid = parent.getModuleRevisionId();
+             mergeInfo(parent);
+-            mergeConfigurations(sourceMrid, parent.getConfigurations());
++            mergeConfigurations(parent);
+             mergeDependencies(parent.getDependencies());
+             mergeDescription(parent.getDescription());
+             mergeLicenses(parent.getLicenses());
+@@ -561,13 +560,20 @@ private static Map mergeValues(Map inherited, Map overrides) {
+          * @param sourceMrid the source module revision id
+          * @param configurations array of configurations to be inherited 
+          */
+-        protected void mergeConfigurations(ModuleRevisionId sourceMrid, Configuration[] configurations) {
+-            DefaultModuleDescriptor md = getMd();
++        protected void mergeConfigurations(ModuleDescriptor parent) {
++            ModuleRevisionId sourceMrid = parent.getModuleRevisionId();
++            Configuration[] configurations = parent.getConfigurations();
+             for (int i = 0; i < configurations.length; i++) {
+                 Configuration configuration = configurations[i];
+                 Message.debug("Merging configuration with: " + configuration.getName());
+                 //copy configuration from parent descriptor
+-                md.addConfiguration(new Configuration(configuration, sourceMrid));
++                getMd().addConfiguration(new Configuration(configuration, sourceMrid));
++            }
++
++            if (parent instanceof DefaultModuleDescriptor) {
++                setDefaultConfMapping(((DefaultModuleDescriptor) parent).getDefaultConfMapping());
++                setDefaultConf(((DefaultModuleDescriptor) parent).getDefaultConf());
++                getMd().setMappingOverride(((DefaultModuleDescriptor) parent).isMappingOverride());
+             }
+         }
+ 

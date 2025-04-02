@@ -1,0 +1,228 @@
+From 5a8ac6281ab6ef236a8742059aae81cfda0c87be Mon Sep 17 00:00:00 2001
+From: Xavier Hanin <xavier@apache.org>
+Date: Fri, 4 Jul 2008 10:53:51 +0000
+Subject: [PATCH] FIX: NPE in Ivy:install task if the repository cache dir has
+ been cleared (IVY-843)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@673998 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../plugins/namespace/NameSpaceHelper.java    | 22 +++++++-
+ .../plugins/resolver/AbstractResolver.java    |  5 ++
+ .../ivy/plugins/resolver/BasicResolver.java   | 15 ++----
+ .../org/apache/ivy/ant/IvyInstallTest.java    | 20 +++++++
+ test/repositories/ivysettings-IVY843.xml      | 52 +++++++++++++++++++
+ 6 files changed, 103 insertions(+), 12 deletions(-)
+ create mode 100644 test/repositories/ivysettings-IVY843.xml
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 37b9287f2..f71d12a66 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -91,6 +91,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: NPE in Ivy:install task if the repository cache dir has been cleared (IVY-843)
+ - FIX: Maven version ranges with ( ) are not supported (IVY-678) (thanks to Michael Kebe)
+ - FIX: Ignore maven metadata files when listing revisions (IVY-765)
+ - FIX: haltonmissing on publish task does not prevent the other files to be published, even with an atomic publisher (IVY-656)
+diff --git a/src/java/org/apache/ivy/plugins/namespace/NameSpaceHelper.java b/src/java/org/apache/ivy/plugins/namespace/NameSpaceHelper.java
+index 028a841db..fb9636d7c 100644
+--- a/src/java/org/apache/ivy/plugins/namespace/NameSpaceHelper.java
++++ b/src/java/org/apache/ivy/plugins/namespace/NameSpaceHelper.java
+@@ -26,6 +26,7 @@
+ import org.apache.ivy.core.module.id.ArtifactId;
+ import org.apache.ivy.core.module.id.ModuleId;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
++import org.apache.ivy.core.report.MetadataArtifactDownloadReport;
+ import org.apache.ivy.core.resolve.ResolvedModuleRevision;
+ 
+ public final class NameSpaceHelper {
+@@ -54,7 +55,8 @@ public static ResolvedModuleRevision toSystem(ResolvedModuleRevision rmr, Namesp
+             return rmr;
+         }
+         return new ResolvedModuleRevision(
+-            rmr.getResolver(), rmr.getArtifactResolver(), md, rmr.getReport());
++            rmr.getResolver(), rmr.getArtifactResolver(), md, 
++            transform(rmr.getReport(), ns.getToSystemTransformer()));
+     }
+ 
+     public static Artifact transform(Artifact artifact, NamespaceTransformer t) {
+@@ -70,6 +72,24 @@ public static Artifact transform(Artifact artifact, NamespaceTransformer t) {
+                         .getQualifiedExtraAttributes());
+     }
+ 
++    public static MetadataArtifactDownloadReport transform(
++            MetadataArtifactDownloadReport report, NamespaceTransformer t) {
++        if (t.isIdentity()) {
++            return report;
++        }
++        MetadataArtifactDownloadReport madr = 
++            new MetadataArtifactDownloadReport(transform(report.getArtifact(), t));
++        madr.setSearched(report.isSearched());
++        madr.setDownloadStatus(report.getDownloadStatus());
++        madr.setDownloadDetails(report.getDownloadDetails());
++        madr.setArtifactOrigin(report.getArtifactOrigin());
++        madr.setDownloadTimeMillis(report.getDownloadTimeMillis());
++        madr.setOriginalLocalFile(report.getOriginalLocalFile());
++        madr.setLocalFile(report.getLocalFile());
++        madr.setSize(report.getSize());
++        return madr;
++    }
++
+     public static ArtifactId transform(ArtifactId artifactId, NamespaceTransformer t) {
+         if (t.isIdentity()) {
+             return artifactId;
+diff --git a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+index 42854498a..c96d889c3 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/AbstractResolver.java
+@@ -40,6 +40,7 @@
+ import org.apache.ivy.core.report.ArtifactDownloadReport;
+ import org.apache.ivy.core.report.DownloadReport;
+ import org.apache.ivy.core.report.DownloadStatus;
++import org.apache.ivy.core.report.MetadataArtifactDownloadReport;
+ import org.apache.ivy.core.resolve.DownloadOptions;
+ import org.apache.ivy.core.resolve.IvyNode;
+ import org.apache.ivy.core.resolve.ResolveData;
+@@ -290,6 +291,10 @@ protected Artifact toSystem(Artifact artifact) {
+         return NameSpaceHelper.transform(artifact, getNamespace().getToSystemTransformer());
+     }
+ 
++    protected MetadataArtifactDownloadReport toSystem(MetadataArtifactDownloadReport report) {
++        return NameSpaceHelper.transform(report, getNamespace().getToSystemTransformer());
++    }
++
+     protected ResolvedModuleRevision toSystem(ResolvedModuleRevision rmr) {
+         return NameSpaceHelper.toSystem(rmr, getNamespace());
+     }
+diff --git a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+index 9f8a158e2..15ff50fbf 100644
+--- a/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
++++ b/src/java/org/apache/ivy/plugins/resolver/BasicResolver.java
+@@ -241,7 +241,8 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dde, ResolveDat
+                         throw new UnresolvedDependencyException();
+                     }
+                 }
+-                if (!rmr.getReport().isDownloaded()) {
++                if (!rmr.getReport().isDownloaded() 
++                        && rmr.getReport().getLocalFile() != null) {
+                     return toSystem(rmr);
+                 } else {
+                     nsMd = rmr.getDescriptor();
+@@ -264,16 +265,8 @@ public ResolvedModuleRevision getDependency(DependencyDescriptor dde, ResolveDat
+                             checkDescriptorConsistency(systemMrid, systemMd, ivyRef);
+                         }
+                     }
+-                    MetadataArtifactDownloadReport madr = 
+-                        new MetadataArtifactDownloadReport(systemMd.getMetadataArtifact());
+-                    madr.setDownloadStatus(rmr.getReport().getDownloadStatus());
+-                    madr.setDownloadDetails(rmr.getReport().getDownloadDetails());
+-                    madr.setArtifactOrigin(rmr.getReport().getArtifactOrigin());
+-                    madr.setDownloadTimeMillis(rmr.getReport().getDownloadTimeMillis());
+-                    madr.setSize(rmr.getReport().getSize());
+-                    madr.setOriginalLocalFile(rmr.getReport().getOriginalLocalFile());
+-                    madr.setSearched(true);
+-                    rmr = new ResolvedModuleRevision(this, this, systemMd, madr);
++                    rmr = new ResolvedModuleRevision(
++                        this, this, systemMd, toSystem(rmr.getReport()));
+                 }
+             }
+ 
+diff --git a/test/java/org/apache/ivy/ant/IvyInstallTest.java b/test/java/org/apache/ivy/ant/IvyInstallTest.java
+index 165468c67..b6717eb22 100644
+--- a/test/java/org/apache/ivy/ant/IvyInstallTest.java
++++ b/test/java/org/apache/ivy/ant/IvyInstallTest.java
+@@ -59,6 +59,7 @@ private void cleanCache() {
+ 
+     private void cleanInstall() {
+         FileUtil.forceDelete(new File("build/test/install"));
++        FileUtil.forceDelete(new File("build/test/install2"));
+     }
+ 
+     public void testInstallDummyDefault() {
+@@ -81,6 +82,25 @@ public void testInstallDummyDefault() {
+         assertTrue(new File("build/test/install/org1/mod1.2/mod1.2-2.2.jar").exists());
+     }
+ 
++    public void testIVY843() {
++        project.setProperty("ivy.settings.file", "test/repositories/ivysettings-IVY843.xml");
++        install.setOrganisation("org1");
++        install.setModule("mod1.4");
++        install.setRevision("1.0.1");
++        install.setFrom("test");
++        install.setTo("install");
++
++        install.execute();
++        
++        cleanCache();
++        
++        install.setFrom("install");
++        install.setTo("install2");
++        install.execute();
++
++        assertTrue(new File("build/test/install2/org1/mod1.4/ivy-1.0.1.xml").exists());
++    }
++
+     public void testInstallWithBranch() {
+         project.setProperty("ivy.settings.file", "test/repositories/branches/ivysettings.xml");
+         install.setOrganisation("foo");
+diff --git a/test/repositories/ivysettings-IVY843.xml b/test/repositories/ivysettings-IVY843.xml
+new file mode 100644
+index 000000000..ff38e2ecb
+--- /dev/null
++++ b/test/repositories/ivysettings-IVY843.xml
+@@ -0,0 +1,52 @@
++<!--
++   Licensed to the Apache Software Foundation (ASF) under one
++   or more contributor license agreements.  See the NOTICE file
++   distributed with this work for additional information
++   regarding copyright ownership.  The ASF licenses this file
++   to you under the Apache License, Version 2.0 (the
++   "License"); you may not use this file except in compliance
++   with the License.  You may obtain a copy of the License at
++
++     http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing,
++   software distributed under the License is distributed on an
++   "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
++   KIND, either express or implied.  See the License for the
++   specific language governing permissions and limitations
++   under the License.    
++-->
++<ivysettings>
++	<properties file="${ivy.settings.dir}/ivysettings.properties" />
++	<settings defaultResolver="dummy" />
++	<caches defaultCacheDir="${cache.dir}" useOrigin="true" />
++	<resolvers>
++		<chain name="test">
++			<filesystem name="1">
++				<ivy pattern="${ivy.settings.dir}/1/[organisation]/[module]/ivys/ivy-[revision].xml"/>
++				<artifact pattern="${ivy.settings.dir}/1/[organisation]/[module]/[type]s/[artifact]-[revision].[ext]"/>
++			</filesystem>
++			<dual name="2">
++				<filesystem name="2-ivy">
++					<ivy pattern="${ivy.settings.dir}/2/[module]/ivy-[revision].xml"/>
++				</filesystem>
++				<filesystem name="2-artifact">
++					<artifact pattern="${ivy.settings.dir}/2/[module]/[artifact]-[revision].[ext]"/>
++					<artifact pattern="${ivy.settings.dir}/2/[module]/[artifact].[ext]"/>
++				</filesystem>
++			</dual>
++		</chain>
++		<filesystem name="dummy">
++			<ivy pattern="dummy/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++			<artifact pattern="dummy/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++		</filesystem>
++		<filesystem name="install">
++			<ivy pattern="build/test/install/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++			<artifact pattern="build/test/install/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++		</filesystem>
++		<filesystem name="install2">
++			<ivy pattern="build/test/install2/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++			<artifact pattern="build/test/install2/[organisation]/[module]/[artifact]-[revision].[ext]"/>
++		</filesystem>
++	</resolvers>
++</ivysettings>

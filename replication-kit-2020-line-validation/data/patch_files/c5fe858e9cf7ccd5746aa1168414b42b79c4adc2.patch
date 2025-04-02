@@ -1,0 +1,147 @@
+From c5fe858e9cf7ccd5746aa1168414b42b79c4adc2 Mon Sep 17 00:00:00 2001
+From: Alessandro Presta <alessandro@fb.com>
+Date: Fri, 31 May 2013 14:57:11 -0700
+Subject: [PATCH] GIRAPH-675: Mutable edge iterator gets corrupted by calling
+ vertex.getNumEdges() during iteration (apresta)
+
+---
+ CHANGELOG                                     |  3 +++
+ .../giraph/edge/MutableEdgesIterable.java     |  1 +
+ .../giraph/edge/MutableEdgesWrapper.java      | 13 +++++++++++-
+ .../java/org/apache/giraph/graph/Vertex.java  |  5 ++++-
+ .../giraph/graph/TestVertexAndEdges.java      | 21 ++++++++++++++++++-
+ 5 files changed, 40 insertions(+), 3 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 66fdd69cb..99d69585d 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-675: Mutable edge iterator gets corrupted by calling
++  vertex.getNumEdges() during iteration (apresta)
++
+   GIRAPH-512: JavaDoc warnings (emre.aladag via nitay)
+ 
+   GIRAPH-620: Website Documentation: How to use Hive I/O with Giraph (nitay)
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesIterable.java b/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesIterable.java
+index ca32a9f4f..ea55e29e2 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesIterable.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesIterable.java
+@@ -96,6 +96,7 @@ public void remove() {
+         // Set the current edge to null, so that it's not added to the
+         // new edges.
+         mutableEdgesWrapper.setCurrentEdge(null);
++        mutableEdgesWrapper.decrementEdges();
+       }
+     };
+   }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesWrapper.java b/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesWrapper.java
+index 529234d67..4e2a2a2e7 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesWrapper.java
++++ b/giraph-core/src/main/java/org/apache/giraph/edge/MutableEdgesWrapper.java
+@@ -47,6 +47,8 @@ public class MutableEdgesWrapper<I extends WritableComparable,
+   private final Iterator<Edge<I, E>> oldEdgesIterator;
+   /** Last edge that was returned during iteration. */
+   private MutableEdge<I, E> currentEdge;
++  /** Number of edges. */
++  private int numEdges;
+ 
+   /**
+    * Private constructor: instantiation happens through the {@code wrap()}
+@@ -59,6 +61,7 @@ private MutableEdgesWrapper(OutEdges<I, E> oldEdges,
+                               OutEdges<I, E> newEdges) {
+     oldEdgesIterator = oldEdges.iterator();
+     this.newEdges = newEdges;
++    numEdges = oldEdges.size();
+   }
+ 
+   /**
+@@ -131,6 +134,14 @@ public void setCurrentEdge(MutableEdge<I, E> edge) {
+     currentEdge = edge;
+   }
+ 
++  /**
++   * Decrement the number of edges (to account for a deletion from the mutable
++   * iterator).
++   */
++  public void decrementEdges() {
++    --numEdges;
++  }
++
+   @Override
+   public void initialize(Iterable<Edge<I, E>> edges) {
+     throw new IllegalStateException("initialize: MutableEdgesWrapper should " +
+@@ -161,7 +172,7 @@ public void remove(I targetVertexId) {
+ 
+   @Override
+   public int size() {
+-    return unwrap().size();
++    return numEdges;
+   }
+ 
+   @Override
+diff --git a/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java b/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java
+index 82fbe0ce7..1241ae757 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java
++++ b/giraph-core/src/main/java/org/apache/giraph/graph/Vertex.java
+@@ -129,6 +129,8 @@ public void setValue(V value) {
+    * Note: edge objects returned by this iterable may be invalidated as soon
+    * as the next element is requested. Thus, keeping a reference to an edge
+    * almost always leads to undesired behavior.
++   * Accessing the edges with other methods (e.g., addEdge()) during iteration
++   * leads to undefined behavior.
+    *
+    * @return the out edges (sort order determined by subclass implementation).
+    */
+@@ -140,7 +142,8 @@ public Iterable<Edge<I, E>> getEdges() {
+    * Get an iterable of out-edges that can be modified in-place.
+    * This can mean changing the current edge value or removing the current edge
+    * (by using the iterator version).
+-   * Note: if
++   * Note: accessing the edges with other methods (e.g., addEdge()) during
++   * iteration leads to undefined behavior.
+    *
+    * @return An iterable of mutable out-edges
+    */
+diff --git a/giraph-core/src/test/java/org/apache/giraph/graph/TestVertexAndEdges.java b/giraph-core/src/test/java/org/apache/giraph/graph/TestVertexAndEdges.java
+index b6e17fd62..d0a6c4611 100644
+--- a/giraph-core/src/test/java/org/apache/giraph/graph/TestVertexAndEdges.java
++++ b/giraph-core/src/test/java/org/apache/giraph/graph/TestVertexAndEdges.java
+@@ -308,7 +308,6 @@ private void testMutateEdgesClass(Class<? extends OutEdges> edgesClass) {
+     int i = 2;
+     for (MutableEdge<LongWritable, DoubleWritable> edge :
+         vertex.getMutableEdges()) {
+-      System.out.println(edge.toString());
+       if (i-- == 0) {
+         break;
+       }
+@@ -323,6 +322,26 @@ private void testMutateEdgesClass(Class<? extends OutEdges> edgesClass) {
+       }
+     }
+     assertEquals(5, vertex.getNumEdges());
++
++    // Calling size() during iteration shouldn't modify the data structure.
++    int iterations = 0;
++    for (MutableEdge<LongWritable, DoubleWritable> edge : vertex.getMutableEdges()) {
++      edge.setValue(new DoubleWritable(3));
++      assertEquals(5, vertex.getNumEdges());
++      ++iterations;
++    }
++    assertEquals(5, vertex.getNumEdges());
++    assertEquals(5, iterations);
++
++    // If we remove an edge after calling next(), size() should return the
++    // correct number of edges.
++    it = vertex.getMutableEdges().iterator();
++    it.next();
++    it.remove();
++    assertEquals(4, vertex.getNumEdges());
++    it.next();
++    it.remove();
++    assertEquals(3, vertex.getNumEdges());
+   }
+ 
+   /**

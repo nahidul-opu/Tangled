@@ -1,0 +1,154 @@
+From beca35e450c6103bf1020bdc1a13ee7b87624b5d Mon Sep 17 00:00:00 2001
+From: Avery Ching <aching@fb.com>
+Date: Mon, 24 Feb 2014 17:01:50 -0800
+Subject: [PATCH] GIRAPH-860: Giraph jobs can hang forever if HDFS filestamps
+ aren't created (aching)
+
+---
+ CHANGELOG                                     |  3 ++
+ .../giraph/conf/GiraphConfiguration.java      | 15 +++++++
+ .../apache/giraph/conf/GiraphConstants.java   | 10 +++++
+ .../apache/giraph/zk/ZooKeeperManager.java    | 45 +++++++++++++++----
+ 4 files changed, 64 insertions(+), 9 deletions(-)
+
+diff --git a/CHANGELOG b/CHANGELOG
+index 738f801a2..7708e7233 100644
+--- a/CHANGELOG
++++ b/CHANGELOG
+@@ -1,6 +1,9 @@
+ Giraph Change Log
+ 
+ Release 1.1.0 - unreleased
++  GIRAPH-860: Giraph jobs can hang forever if HDFS filestamps aren't 
++  created (aching)
++
+   GIRAPH-858: tests fail for hadoop_facebook because of dependency issues
+   (pavanka via aching)
+ 
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java
+index 358fe447b..2862c3e3d 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConfiguration.java
+@@ -1223,4 +1223,19 @@ public void setWaitTaskDoneTimeoutMs(int ms) {
+   public boolean trackJobProgressOnClient() {
+     return TRACK_JOB_PROGRESS_ON_CLIENT.get(this);
+   }
++
++  /**
++   * @return Number of retries when creating an HDFS file before failing.
++   */
++  public int getHdfsFileCreationRetries() {
++    return HDFS_FILE_CREATION_RETRIES.get(this);
++  }
++
++  /**
++   * @return Milliseconds to wait before retrying an HDFS file creation
++   *         operation.
++   */
++  public int getHdfsFileCreationRetryWaitMs() {
++    return HDFS_FILE_CREATION_RETRY_WAIT_MS.get(this);
++  }
+ }
+diff --git a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
+index 8afe10149..300005ef2 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
++++ b/giraph-core/src/main/java/org/apache/giraph/conf/GiraphConstants.java
+@@ -1031,5 +1031,15 @@ public interface GiraphConstants {
+   BooleanConfOption TRACK_JOB_PROGRESS_ON_CLIENT =
+       new BooleanConfOption("giraph.trackJobProgressOnClient", true,
+           "Whether to track job progress on client or not");
++
++  /** Number of retries for creating the HDFS files */
++  IntConfOption HDFS_FILE_CREATION_RETRIES =
++      new IntConfOption("giraph.hdfs.file.creation.retries", 10,
++          "Retries to create an HDFS file before failing");
++
++  /** Number of milliseconds to wait before retrying HDFS file creation */
++  IntConfOption HDFS_FILE_CREATION_RETRY_WAIT_MS =
++      new IntConfOption("giraph.hdfs.file.creation.retry.wait.ms", 30_000,
++          "Milliseconds to wait prior to retrying creation of an HDFS file");
+ }
+ // CHECKSTYLE: resume InterfaceIsTypeCheck
+diff --git a/giraph-core/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java b/giraph-core/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java
+index 348580c3b..73ef97b90 100644
+--- a/giraph-core/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java
++++ b/giraph-core/src/main/java/org/apache/giraph/zk/ZooKeeperManager.java
+@@ -21,6 +21,7 @@
+ import com.google.common.collect.Lists;
+ import com.google.common.collect.Maps;
+ import com.google.common.io.Closeables;
++import com.google.common.util.concurrent.Uninterruptibles;
+ import org.apache.commons.io.FileUtils;
+ import org.apache.giraph.conf.GiraphConstants;
+ import org.apache.giraph.conf.ImmutableClassesGiraphConfiguration;
+@@ -52,6 +53,7 @@
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
++import java.util.concurrent.TimeUnit;
+ 
+ import static org.apache.giraph.conf.GiraphConstants.BASE_ZNODE_KEY;
+ import static org.apache.giraph.conf.GiraphConstants.ZOOKEEPER_MANAGER_DIRECTORY;
+@@ -310,7 +312,7 @@ public void createCandidateStamp() {
+               "for base directory " + baseDirectory + ".  If there is an " +
+               "issue with this directory, please set an accesible " +
+               "base directory with the Hadoop configuration option " +
+-              ZOOKEEPER_MANAGER_DIRECTORY.getKey());
++              ZOOKEEPER_MANAGER_DIRECTORY.getKey(), e);
+     }
+ 
+     Path myCandidacyPath = new Path(
+@@ -328,20 +330,45 @@ public void createCandidateStamp() {
+     }
+   }
+ 
++  /**
++   * Create a new file with retries if it fails.
++   *
++   * @param fs File system where the new file is created
++   * @param path Path of the new file
++   * @param maxAttempts Maximum number of attempts
++   * @param retryWaitMsecs Milliseconds to wait before retrying
++   */
++  private static void createNewFileWithRetries(
++      FileSystem fs, Path path, int maxAttempts, int retryWaitMsecs) {
++    int attempt = 0;
++    while (attempt < maxAttempts) {
++      try {
++        fs.createNewFile(path);
++        return;
++      } catch (IOException e) {
++        LOG.warn("createNewFileWithRetries: Failed to create file at path " +
++            path + " on attempt " + attempt + " of " + maxAttempts + ".", e);
++      }
++      ++attempt;
++      Uninterruptibles.sleepUninterruptibly(
++          retryWaitMsecs, TimeUnit.MILLISECONDS);
++    }
++    throw new IllegalStateException(
++        "createNewFileWithRetries: Failed to create file at path " +
++            path + " after " + attempt + " attempts");
++  }
++
+   /**
+    * Every task must create a stamp to let the ZooKeeper servers know that
+    * they can shutdown.  This also lets the task know that it was already
+    * completed.
+    */
+   private void createZooKeeperClosedStamp() {
+-    try {
+-      LOG.info("createZooKeeperClosedStamp: Creating my filestamp " +
+-          myClosedPath);
+-      fs.createNewFile(myClosedPath);
+-    } catch (IOException e) {
+-      LOG.error("createZooKeeperClosedStamp: Failed (maybe previous task " +
+-          "failed) to create filestamp " + myClosedPath);
+-    }
++    LOG.info("createZooKeeperClosedStamp: Creating my filestamp " +
++        myClosedPath);
++    createNewFileWithRetries(fs, myClosedPath,
++        conf.getHdfsFileCreationRetries(),
++        conf.getHdfsFileCreationRetryWaitMs());
+   }
+ 
+   /**

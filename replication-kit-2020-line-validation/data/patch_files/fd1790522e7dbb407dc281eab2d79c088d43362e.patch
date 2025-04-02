@@ -1,0 +1,169 @@
+From fd1790522e7dbb407dc281eab2d79c088d43362e Mon Sep 17 00:00:00 2001
+From: Thomas Neidhart <tn@apache.org>
+Date: Sat, 7 Nov 2015 20:53:57 +0000
+Subject: [PATCH] Backport COLLECTIONS-266 to 3.2.2.
+
+git-svn-id: https://svn.apache.org/repos/asf/commons/proper/collections/branches/COLLECTIONS_3_2_X@1713176 13f79535-47bb-0310-9956-ffa450edef68
+---
+ src/changes/changes.xml                       |  6 +-
+ .../collections/keyvalue/MultiKey.java        | 38 ++++++++++---
+ .../collections/keyvalue/TestMultiKey.java    | 55 ++++++++++++++++++-
+ 3 files changed, 86 insertions(+), 13 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index e06564d64b..0612b0ff1a 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -26,6 +26,9 @@
+     <action issue="COLLECTIONS-335" dev="jochen" type="fix" due-to="sebb">
+       Fixed cache assignment for "TreeBidiMap#entrySet".
+     </action>
++    <action issue="COLLECTIONS-266" dev="bayard" type="fix" due-to="Joerg Schaible">
++      "MultiKey" will now be correctly serialized/de-serialized.
++    </action>
+     <action issue="COLLECTIONS-249" dev="bayard" type="fix" due-to="Joe Kelly">
+       "SetUniqueList.addAll(int, Collection)" now correctly add the collection at the
+       provided index.
+@@ -75,9 +78,6 @@
+       "CaseInsensitiveMap" will now convert input strings to lower-case in a
+       locale-independant manner.
+     </action>
+-    <action issue="COLLECTIONS-266" dev="bayard" type="fix" due-to="Joerg Schaible">
+-      "MultiKey" will now be correctly serialized/de-serialized.
+-    </action>
+     <action issue="COLLECTIONS-261" dev="bayard" type="fix" due-to="ori">
+       "Flat3Map#remove(Object)" will now return the correct value mapped to the removed key
+       if the size of the map is less or equal 3.
+diff --git a/src/java/org/apache/commons/collections/keyvalue/MultiKey.java b/src/java/org/apache/commons/collections/keyvalue/MultiKey.java
+index 736844330b..1d9ab35a08 100644
+--- a/src/java/org/apache/commons/collections/keyvalue/MultiKey.java
++++ b/src/java/org/apache/commons/collections/keyvalue/MultiKey.java
+@@ -54,7 +54,7 @@ public class MultiKey implements Serializable {
+     /** The individual keys */
+     private final Object[] keys;
+     /** The cached hashCode */
+-    private final int hashCode;
++    private transient int hashCode;
+     
+     /**
+      * Constructor taking two keys.
+@@ -163,14 +163,8 @@ public MultiKey(Object[] keys, boolean makeClone) {
+         } else {
+             this.keys = keys;
+         }
+-        
+-        int total = 0;
+-        for (int i = 0; i < keys.length; i++) {
+-            if (keys[i] != null) {
+-                total ^= keys[i].hashCode();
+-            }
+-        }
+-        hashCode = total;
++
++        calculateHashCode(keys);        
+     }
+     
+     //-----------------------------------------------------------------------
+@@ -255,4 +249,30 @@ public String toString() {
+         return "MultiKey" + Arrays.asList(keys).toString();
+     }
+ 
++    /**
++     * Calculate the hash code of the instance using the provided keys.
++     * 
++     * @param keys
++     */
++    private void calculateHashCode(Object[] keys) {
++        int total = 0;
++        for (int i = 0; i < keys.length; i++) {
++            if (keys[i] != null) {
++                total ^= keys[i].hashCode();
++            }
++        }
++        hashCode = total;
++    }
++
++    /**
++     * Recalculate the hash code after deserialization.
++     * The hash code of some keys might have change (hash codes based
++     * on the system hash code are only stable for the same process).
++     * 
++     * @return the instance with recalculated hash code
++     */
++    private Object readResolve() {
++        calculateHashCode(keys);
++        return this;
++    }
+ }
+diff --git a/src/test/org/apache/commons/collections/keyvalue/TestMultiKey.java b/src/test/org/apache/commons/collections/keyvalue/TestMultiKey.java
+index 316a784ded..f4704d2ee1 100644
+--- a/src/test/org/apache/commons/collections/keyvalue/TestMultiKey.java
++++ b/src/test/org/apache/commons/collections/keyvalue/TestMultiKey.java
+@@ -16,7 +16,15 @@
+  */
+ package org.apache.commons.collections.keyvalue;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++import java.io.ObjectInputStream;
++import java.io.ObjectOutputStream;
++import java.io.Serializable;
+ import java.util.Arrays;
++import java.util.HashMap;
++import java.util.Map;
+ 
+ import junit.framework.Assert;
+ import junit.framework.Test;
+@@ -205,5 +213,50 @@ public void testEquals() {
+         Assert.assertTrue(mk1.equals("") == false);
+         Assert.assertTrue(mk1.equals(null) == false);
+     }
+-    
++
++    static class SystemHashCodeSimulatingKey implements Serializable {
++        private static final long serialVersionUID = 1L;
++        private final String name;
++        private int hashCode = 1;
++
++        public SystemHashCodeSimulatingKey(String name) {
++            this.name = name;
++        }
++
++        public boolean equals(Object obj) {
++            return obj instanceof SystemHashCodeSimulatingKey
++                && name.equals(((SystemHashCodeSimulatingKey) obj).name);
++        }
++
++        public int hashCode() {
++            return hashCode;
++        }
++
++        private Object readResolve() {
++            hashCode = 2; // simulate different hashCode after deserialization in another process
++            return this;
++        }
++    }
++
++    public void testEqualsAfterSerialization() throws IOException, ClassNotFoundException {
++        SystemHashCodeSimulatingKey sysKey = new SystemHashCodeSimulatingKey("test");
++        MultiKey mk = new MultiKey(ONE, sysKey);
++        Map map = new HashMap();
++        map.put(mk, TWO);
++        // serialize
++        ByteArrayOutputStream baos = new ByteArrayOutputStream();
++        ObjectOutputStream out = new ObjectOutputStream(baos);
++        out.writeObject(sysKey);
++        out.writeObject(map);
++        out.close();
++        // deserialize
++        ByteArrayInputStream bais = new ByteArrayInputStream(baos.toByteArray());
++        ObjectInputStream in = new ObjectInputStream(bais);
++        sysKey = (SystemHashCodeSimulatingKey) in.readObject(); // simulate deserialization in another process
++        Map map2 = (Map) in.readObject();
++        in.close();
++        assertEquals(2, sysKey.hashCode()); // different hashCode now
++        MultiKey mk2 = new MultiKey(ONE, sysKey);
++        assertEquals(TWO, map2.get(mk2));
++    }
+ }

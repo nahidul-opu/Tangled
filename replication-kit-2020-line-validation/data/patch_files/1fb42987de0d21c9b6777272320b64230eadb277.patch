@@ -1,0 +1,203 @@
+From 1fb42987de0d21c9b6777272320b64230eadb277 Mon Sep 17 00:00:00 2001
+From: Stefan Bodewig <bodewig@apache.org>
+Date: Sun, 31 Jan 2016 13:12:31 +0100
+Subject: [PATCH] COMPRESS-331 make tar checksum check as strict as GNU tar
+
+---
+ src/changes/changes.xml                       |   9 +++
+ .../compress/archivers/tar/TarUtils.java      |  14 +---
+ .../compress/archivers/tar/TarUtilsTest.java  |  64 +++++++++++-------
+ src/test/resources/COMPRESS-117.tar           | Bin 10240 -> 6656 bytes
+ 4 files changed, 48 insertions(+), 39 deletions(-)
+
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 518381e8a3b..6bc1df2dc9a 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -44,6 +44,15 @@ The <action> type attribute can be add,update,fix,remove.
+   <body>
+     <release version="1.11" date="not released, yet"
+              description="Release 1.11">
++      <action issue="COMPRESS-331" type="fix" date="2016-01-31">
++        The checksum validation of TararchiveEntry is now as strict as
++        the validation of GNU tar, which eliminates a few cases of
++        false positives of ArchiveStreamFactory.
++        This behavior is a breaking change since the check has become
++        more strict but any archive that fails the checksum test now
++        would also fail it when extracted with other tools and must be
++        considered an invalid archive.
++      </action>
+       <action issue="COMPRESS-323" type="add" date="2016-01-29">
+         ZipFile.getRawInputStream() is now part of the public API
+       </action>
+diff --git a/src/main/java/org/apache/commons/compress/archivers/tar/TarUtils.java b/src/main/java/org/apache/commons/compress/archivers/tar/TarUtils.java
+index 3cbf83f65a4..65088eb2939 100644
+--- a/src/main/java/org/apache/commons/compress/archivers/tar/TarUtils.java
++++ b/src/main/java/org/apache/commons/compress/archivers/tar/TarUtils.java
+@@ -580,16 +580,6 @@ public static long computeCheckSum(final byte[] buf) {
+      * checksum.
+      * </blockquote>
+      * <p>
+-     * In addition there are
+-     * <a href="https://issues.apache.org/jira/browse/COMPRESS-117">some tar files</a>
+-     * that seem to have parts of their header cleared to zero (no detectable
+-     * magic bytes, etc.) but still have a reasonable-looking checksum field
+-     * present. It looks like we can detect such cases reasonably well by
+-     * checking whether the stored checksum is <em>greater than</em> the
+-     * computed unsigned checksum. That check is unlikely to pass on some
+-     * random file header, as it would need to have a valid sequence of
+-     * octal digits in just the right place.
+-     * <p>
+      * The return value of this method should be treated as a best-effort
+      * heuristic rather than an absolute and final truth. The checksum
+      * verification logic may well evolve over time as more special cases
+@@ -619,9 +609,7 @@ public static boolean verifyCheckSum(byte[] header) {
+             unsignedSum += 0xff & b;
+             signedSum += b;
+         }
+-
+-        return storedSum == unsignedSum || storedSum == signedSum
+-                || storedSum > unsignedSum; // COMPRESS-177
++        return storedSum == unsignedSum || storedSum == signedSum;
+     }
+ 
+ }
+diff --git a/src/test/java/org/apache/commons/compress/archivers/tar/TarUtilsTest.java b/src/test/java/org/apache/commons/compress/archivers/tar/TarUtilsTest.java
+index 5ebbbb5b71b..9b83116fb11 100644
+--- a/src/test/java/org/apache/commons/compress/archivers/tar/TarUtilsTest.java
++++ b/src/test/java/org/apache/commons/compress/archivers/tar/TarUtilsTest.java
+@@ -286,32 +286,44 @@ public void testVerifyHeaderCheckSum() {
+         assertTrue(TarUtils.verifyCheckSum(valid));
+ 
+         byte[] compress117 = { // from COMPRESS-117
+-                116, 101, 115, 116, 49, 46, 120, 109, 108, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 48, 48, 48, 48, 54, 52, 52, 0, 48, 48, 48, 48, 55, 54, 53,
+-                0, 48, 48, 48, 48, 55, 54, 53, 0, 48, 48, 48, 48, 48, 48, 48,
+-                49, 49, 52, 50, 0, 49, 48, 55, 49, 54, 53, 52, 53, 54, 50, 54,
+-                0, 48, 49, 50, 50, 54, 48, 0, 32, 48, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+-                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
++            (byte) 0x37, (byte) 0x7a, (byte) 0x43, (byte) 0x2e, (byte) 0x74, (byte) 0x78, (byte) 0x74, (byte) 0x00,
++            0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, (byte) 0x31, (byte) 0x30, (byte) 0x30, (byte) 0x37,
++            (byte) 0x37, (byte) 0x37, (byte) 0x20, (byte) 0x00, (byte) 0x20, (byte) 0x20, (byte) 0x20, (byte) 0x20,
++            (byte) 0x20, (byte) 0x30, (byte) 0x20, (byte) 0x00, (byte) 0x20, (byte) 0x20, (byte) 0x20, (byte) 0x20,
++            (byte) 0x20, (byte) 0x30, (byte) 0x20, (byte) 0x00, (byte) 0x20, (byte) 0x20, (byte) 0x20, (byte) 0x20,
++            (byte) 0x20, (byte) 0x20, (byte) 0x31, (byte) 0x33, (byte) 0x30, (byte) 0x33, (byte) 0x33, (byte) 0x20,
++            (byte) 0x31, (byte) 0x31, (byte) 0x31, (byte) 0x31, (byte) 0x35, (byte) 0x31, (byte) 0x36, (byte) 0x36,
++            (byte) 0x30, (byte) 0x31, (byte) 0x36, (byte) 0x20, (byte) 0x20, (byte) 0x20, (byte) 0x35, (byte) 0x34,
++            (byte) 0x31, (byte) 0x37, (byte) 0x20, (byte) 0x00, (byte) 0x30, (byte) 0x00, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
++        };
+         assertTrue(TarUtils.verifyCheckSum(compress117));
+ 
+         byte[] invalid = { // from the testAIFF.aif file in Tika
+diff --git a/src/test/resources/COMPRESS-117.tar b/src/test/resources/COMPRESS-117.tar
+index d42ebeb8e2c9bbd726b4088952d5d0b663c8c2da..51abeb9d9507f2679804d76103224f35f86879d8 100644
+GIT binary patch
+literal 6656
+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
+
+literal 10240
+zcmeH{QE!_t5XX64q<#nQsZRqNjA4`ODh-j^Y70@DmpxSkOq+>7gh{%7``Ki3vUJt7
+zhi=hy_X797^I?8IUnf;Z+^@^Zc|F707^RMRMlAg4sU<?F?+_dj7SfRU%)!L>8FmnU
+zy)8lI?*#a{K6|v0ty(lSIzy+##i!@uWWe7h>1g(OI!1X@*D~*PTp9hq<-MWH@i6(&
+z>1HajF7wQbX{y25)&@vhrcMT8YbXlyISa}%!Z-{l4deIoFe*qC1o52FC=SZFqyf%<
+zQBqgh+k@Vbsjao^<YII;O>bs`gg)Wk&bKL->FsPX{4^E>yFQIwid{l<s?}}g$o})}
+zX(ffJ#k~X3CMR-LHBZw_smG=*M444ea_>O3*=r?Rk*!v$-EgmWY-sm^Nw$<Ck(+nP
+z#r}7D*{0uKB_bvG{%WHC!8kT@UCi^OUFc&KO`GMFbiZiDEqcjKdubcjoOZc(eR?w-
+zeH`EQ2u%-&?qN}L@0r{$;NGq!OoQyXreWZ!9Ww!QQ~iHC|IN66HvdERm*)Rkby<s$
+z)8*^7=w3dm-^E{EdDM|VpZ`m_sP$;qH~S5*q->GbU-}<1-1nnCZ`d3V00KY&2mk>f
+s00e*l5C8%|00;m9AOHk_01yBIKmZ5;0U!VbfB+Bx0zd!={GSBA0WLA@(*OVf
+

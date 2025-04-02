@@ -1,0 +1,143 @@
+From 8e0e1c32ff1ed1da4f09fc9917812e6457e6fef7 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Nicolas=20Laleve=CC=81e?= <nicolas.lalevee@hibnet.org>
+Date: Sun, 6 Sep 2015 17:10:47 +0200
+Subject: [PATCH] IVY-1141 : dependencies failed using branch attribute (and
+ extra attributes)
+
+Thanks to Stephen Haberman
+---
+ doc/release-notes.html                        |  1 +
+ .../plugins/version/LatestVersionMatcher.java | 15 +++++-
+ .../version/LatestVersionMatcherTest.java     | 53 ++++++++++++++++++-
+ 3 files changed, 66 insertions(+), 3 deletions(-)
+
+diff --git a/doc/release-notes.html b/doc/release-notes.html
+index 12624afbe..0c3499479 100644
+--- a/doc/release-notes.html
++++ b/doc/release-notes.html
+@@ -61,6 +61,7 @@ <h2>List of Changes in this Release</h2>
+ - FIX: fixdeps remove transitive 'kept' dependencies
+ - FIX: PomModuleDescriptorParser should parse licenses from parent POM (IVY-1526) (Thanks to Jaikiran Pai)
+ - FIX: dynamic revisions are not cached per resolver (IVY-1430) (Thanks to Stephen Haberman)
++- FIX: Dependencies failed using branch attribute (and extra attributes) (IVY-1141) (Thanks to Stephen Haberman)
+ 
+ - IMPROVEMENT: Optimization: limit the revision numbers scanned if revision prefix is specified (Thanks to Ernestas Vaiciukevi&#269;ius)
+ 
+diff --git a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+index ba5b153b3..5a30b24e8 100644
+--- a/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
++++ b/src/java/org/apache/ivy/plugins/version/LatestVersionMatcher.java
+@@ -39,13 +39,26 @@ public boolean accept(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid) {
+     }
+ 
+     public boolean needModuleDescriptor(ModuleRevisionId askedMrid, ModuleRevisionId foundMrid) {
+-        List statuses = StatusManager.getCurrent().getStatuses();
++        // if asking for a branch, foundMrid will likely have an invalid value that doesn't
++        // come from the module descriptor itself. return true so accept is given the real
++        // module descriptor with the correct branch.
++        if (askedMrid.getBranch() != null) {
++            return true;
++        }
++        List<Status> statuses = StatusManager.getCurrent().getStatuses();
+         Status lowest = (Status) statuses.get(statuses.size() - 1);
+         String latestLowest = "latest." + lowest.getName();
+         return !latestLowest.equals(askedMrid.getRevision());
+     }
+ 
+     public boolean accept(ModuleRevisionId askedMrid, ModuleDescriptor foundMD) {
++        String askedBranch = askedMrid.getBranch();
++        String foundBranch = foundMD.getModuleRevisionId().getBranch();
++        boolean sameBranch = (askedBranch == null) ? foundBranch == null
++                : askedBranch.equals(foundBranch);
++        if (!sameBranch) {
++            return false;
++        }
+         String askedStatus = askedMrid.getRevision().substring("latest.".length());
+         return StatusManager.getCurrent().getPriority(askedStatus) >= StatusManager.getCurrent()
+                 .getPriority(foundMD.getStatus());
+diff --git a/test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java b/test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java
+index 654bf1190..f72d8999d 100644
+--- a/test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java
++++ b/test/java/org/apache/ivy/plugins/version/LatestVersionMatcherTest.java
+@@ -17,13 +17,14 @@
+  */
+ package org.apache.ivy.plugins.version;
+ 
+-import junit.framework.TestCase;
+-
+ import org.apache.ivy.core.IvyContext;
++import org.apache.ivy.core.module.descriptor.DefaultModuleDescriptor;
+ import org.apache.ivy.core.module.id.ModuleRevisionId;
+ import org.apache.ivy.core.module.status.Status;
+ import org.apache.ivy.core.module.status.StatusManager;
+ 
++import junit.framework.TestCase;
++
+ public class LatestVersionMatcherTest extends TestCase {
+     private LatestVersionMatcher vm = new LatestVersionMatcher();
+ 
+@@ -41,6 +42,13 @@ public void testNeedModuleDescriptorStandardStatus() throws Exception {
+         assertNeed("latest.integration", false);
+     }
+ 
++    public void testNeedModuleDescriptorForBranches() throws Exception {
++        assertNeed("latest.release", "trunk", true);
++        assertNeed("latest.milestone", "trunk", true);
++        // different branches will have different latest.integration artifacts
++        assertNeed("latest.integration", "trunk", true);
++    }
++
+     public void testNeedModuleDescriptorCustomStatus() throws Exception {
+         StatusManager.getCurrent().addStatus(new Status("release", false));
+         StatusManager.getCurrent().addStatus(new Status("snapshot", true));
+@@ -49,9 +57,50 @@ public void testNeedModuleDescriptorCustomStatus() throws Exception {
+         assertNeed("latest.snapshot", false);
+     }
+ 
++    public void testAcceptForStandardStatus() throws Exception {
++        assertAccept("latest.release", "release", true);
++        assertAccept("latest.release", "milestone", false);
++        assertAccept("latest.release", "integration", false);
++    }
++
++    public void testAcceptForSameBranches() throws Exception {
++        assertAccept("latest.release", "trunk", "release", "trunk", true);
++        assertAccept("latest.release", "trunk", "milestone", "trunk", false);
++        assertAccept("latest.release", "trunk", "integration", "trunk", false);
++    }
++
++    public void testAcceptForDifferentBranches() throws Exception {
++        assertAccept("latest.release", "trunk", "release", "feature", false);
++        assertAccept("latest.release", "trunk", "milestone", "feature", false);
++        assertAccept("latest.release", "trunk", "integration", "feature", false);
++    }
++
+     // assertion helper methods
+     private void assertNeed(String askedVersion, boolean b) {
+         assertEquals(b, vm.needModuleDescriptor(
+             ModuleRevisionId.newInstance("org", "name", askedVersion), null));
+     }
++
++    private void assertNeed(String askedVersion, String askedBranch, boolean b) {
++        assertEquals(b, vm.needModuleDescriptor(
++            ModuleRevisionId.newInstance("org", "name", askedBranch, askedVersion), null));
++    }
++
++    private void assertAccept(String askedVersion, String foundStatus, boolean b) {
++        ModuleRevisionId askedMrid = ModuleRevisionId.newInstance("org", "name", askedVersion);
++        DefaultModuleDescriptor foundMD = DefaultModuleDescriptor
++                .newDefaultInstance(ModuleRevisionId.newInstance("org", "name", null));
++        foundMD.setStatus(foundStatus);
++        assertEquals(b, vm.accept(askedMrid, foundMD));
++    }
++
++    private void assertAccept(String askedVersion, String askedBranch, String foundStatus,
++            String foundBranch, boolean b) {
++        ModuleRevisionId askedMrid = ModuleRevisionId.newInstance("org", "name", askedBranch,
++            askedVersion);
++        DefaultModuleDescriptor foundMD = DefaultModuleDescriptor.newDefaultInstance(
++            ModuleRevisionId.newInstance("org", "name", foundBranch, (String) null));
++        foundMD.setStatus(foundStatus);
++        assertEquals(b, vm.accept(askedMrid, foundMD));
++    }
+ }

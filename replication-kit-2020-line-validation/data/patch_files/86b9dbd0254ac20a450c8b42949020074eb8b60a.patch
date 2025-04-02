@@ -1,0 +1,95 @@
+From 86b9dbd0254ac20a450c8b42949020074eb8b60a Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Wed, 1 Oct 2008 21:00:57 +0000
+Subject: [PATCH] FIX: ivy:settings doesn't work if id is a property (IVY-925)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@700920 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                          |  1 +
+ src/java/org/apache/ivy/ant/IvyAntSettings.java      | 12 +++++++++++-
+ .../org/apache/ivy/ant/IvyAntSettingsBuildFile.xml   |  6 ++++++
+ .../apache/ivy/ant/IvyAntSettingsBuildFileTest.java  |  8 ++++++++
+ 4 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d6cb99355..06b8bd085 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -95,6 +95,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - FIX: Maven packaging of "pom" should add a "jar" artifact if present (IVY-920)
+ - FIX: StackOverflow when using ivy:settings with "ivy.instance" as id (IVY-924)
+ - FIX: Maven Pom reader doesn't handle optional dependencies correctly in some instances (IVY-926) (thanks to Phil Messenger)
++- FIX: ivy:settings doesn't work if id is a property (IVY-925)
+ 
+    2.0.0-rc1
+ =====================================
+diff --git a/src/java/org/apache/ivy/ant/IvyAntSettings.java b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+index 01d71c071..43e2dbab0 100644
+--- a/src/java/org/apache/ivy/ant/IvyAntSettings.java
++++ b/src/java/org/apache/ivy/ant/IvyAntSettings.java
+@@ -134,6 +134,12 @@ public static IvyAntSettings getDefaultInstance(Project project) {
+             return (IvyAntSettings) defaultInstanceObj;
+         }
+     }
++    
++    public IvyAntSettings() {
++        super();
++        System.out.println(this);
++        Thread.dumpStack();
++    }
+ 
+     public File getFile() {
+         return file;
+@@ -178,7 +184,7 @@ public void setUsername(String aUserName) {
+     public void setProject(Project p) {
+         super.setProject(p);
+         
+-        if ("ivy.instance".equals(id) && getProject().getReferences().get(id) == null) {
++        if ("ivy.instance".equals(id) && !getProject().getReferences().containsKey(id)) {
+             // register ourselfs as default settings, just in case the id attribute is not set
+             getProject().addReference("ivy.instance", this);
+             autoRegistered = true;
+@@ -216,6 +222,10 @@ public void setId(String id) {
+             autoRegistered = false;
+         }
+         this.id = id;
++        
++        if (getProject() != null) {
++            getProject().addReference(this.id, this);
++        }
+     }
+     
+     public String getId() {
+diff --git a/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFile.xml b/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFile.xml
+index 7a8754560..b3916ed70 100644
+--- a/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFile.xml
++++ b/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFile.xml
+@@ -39,4 +39,10 @@
+ 	  	<ivy:configure settingsId="testUnnecessaryDefaultIvyInstance" file="test/repositories/ivysettings.xml" override="true" />
+ 	  	<ivy:cachepath settingsRef="testUnnecessaryDefaultIvyInstance" file="test/java/org/apache/ivy/ant/ivy-simple.xml" pathid="ptest" />
+ 	  </target>
++	
++  <target name="testSettingsWithPropertyAsId">
++  	<property name="my.property" value="whatever" />
++  	<ivy:settings id="${my.property}" file="test/repositories/ivysettings.xml" />
++  	<ivy:resolve settingsRef="${my.property}" file="test/java/org/apache/ivy/ant/ivy-simple.xml" />
++  </target>
+ </project>
+\ No newline at end of file
+diff --git a/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFileTest.java b/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFileTest.java
+index 600225bf1..9738abd1d 100644
+--- a/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFileTest.java
++++ b/test/java/org/apache/ivy/ant/IvyAntSettingsBuildFileTest.java
+@@ -47,4 +47,12 @@ public void testUnnecessaryDefaultIvyInstance() {
+         assertNull("Default ivy.instance settings shouldn't have been loaded", 
+                 getProject().getReference("ivy.instance"));
+     }
++    
++    public void testSettingsWithIdIvyInstance() {
++        executeTarget("testSettingsWithPropertyAsId");
++        ResolveReport report = (ResolveReport) getProject().getReference("ivy.resolved.report");
++        assertNotNull(report);
++        assertFalse(report.hasError());
++        assertEquals(1, report.getDependencies().size());
++    }
+ }

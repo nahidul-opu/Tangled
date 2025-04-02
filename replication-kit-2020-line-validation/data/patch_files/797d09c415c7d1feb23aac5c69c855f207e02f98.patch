@@ -1,0 +1,90 @@
+From 797d09c415c7d1feb23aac5c69c855f207e02f98 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 5 May 2008 21:43:23 +0000
+Subject: [PATCH] FIX: Filesystem resolver does not evaluate [branch] token
+ when publishing (IVY-814)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@653610 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../org/apache/ivy/core/IvyPatternHelper.java |  4 +-
+ .../resolver/FileSystemResolverTest.java      | 39 +++++++++++++++++++
+ 3 files changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index d857db297..6b797beb7 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -79,6 +79,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Change allownomd and skipbuildwithoutivy into a more semantically correct name (IVY-297)
+ - IMPROVEMENT: Smarter determination if an expression is exact or not for RegexpPatternMatcher and GlobPatternMatcher
+ 
++- FIX: Filesystem resolver does not evaluate [branch] token when publishing (IVY-814)
+ - FIX: Using ivy:settings with the "id" attribute not behaving as expected (IVY-809)
+ - FIX: onMissingDescriptor doesn't work due to == comparison (IVY-805) (thanks to Ben Hale)
+ - FIX: revision token is not set in report outputpattern (IVY-272)
+diff --git a/src/java/org/apache/ivy/core/IvyPatternHelper.java b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+index b96f42afb..6a42fa8c1 100644
+--- a/src/java/org/apache/ivy/core/IvyPatternHelper.java
++++ b/src/java/org/apache/ivy/core/IvyPatternHelper.java
+@@ -69,8 +69,8 @@ private IvyPatternHelper() {
+ 
+     public static String substitute(String pattern, ModuleRevisionId moduleRevision) {
+         return substitute(pattern, moduleRevision.getOrganisation(), moduleRevision.getName(),
+-            moduleRevision.getRevision(), "ivy", "ivy", "xml", null,
+-            moduleRevision.getAttributes());
++            moduleRevision.getBranch(), moduleRevision.getRevision(), "ivy", "ivy", "xml", null,
++            null, moduleRevision.getAttributes());
+     }
+ 
+     public static String substitute(String pattern, ModuleRevisionId moduleRevision,
+diff --git a/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java b/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
+index 0930b47f6..250e60bf2 100644
+--- a/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
++++ b/test/java/org/apache/ivy/plugins/resolver/FileSystemResolverTest.java
+@@ -633,6 +633,45 @@ public void testPublishTransaction() throws Exception {
+         }
+     }
+ 
++    public void testPublishTransactionWithBranch() throws Exception {
++        try {
++            FileSystemResolver resolver = new FileSystemResolver();
++            resolver.setName("test");
++            resolver.setSettings(settings);
++
++            resolver.addIvyPattern(
++                "test/repositories/1/[organisation]/[module]/[branch]/[revision]/[artifact].[ext]");
++            resolver.addArtifactPattern(
++                 "test/repositories/1/[organisation]/[module]/[branch]/[revision]/[artifact]-[revision].[ext]");
++
++            ModuleRevisionId mrid = ModuleRevisionId.newInstance("myorg", "mymodule", "mybranch", "myrevision");
++            Artifact ivyArtifact = new DefaultArtifact(mrid, new Date(), "ivy", "ivy", "xml");
++            Artifact artifact = new DefaultArtifact(mrid, new Date(), "myartifact", "mytype",
++                    "myext");
++            File src = new File("test/repositories/ivysettings.xml");
++            
++            resolver.beginPublishTransaction(mrid, false);
++            
++            // files should not be available until the transaction is committed
++            resolver.publish(ivyArtifact, src, false);
++            assertFalse(new File("test/repositories/1/myorg/mymodule/mybranch/myrevision/ivy.xml").exists());
++
++            resolver.publish(artifact, src, false);
++            assertFalse(new File(
++                "test/repositories/1/myorg/mymodule/mybranch/myrevision/myartifact-myrevision.myext")
++                .exists());
++
++            resolver.commitPublishTransaction();
++
++            assertTrue(new File("test/repositories/1/myorg/mymodule/mybranch/myrevision/ivy.xml").exists());
++            assertTrue(new File(
++                    "test/repositories/1/myorg/mymodule/mybranch/myrevision/myartifact-myrevision.myext")
++                    .exists());
++        } finally {
++            FileUtil.forceDelete(new File("test/repositories/1/myorg"));
++        }
++    }
++
+     public void testAbortTransaction() throws Exception {
+         try {
+             FileSystemResolver resolver = new FileSystemResolver();

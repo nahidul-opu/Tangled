@@ -1,0 +1,191 @@
+From b88e17ca8fa4eb7ba86886ed8f2a33875c55b223 Mon Sep 17 00:00:00 2001
+From: Maarten Coene <maartenc@apache.org>
+Date: Mon, 25 Aug 2008 21:56:56 +0000
+Subject: [PATCH] FIX: HTTP Handlers ignore unsuccessful response codes
+ (IVY-864) (thanks to James P. White)
+
+git-svn-id: https://svn.apache.org/repos/asf/ant/ivy/core/trunk@688894 13f79535-47bb-0310-9956-ffa450edef68
+---
+ CHANGES.txt                                   |  1 +
+ .../apache/ivy/util/url/BasicURLHandler.java  | 53 +++++++++++++------
+ .../ivy/util/url/HttpClientHandler.java       | 42 ++++++++++-----
+ 3 files changed, 69 insertions(+), 27 deletions(-)
+
+diff --git a/CHANGES.txt b/CHANGES.txt
+index 8adc2fce6..c88c12ef2 100644
+--- a/CHANGES.txt
++++ b/CHANGES.txt
+@@ -108,6 +108,7 @@ for detailed view of each issue, please consult http://issues.apache.org/jira/br
+ - IMPROVEMENT: Add a memory cache for the module descriptor that are parsed from the cache (IVY-883)
+ - IMPROVEMENT: Improve performance (IVY-872)
+ 
++- FIX: HTTP Handlers ignore unsuccessful response codes (IVY-864) (thanks to James P. White)
+ - FIX: Deliver delivers the wrong version when a dynamic revision is evicted before being resolved (IVY-707)
+ - FIX: Inconsistency with "multi-project" tutorial (IVY-667)
+ - FIX: URLRepository does not allow some valid file scheme uri's (IVY-884)
+diff --git a/src/java/org/apache/ivy/util/url/BasicURLHandler.java b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+index faeb67056..b2dc21d8b 100644
+--- a/src/java/org/apache/ivy/util/url/BasicURLHandler.java
++++ b/src/java/org/apache/ivy/util/url/BasicURLHandler.java
+@@ -61,22 +61,11 @@ public URLInfo getURLInfo(URL url, int timeout) {
+             con = url.openConnection();
+             con.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
+             if (con instanceof HttpURLConnection) {
+-                ((HttpURLConnection) con).setRequestMethod("HEAD");
+-                int status = ((HttpURLConnection) con).getResponseCode();
+-                if (status == HttpStatus.SC_OK) {
+-                    return new URLInfo(true, ((HttpURLConnection) con).getContentLength(), con
+-                            .getLastModified());
++                HttpURLConnection httpCon = (HttpURLConnection) con;
++                httpCon.setRequestMethod("HEAD");
++                if (checkStatusCode(url, httpCon)) {
++                    return new URLInfo(true, httpCon.getContentLength(), con.getLastModified());
+                 }
+-                if (status == HttpStatus.SC_PROXY_AUTHENTICATION_REQUIRED) {
+-                    Message.warn("Your proxy requires authentication.");
+-                } else if (String.valueOf(status).startsWith("4")) {
+-                    Message.verbose("CLIENT ERROR: "
+-                            + ((HttpURLConnection) con).getResponseMessage() + " url=" + url);
+-                } else if (String.valueOf(status).startsWith("5")) {
+-                    Message.error("SERVER ERROR: " + ((HttpURLConnection) con).getResponseMessage()
+-                            + " url=" + url);
+-                }
+-                Message.debug("HTTP response status: " + status + " url=" + url);
+             } else {
+                 int contentLength = con.getContentLength();
+                 if (contentLength <= 0) {
+@@ -97,12 +86,38 @@ public URLInfo getURLInfo(URL url, int timeout) {
+         return UNAVAILABLE;
+     }
+ 
++    private boolean checkStatusCode(URL url, HttpURLConnection con) throws IOException {
++        int status = con.getResponseCode();
++        if (status == HttpStatus.SC_OK) {
++            return true;
++        }
++        Message.debug("HTTP response status: " + status + " url=" + url);
++        if (status == HttpStatus.SC_PROXY_AUTHENTICATION_REQUIRED) {
++            Message.warn("Your proxy requires authentication.");
++        } else if (String.valueOf(status).startsWith("4")) {
++            Message.verbose("CLIENT ERROR: "
++                    + ((HttpURLConnection) con).getResponseMessage() + " url=" + url);
++        } else if (String.valueOf(status).startsWith("5")) {
++            Message.error("SERVER ERROR: " + ((HttpURLConnection) con).getResponseMessage()
++                    + " url=" + url);
++        }
++        return false;
++    }
++
+     public InputStream openStream(URL url) throws IOException {
+         URLConnection conn = null;
+         InputStream inStream = null;
+         try {
+             conn = url.openConnection();
+             conn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
++            if (conn instanceof HttpURLConnection) {
++                HttpURLConnection httpCon = (HttpURLConnection) conn;
++                if (!checkStatusCode(url, httpCon)) {
++                    throw new IOException(
++                        "The HTTP response code for " + url + " did not indicate a success."
++                                + " See log for more detail.");
++                }
++            }
+             inStream = conn.getInputStream();
+             ByteArrayOutputStream outStream = new ByteArrayOutputStream();
+ 
+@@ -126,6 +141,14 @@ public void download(URL src, File dest, CopyProgressListener l) throws IOExcept
+         try {
+             srcConn = src.openConnection();
+             srcConn.setRequestProperty("User-Agent", "Apache Ivy/" + Ivy.getIvyVersion());
++            if (srcConn instanceof HttpURLConnection) {
++                HttpURLConnection httpCon = (HttpURLConnection) srcConn;
++                if (!checkStatusCode(src, httpCon)) {
++                    throw new IOException(
++                        "The HTTP response code for " + src + " did not indicate a success."
++                                + " See log for more detail.");
++                }
++            }
+             int contentLength = srcConn.getContentLength();
+             FileUtil.copy(srcConn.getInputStream(), dest, l);
+             if (dest.length() != contentLength && contentLength != -1) {
+diff --git a/src/java/org/apache/ivy/util/url/HttpClientHandler.java b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+index 5fa6eaf1d..6eea468a3 100644
+--- a/src/java/org/apache/ivy/util/url/HttpClientHandler.java
++++ b/src/java/org/apache/ivy/util/url/HttpClientHandler.java
+@@ -21,6 +21,7 @@
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.io.FileInputStream;
++import java.net.HttpURLConnection;
+ import java.net.URL;
+ import java.net.UnknownHostException;
+ import java.text.ParseException;
+@@ -94,11 +95,22 @@ private void configureProxy() {
+ 
+     public InputStream openStream(URL url) throws IOException {
+         GetMethod get = doGet(url);
++        if (!checkStatusCode(url, get)) {
++            throw new IOException(
++                    "The HTTP response code for " + url + " did not indicate a success."
++                            + " See log for more detail.");
++        }
+         return new GETInputStream(get);
+     }
+ 
+     public void download(URL src, File dest, CopyProgressListener l) throws IOException {
+         GetMethod get = doGet(src);
++        // We can only figure the content we got is want we want if the status is success.
++        if (!checkStatusCode(src, get)) {
++            throw new IOException(
++                    "The HTTP response code for " + src + " did not indicate a success."
++                            + " See log for more detail.");
++        }
+         FileUtil.copy(get.getResponseBodyAsStream(), dest, l);
+         dest.setLastModified(getLastModified(get));
+         get.releaseConnection();
+@@ -134,20 +146,9 @@ public URLInfo getURLInfo(URL url, int timeout) {
+         HeadMethod head = null;
+         try {
+             head = doHead(url, timeout);
+-            int status = head.getStatusCode();
+-            head.releaseConnection();
+-            if (status == HttpStatus.SC_OK) {
++            if (checkStatusCode(url, head)) {
+                 return new URLInfo(true, getResponseContentLength(head), getLastModified(head));
+             }
+-            if (status == HttpStatus.SC_PROXY_AUTHENTICATION_REQUIRED) {
+-                Message.error("Your proxy requires authentication.");
+-            } else if (String.valueOf(status).startsWith("4")) {
+-                Message.verbose("CLIENT ERROR: " + head.getStatusText() + " url=" + url);
+-            } else if (String.valueOf(status).startsWith("5")) {
+-                Message.warn("SERVER ERROR: " + head.getStatusText() + " url=" + url);
+-            }
+-            Message.debug("HTTP response status: " + status + "=" + head.getStatusText() + " url="
+-                    + url);
+         } catch (HttpException e) {
+             Message.error("HttpClientHandler: " + e.getMessage() + ":" + e.getReasonCode() + "="
+                     + e.getReason() + " url=" + url);
+@@ -167,6 +168,23 @@ public URLInfo getURLInfo(URL url, int timeout) {
+         }
+         return UNAVAILABLE;
+     }
++    
++    private boolean checkStatusCode(URL url, HttpMethodBase method) throws IOException {
++        int status = method.getStatusCode();
++        if (status == HttpStatus.SC_OK) {
++            return true;
++        }
++        Message.debug("HTTP response status: " + status + " url=" + url);
++        if (status == HttpStatus.SC_PROXY_AUTHENTICATION_REQUIRED) {
++            Message.warn("Your proxy requires authentication.");
++        } else if (String.valueOf(status).startsWith("4")) {
++            Message.verbose("CLIENT ERROR: " + method.getStatusText() + " url=" + url);
++        } else if (String.valueOf(status).startsWith("5")) {
++            Message.error("SERVER ERROR: " + method.getStatusText() + " url=" + url);
++        }
++        
++        return false;
++    }
+ 
+     private long getLastModified(HttpMethodBase method) {
+         Header header = method.getResponseHeader("last-modified");
